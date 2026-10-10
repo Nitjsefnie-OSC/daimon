@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Discord continuations check thread history back to the queued handoff and retry when that history is unavailable, so a newer human reply cannot trigger stale work.
+- Follow-up turns obey the tenant's current concurrency cap after an operator changes it, without starting queued turns above a lowered cap.
 - Registered Discord tenants with an unjoined guild receive defaults updates on restart, so their agents no longer keep stale guidance.
 - One `yes` now approves only the latest skill-add preview in a thread, even when the previews target different agents.
 - Agents created before the Connect GitHub change get the new guidance on the next restart.

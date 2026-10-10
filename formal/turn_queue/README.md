@@ -5,26 +5,28 @@ of them ([`turn_queue.py`](../../packages/core/daimon/core/turn_queue.py),
 [`turn/slots.py`](../../packages/core/daimon/core/turn/slots.py)): a global
 cap, a per-tenant cap, a bounded per-tenant FIFO queue served round-robin
 across tenants, the max-wait safeguard, Stop while queued and while running,
-every end path of a running turn, follow-up turns in one thread, and a restart
-that drops the in-process queue.
+every end path of a running turn, follow-up turns in one thread, an observed
+admin cap change, and a restart that drops the in-process queue.
 
 The question it answers: can a turn be lost, run twice, start after its max
 wait, leak a slot, or starve another tenant, on any interleaving of arrivals,
 releases, Stop clicks, timeouts, follow-ups and restarts?
 
-Every action boundary is an `await` in the asyncio code; everything inside one
-action runs without yielding. A slot release and the dispatch it owes run in
-one synchronous span: `owed` blocks every other action until `Dispatch` has
-run.
+Adapter action boundaries follow `await` points in the asyncio code; the
+admin change and its next observation are combined as noted below. A slot
+release and its dispatch run in one synchronous span: `owed` blocks other
+actions until `Dispatch` has run.
 
 | Model item | Implementation |
 | --- | --- |
-| `Arrive` | `TurnQueue.admit` ([`turn_queue.py:269`](../../packages/core/daimon/core/turn_queue.py)): run now when the tenant and the process have a free slot and nobody of the tenant is waiting; else queue; else (queue full) `None`, and the adapter refuses with its plain notice. A follow-up arrives the same way through `TurnQueue.readmit` (`turn_queue.py:309`), called from `wait_for_slot` (`slots.py:97`), once the turn before it in the thread has ended |
-| `Dispatch` | `TurnQueue._dispatch` (`turn_queue.py:329`), called from `free`: first eligible tenant in rotation order, its FIFO head, tenant moved to the back. A head already past its max wait is timed out there (`_expire`, `turn_queue.py:377`); the tenant keeps its place and dispatch continues |
+| `Arrive` | `TurnQueue.admit` ([`turn_queue.py:267`](../../packages/core/daimon/core/turn_queue.py)): run now when the tenant and the process have a free slot and nobody of the tenant is waiting; else queue; else (queue full) `None`, and the adapter refuses with its plain notice. A follow-up arrives the same way through `TurnQueue.readmit` ([`turn_queue.py:305`](../../packages/core/daimon/core/turn_queue.py)), called from `wait_for_slot` ([`slots.py:98`](../../packages/core/daimon/core/turn/slots.py)), once the turn before it in the thread has ended |
+| `ChangeCap` | The admin writes `Tenant.turn_cap` through `set_turn_cap` ([`tenants.py:268`](../../packages/core/daimon/core/stores/tenants.py)); the next admission reads it through `get_turn_cap` ([`tenants.py:60`](../../packages/core/daimon/core/stores/tenants.py)) and updates `TurnQueue._caps` ([`turn_queue.py:251`](../../packages/core/daimon/core/turn_queue.py)). The model combines the write and observation into one action. A raise owes the synchronous dispatch in `try_claim` (`turn_queue.py:253-254`) |
+| `Arrive` with `StaleFollowUpCap` (unsafe only) | The old `TurnQueue.readmit` restored `previous.cap` before `try_claim` dispatched waiting turns; the fixed path refreshes in `wait_for_slot` ([`slots.py:123`](../../packages/core/daimon/core/turn/slots.py)) and passes the current cap to `readmit` ([`turn_queue.py:305`](../../packages/core/daimon/core/turn_queue.py)) |
+| `Dispatch` | `TurnQueue._dispatch` (`turn_queue.py:327`), called from `free`: first eligible tenant in rotation order, its FIFO head, tenant moved to the back. A head already past its max wait is timed out there (`_expire`, `turn_queue.py:375`); the tenant keeps its place and dispatch continues |
 | `PassMaxWait` | time passing `max_wait_s` for a queued ticket (`TurnTicket.overdue`) |
-| `Stop`, `Withdraw` | the card's Stop button sets the turn's cancel event; `TurnTicket.wait` (`turn_queue.py:122`) wakes and calls `leave` |
+| `Stop`, `Withdraw` | the card's Stop button sets the turn's cancel event; `TurnTicket.wait` (`turn_queue.py:120`) wakes and calls `leave` |
 | `Expire` | `TurnTicket.wait` after `max_wait_s`; the adapter ends the card with its ordinary error |
-| `Finish` | `release_turn_slot` (`slots.py:89`) at the end of every turn (Discord `_handle_mention`, Slack `_run_thread_turn`, Teams `_run_turn`), and `holding`'s exit, after an answer, a failure, the turn ceiling or Stop |
+| `Finish` | `release_turn_slot` (`slots.py:90`) at the end of every turn (Discord `_handle_mention`, Slack `_run_thread_turn`, Teams `_run_turn`), and `holding`'s exit, after an answer, a failure, the turn ceiling or Stop |
 | `Restart`, `Recover` | process exit drops the queue; the boot sweep (`turn_card_recovery`, `turn.orphans_found`) retires each card left "working" as "Daimon restarted before this request finished." |
 | `Pop` (unsafe only) | a dispatcher that starts the head and pops it after an await |
 | `ChainFollowUp` (unsafe only) | the pre-review drain: a follow-up ran on the slot its thread's first turn claimed |
@@ -37,8 +39,8 @@ set -eu
 : "${TLA2TOOLS_JAR:?Set TLA2TOOLS_JAR to the path of tla2tools.jar}"
 cd formal/turn_queue
 run() { java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "${TMPDIR:-/tmp}/daimon-turn-queue-tlc/$1" -config "$1.cfg" TurnQueue.tla; }
-for c in TurnQueueSafe TurnQueueThreeTenants TurnQueueFull TurnQueueProgress FollowUpsReadmit; do run $c; done
-for c in TurnQueueFullWitness LeakOnFailure GlobalFifoStarves GrantThenPop DispatchGrantsLate FollowUpKeepsSlot FollowUpReusesTicket; do run $c || test $? -eq 12; done
+for c in TurnQueueSafe TurnQueueThreeTenants TurnQueueFull TurnQueueProgress FollowUpsReadmit CapChangeFixed CapChangeRaised; do run $c; done
+for c in TurnQueueFullWitness LeakOnFailure GlobalFifoStarves GrantThenPop DispatchGrantsLate FollowUpKeepsSlot FollowUpReusesTicket CapChangeStaleFollowUp; do run $c || test $? -eq 12; done
 run LeakStallsQueue || test $? -eq 13
 ```
 
@@ -51,7 +53,7 @@ in `formal/expected.tsv`.
 | --- | --- | --- |
 | `NoDoubleStart` | invariant | no turn body starts twice |
 | `SlotAccounting` | invariant | the slot counters equal the turns actually running, after every end path |
-| `WithinCaps` | invariant | slots in use never exceed the global or the tenant cap |
+| `WithinCaps` | invariant | the global cap holds and no turn starts when its tenant is already at the current admin cap; turns running when an admin lowers the cap finish normally |
 | `QueueBounded` | invariant | queue depth stays within the per-tenant and global bounds |
 | `NoLostTurn` | invariant | a queued turn sits exactly once in its own tenant's queue, and the rotation holds exactly the tenants with waiting turns |
 | `CardTruth` | invariant | the card says "working" exactly while the turn is queued or running, or dead and not yet swept |
@@ -75,6 +77,7 @@ the timeout to hide a stranded turn.
 | --- | --- | --- | --- |
 | global cap 200 | `DAIMON_DISCORD__MAX_CONCURRENT_TURNS` ([`config.py:399`](../../packages/core/daimon/core/config.py)), set to 200 in production (prod-scale, 2026-10-08) | `GlobalCap = 2` | more than one slot, so slots are shared |
 | busy tenant's raised cap | `daimon tenants turn-cap` override | `FlooderCap = 2` | the busy tenant alone can fill the process (worst case for fairness) |
+| operator cap change | `set_turn_cap` (`tenants.py:268`), observed by `get_turn_cap` (`tenants.py:60`) and `try_claim` (`turn_queue.py:251`) | one change, `2 → 1` or `1 → 2` | permits both lowering below running count and raising with queued work |
 | per-tenant cap 3 (10 for participant guilds) | `max_concurrent_turns_per_tenant` (`config.py:391`, `:522`, `:587`) | `OtherCap = 1` | below the global cap |
 | queue 50 per tenant | `DAIMON_TURN_QUEUE__MAX_PER_TENANT` (`config.py:1269`) | `TenantQueueMax = 2` | below the global bound |
 | queue 500 in total | `DAIMON_TURN_QUEUE__MAX_TOTAL` (`config.py:1278`) | `GlobalQueueMax = 3` | below the sum of tenant bounds (500 < 50 × guilds), so the global bound can bind first |
@@ -102,6 +105,9 @@ Checked within these bounds, not proved for the production numbers.
 | `TurnQueueFullWitness` | violates `NoRefusal` | 257 | witness: the plain refusal is reachable, from a full queue |
 | `TurnQueueProgress` | clean | 19,795 | liveness with the max wait off: every queued turn resolves, every card settles, every slot returns |
 | `FollowUpsReadmit` | clean | 3,551 | a two-follow-up thread at global cap 1: each follow-up re-enters admission; all invariants |
+| `CapChangeFixed` | clean | 57,264 | a lowered cap is observed, and no new turn starts above the current cap |
+| `CapChangeRaised` | clean | 2,897 | a raised cap is observed and dispatches eligible queued work |
+| `CapChangeStaleFollowUp` | violates `WithinCaps` | 1,835 | old readmit restores a predecessor's cap 2 after an admin set cap 1 and another turn queued |
 | `LeakOnFailure` | violates `SlotAccounting` | 13 | unsafe: the failure path forgets its slot |
 | `LeakStallsQueue` | violates `QueuedResolves` | 823 | unsafe: the same leak without the max wait strands a queued turn |
 | `GlobalFifoStarves` | violates `NoStarvation` | 127,426 | unsafe: one global FIFO instead of round-robin |
@@ -136,6 +142,10 @@ Checked within these bounds, not proved for the production numbers.
 - `FollowUpReusesTicket`: a turn queues, the person clicks Stop, and it
   leaves the queue. Their follow-up in the thread inherits that finished
   ticket and ends at once with "Something went wrong" without ever waiting.
+- `CapChangeStaleFollowUp`: a turn starts with cap 2. An admin lowers it to 1;
+  another turn is still running, and a third turn queues at cap 1. The first
+  turn's follow-up restores cap 2 and dispatches the third turn while the
+  other turn still holds the only allowed slot.
 
 ## Replay status
 
@@ -149,6 +159,7 @@ Each counterexample has a test against the real code that the fix makes pass:
 | `DispatchGrantsLate` | `test_dispatch_times_out_a_ticket_past_its_max_wait_instead_of_starting_it`, `test_an_overdue_ticket_wakes_its_waiter_at_once` |
 | `FollowUpKeepsSlot` | `test_follow_ups_release_and_re_queue_so_another_tenant_is_not_starved` (core), `test_a_drained_follow_up_re_queues_behind_another_tenants_waiting_turn` (Discord) |
 | `FollowUpReusesTicket` | `test_a_follow_up_after_a_stopped_turn_takes_a_fresh_ticket`, `test_a_follow_up_after_a_timed_out_turn_takes_a_fresh_ticket` |
+| `CapChangeStaleFollowUp` | `test_follow_up_obeys_current_tenant_cap_after_admin_lowers_it` (red before fix, green after); `test_follow_up_reads_the_latest_tenant_cap` verifies the store refresh |
 
 Trace validation against staging logs (`turn.queue.*` events from the
 prod-scale rerun) has not been done yet, so the clean results are provisional
@@ -156,9 +167,16 @@ until the model accepts those traces.
 
 ## Assumptions and what is not modelled
 
-- The per-tenant cap is a constant here; the code reads it per admission and
-  runs a dispatch first, so a raised cap starts waiting turns before a
-  newcomer.
+- The cap-change configs allow one change of the busy tenant's cap between 1
+  and 2. `ChangeCap` represents the admin write together with the next
+  admission's observation. The model does not cover the interval after the
+  database write but before any adapter observes it. In that interval, a
+  release may dispatch using the queue's older cached cap.
+- The unsafe config lowers the cap with two turns running, then limits
+  follow-up arrival to states with a queued turn admitted at the new cap. This
+  keeps its counterexample on the reported path.
+- Follow-up admission refreshes the cap from the tenant store; `readmit` uses
+  the queue's last observed cap only in direct calls without that refresh.
 - A turn that waited runs the balance gate again once it holds a slot; a
   refusal there is one more end path of a started turn (`Finish`).
 - Thread-level queueing (`_processing`/`_pending`) is in

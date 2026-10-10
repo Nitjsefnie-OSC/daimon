@@ -1003,7 +1003,10 @@ class TeamsApp:
                 # Over the cap the turn waits here, behind its ordinary card:
                 # the queue is never shown.
                 slot = await wait_for_slot(
-                    cancel, sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id
+                    cancel,
+                    sessionmaker=self.runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    default_cap=self._teams.max_concurrent_turns_per_tenant,
                 )
                 if slot != "started":
                     await lifecycle.close_with_notice(
