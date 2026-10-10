@@ -1830,3 +1830,11 @@ another channel. Disabling DMs prevents new turns, without cancelling a running 
 Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.
 
 Teams consumes neutral snapshots and draft fragments through the optional lifecycle tap for alternate providers. Terminal callbacks retire the progress card and deliver authoritative answers; unprompted drafts remain silent. Unknown alternate-provider cost stays absent from the summary instead of becoming an Anthropic usage meter.
+
+### Neutral output upload edges
+
+Discord, Slack and Teams output-delivery modules accept verified `DeliverableFile`
+bytes through `deliver_provider_output`. The caller owns admitted tenant/session/root
+validation. Uploads reuse answer attachment edits, Slack's external upload flow,
+and Teams Graph or requester-bound consent with SharePoint PUT. These edges
+perform no provider selection, native payload parsing or artifact deletion.
