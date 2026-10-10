@@ -558,3 +558,9 @@ MCP spelling variants), extra fields and multiple bindings refuse before any
 resolver or session write. The override rebuilds these admitted tools and the
 bound MCP connection; it never copies a saved tool object verbatim. Multiple
 bound servers are deferred under RULES 24.
+
+Final table rendering belongs to the platform adapter. The host's existing
+`DAIMON_TABLE_RENDERING` tenant UUID map opts into Discord PNGs and Slack native
+tables for Anthropic, OpenAI and Gemini alike; missing/false stays plain text.
+Codecs and journals retain the provider's original text. See
+[`docs/mux.md`](../../docs/mux.md#opt-in-table-rendering) for configuration.
