@@ -148,6 +148,8 @@ from daimon.adapters.slack.privacy_panel.submit import (
     evaluate_delete_submission,
     run_purge_and_update,
 )
+from daimon.adapters.slack.provider_actions import ACTION_PREFIX as PROVIDER_ACTION_PREFIX
+from daimon.adapters.slack.provider_actions import SlackProviderActions, provider_action_options
 from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
 from daimon.adapters.slack.routines_panel.actions import (
     handle_routine_action,
@@ -418,6 +420,7 @@ class SlackApp:
         # Tool-write confirmation cards awaiting a click (in-process, like the
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
+        self._provider_actions = SlackProviderActions()
         # Output-delivery abort-notice dedup, keyed "{team_id}:{error_code}".
         self._delivery_notice_keys: set[str] = set()
         # Chains output sweeps per MA session so two never overlap.
@@ -1254,6 +1257,8 @@ class SlackApp:
                     self._spawn(handle_feedback_details_click(self.runtime, payload))
                 elif action_id == ASK_HUMAN_ACTION_ID:
                     self._spawn(handle_ask_human_click(self.runtime, payload))
+                elif action_id.startswith(PROVIDER_ACTION_PREFIX):
+                    self._spawn(self._provider_actions.handle_click(payload))
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
                     self._spawn(self._confirmations.handle_click(payload))
                 elif action_id == HAND_OVER_ACTION_ID:
@@ -2769,6 +2774,16 @@ class SlackApp:
                             identity=turn_identity,
                             record_post=lifecycle.record_post,
                         ),
+                        **provider_action_options(
+                            prepared,
+                            lambda: self._provider_actions.hook(
+                                web_client,
+                                channel=channel,
+                                thread_ts=thread_id,
+                                identity=turn_identity,
+                                record_post=lifecycle.record_post,
+                            ),
+                        ),
                     )
                     intent_terminal = lifecycle_holder[0].final_ts is not None
             finally:
@@ -3275,6 +3290,16 @@ class SlackApp:
                         thread_ts=thread_id,
                         identity=follow_identity,
                         record_post=follow_lifecycle.record_post,
+                    ),
+                    **provider_action_options(
+                        follow_prepared,
+                        lambda: self._provider_actions.hook(
+                            web_client,
+                            channel=channel,
+                            thread_ts=thread_id,
+                            identity=follow_identity,
+                            record_post=follow_lifecycle.record_post,
+                        ),
                     ),
                 )
         finally:

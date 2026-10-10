@@ -116,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enforce the frozen TARGET-53 digest when building and replaying QA catalog matrices, refusing re-scored extras.
 
 - Map the frozen 53-scenario QA catalog across three explicit channel backends, preserving replay inputs and reporting adapter/capability gaps separately from unscored extras.
+- Add requester-only Slack cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.
+
 - Start native provider-action approval windows per prompt and safely refuse adapter hook failures.
 - Add requester-only Discord cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.
 
