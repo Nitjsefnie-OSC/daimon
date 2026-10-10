@@ -26,13 +26,13 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import accounts, channel_admins, channel_budgets, routines, tenants
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.testing.db import WORKER_SCHEMA_PATTERN, isolated_test_schema
+from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ChannelRef, Provider, Scope
 from mux.errors import ScopeViolation
 from pydantic import BaseModel, ConfigDict, JsonValue
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PROFILES: dict[Provider, str] = {
     "anthropic": "anthropic.managed_agents",
@@ -62,46 +62,6 @@ class _OfflineAnthropic(AsyncAnthropic):
 
     # The SDK defines with_options as an alias, so override both entry points.
     with_options = copy
-
-
-def _require_owned_database(sessions: async_sessionmaker[AsyncSession]) -> None:
-    """Validate effective destination and isolated CI provenance before I/O."""
-    _require_owned_bind(sessions.kw.get("bind"))
-    binds = sessions.kw.get("binds")
-    if binds is not None:
-        if not isinstance(binds, Mapping):
-            raise ValueError("admin bindings require explicit test DB bind mappings")
-        for bind in cast(Mapping[object, object], binds).values():
-            _require_owned_bind(bind)
-
-
-def _require_owned_bind(bind: object) -> None:
-    if isinstance(bind, AsyncConnection):
-        engine = bind.engine
-    elif isinstance(bind, AsyncEngine):
-        engine = bind
-    else:
-        raise ValueError("admin bindings require an explicit test DB engine")
-    url = engine.url
-    schema = isolated_test_schema(engine)
-    schema_match = WORKER_SCHEMA_PATTERN.fullmatch(schema) if schema is not None else None
-    isolated_ci = (
-        url.database == "daimon_test"
-        and os.environ.get("GITHUB_ACTIONS") == "true"
-        and os.environ.get("CI") == "true"
-        and schema_match is not None
-        and int(schema_match[1]) == os.getpid()
-    )
-    if (
-        url.get_backend_name() != "postgresql"
-        or url.host not in ("localhost", "127.0.0.1")
-        or url.query
-        or not (
-            re.fullmatch(r"daimon_test_nc_[A-Za-z0-9][A-Za-z0-9_]{0,47}", url.database or "")
-            or isolated_ci
-        )
-    ):
-        raise ValueError("admin bindings refuse non-lane test databases or unsafe destinations")
 
 
 class AdminReceipt(BaseModel):
@@ -270,7 +230,9 @@ class AdminBindings:
             default_query={},
             base_url="https://anthropic.invalid",
             max_retries=0,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self.trace.dispatch)),
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(self.trace.dispatch), trust_env=False
+            ),
         )
 
     async def close(self) -> None:
@@ -278,7 +240,7 @@ class AdminBindings:
 
     async def _authorize(self, command: AdminCommand | None = None) -> None:
         _require_isolated_sdk_environment()
-        _require_owned_database(self.sessions)
+        require_owned_sessionmaker(self.sessions)
         if (
             self.scope.is_platform
             or self.scope.is_legacy_host_authorized
@@ -505,7 +467,7 @@ async def provision_admin_run(
 ) -> AdminBindings:
     """Actual product provisioning; no ORM/model/fabricated state insertion."""
     _require_isolated_sdk_environment()
-    _require_owned_database(sessions)
+    require_owned_sessionmaker(sessions)
     provisioned = await provision_tenant(sessions, platform="discord", workspace_id=workspace_id)
     return AdminBindings(
         sessions=sessions,

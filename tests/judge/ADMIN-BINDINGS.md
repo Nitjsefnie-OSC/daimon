@@ -101,3 +101,5 @@ and cleanup preserving another tenant and another channel's routines. There
 are no live provider, Discord, Slack, Teams, tunnel or model calls.
 
 Every sessionmaker destination is checked before I/O: the main bind and each per-model `binds` entry, including connection-bound engines, must satisfy the same owned-database and isolated-CI rule. An accepted main engine cannot authorize a foreign model route.
+
+Both provisioning and callbacks use the public `daimon.testing.db.require_owned_sessionmaker()` guard. They validate every main/model bind with the shared isolated-CI exception; no admin-local database policy remains. Offline HTTP clients disable ambient proxy and TLS overrides.

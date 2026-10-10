@@ -464,7 +464,7 @@ async def test_non_lane_database_refuses_before_any_connection() -> None:
     engine = create_async_engine("postgresql+asyncpg://offline:fixture@127.0.0.1/operator_database")
     sessions = async_sessionmaker(engine)
     try:
-        with pytest.raises(ValueError, match="non-lane test databases"):
+        with pytest.raises(ValueError, match="owned local lane engines"):
             await provision_admin_run(
                 sessions,
                 workspace_id="123",
@@ -560,7 +560,7 @@ async def test_database_guards_refuse_both_admin_apis_before_io(
         trace=ScriptedTransport(),
     )
     try:
-        with pytest.raises(ValueError, match="non-lane test databases"):
+        with pytest.raises(ValueError, match="owned local lane engines"):
             await provision_admin_run(
                 sessions,
                 workspace_id="123",
@@ -568,7 +568,7 @@ async def test_database_guards_refuse_both_admin_apis_before_io(
                 channels=frozenset({"456"}),
                 trace=bound.trace,
             )
-        with pytest.raises(ValueError, match="non-lane test databases"):
+        with pytest.raises(ValueError, match="owned local lane engines"):
             await bound.configure_channel("456")
         assert connections == [] and bound.trace.requests == []
     finally:
@@ -815,7 +815,7 @@ async def test_every_model_bind_is_checked_before_provision_or_authorization(
         trace=ScriptedTransport(),
     )
     try:
-        with pytest.raises(ValueError, match="non-lane test databases"):
+        with pytest.raises(ValueError, match="owned local lane engines"):
             await provision_admin_run(
                 sessions,
                 workspace_id="123",
@@ -823,7 +823,7 @@ async def test_every_model_bind_is_checked_before_provision_or_authorization(
                 channels=bound.channels,
                 trace=bound.trace,
             )
-        with pytest.raises(ValueError, match="non-lane test databases"):
+        with pytest.raises(ValueError, match="owned local lane engines"):
             await bound.configure_channel("456")
         assert not connections and not bound.trace.requests
     finally:
