@@ -1356,3 +1356,9 @@ occupancy and usage revision replay on MockTransport. Tool/mount updates, native
 vaults and deletion keep their typed limits; live certificates and exact-spend
 settlement are separate. See
 `packages/mux/mux/drivers/gemini/CONFORMANCE-SDK.md`.
+Explicit channel backend configuration resolves runtime dependencies separately
+for each admitted turn. Native preparation and execution use the same resolved
+runtime and authorized scope; runtime lookup does not cache one channel's native
+plan for another channel or configuration revision. Default Anthropic channels
+do not construct provider runtimes. An explicitly selected provider whose
+deployment constructor is absent is refused before provider transport access.
