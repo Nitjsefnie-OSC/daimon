@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2217,
+  "files_scanned": 2220,
   "parse_errors": [],
   "calls": [
     {
@@ -18109,6 +18109,24 @@
       "category": "test-support"
     },
     {
+      "file": "packages/testing/daimon/testing/isolated_sdk.py",
+      "line": 17,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test-support"
+    },
+    {
+      "file": "packages/testing/daimon/testing/isolated_sdk.py",
+      "line": 157,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test-support"
+    },
+    {
       "file": "packages/testing/daimon/testing/ma.py",
       "line": 36,
       "module": "anthropic",
@@ -18134,6 +18152,15 @@
       "module": "anthropic.types.beta.beta_managed_agents_model_config",
       "names": [
         "BetaManagedAgentsModelConfig"
+      ],
+      "category": "test-support"
+    },
+    {
+      "file": "packages/testing/daimon/testing/ma.py",
+      "line": 255,
+      "module": "anthropic",
+      "names": [
+        "DEFAULT_TIMEOUT"
       ],
       "category": "test-support"
     },
@@ -18573,6 +18600,25 @@
         "AsyncAnthropic"
       ],
       "category": "test-support"
+    },
+    {
+      "file": "packages/testing/tests/test_isolated_sdk.py",
+      "line": 297,
+      "module": "anthropic",
+      "names": [
+        "DEFAULT_TIMEOUT",
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/testing/tests/test_isolated_sdk.py",
+      "line": 335,
+      "module": "anthropic",
+      "names": [
+        "DEFAULT_TIMEOUT"
+      ],
+      "category": "test"
     },
     {
       "file": "packages/testing/tests/test_ma.py",
