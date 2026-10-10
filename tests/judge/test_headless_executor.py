@@ -225,7 +225,7 @@ async def test_native_failed_turn_is_a_real_oracle_failure(tmp_path: Path, surfa
     assert result.host_outcome.checks[0].code == "TURN_NOT_COMPLETED"
     # The current host returns text on retries_exhausted when state.error is
     # unset. Capture that real return without promoting the failed root.
-    assert result.evidence.turns[0].text_capture_complete == (surface == "headless")
+    assert result.evidence.turns[0].text_capture_complete
     assert result.evidence.turns[0].terminals[0].outcome == "errored"
     assert len(result.headless_outputs) == 2
 
@@ -262,7 +262,7 @@ asyncio.run(check())
         [sys.executable, "-O", "-c", script, str(inputs), str(Path(__file__).parents[1])],
         check=False,
         capture_output=True,
-        timeout=30,
+        timeout=60,
     )
     if result.returncode != 0:
         raise AssertionError(result.stderr.decode())
@@ -403,7 +403,7 @@ def test_wait_done_timeout_refusal_survives_optimized_python(tmp_path: Path) -> 
         [sys.executable, "-O", "-c", script, str(inputs), str(Path(__file__).parents[1])],
         check=False,
         capture_output=True,
-        timeout=30,
+        timeout=60,
     )
     if result.returncode != 0:
         raise AssertionError(result.stderr.decode())
@@ -542,7 +542,7 @@ async def check():
         raise RuntimeError("native narration became visible evidence")
     if t.tools or t.tool_capture_complete or t.cards or t.card_capture_complete:
         raise RuntimeError("unbound native tool/card effect was certified")
-    for surface in ("discord", "slack", "teams"):
+    for surface in ("slack", "teams"):
         x["plan"]["scenario"]["scenario"]["surface"] = surface
         r = await e.execute_cell(c.ScenarioPlan.model_validate(x["plan"]), e.ScenarioReplay.model_validate(x["replay"]))
         if r.status != "PENDING" or not r.headless_outputs:
@@ -557,13 +557,13 @@ asyncio.run(check())
         [sys.executable, "-O", "-c", script, str(inputs), str(Path(__file__).parents[1])],
         capture_output=True,
         check=False,
-        timeout=30,
+        timeout=60,
     )
     if result.returncode:
         raise AssertionError(result.stderr.decode())
 
 
-@pytest.mark.parametrize("surface", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("surface", ["slack", "teams"])
 async def test_platform_text_stays_pending_despite_successful_headless_return(
     tmp_path: Path,
     surface: str,

@@ -247,3 +247,25 @@ it makes no live spend or price claim and refuses fallback attempts. SDK key,
 project, location, endpoint and Vertex/enterprise options refuse construction
 by environment variable name only. No credential files or live transport are
 used. This slice is conditional on G2 merging; the lead restacks it.
+
+Discord text binding now feeds each executed Discord-surface turn through
+`DiscordSurfaceHarness` using the actual `DiscordTurnLifecycle`,
+`DiscordPostTransport` and discord.py serialization. The capture runs alongside
+the real Anthropic/G1/G2 driver lifecycle; it never posts a substituted headless
+return. `discord_surfaces` retains the owned adapter receipts. The binding checks
+acknowledged native session/root identity, the host window and surviving-message
+consistency with the complete send/edit/delete history. `VisibleText` includes
+surviving message content, embed text and component labels in post order. Drafts
+and deleted messages remain diagnostic history. Long replies retain the adapter's
+actual split messages, independently of the headless return's 1000-character cap.
+
+A single completed delivery closes this transport's text window. Partial adapter
+delivery and attachment pixels leave coverage incomplete. Billing-dependent text
+predicates remain partial because these offline host turns exempt billing and do
+not bind account debits/ledger usage. Titles, cards, external tool posts,
+reactions, other platform adapters, browser pixels and live model behavior remain
+uncaptured. No catalog assertions or fixture/source pins are weakened. The table
+scenario exercises `render_tables=False`, the existing ordinary adapter default:
+raw pipe rows in the actual posts produce a real oracle FAIL.
+
+Focused verification: `uv run pytest -q -o addopts='' tests/judge/test_discord_catalog_surface.py tests/judge/test_headless_executor.py tests/judge/test_openai_catalog.py tests/judge/test_gemini_catalog.py packages/testing/tests/test_discord_surface.py`.

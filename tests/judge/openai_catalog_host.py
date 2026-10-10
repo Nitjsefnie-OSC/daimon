@@ -21,8 +21,8 @@ from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevi
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState, extract_final_response
+from daimon.testing.discord_surface import DiscordSurfaceCapture
 from daimon.testing.outcome_oracle import SessionUse, TerminalEvidence, TurnEvidence, VisibleText
-from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.events import TurnEndedPayload
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import SendReceipt
@@ -34,9 +34,11 @@ from mux.state.store import binding_slot
 
 if __package__:
     from .catalog_runner import Invocation, ScenarioPlan, expand_text
+    from .discord_catalog_surface import CatalogLifecycle, bind_discord_text
     from .headless_output import HeadlessOutput, capture_headless_return
 else:
     from catalog_runner import Invocation, ScenarioPlan, expand_text
+    from discord_catalog_surface import CatalogLifecycle, bind_discord_text
     from headless_output import HeadlessOutput, capture_headless_return
 
 
@@ -44,6 +46,7 @@ else:
 class OpenAITurnCapture:
     evidence: TurnEvidence
     output: HeadlessOutput | None
+    surface: DiscordSurfaceCapture | None
 
 
 async def run_openai_turn(
@@ -121,7 +124,6 @@ async def run_openai_turn(
         runtime=runtime,
         read_timeout_s=5.0,
     )
-    lifecycle = RecordingLifecycle()
     before = await store.read_events(session.id)
     prior_roots = {e.turn_id for e in before if e.turn_id is not None}
     if expected_root in prior_roots:
@@ -129,6 +131,14 @@ async def run_openai_turn(
     cursor = before[-1].sequence if before else -1
     started = time.monotonic()
     output_id = f"{plan.scenario.id}:openai:{session.id}:{expected_root}:headless_return"
+    surface_id = output_id.replace(":headless_return", ":discord_adapter_posts")
+    lifecycle = CatalogLifecycle(
+        surface=str(plan.scenario.scenario.get("surface")),
+        evidence_id=surface_id,
+        session_id=session.id,
+        root_turn_id=expected_root,
+        model_id=channel.agent_model,
+    )
     states: list[TurnState] = []
     output: HeadlessOutput | None = None
     with persistence.activate():
@@ -157,8 +167,12 @@ async def run_openai_turn(
                 raise state.error
             return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]
 
-        try:
+        async def captured() -> None:
+            nonlocal output
             output = await capture_headless_return(invoke, evidence_id=output_id)
+
+        try:
+            await lifecycle.run(captured)
         except TurnError as error:
             if not states or states[-1].error is not error:
                 raise
@@ -243,4 +257,14 @@ async def run_openai_turn(
             output is not None and plan.scenario.scenario.get("surface") == "headless"
         ),
     )
-    return OpenAITurnCapture(evidence, output)
+    evidence = bind_discord_text(
+        evidence,
+        lifecycle.capture,
+        expected_id=surface_id,
+        observed_s=observed,
+        accounting_required=any(
+            a.get("kind") in {"footer_cost_matches_ledger", "ledger_matches_usage"}
+            for a in plan.assertions
+        ),
+    )
+    return OpenAITurnCapture(evidence, output, lifecycle.capture)

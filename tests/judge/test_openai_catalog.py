@@ -20,7 +20,7 @@ INDEX = REPO / "packages/testing/fixtures/target53/index.json"
 CATALOG = INDEX.parent / "catalog"
 
 
-async def test_native_table_return_does_not_certify_discord_text() -> None:
+async def test_actual_discord_table_posts_fail_the_catalog_predicate() -> None:
     pack = load_provider_fixtures(INDEX, catalog_root=CATALOG)
     scenario, fixture = pack.select("QA-NEW37-MARKDOWN-TABLE-READABLE", "openai")
     entry = next(e for e in load_catalog(CATALOG) if e.id == scenario.scenario_id)
@@ -32,11 +32,12 @@ async def test_native_table_return_does_not_certify_discord_text() -> None:
     result = await execute_openai_cell(
         plan, scenario, fixture, source_root=CATALOG, repository_root=REPO
     )
-    assert result.status == "PENDING"
+    assert result.status == "FAIL"
     assert result.host_outcome.status == "PASS"
-    assert not result.evidence.turns[0].texts
-    assert not result.evidence.turns[0].text_capture_complete
-    assert all(c.status == "PENDING" for c in result.catalog_outcome.checks)
+    assert result.evidence.turns[0].texts
+    assert result.evidence.turns[0].text_capture_complete
+    assert result.catalog_outcome.checks[0].status == "FAIL"
+    assert result.discord_surfaces[0].boundary == "discord_adapter_posts"
     assert result.request_count == 6
     assert len(result.evidence.turns) == len(result.headless_outputs) == 1
     assert result.evidence.turns[0].root_turn_id == fixture.turns[0].root_id
