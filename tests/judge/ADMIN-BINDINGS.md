@@ -7,7 +7,11 @@ tenant; config revisions, grants, rules, budgets, caps and routine cleanup use
 product APIs. Separate DB sessions read the resulting state. Provider selection
 is persisted by `configure_channel`, and the common operations run identically
 for Anthropic, OpenAI and Gemini. The owned Anthropic SDK uses only
-`ScriptedTransport` through `httpx.MockTransport` with an offline fixture key.
+`ScriptedTransport` through `httpx.MockTransport` with an offline fixture key,
+explicit empty webhook/header/query defaults, and no discovery. Any ambient
+`ANTHROPIC_*` setting (including empty values) refuses before SDK/HTTP allocation
+and provisioning; actual SDK `copy`/`with_options` also refuse late overrides.
+The guard checks names only and never reads, logs or erases operator values.
 Database guards require PostgreSQL on localhost/127.0.0.1 with no URL query
 overrides and an exact `daimon_test_nc_*` lane name. The sole `daimon_test`
 exception requires both `GITHUB_ACTIONS` and `CI` exactly `true`, plus
@@ -95,3 +99,5 @@ provisioning/configuration, denied cross-tenant/channel operations, token/unknow
 platform pending results, placeholder injection refusal, non-lane DB refusal,
 and cleanup preserving another tenant and another channel's routines. There
 are no live provider, Discord, Slack, Teams, tunnel or model calls.
+
+Every sessionmaker destination is checked before I/O: the main bind and each per-model `binds` entry, including connection-bound engines, must satisfy the same owned-database and isolated-CI rule. An accepted main engine cannot authorize a foreign model route.

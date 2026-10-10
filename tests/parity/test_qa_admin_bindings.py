@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from daimon.core._models import Tenant
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.channel_backend import current_backend
 from daimon.core.defaults.provisioning import provision_tenant
@@ -660,5 +661,196 @@ async def test_isolated_ci_real_product_provisioning_and_readback(
         assert database == actual_database and schema == actual_schema
         assert stored is not None and stored.backend == bound.backend
         assert not bound.trace.requests
+    finally:
+        await bound.close()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ANTHROPIC_WEBHOOK_SIGNING_KEY",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_PROFILE",
+        "ANTHROPIC_CONFIG_DIR",
+        "ANTHROPIC_IDENTITY_TOKEN",
+        "ANTHROPIC_IDENTITY_TOKEN_FILE",
+        "ANTHROPIC_FEDERATION_RULE_ID",
+        "ANTHROPIC_ORGANIZATION_ID",
+        "ANTHROPIC_LOG",
+        "ANTHROPIC_FUTURE_OVERRIDE",
+    ],
+)
+@pytest.mark.parametrize("value", ["", "synthetic-sdk-override"])
+async def test_sdk_environment_refuses_before_http_allocation_or_provisioning(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    engine = create_async_engine("postgresql+asyncpg://offline:fixture@localhost/daimon_test_nc_n6")
+    allocations: list[None] = []
+    connections: list[None] = []
+
+    def forbid_http(*_args: object, **_kwargs: object) -> None:
+        allocations.append(None)
+        raise AssertionError("ambient SDK configuration reached HTTP allocation")
+
+    def forbid_connection(*_args: object, **_kwargs: object) -> None:
+        connections.append(None)
+        raise AssertionError("ambient SDK configuration reached DB connection")
+
+    event.listen(engine.sync_engine, "do_connect", forbid_connection)
+    monkeypatch.setattr("daimon.testing.admin_bindings.httpx.AsyncClient", forbid_http)
+    monkeypatch.setenv(name, value)
+    caplog.set_level("DEBUG")
+    sessions = async_sessionmaker(engine)
+    trace = ScriptedTransport()
+    try:
+        with pytest.raises(ValueError, match="refuse ambient Anthropic SDK configuration") as error:
+            AdminBindings(
+                sessions=sessions,
+                scope=Scope.platform(reason="constructor-only environment refusal"),
+                backend="anthropic",
+                platform="discord",
+                workspace_id="123",
+                channels=frozenset(),
+                trace=trace,
+            )
+        with pytest.raises(ValueError, match="refuse ambient Anthropic SDK configuration"):
+            await provision_admin_run(
+                sessions,
+                workspace_id="123",
+                backend="anthropic",
+                channels=frozenset(),
+                trace=trace,
+            )
+        assert "synthetic-sdk-override" not in str(error.value) + caplog.text
+        assert name in os.environ  # Refusal does not erase caller configuration.
+        assert connections == allocations == [] and trace.requests == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("name", ["ANTHROPIC_WEBHOOK_SIGNING_KEY", "ANTHROPIC_CUSTOM_HEADERS"])
+@pytest.mark.parametrize("value", ["", "x-synthetic-secret: synthetic-sdk-override"])
+@pytest.mark.parametrize("method", ["copy", "with_options"])
+async def test_actual_sdk_copies_refuse_late_environment(
+    binding: AdminBindings,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    method: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv(name, value)
+    caplog.set_level("DEBUG")
+    with pytest.raises(ValueError, match="refuse ambient Anthropic SDK configuration") as error:
+        if method == "copy":
+            binding.anthropic.copy()
+        else:
+            binding.anthropic.with_options()
+    # A DB-only operation must also refuse before its authorization read/writes.
+    with pytest.raises(ValueError, match="refuse ambient Anthropic SDK configuration"):
+        await binding.configure_channel(min(binding.channels))
+    assert "synthetic-sdk-override" not in str(error.value) + caplog.text
+    assert name in os.environ and not binding.trace.requests
+
+
+async def test_actual_sdk_copy_keeps_explicit_offline_credentials_and_headers(
+    binding: AdminBindings,
+) -> None:
+    copied = binding.anthropic.with_options(default_headers={"x-offline-proof": "fixture"})
+    try:
+        assert isinstance(copied, type(binding.anthropic))
+        assert copied.api_key == "offline-fixture" and copied.auth_token is None
+        assert copied.credentials is None and copied.webhook_key == ""
+        assert copied.base_url.scheme == "https" and copied.base_url.host == "anthropic.invalid"
+        assert copied.default_headers["x-offline-proof"] == "fixture"
+        assert not binding.trace.requests
+    finally:
+        await copied.close()
+
+
+@pytest.mark.parametrize("bind_kind", ["engine", "connection"])
+@pytest.mark.parametrize("foreign_first", [False, True])
+@pytest.mark.parametrize(
+    "foreign_url",
+    [
+        "postgresql+asyncpg://offline:fixture@localhost/operator_database",
+        "postgresql+asyncpg://offline:fixture@localhost/daimon_test",
+        "postgresql+asyncpg://offline:fixture@remote.invalid/daimon_test_nc_n6",
+        "postgresql+asyncpg://offline:fixture@localhost/daimon_test_nc_n6?host=remote.invalid",
+    ],
+)
+async def test_every_model_bind_is_checked_before_provision_or_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    bind_kind: str,
+    foreign_first: bool,
+    foreign_url: str,
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("CI", "true")
+    owned = create_async_engine("postgresql+asyncpg://offline:fixture@localhost/daimon_test_nc_n6")
+    foreign = create_async_engine(foreign_url)
+    connections: list[None] = []
+
+    def forbid_connection(*_args: object, **_kwargs: object) -> None:
+        connections.append(None)
+        raise AssertionError("per-model bind guard attempted a connection")
+
+    for engine in (owned, foreign):
+        event.listen(engine.sync_engine, "do_connect", forbid_connection)
+    routed = foreign if bind_kind == "engine" else AsyncConnection(foreign)
+    entries = [(Tenant, routed), (Tenant.__table__, owned)]
+    if not foreign_first:
+        entries.reverse()
+    sessions = async_sessionmaker(owned, binds=dict(entries), expire_on_commit=False)
+    bound = AdminBindings(
+        sessions=sessions,
+        scope=Scope.platform(reason="bind guard must run before authorization"),
+        backend="anthropic",
+        platform="discord",
+        workspace_id="123",
+        channels=frozenset({"456"}),
+        trace=ScriptedTransport(),
+    )
+    try:
+        with pytest.raises(ValueError, match="non-lane test databases"):
+            await provision_admin_run(
+                sessions,
+                workspace_id="123",
+                backend="anthropic",
+                channels=bound.channels,
+                trace=bound.trace,
+            )
+        with pytest.raises(ValueError, match="non-lane test databases"):
+            await bound.configure_channel("456")
+        assert not connections and not bound.trace.requests
+    finally:
+        await bound.close()
+        await owned.dispose()
+        await foreign.dispose()
+
+
+@pytest.mark.parametrize("bind_kind", ["engine", "connection"])
+async def test_owned_model_routing_still_provisions_and_reads_product_state(
+    binding: AdminBindings,
+    bind_kind: str,
+) -> None:
+    original = binding.sessions.kw["bind"]
+    engine = original.engine if isinstance(original, AsyncConnection) else original
+    assert isinstance(engine, AsyncEngine)
+    routed = original if bind_kind == "connection" else engine
+    sessions = async_sessionmaker(routed, binds={Tenant: routed}, expire_on_commit=False)
+    bound = await provision_admin_run(
+        sessions,
+        workspace_id=str(uuid.uuid4().int)[:18],
+        backend=binding.backend,
+        channels=binding.channels,
+        trace=binding.trace,
+    )
+    try:
+        assert bound.scope.tenant_id and bound.scope.account_id
+        assert (await bound.configure_channel(min(bound.channels))).status == "executed"
     finally:
         await bound.close()

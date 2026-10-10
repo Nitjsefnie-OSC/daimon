@@ -13,7 +13,7 @@ import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, Literal, Self, cast, override
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -47,9 +47,35 @@ MODELS: dict[Provider, str | None] = {
 PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*(?:\.[a-z0-9_]+|:[A-Za-z0-9_]+)*)\}")
 
 
+def _require_isolated_sdk_environment() -> None:
+    # Presence only: do not read, log or erase operator values. Include future
+    # Anthropic selectors rather than guessing which SDK release consumes them.
+    if any(name.startswith("ANTHROPIC_") for name in os.environ):
+        raise ValueError("offline admin bindings refuse ambient Anthropic SDK configuration")
+
+
+class _OfflineAnthropic(AsyncAnthropic):
+    @override
+    def copy(self, **kwargs: Any) -> Self:
+        _require_isolated_sdk_environment()
+        return super().copy(**kwargs)
+
+    # The SDK defines with_options as an alias, so override both entry points.
+    with_options = copy
+
+
 def _require_owned_database(sessions: async_sessionmaker[AsyncSession]) -> None:
     """Validate effective destination and isolated CI provenance before I/O."""
-    bind = sessions.kw.get("bind")
+    _require_owned_bind(sessions.kw.get("bind"))
+    binds = sessions.kw.get("binds")
+    if binds is not None:
+        if not isinstance(binds, Mapping):
+            raise ValueError("admin bindings require explicit test DB bind mappings")
+        for bind in cast(Mapping[object, object], binds).values():
+            _require_owned_bind(bind)
+
+
+def _require_owned_bind(bind: object) -> None:
     if isinstance(bind, AsyncConnection):
         engine = bind.engine
     elif isinstance(bind, AsyncEngine):
@@ -235,8 +261,13 @@ class AdminBindings:
     resource_edge: ResourceEdge | None = None
 
     def __post_init__(self) -> None:
-        self.anthropic = AsyncAnthropic(
+        _require_isolated_sdk_environment()
+        self.anthropic = _OfflineAnthropic(
             api_key="offline-fixture",
+            auth_token=None,
+            webhook_key="",
+            default_headers={},
+            default_query={},
             base_url="https://anthropic.invalid",
             max_retries=0,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(self.trace.dispatch)),
@@ -246,6 +277,7 @@ class AdminBindings:
         await self.anthropic.close()
 
     async def _authorize(self, command: AdminCommand | None = None) -> None:
+        _require_isolated_sdk_environment()
         _require_owned_database(self.sessions)
         if (
             self.scope.is_platform
@@ -472,6 +504,7 @@ async def provision_admin_run(
     trace: ScriptedTransport,
 ) -> AdminBindings:
     """Actual product provisioning; no ORM/model/fabricated state insertion."""
+    _require_isolated_sdk_environment()
     _require_owned_database(sessions)
     provisioned = await provision_tenant(sessions, platform="discord", workspace_id=workspace_id)
     return AdminBindings(
