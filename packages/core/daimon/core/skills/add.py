@@ -49,6 +49,7 @@ from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_skill, publish_skill_version, retrieve_agent, update_agent
+from daimon.core.neutral_resources import AgentGate, NeutralResourceHost
 from daimon.core.skill_zip import MAX_FILES, MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.fetch import fetch_repo
 from daimon.core.skills.ingest import (
@@ -69,6 +70,7 @@ __all__ = [
     "AgentRecheck",
     "SkillAddResult",
     "add_agent_skill",
+    "add_host_agent_skill",
     "fetch_attachment",
     "fetch_repo_skill",
     "fetch_teams_attachment",
@@ -280,6 +282,28 @@ async def add_agent_skill(
         action=result.action,
         newly_attached=result.newly_attached,
     )
+    return SkillAddResult(
+        name=result.name,
+        skill_id=result.skill_id,
+        version=result.version,
+        action=result.action,
+        newly_attached=result.newly_attached,
+    )
+
+
+async def add_host_agent_skill(
+    host: NeutralResourceHost,
+    *,
+    catalog_id: str,
+    bundle: SkillBundle,
+    recheck: AgentGate,
+) -> SkillAddResult:
+    """Add a confirmed bundle through the scoped neutral host resource edge.
+
+    The caller supplies its existing fresh policy/pin gate. It cannot omit it
+    or replace the actual catalog identity with an SDK id from another backend.
+    """
+    result = await host.add(catalog_id, bundle, recheck=recheck)
     return SkillAddResult(
         name=result.name,
         skill_id=result.skill_id,

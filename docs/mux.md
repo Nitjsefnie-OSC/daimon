@@ -1237,3 +1237,23 @@ Teams renders root neutral snapshots and ordered previews locally, retaining its
 The host's `PostgresNeutralCatalog` retains OpenAI/Gemini agent revisions and checked skill bundles within an authorized tenant, account and provider workspace. Agent edits publish a new immutable native agent with a compare-and-swap host revision; historical revisions retain their native references and skill pins. The host revision does not change a provider's native revision. Exact-version bundles preserve their bytes, title and owning agent. Upload ownership is retained with each immutable version; callers commit a checked bundle before attachment.
 
 This store requires additive migration `0079_neutral_catalog`. It supplies storage for explicitly selected alternate resource helpers; callers still perform policy rechecks, native creation and attachment. The default Anthropic resource path uses its existing storage and requests. Downgrading drops only the alternate catalog tables and their retained content. Retained versions store bounded skill archives in Postgres; storage grows with published versions. Account deletion cascades to both catalog tables.
+
+### Scoped host resource helpers
+
+For an explicitly provisioned OpenAI catalog, `NeutralResourceHost` constructs
+the store from the authorized tenant/account/project routing tuple and calls
+only the injected resource ports. `add_host_agent_skill` requires the caller's
+fresh policy gate. It retains each native uploaded version and checked bundle
+before replacing the catalog agent under local CAS. A known failed attachment
+can reuse that retained upload after restart. An unknown native upload remains
+the caller's claimed-operation reconciliation responsibility.
+
+`fork_host_agent` applies the existing FORK authorization, copies source-owned
+bundle bytes under new native skill ids, keeps shared library pins and omits
+foreign-agent skills. Passing this host to `set_channel_rule` exercises the same
+locked channel write and repeat-request behavior. Missing catalog ownership or
+bytes refuses before mutation. An owned unversioned pin requires an injected
+scoped native-default resolver; no latest-version or lexical fallback is used.
+Gemini resource hosts remain pending G2. Runtime provisioning, remote MCP
+authentication and live turns are separate gates. Unconfigured Anthropic paths
+retain their existing requests, storage and policy.

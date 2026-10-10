@@ -200,6 +200,7 @@ source_modules = [
     "daimon.core.ma_resolver",
     "daimon.core.mux_backend",
     "daimon.core.mux_compat",
+    "daimon.core.neutral_resources",
     "daimon.core.mcp_attach",
     "daimon.core.mcp_auth",
     "daimon.core.mcp_credential_sweep",

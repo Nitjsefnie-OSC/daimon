@@ -7,14 +7,27 @@ bytes, query and beta headers. Only the SDK's random MIME boundary is fixed.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import httpx._multipart
 import pytest
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
-from anthropic.types.beta.agent_update_params import Tool
-from daimon.core.defaults.metadata import tenant_scoped_display_title
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsSkillParams,
+    BetaManagedAgentsURLMCPServerParams,
+)
+from anthropic.types.beta.agent_create_params import (
+    Model,
+    Tool,
+)
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ISOLATED,
+    build_metadata,
+    tenant_scoped_display_title,
+)
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.testing.factories import make_tenant
@@ -187,3 +200,95 @@ async def test_fork_partition_preserves_sdk_trace_and_raw_shared_pins(
         ("owned", "source/notes", "2")
     ]
     assert split.dropped == []
+
+
+@pytest.mark.parametrize("with_toolset", (False, True))
+@pytest.mark.parametrize("public_url", (None, "https://daimon.example.com/mcp"))
+async def test_fork_create_preserves_pre_refactor_sdk_bytes_and_face_metadata(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    with_toolset: bool,
+    public_url: str | None,
+) -> None:
+    from daimon.core import agent_fork
+    from daimon.core.authz import Subject
+    from daimon.core.defaults.provisioning import derive_guild_account_uuid
+
+    tenant = await make_tenant(db_session)
+    base: Tool = {
+        "type": "agent_toolset_20260401",
+        "configs": [{"name": name} for name in ("bash", "read", "edit", "grep", "glob", "write")],
+    }
+    existing: Tool = {
+        "type": "agent_toolset_20260401",
+        "configs": [],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+    }
+    source = ma_agent(
+        id="source",
+        name="source",
+        tenant_id=tenant.id,
+        system="Preserve this prompt.",
+        metadata={MA_METADATA_KEY_ISOLATED: "true"},
+        tools=[existing] if with_toolset else [],
+        skills=[{"type": "anthropic", "skill_id": "pdf", "version": "latest"}],
+    )
+    metadata = build_metadata(
+        tenant_id=tenant.id, name="copy", account_id=derive_guild_account_uuid(tenant.id)
+    )
+    copied = ma_agent(id="copy", name="copy", tenant_id=tenant.id, metadata=metadata)
+    tools: list[Tool] = [existing] if with_toolset else [base]
+    servers: list[BetaManagedAgentsURLMCPServerParams] = []
+    if public_url is not None:
+        mcp: Tool = {"type": "mcp_toolset", "mcp_server_name": "daimon-mcp"}
+        tools = [existing, mcp] if with_toolset else [mcp, base]
+        servers = [{"type": "url", "name": "daimon-mcp", "url": public_url}]
+
+    def script() -> ScriptedTransport:
+        transport = ScriptedTransport()
+        transport.queue(
+            ScriptedReply(
+                "GET", "/v1/agents/source", httpx.Response(200, json=source.model_dump(mode="json"))
+            ),
+            ScriptedReply(
+                "POST", "/v1/agents", httpx.Response(200, json=copied.model_dump(mode="json"))
+            ),
+        )
+        return transport
+
+    reference, migrated = script(), script()
+    async with reference.client() as sdk:
+        await sdk.beta.agents.retrieve("source")
+        await sdk.beta.agents.create(
+            name="copy",
+            model=cast(Model, source.model.model_dump(mode="json")),
+            description=None,
+            system="Preserve this prompt.",
+            metadata=metadata,
+            tools=tools,
+            mcp_servers=servers,
+            skills=[{"type": "anthropic", "skill_id": "pdf", "version": "latest"}],
+        )
+    faces: list[Mapping[str, str] | None] = []
+
+    def face(*args: object, **kwargs: object) -> None:
+        faces.append(cast("Mapping[str, str] | None", kwargs.get("metadata")))
+
+    monkeypatch.setattr(agent_fork, "queue_agent_face", face)
+    async with migrated.client() as sdk:
+        result = await agent_fork.copy_agent(
+            sdk,
+            db_session_factory,
+            tenant_id=tenant.id,
+            source=source,
+            new_name="copy",
+            public_url=public_url,
+            subject=Subject(is_admin=True),
+            default_agent_name="daimon",
+        )
+    reference.assert_consumed()
+    migrated.assert_consumed()
+    assert migrated.requests == reference.requests
+    assert faces == [copied.metadata]
+    assert result.agent.id == "copy" and result.dropped_skills == ()

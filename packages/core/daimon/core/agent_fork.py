@@ -49,6 +49,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_agent, retrieve_agent
+from daimon.core.neutral_resources import HostAgentCopy, NeutralResourceHost
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_skills
@@ -56,6 +57,7 @@ from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
+from mux.contracts.resources import Agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _FORK_COPY_FIELDS = frozenset(
@@ -347,4 +349,58 @@ async def fork_agent(
     )
 
 
-__all__ = ["AgentCopy", "copy_agent", "fork_agent"]
+async def fork_host_agent(
+    host: NeutralResourceHost,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    source_name: str,
+    new_name: str,
+    subject: Subject,
+    default_agent_name: str | None,
+    public_url: str | None = None,
+    extra_metadata: Mapping[str, str] | None = None,
+) -> HostAgentCopy:
+    """The same fork policy, with explicit neutral catalog/native resources."""
+    tenant_id = uuid.UUID(host.scope.tenant_id)
+    source = await host.find(source_name)
+    if source is None:
+        raise DaimonError(f"There is no agent named {source_name} to copy.")
+
+    async def recheck(agent: Agent) -> None:
+        async with sessionmaker() as session:
+            try:
+                policy = await load_access_policy(session, tenant_id=tenant_id)
+            except AccessPolicyUnreadable as exc:
+                raise DaimonError("The access policy can't be read.") from exc
+        decision = authorize(
+            policy,
+            subject=subject,
+            action=Action.FORK,
+            agent=build_agent_ref(agent.spec.name, agent.spec.metadata or {}),
+        )
+        if decision.reason == "agent_has_rule":
+            raise DaimonError(
+                f"{source_name} has an agent rule limiting where it runs, so it can't be copied."
+            )
+        if not decision:
+            raise DaimonError("Only a workspace or server admin can copy an agent.")
+
+    await recheck(source.revision.agent)
+    made = await host.fork(
+        source.revision.catalog_id,
+        new_name,
+        recheck=recheck,
+        public_url=public_url,
+        extra_metadata=extra_metadata,
+    )
+    queue_agent_face(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=new_name,
+        metadata=made.agent.metadata,
+        default_agent_name=default_agent_name,
+    )
+    return made
+
+
+__all__ = ["AgentCopy", "copy_agent", "fork_agent", "fork_host_agent"]
