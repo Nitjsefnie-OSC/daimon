@@ -39,7 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain acknowledged session references for cleanup on control failure, and
   preserve optional cap omission and default provider behavior.
 - Execute offline catalog steps in source order with measured completion deadlines and short waits; retain completed turn prefixes and typed PENDING at unsupported operations.
+### Added
+
+- Execute source-ordered offline TARGET-53 catalog steps through the three selected backend hosts, with bounded completion waits, strict native replay consumption and explicit PENDING for unsupported operations and effects.
+- Bind catalog text to actual headless or Discord/Slack/Teams adapter captures, retain transient posts for forbidden-text checks, and report equivalent default-disabled table controls as EXPECTED-FAIL.
 - Add opt-in offline host clock and native-root completion capture helpers, keeping source completion deadlines separate from invocation cleanup and preserving independently acknowledged journal authority.
+
+- Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Document the existing per-tenant table-rendering opt-in for Anthropic, OpenAI and Gemini host turns, retaining plain-text defaults.
