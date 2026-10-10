@@ -1312,3 +1312,21 @@ cleanup controls. That mapping is a test bridge, not a public HTTPS tunnel,
 provider-side remote execution, production resolver wiring or F2 live
 certification. Runtime injection remains the host owner's follow-up; no operator
 keys or live calls are involved.
+For explicitly configured OpenAI sessions, `spend_limit_usd_cents` is an optional
+integer cap in USD cents. The driver verifies its exact native echo on creation,
+reuse and before input. Missing or changed configured limits refuse; omission
+preserves existing behavior. If an acknowledged creation fails verification,
+its native session reference remains in the durable creation claim for exact
+owned cleanup, and preparation does not resend it automatically.
+### Discord multi-human host conformance
+
+`daimon.adapters.discord.conformance.multi_human_evidence` is an explicitly
+imported offline probe for a dedicated idle bot. It queues authored follow-up
+messages behind an owner-controlled admitted-root barrier, then invokes the
+actual Discord drain path. Evidence retains thread ownership, caller batch
+order, composed text, and attachment identities. The callback performs normal
+host admission/binding/turn execution; provider choreography, independent
+workspace/configuration/principal checks and persisted charge facts remain
+with the host envelope. The probe returns facts, never a verdict, and does
+not activate a shared C01 fixture or certify a live run. Application imports
+and default admission, queues and rendering are unchanged.
