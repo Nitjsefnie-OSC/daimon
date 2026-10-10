@@ -13,7 +13,7 @@ import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Self, cast, override
+from typing import Any, Literal, cast
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -27,6 +27,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import accounts, channel_admins, channel_budgets, routines, tenants
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.isolated_sdk import build_async_anthropic
 from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ChannelRef, Provider, Scope
@@ -50,18 +51,11 @@ PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*(?:\.[a-z0-9_]+|:[A-Za-z0-9_]+)*)\}
 def _require_isolated_sdk_environment() -> None:
     # Presence only: do not read, log or erase operator values. Include future
     # Anthropic selectors rather than guessing which SDK release consumes them.
-    if any(name.startswith("ANTHROPIC_") for name in os.environ):
-        raise ValueError("offline admin bindings refuse ambient Anthropic SDK configuration")
-
-
-class _OfflineAnthropic(AsyncAnthropic):
-    @override
-    def copy(self, **kwargs: Any) -> Self:
-        _require_isolated_sdk_environment()
-        return super().copy(**kwargs)
-
-    # The SDK defines with_options as an alias, so override both entry points.
-    with_options = copy
+    if any(
+        name.startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_", "GENAI_"))
+        for name in os.environ
+    ):
+        raise ValueError("offline admin bindings refuse ambient provider SDK configuration")
 
 
 class AdminReceipt(BaseModel):
@@ -222,17 +216,10 @@ class AdminBindings:
 
     def __post_init__(self) -> None:
         _require_isolated_sdk_environment()
-        self.anthropic = _OfflineAnthropic(
+        self.anthropic = build_async_anthropic(
             api_key="offline-fixture",
-            auth_token=None,
-            webhook_key="",
-            default_headers={},
-            default_query={},
             base_url="https://anthropic.invalid",
-            max_retries=0,
-            http_client=httpx.AsyncClient(
-                transport=httpx.MockTransport(self.trace.dispatch), trust_env=False
-            ),
+            transport=httpx.MockTransport(self.trace.dispatch),
         )
 
     async def close(self) -> None:

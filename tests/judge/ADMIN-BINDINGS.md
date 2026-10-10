@@ -8,8 +8,8 @@ product APIs. Separate DB sessions read the resulting state. Provider selection
 is persisted by `configure_channel`, and the common operations run identically
 for Anthropic, OpenAI and Gemini. The owned Anthropic SDK uses only
 `ScriptedTransport` through `httpx.MockTransport` with an offline fixture key,
-explicit empty webhook/header/query defaults, and no discovery. Any ambient
-`ANTHROPIC_*` setting (including empty values) refuses before SDK/HTTP allocation
+explicit credential fields and empty header/query defaults through the shared
+isolated SDK factory. Ambient provider settings (including empty values) refuse before SDK/HTTP allocation
 and provisioning; actual SDK `copy`/`with_options` also refuse late overrides.
 The guard checks names only and never reads, logs or erases operator values.
 Database guards require PostgreSQL on localhost/127.0.0.1 with no URL query
@@ -25,7 +25,7 @@ threads.
 
 N9 owns runner hooks, original operation order, deadlines, receipt capture and
 all outcome assertions. N6 owns this module and
-`tests/parity/test_qa_admin_bindings.py`. N2 owns the real credential-submit edge.
+`packages/testing/tests/test_qa_admin_bindings.py`. N2 owns the real credential-submit edge.
 The pinned fixture retains 19 frozen source scenarios / 38 admin invocations,
 source hashes and the frozen TARGET-53 digest. Source snapshots are not changed
 to make an unsupported operation pass.
@@ -103,3 +103,5 @@ are no live provider, Discord, Slack, Teams, tunnel or model calls.
 Every sessionmaker destination is checked before I/O: the main bind and each per-model `binds` entry, including connection-bound engines, must satisfy the same owned-database and isolated-CI rule. An accepted main engine cannot authorize a foreign model route.
 
 Both provisioning and callbacks use the public `daimon.testing.db.require_owned_sessionmaker()` guard. They validate every main/model bind with the shared isolated-CI exception; no admin-local database policy remains. Offline HTTP clients disable ambient proxy and TLS overrides.
+
+Admin SDK clients are built through the shared `daimon.testing.isolated_sdk` factories, including their guarded SDK reconstruction and native User-Agent preservation. ORM-specific bind routing tests live in the permitted `packages/testing/tests` tree; the T9 allowlist is unchanged.

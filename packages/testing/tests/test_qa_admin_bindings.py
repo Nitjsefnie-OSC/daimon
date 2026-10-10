@@ -41,7 +41,9 @@ from sqlalchemy.ext.asyncio import (
 
 pytest_plugins = ["daimon.testing.db"]
 
-FIXTURE = Path(__file__).parent.parent / "judge" / "fixtures" / "admin_operations.json"
+FIXTURE = (
+    Path(__file__).resolve().parents[3] / "tests" / "judge" / "fixtures" / "admin_operations.json"
+)
 
 
 @pytest.fixture(params=["anthropic", "openai", "gemini"])
@@ -706,7 +708,7 @@ async def test_sdk_environment_refuses_before_http_allocation_or_provisioning(
     sessions = async_sessionmaker(engine)
     trace = ScriptedTransport()
     try:
-        with pytest.raises(ValueError, match="refuse ambient Anthropic SDK configuration") as error:
+        with pytest.raises(ValueError, match="ambient") as error:
             AdminBindings(
                 sessions=sessions,
                 scope=Scope.platform(reason="constructor-only environment refusal"),
@@ -716,7 +718,7 @@ async def test_sdk_environment_refuses_before_http_allocation_or_provisioning(
                 channels=frozenset(),
                 trace=trace,
             )
-        with pytest.raises(ValueError, match="refuse ambient Anthropic SDK configuration"):
+        with pytest.raises(ValueError, match="ambient"):
             await provision_admin_run(
                 sessions,
                 workspace_id="123",
@@ -744,13 +746,13 @@ async def test_actual_sdk_copies_refuse_late_environment(
 ) -> None:
     monkeypatch.setenv(name, value)
     caplog.set_level("DEBUG")
-    with pytest.raises(ValueError, match="refuse ambient Anthropic SDK configuration") as error:
+    with pytest.raises(ValueError, match="ambient") as error:
         if method == "copy":
             binding.anthropic.copy()
         else:
             binding.anthropic.with_options()
     # A DB-only operation must also refuse before its authorization read/writes.
-    with pytest.raises(ValueError, match="refuse ambient Anthropic SDK configuration"):
+    with pytest.raises(ValueError, match="ambient"):
         await binding.configure_channel(min(binding.channels))
     assert "synthetic-sdk-override" not in str(error.value) + caplog.text
     assert name in os.environ and not binding.trace.requests
@@ -763,7 +765,7 @@ async def test_actual_sdk_copy_keeps_explicit_offline_credentials_and_headers(
     try:
         assert isinstance(copied, type(binding.anthropic))
         assert copied.api_key == "offline-fixture" and copied.auth_token is None
-        assert copied.credentials is None and copied.webhook_key == ""
+        assert copied.credentials is None and copied.webhook_key is None
         assert copied.base_url.scheme == "https" and copied.base_url.host == "anthropic.invalid"
         assert copied.default_headers["x-offline-proof"] == "fixture"
         assert not binding.trace.requests

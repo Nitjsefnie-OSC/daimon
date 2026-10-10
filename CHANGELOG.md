@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prove OpenAI C04 offline with real SDK delivery, fenced intent/ack crashes and restart recovery that retains unknown input identity without resending.
 - Prove OpenAI interaction preparation offline across skill upload/pinning, MCP and input-file binding, retaining typed unavailable execution and the canonical C11 gaps.
+- Use the shared isolated SDK factory in offline admin bindings and move their ORM routing tests into the permitted testing package.
+
 - Check every QA admin per-model database bind before provisioning or authorization.
 
 - Refuse ambient Anthropic SDK configuration in offline QA admin clients and copies before allocation or I/O; retain explicit fixture credentials and unchanged production clients.
