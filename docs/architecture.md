@@ -249,6 +249,7 @@ message if the answer has not arrived yet. Once an answer is delivered, a
 stale edit is logged and ignored. Stop still interrupts the turn when its
 card has been deleted; restart recovery treats a card deleted between its
 lookup and edit as already resolved. Other edit failures still propagate.
+
 On gateway readiness, Discord scans recently active channels and threads for
 missed addressed messages. The window and per-guild/channel limits are
 configurable (`discord.startup_replay_*`). Replayed messages use the same
@@ -257,10 +258,12 @@ The `discord_message_admissions` ledger deduplicates each tenant/message ID;
 queued follow-ups remain pending until a card intent is committed or the
 request reaches a visible terminal outcome. A PostgreSQL session advisory
 lock identifies each process for its lifetime, using one dedicated database
-connection outside the turn connection pool. A guard stops the adapter if this connection is lost. Another worker can reclaim a pending message only after that
-owner's lock disappears. Inputs whose card intent was committed before a crash
+connection outside the turn connection pool. A guard stops the adapter if this
+connection is lost. Another worker can reclaim a pending message only after
+that owner's lock disappears. Inputs whose card intent was committed before a crash
 but never posted are requeued only after two complete no-card history reads
-separated by a minute; the ledger reset and intent retirement commit together. Turn markers and card intents also carry the owner,
+separated by a minute; the ledger reset and intent retirement commit together.
+Turn markers and card intents also carry the owner,
 so startup never retires another live worker's cards.
 
 Orphan recovery runs at most four rows concurrently. Successful completed
