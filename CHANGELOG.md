@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Isolate Gemini full-byte bundle and F2 replay SDK clients with explicit fixture authentication and owned sync/async transports; refuse ambient provider settings before construction.
+
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.
 - Add an explicitly imported Discord C01 conformance probe over the existing per-thread mention queue and caller batching, with owner-controlled root barriers and raw platform evidence.

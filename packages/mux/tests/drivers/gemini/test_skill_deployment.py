@@ -1,15 +1,17 @@
 """Full authored default bytes, native GCS compilation and scoped pin failures."""
 
 import json
+import os
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 
 import httpx
 import pytest
 import yaml
-from google import genai
-from google.genai.types import HttpOptions, HttpRetryOptions
+from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_gemini_client
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -30,6 +32,79 @@ from pydantic import BaseModel, JsonValue
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")
 ROOT = Path(__file__).resolve().parents[5]
+
+SDK_CONFIGS = (
+    ("offline-fixture", "https://generativelanguage.googleapis.com"),
+    ("offline-f2-fixture", "https://gemini.invalid"),
+)
+
+
+class NamesWithoutValues(Mapping[str, str]):
+    """Provider presence must refuse before even reading a synthetic value."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((self.name,))
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, key: str) -> str:
+        raise AssertionError("SDK construction read an ambient value")
+
+
+@pytest.mark.parametrize(("api_key", "base_url"), SDK_CONFIGS)
+@pytest.mark.parametrize(
+    "name", ["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_CLOUD_PROJECT", "GOOGLE_FUTURE_ROUTE"]
+)
+def test_replay_sdk_refuses_initial_provider_names_before_allocation(
+    api_key: str, base_url: str, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> NoReturn:
+        raise AssertionError("ambient configuration reached SDK/HTTP client allocation")
+
+    transport = httpx.MockTransport(lambda _: httpx.Response(500))
+    # Restore the stand-in before pytest updates its own environment metadata.
+    with monkeypatch.context() as isolated:
+        isolated.setattr(os, "environ", NamesWithoutValues(name))
+        isolated.setattr("google.genai.Client", forbidden)
+        isolated.setattr(httpx, "Client", forbidden)
+        isolated.setattr(httpx, "AsyncClient", forbidden)
+        with pytest.raises(AmbientSDKConfigurationError) as error:
+            build_gemini_client(transport=transport, api_key=api_key, base_url=base_url)
+        if name == "GOOGLE_FUTURE_ROUTE":
+            assert name not in str(error.value)
+
+
+@pytest.mark.parametrize(("api_key", "base_url"), SDK_CONFIGS)
+async def test_replay_sdk_owns_sync_async_models_and_interactions(
+    api_key: str, base_url: str
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"models": []}
+            if request.url.path.endswith("/models")
+            else {"id": "owned", "status": "completed", "outputs": []},
+        )
+
+    with build_gemini_client(
+        transport=httpx.MockTransport(reply), api_key=api_key, base_url=base_url
+    ) as client:
+        async with client.aio:
+            list(client.models.list())
+            await client.aio.models.list()
+            client.interactions.get("owned")
+            await client.aio.interactions.get("owned")
+    assert len(requests) == 4
+    assert all(request.url.host == httpx.URL(base_url).host for request in requests)
+    assert all(request.headers["x-goog-api-key"] == api_key for request in requests)
+    assert all("authorization" not in request.headers for request in requests)
 
 
 class DefaultSkill(BaseModel):
@@ -142,6 +217,8 @@ async def test_all_eleven_full_default_bundles_reach_sdk_as_pinned_gcs_directori
     stamp = datetime.now(UTC).isoformat()
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "generativelanguage.googleapis.com"
+        assert request.headers["x-goog-api-key"] == "offline-fixture"
         captured.append(request)
         return httpx.Response(
             200,
@@ -155,49 +232,48 @@ async def test_all_eleven_full_default_bundles_reach_sdk_as_pinned_gcs_directori
             },
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        client = genai.Client(
-            api_key="offline-fixture",
-            http_options=HttpOptions(
-                httpx_async_client=http,
-                retry_options=HttpRetryOptions(attempts=1),
-            ),
-        )
-        ma = driver(SDKTransport(client), storage, publisher)
-        pins: list[SkillRef] = []
-        for name, bundle in defaults.items():
-            skill = await ma.skills.create(SCOPE, bundle, key=name)
-            assert skill.latest_version is not None
-            pins.append(skill.latest_version)
-        assert len(pins) == len(publisher.calls) == 11
-        assert captured == []  # Native Interactions I/O starts at the turn.
-        assert (
-            sum(len(file.content) for file in defaults["pymc-artifact-style"].files)
-            > MAX_BUNDLE_BYTES
-        )
-        expected: list[JsonValue] = []
-        for pin, (scope, account, version, original) in zip(pins, publisher.calls, strict=True):
-            assert scope == SCOPE and account == "project" and version == pin.version
-            uri = f"gs://offline-bundles/t/a/{version}/"
-            directory = ROOT / "defaults/skills" / str(original.display_title)
-            assert publisher.contents[uri] == {
-                path.relative_to(directory).as_posix(): path.read_bytes()
-                for path in directory.rglob("*")
-                if path.is_file()
+    with build_gemini_client(
+        transport=httpx.MockTransport(handler),
+        api_key="offline-fixture",
+        base_url="https://generativelanguage.googleapis.com",
+    ) as client:
+        async with client.aio:
+            ma = driver(SDKTransport(client), storage, publisher)
+            pins: list[SkillRef] = []
+            for name, bundle in defaults.items():
+                skill = await ma.skills.create(SCOPE, bundle, key=name)
+                assert skill.latest_version is not None
+                pins.append(skill.latest_version)
+            assert len(pins) == len(publisher.calls) == 11
+            assert captured == []  # Native Interactions I/O starts at the turn.
+            assert (
+                sum(len(file.content) for file in defaults["pymc-artifact-style"].files)
+                > MAX_BUNDLE_BYTES
+            )
+            expected: list[JsonValue] = []
+            for pin, (scope, account, version, original) in zip(pins, publisher.calls, strict=True):
+                assert scope == SCOPE and account == "project" and version == pin.version
+                uri = f"gs://offline-bundles/t/a/{version}/"
+                directory = ROOT / "defaults/skills" / str(original.display_title)
+                assert publisher.contents[uri] == {
+                    path.relative_to(directory).as_posix(): path.read_bytes()
+                    for path in directory.rglob("*")
+                    if path.is_file()
+                }
+                expected.append(
+                    {"type": "gcs", "source": uri, "target": f".agents/skills/{pin.id}"}
+                )
+            # Restart without a publisher: persisted immutable mount receipts suffice.
+            restarted = driver(SDKTransport(client), storage, None)
+            await session(restarted, tuple(pins))
+            assert len(captured) == 1
+            assert captured[0].method == "POST"
+            assert json.loads(captured[0].content)["environment"] == {
+                "type": "remote",
+                "sources": expected,
             }
-            expected.append({"type": "gcs", "source": uri, "target": f".agents/skills/{pin.id}"})
-        # Restart without a publisher: persisted immutable mount receipts suffice.
-        restarted = driver(SDKTransport(client), storage, None)
-        await session(restarted, tuple(pins))
-        assert len(captured) == 1
-        assert captured[0].method == "POST"
-        assert json.loads(captured[0].content)["environment"] == {
-            "type": "remote",
-            "sources": expected,
-        }
-        assert b'"type": "inline"' not in captured[0].content
-        assert len(publisher.calls) == 11
-        await client.aio.aclose()
+            assert b'"type": "inline"' not in captured[0].content
+            assert len(publisher.calls) == 11
 
 
 @pytest.mark.asyncio

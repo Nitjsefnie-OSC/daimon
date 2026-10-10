@@ -694,3 +694,6 @@ The Gemini F2 offline proof retains the full default skill bundle and maps the
 logical toolset to one native code-execution tool plus its declared authenticated
 MCP server. N2’s loopback host serves both read-only tools; wrong/revoked bearers
 fail. Explicit deployment/auth adapters are required; no live/CAS claim is made.
+The full-byte bundle and F2 SDK proofs use the shared isolated test factory with
+explicit fixture keys and owned sync/async transports; ambient provider settings
+refuse before construction. Product client construction is unchanged.

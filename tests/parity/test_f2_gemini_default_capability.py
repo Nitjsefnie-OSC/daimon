@@ -17,8 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 import yaml
-from google import genai
-from google.genai.types import HttpOptions, HttpRetryOptions
+from daimon.testing.isolated_sdk import build_gemini_client
 from mux.conformance.default_capability import (
     BASH_RESULT,
     FINAL_MESSAGE,
@@ -289,6 +288,8 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
                 return qa.bearer.token if mode != "wrong-bearer" else "wrong-owned-run-bearer"
 
             async def bridge(request: httpx.Request) -> httpx.Response:
+                assert request.url.host == "gemini.invalid"
+                assert request.headers["x-goog-api-key"] == "offline-f2-fixture"
                 nonlocal saved
                 assert request.url.host == "gemini.invalid"
                 if request.method == "GET":
@@ -380,18 +381,11 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
                 }
                 return httpx.Response(200, json={**saved, "status": "in_progress", "steps": []})
 
-            async with httpx.AsyncClient(
-                transport=httpx.MockTransport(bridge), trust_env=False
-            ) as http:
-                client = genai.Client(
-                    api_key="offline-f2-fixture",
-                    vertexai=False,
-                    http_options=HttpOptions(
-                        base_url="https://gemini.invalid",
-                        httpx_async_client=http,
-                        retry_options=HttpRetryOptions(attempts=1),
-                    ),
-                )
+            with build_gemini_client(
+                transport=httpx.MockTransport(bridge),
+                api_key="offline-f2-fixture",
+                base_url="https://gemini.invalid",
+            ) as client:
                 try:
                     transport = SDKTransport(client)
                     driver = GeminiManagedAgents(
@@ -451,7 +445,6 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
                     assert not qa.manifest.refused_egress
                 finally:
                     await client.aio.aclose()
-                    client.close()
     finally:
         await qa.engine.dispose()
         cleaned = await cleanup(path, database_url=url)

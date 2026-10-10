@@ -69,3 +69,10 @@ Valid authorization yields both host tool results; wrong/revoked bearers fail.
 The normalized tape uses the merged credential-audited identity projection.
 This is an offline SDK/host proof, with no native-agent CAS or live certification
 claim. The uninjected adapter stays typed PENDING.
+
+The bundle and F2 replay tests use `daimon.testing.isolated_sdk.build_gemini_client`
+with explicit synthetic keys, fixed routes and owned sync/async MockTransport
+clients. Ambient provider names, including empty and unknown future settings,
+refuse before SDK construction; proxy/TLS settings do not configure the clients.
+Both clients close even when the proof fails. This test factory does not change
+product client construction or the unconfigured backend.
