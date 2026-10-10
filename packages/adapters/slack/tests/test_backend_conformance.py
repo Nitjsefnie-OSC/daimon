@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.slack import app as platform_module
 from daimon.adapters.slack.app import SlackApp
@@ -30,6 +31,7 @@ from daimon.core.config import (
     TurnSettings,
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import ThreadSessionRow
@@ -38,8 +40,13 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import PreparedTurn
-from daimon.testing import build_fake_anthropic, ma_session
+from daimon.testing import ma_session
 from daimon.testing.factories import make_tenant
+from daimon.testing.isolated_sdk import (
+    SDK_ENV_VARS,
+    AmbientSDKConfigurationError,
+    build_async_anthropic,
+)
 from daimon.testing.ma import json_body, make_fake_memory_store_handler
 from daimon.testing.turn_router import build_turn_router
 from mux.contracts.config import BackendConfig, ConfigRevision
@@ -48,7 +55,7 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import FakeSlackWebClient
-from .harness import make_orchestrate_app
+from .harness import build_slack_runtime
 
 WORKSPACE, CHANNEL, USER, THREAD = "T_TEST", "C_TEST", "U_TEST", "1000000000.000001"
 OTHER_USER, NEW_THREAD = "U_OTHER", "1000000000.000002"
@@ -108,6 +115,17 @@ class Wire:
         return self.router.dispatch(request)
 
 
+def build_client(wire: Wire) -> AsyncAnthropic:
+    """Keep the original test wire policy while refusing ambient SDK settings."""
+    return build_async_anthropic(
+        transport=httpx.MockTransport(wire.handle),
+        api_key="test",
+        base_url="https://api.anthropic.com",
+        max_retries=2,
+        timeout=httpx.Timeout(600.0, connect=5.0),
+    )
+
+
 async def setup(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> tuple[SlackApp, Callable[[str, str], Awaitable[PreparedTurn]], Wire]:
@@ -125,7 +143,7 @@ async def setup(
     await set_channel_backend(db_session, channel_ref(tenant.id, "slack", CHANNEL), BackendConfig())
     await db_session.commit()
     wire = Wire(tenant.id)
-    client = build_fake_anthropic(wire.handle)
+    client = build_client(wire)
     default = DeploymentDefault(agent_name="test-agent", environment_name="test-env")
     key = Fernet.generate_key().decode()
     async with db_session_factory() as session:
@@ -135,10 +153,6 @@ async def setup(
             encrypted_token=encrypt_token(build_multifernet((key,)), "xoxb-offline"),
         )
         await session.commit()
-    app, previous = make_orchestrate_app(
-        db_session_factory, deployment_default=default, crypto_key=key
-    )
-    await previous.close()
     settings = OfflineSettings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/offline")),
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
@@ -146,19 +160,23 @@ async def setup(
         crypto=CryptoSettings(keys=(SecretStr(key),)),
         turn=TurnSettings(channel_backends=True),
     )
-    app.runtime = dataclasses.replace(
-        app.runtime,
+    runtime = build_slack_runtime(key, db_session_factory, anthropic=client)
+    resolver_cache = new_resolver_cache()
+    runtime = dataclasses.replace(
+        runtime,
         settings=settings,
-        anthropic=client,
+        deployment_default=default,
+        resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(
             settings,
             client,
             db_session_factory,
             deployment_default=default,
-            resolver_cache=app.runtime.resolver_cache,
+            resolver_cache=resolver_cache,
             billing_config=None,
         ),
     )
+    app = SlackApp(runtime=runtime)
 
     async def dispatch(thread: str, user: str) -> PreparedTurn:
         stamp = f"1700000000.{next(ids):06}"
@@ -351,3 +369,79 @@ async def test_timeout_restores_observers_and_does_not_certify_a_binding(
         assert wire.requests == []
     finally:
         await app.runtime.anthropic.close()
+
+
+@pytest.mark.parametrize(
+    "variable", [name for name in SDK_ENV_VARS if name.startswith("ANTHROPIC_")]
+)
+def test_fixture_client_refuses_initial_ambient_sdk_settings(
+    variable: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire = Wire(uuid.uuid4())
+    monkeypatch.setenv(variable, "n7-invented-setting")
+    with pytest.raises(AmbientSDKConfigurationError, match=variable) as caught:
+        build_client(wire)
+    assert "n7-invented-setting" not in str(caught.value)
+    assert wire.requests == []
+
+
+@pytest.mark.parametrize(
+    "variable", [name for name in SDK_ENV_VARS if name.startswith("ANTHROPIC_")]
+)
+@pytest.mark.parametrize("method", ["copy", "with_options"])
+async def test_fixture_client_refuses_late_ambient_sdk_settings_on_copy(
+    variable: str, method: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire = Wire(uuid.uuid4())
+    client = build_client(wire)
+    try:
+        monkeypatch.setenv(variable, "n7-invented-setting")
+        with pytest.raises(AmbientSDKConfigurationError, match=variable):
+            if method == "copy":
+                client.copy(default_headers={"X-N7-Explicit": "copy"})
+            else:
+                client.with_options(default_headers={"X-N7-Explicit": "copy"})
+        assert wire.requests == []
+    finally:
+        await client.close()
+
+
+async def test_fixture_client_preserves_actual_sdk_wire_and_copy_options() -> None:
+    wire = Wire(uuid.uuid4())
+    session = "sess_sdk_isolation"
+    wire.sessions[session] = ma_session(id=session).model_dump(mode="json")
+    client = build_client(wire)
+    copied = client.with_options(max_retries=7, default_headers={"X-N7-Explicit": "copy"})
+    try:
+        assert client.max_retries == 2
+        assert client.timeout == httpx.Timeout(600.0, connect=5.0)
+        assert copied.max_retries == 7
+        assert copied.timeout == client.timeout
+        first = await client.get(f"/v1/sessions/{session}", cast_to=object)
+        second = await copied.get(f"/v1/sessions/{session}", cast_to=object)
+        assert first == second == wire.sessions[session]
+        assert len(wire.requests) == 2
+        for request in wire.requests:
+            assert request.method == "GET"
+            assert str(request.url) == f"https://api.anthropic.com/v1/sessions/{session}"
+            assert request.headers["x-api-key"] == "test"
+            assert request.headers["user-agent"].startswith("AsyncAnthropic/Python ")
+            assert "_Isolated" not in request.headers["user-agent"]
+            assert request.content == b""
+        assert "X-N7-Explicit" not in wire.requests[0].headers
+        assert wire.requests[1].headers["X-N7-Explicit"] == "copy"
+    finally:
+        await copied.close()
+        await client.close()
+
+
+async def test_actual_fixture_refuses_ambient_sdk_settings(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-N7-Poison":"invented"}')
+    monkeypatch.setenv("ANTHROPIC_WEBHOOK_SIGNING_KEY", "n7-invented-signing-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://n7-poison.invalid")
+    with pytest.raises(AmbientSDKConfigurationError):
+        await setup(db_session, db_session_factory)

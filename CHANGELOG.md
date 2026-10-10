@@ -153,6 +153,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Isolate C14 platform test SDK clients from ambient configuration, including late settings on copies, while retaining their original offline wire policy.
+
 - Document fixed transitive usage coverage and the native preparation, persistence and verified-reporting prerequisites for foreign billing adoption.
 - Reject approval-gated tool executions without their own linked approved decision in the QA outcome oracle; accept catalog setup-window log assertions as pending capture.
 - Extend cross-backend QA outcomes with visible text, final progress cards, linked approval/tool effects, first-visible latency and host logs; distinguish catalog terminal timing from successful completion.
