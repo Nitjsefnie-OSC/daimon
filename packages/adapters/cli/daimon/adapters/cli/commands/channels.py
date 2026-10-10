@@ -16,10 +16,11 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
-from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime, build_runtime
+from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime, build_runtime, cli_principal_id
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
+from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.channel_budget import (
     BUDGET_WINDOWS,
     ChannelBudgetError,
@@ -40,9 +41,11 @@ from daimon.core.channel_rules import (
 from daimon.core.channel_skills import REFUSALS as CHANNEL_SKILL_REFUSALS
 from daimon.core.channel_skills import add_skill_to_channel
 from daimon.core.config import load_settings
+from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import RuleRefused, thread_rule_key
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.channel_admins import (
@@ -469,6 +472,37 @@ async def channels_list(
 
 
 _ADMIN_COLUMNS = ("channel_id", "role_ids", "user_ids", "updated_at")
+
+
+_OPENAI_PROFILE = "openai.persistent_workspace"
+_ANTHROPIC_PROFILE = "anthropic.managed_agents"
+
+
+async def _copy_resource_host(
+    rt: CliRuntime, *, tenant_id: uuid.UUID, platform: str, channel: str
+) -> NeutralResourceHost | None:
+    """The OpenAI host a channel's own copy is made through, or None for the existing path.
+
+    Only with the operator capability (`rt.resource_hosts`). The channel's
+    backend is read fresh, here, and a host is requested only for the OpenAI
+    profile. A channel on any other non-Anthropic backend cannot be copied yet.
+    """
+    if rt.resource_hosts is None:
+        return None
+    async with rt.sessionmaker() as session:
+        revision = await current_backend(session, channel_ref(tenant_id, platform, channel))
+    if revision is None or revision.profile == _ANTHROPIC_PROFILE:
+        return None
+    if revision.profile != _OPENAI_PROFILE:
+        raise ChannelRuleRefused(
+            "invalid", message="This channel's backend can't make its own copy of an agent yet."
+        )
+    return rt.resource_hosts(
+        tenant_id=tenant_id,
+        account_id=derive_guild_account_uuid(tenant_id),
+        principal_id=cli_principal_id(rt),
+        operation_key=f"cli-channel-copy:{uuid.uuid4()}",
+    )
 
 
 def _ids(
@@ -1013,6 +1047,11 @@ async def channels_rule_set(
     )
     public_url = rt.settings.mcp.public_url if copy_from is not None else None
     try:
+        resource_host = (
+            await _copy_resource_host(rt, tenant_id=tenant_id, platform=platform, channel=channel)
+            if copy_from is not None and not thread
+            else None
+        )
         change = await set_channel_rule(
             rt.anthropic,
             rt.sessionmaker,
@@ -1028,6 +1067,7 @@ async def channels_rule_set(
             channel_label=label,
             public_url=str(public_url) if public_url is not None else None,
             release_agents=release_agents,
+            resource_host=resource_host,
         )
     except ChannelRuleRefused as exc:
         console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
