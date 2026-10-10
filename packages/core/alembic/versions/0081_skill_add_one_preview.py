@@ -5,7 +5,7 @@ downgrade: safe
 
 from alembic import op
 
-revision: str = "0081_pending_skill_add_one_thread"
+revision: str = "0081_skill_add_one_preview"
 down_revision: str | None = "0080_github_grant_proposals"
 branch_labels: str | None = None
 depends_on: str | None = None

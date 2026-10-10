@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @pytest.mark.fresh_schema
 async def test_pending_skill_add_one_thread_migration_round_trip(db_session: AsyncSession) -> None:
-    path = Path(__file__).parents[1] / "alembic/versions/0081_pending_skill_add_one_thread.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0081_skill_add_one_preview.py"
     spec = importlib.util.spec_from_file_location("migration_pending_skill_add_one_thread", path)
     assert spec is not None and spec.loader is not None
     migration = importlib.util.module_from_spec(spec)
@@ -48,3 +48,16 @@ async def test_pending_skill_add_one_thread_migration_round_trip(db_session: Asy
     assert await index_columns() == [*expected, "ma_agent_id"]
     await conn.run_sync(run("upgrade"))
     assert await index_columns() == expected
+
+
+def test_every_revision_id_fits_alembic_version_column() -> None:
+    """alembic_version.version_num is varchar(32); a longer id fails every upgrade."""
+    versions = Path(__file__).parents[1] / "alembic/versions"
+    too_long = []
+    for path in versions.glob("*.py"):
+        for line in path.read_text().splitlines():
+            if line.startswith("revision"):
+                revision = line.split("=", 1)[1].strip().strip("\"'")
+                if len(revision) > 32:
+                    too_long.append(revision)
+    assert too_long == []
