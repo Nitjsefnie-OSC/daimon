@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain acknowledged session references for cleanup on control failure, and
   preserve optional cap omission and default provider behavior.
 - Execute offline catalog steps in source order with measured completion deadlines and short waits; retain completed turn prefixes and typed PENDING at unsupported operations.
+
 ### Added
 
 - Use shared isolated SDK factories for pinned offline OpenAI and Gemini replays, refusing ambient provider settings before dispatch.
@@ -70,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind offline catalog Slack and Teams text to actual scoped adapter posts through all three native hosts, preserving manual-scenario and unobserved-effect gaps.
 
 - Bind offline catalog Discord text to actual adapter posts across Anthropic, OpenAI and Gemini, retaining scoped surface receipts and honest partial coverage.
+
+- Add opt-in scoped single-server HTTPS MCP authentication to the Gemini driver, with closed native intent/policies, fresh SDK-dispatch resolution, secret-free persistence and DEBUG logs, and fail-closed replay/continuation admission.
 
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.
 - Gemini explicitly sends configured tools (or an empty list) on every interaction, preventing implicit provider web-tool defaults, including continuations and fallback sends.
