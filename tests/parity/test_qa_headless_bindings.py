@@ -151,13 +151,32 @@ async def test_db_check_runs_exactly_one_read_only_select(
 
 
 async def test_i7_and_new24_against_the_real_apps(
-    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from daimon.adapters.mcp import server
+
+    built: list[object] = []
+    real_create = server.create_mcp_app
+
+    def no_engine(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the MCP app built its own engine from a bare DSN")
+
+    def recording_create(**kwargs: object) -> object:
+        built.append(kwargs.get("sessionmaker"))
+        return real_create(**kwargs)  # pyright: ignore[reportArgumentType]
+
+    # The app must run on the validated factory itself (schema, routing and
+    # provenance kept), never rebuild an engine from settings.
+    monkeypatch.setattr(server, "build_engine", no_engine)
+    monkeypatch.setattr(server, "create_mcp_app", recording_create)
     async with serve_catalog_hosts(db_session_factory, tmp_path) as origins:
         values = {**origins, "nonce": "n2-headless"}
         i7 = [await http_check(str(a["url"]), values) for a in I7]
         new24 = [await http_check(str(a["url"]), values) for a in NEW24]
 
+    assert built == [db_session_factory]
     # I7: the base MCP app serves no protected-resource metadata at either path
     # (OAuth metadata is served only under hub mounts), so the cell FAILs.
     assert [(r.status, http_check_holds(a, r)) for a, r in zip(I7, i7, strict=True)] == [
@@ -250,14 +269,15 @@ async def test_a_remote_per_model_bind_is_refused_before_connecting(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The main bind is owned; one routed bind points elsewhere. Nothing connects."""
-    from daimon.core._models import CredentialRequest  # pyright: ignore[reportPrivateUsage]
-    from daimon.testing.headless_bindings import BindingRefused
+    from daimon.testing.headless_bindings import BindingRefused, credential_request_route
 
     connects: list[object] = []
     remote = _factory_for(
         "postgresql+asyncpg://daimon:daimon@db.example.com:5432/daimon_test_nc_n2", connects
     ).kw["bind"]
-    factory = _NeverOpened(bind=db_session_factory.kw["bind"], binds={CredentialRequest: remote})
+    factory = _NeverOpened(
+        bind=db_session_factory.kw["bind"], binds=credential_request_route(remote)
+    )
     with pytest.raises(BindingRefused):
         await submit_mcp_token(
             factory, mcp_transport=httpx.MockTransport(_no_egress), token=NEW27_TOKEN

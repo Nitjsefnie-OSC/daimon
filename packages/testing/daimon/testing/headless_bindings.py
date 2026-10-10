@@ -38,8 +38,6 @@ from pydantic import JsonValue
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
-    AsyncConnection,
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
 )
@@ -122,13 +120,9 @@ def check_owned_sessionmaker(sessionmaker: object) -> None:
         raise BindingRefused(str(err)) from None
 
 
-def _database_url(sessionmaker: async_sessionmaker[AsyncSession]) -> str:
-    """The owned factory's database URL, for an app that builds its own engine."""
-    bind = sessionmaker.kw.get("bind")
-    engine = bind.engine if isinstance(bind, AsyncConnection) else bind
-    if not isinstance(engine, AsyncEngine):
-        raise BindingRefused("the session factory needs an explicit AsyncEngine bind")
-    return engine.url.render_as_string(hide_password=False)
+# Settings must name a database; the app is handed the owned factory instead, so
+# this placeholder is never connected to and no engine is built from it.
+_UNUSED_DSN = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused_qa"
 
 
 def _owned_url(url: str, origins: frozenset[str]) -> str:
@@ -481,12 +475,11 @@ async def serve_catalog_hosts(
 
     check_owned_sessionmaker(sessionmaker)
     refuse_ambient_anthropic()
-    database_url = _database_url(sessionmaker)
     admin = [SecretStr(secrets.token_urlsafe(32))]
     with scrubbed_environment():
         settings = Settings(
             _env_file=None,  # pyright: ignore[reportCallIssue]
-            database=DatabaseSettings(url=PostgresDsn(database_url)),
+            database=DatabaseSettings(url=PostgresDsn(_UNUSED_DSN)),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-qa-synthetic-no-egress")),
             mcp=McpSettings(
                 jwt_secret=SecretStr(secrets.token_urlsafe(48)),
@@ -494,7 +487,11 @@ async def serve_catalog_hosts(
             ),
         )
         mcp = create_mcp_app(
-            settings=settings, anthropic=isolated_anthropic(_refuse_all), billing_config=None
+            settings=settings,
+            # The validated factory itself: its schema, routing and provenance are kept.
+            sessionmaker=sessionmaker,
+            anthropic=isolated_anthropic(_refuse_all),
+            billing_config=None,
         )
         notebooks = notebook_main.create_app(
             notebook_config.Settings(
@@ -519,3 +516,14 @@ async def serve_catalog_hosts(
             "env.notebook_host": notebook_origin,
             "env.report_host": report_origin,
         }
+
+
+def credential_request_route(bind: object) -> dict[type, object]:
+    """A per-model `binds` entry routing the credential-request model to `bind`.
+
+    For guard proofs: tests outside this package may not import ORM models, so
+    the real model reaches a session factory's routing map through here.
+    """
+    from daimon.core._models import CredentialRequest
+
+    return {CredentialRequest: bind}
