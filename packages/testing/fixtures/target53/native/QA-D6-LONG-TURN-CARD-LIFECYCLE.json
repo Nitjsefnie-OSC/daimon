@@ -424,7 +424,8 @@
               }
             ],
             "background": true,
-            "store": true
+            "store": true,
+            "tools": []
           },
           "frames": [
             {

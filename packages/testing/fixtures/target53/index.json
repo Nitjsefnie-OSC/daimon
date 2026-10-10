@@ -7,7 +7,7 @@
   "scenarios": [
     {
       "path": "native/QA-D11-FOOTER-COST-MATCHES-LEDGER.json",
-      "sha256": "2aaf5f7da5d70bf228c98bb884219c16f4059310cb6e8649b202e4432127c417"
+      "sha256": "be70a74fd4d2993b31a9d48d802c32a948659cde9a7764b177b8fbd92759a13f"
     },
     {
       "path": "native/QA-D12-PDF-CLAIM-HAS-PDF.json",
@@ -23,11 +23,11 @@
     },
     {
       "path": "native/QA-D1-CANARY-TWO-TURN.json",
-      "sha256": "1a1fc4ec63bcdcfb88138ebe5dea0581e0f2d830a6c100294d7c1885b2d65e4f"
+      "sha256": "d61a902e90675df58aef4c86782efba7fedbedba8e869285a37f03b9b37da99e"
     },
     {
       "path": "native/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.json",
-      "sha256": "e6c4ccefd14da965fd5bad3ea69d306103014d996eeba4207fac5f0c4d3a1d75"
+      "sha256": "00703de552a88786a371c29dcd31d68d7c519e19b5e885bb5b5d64a71a3a1321"
     },
     {
       "path": "native/QA-D1-SLACK-FOLLOWUP.json",
@@ -47,11 +47,11 @@
     },
     {
       "path": "native/QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
-      "sha256": "fac68c813c5da0c2ec4ea0d393d78f03819a14d6bab4f0ea898e2efdcd2d5d39"
+      "sha256": "267c185d0ada46acde5f4b800b01b3aff445aab9a41acfd6b6bbf48feb87e1d7"
     },
     {
       "path": "native/QA-D7-BIG-WORKSPACE-CHECKPOINT.json",
-      "sha256": "768a809e0212ad2a568d856f6f5982e061564b24438cf3328b5433515025cbbb"
+      "sha256": "50eb7664cb805864864a447e3d7e4b66e52dc9001594539bc27f9b398bfd9d56"
     },
     {
       "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
@@ -63,11 +63,11 @@
     },
     {
       "path": "native/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.json",
-      "sha256": "3df8d9dd93f4a30166a512555d46d4014f16e397bd97cf16ee1ec18dedca1cb6"
+      "sha256": "f6b88c7da65a9dce135a08969d9db48c90227ceb834e2fbfe9424da1ce9671a5"
     },
     {
       "path": "native/QA-I6-BARE-MENTION-THREAD-TITLE.json",
-      "sha256": "48db4cfd7658576de26233867080fc563bcee747d00746992d031f3f3d69932f"
+      "sha256": "622a5de565d01e061c895e91443a26ef64aafd25f578de66e1597f7b725e2839"
     },
     {
       "path": "native/QA-I7-MCP-OAUTH-DISCOVERY.json",
@@ -79,11 +79,11 @@
     },
     {
       "path": "native/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
-      "sha256": "c9c64a9493b89c7eb266e89286b03e1977df41c15694aa28ec4f030c9fd1e84f"
+      "sha256": "717c9d91ea66080e34f849171cc806b7d0edcc15dfea3a13030b33d9ffc8c37b"
     },
     {
       "path": "native/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.json",
-      "sha256": "1e85a481dbc862018a3f66a4663405f58cbd969a9cd9d36cc33237037a2d5d69"
+      "sha256": "05c4ef343336e66ddfa3e23731a95279820297263cf9cb4e9d45a00211b0058c"
     },
     {
       "path": "native/QA-NEW13-WRITERS-NONE-NOT-SILENT.json",
@@ -95,7 +95,7 @@
     },
     {
       "path": "native/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.json",
-      "sha256": "beddbf5c428700c1d11e78e070d1ac579728c43b76c697bef63c24d8848d3bd6"
+      "sha256": "625c2fb4809d2e875aa66916ab282ef2a22e10eb7474434328a8955b62ff8701"
     },
     {
       "path": "native/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.json",
@@ -111,11 +111,11 @@
     },
     {
       "path": "native/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
-      "sha256": "f0e6f0af0006fe82c456ed7e793abbac89849e8d976762fb7f6c71e3764d78dc"
+      "sha256": "fc5aa47b0c926fd70180cd339ab7cc5cd52fd3b9b1648a9ae4121603628f6619"
     },
     {
       "path": "native/QA-NEW1-PDF-BARE-MENTION-NO-DROP.json",
-      "sha256": "33f0826242ca20e73e5c0117f77305ed930838eed5a42185a9541fcb4cf55e20"
+      "sha256": "8ea204923579c30f9c09dff849d1586655f7d4d7008031dd592b6bd2d7366dca"
     },
     {
       "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
@@ -159,7 +159,7 @@
     },
     {
       "path": "native/QA-NEW2-CSV-ATTACHMENT-READ.json",
-      "sha256": "01c6987daecd8d82693f50d9bed86aab907ef2f0ff2cdef59f24a0b250e022de"
+      "sha256": "d2ec796419caefd81282513e7cb49dca84fbb26c9d0d4bbb61d2e55b80d40182"
     },
     {
       "path": "native/QA-NEW30-APPROVE-AFTER-RESTART.json",
@@ -191,31 +191,31 @@
     },
     {
       "path": "native/QA-NEW37-MARKDOWN-TABLE-READABLE.json",
-      "sha256": "add6777d257b764d71784d086ef61feafb094949be9b043b8900448d05ef00cc"
+      "sha256": "a8d2d2f790a8dd15da31a50dfdc8cac374b4a25170d026bce112c4bec6059c25"
     },
     {
       "path": "native/QA-NEW3-BURST-CHANNEL-MENTIONS.json",
-      "sha256": "2d05cf6bd474f9192a797b662d6a753dfd5f0485b3b11bc8a3decd83c4ea1271"
+      "sha256": "f319a21e6f323744d8a81a71ee2f7e693435981680a326e39ff5612161157e33"
     },
     {
       "path": "native/QA-NEW4-DOUBLE-MENTION-DEDUPE.json",
-      "sha256": "d71ff1553a8f912a86737517911424181b8a49795aa04dcd5222dba44b568e59"
+      "sha256": "aed000bd434418005fb903ae95c62f15adeb48ec60508f702f3425a79ee8ac1d"
     },
     {
       "path": "native/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.json",
-      "sha256": "5413fe4e24e229e9c261a8465454d4d8e1b169cca54bd9915de0dab817b2b465"
+      "sha256": "97e45245512b8552052bad0cdd0552e0ae5251257f2f3702ba2a2780313b3db5"
     },
     {
       "path": "native/QA-NEW6-TENANT-CAP-QUEUE.json",
-      "sha256": "45b11a77f458bcaa6e03f5c960ad66ed48171cb3dffa9116269a1482d2a4e8f9"
+      "sha256": "cdc2be8bc40e083077a192c9bcf51b8517dc5d6253895d24840f075ab778b3a8"
     },
     {
       "path": "native/QA-NEW8-LINK-PAGE-THREAD-TITLE.json",
-      "sha256": "1efb3e3eb65d317f45a7fc19bfb790ea5a34efd8c7adbd6a2808f8be04235040"
+      "sha256": "055907f7f35adbdc9e60e791ef9c0c73abea67ea5e1d299514c6b683b2d298db"
     },
     {
       "path": "native/QA-NEW9-NO-INTERNAL-PLUMBING.json",
-      "sha256": "f788d29e8d5a64724b2f658a84f8299dca1a0f28017510a27f0fc867e861c777"
+      "sha256": "3953d37a1624f8466e3240ea84ef25edd1c692412fcbbb0c4534f4caebca7e9b"
     }
   ]
 }

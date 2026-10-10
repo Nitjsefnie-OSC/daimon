@@ -288,3 +288,11 @@ unchanged. Synthetic matched-input controls are unscored. The fixture owner can
 supply an equivalent table independently; it then exercises the same observed
 expected default-off failure as the OpenAI/Gemini controls. No native content,
 catalog predicate, source pin or application default is rewritten for a PASS.
+
+Current-integration matrix refresh retains the frozen 53 × 3 denominator and
+all original/global predicates. After the Gemini explicit-tools merge (#708),
+the authored native requests explicitly include `tools: []`; missing tools on
+an old wire tape still refuse exact equality. The transport safety default is
+retained. Only those request fields and their native file/index hashes change;
+authored input text, response frames, saved snapshots and other providers stay
+unchanged. Source-verified current SDK/host replays produce fresh receipts.

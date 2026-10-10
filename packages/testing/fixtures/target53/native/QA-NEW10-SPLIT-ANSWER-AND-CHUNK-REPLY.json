@@ -551,7 +551,8 @@
               }
             ],
             "background": true,
-            "store": true
+            "store": true,
+            "tools": []
           },
           "frames": [
             {
@@ -613,7 +614,8 @@
             ],
             "background": true,
             "store": true,
-            "previous_interaction_id": "qa-gemini-8b917e5a82fee069-turn-1"
+            "previous_interaction_id": "qa-gemini-8b917e5a82fee069-turn-1",
+            "tools": []
           },
           "frames": [
             {

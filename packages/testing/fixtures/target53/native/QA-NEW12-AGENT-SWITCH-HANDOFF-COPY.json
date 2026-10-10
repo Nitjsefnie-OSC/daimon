@@ -1030,7 +1030,8 @@
               }
             ],
             "background": true,
-            "store": true
+            "store": true,
+            "tools": []
           },
           "frames": [
             {
@@ -1092,7 +1093,8 @@
             ],
             "background": true,
             "store": true,
-            "previous_interaction_id": "qa-gemini-8acb81896bfc6edd-turn-1"
+            "previous_interaction_id": "qa-gemini-8acb81896bfc6edd-turn-1",
+            "tools": []
           },
           "frames": [
             {
@@ -1154,7 +1156,8 @@
             ],
             "background": true,
             "store": true,
-            "previous_interaction_id": "qa-gemini-8acb81896bfc6edd-turn-2"
+            "previous_interaction_id": "qa-gemini-8acb81896bfc6edd-turn-2",
+            "tools": []
           },
           "frames": [
             {
@@ -1216,7 +1219,8 @@
             ],
             "background": true,
             "store": true,
-            "previous_interaction_id": "qa-gemini-8acb81896bfc6edd-turn-3"
+            "previous_interaction_id": "qa-gemini-8acb81896bfc6edd-turn-3",
+            "tools": []
           },
           "frames": [
             {
