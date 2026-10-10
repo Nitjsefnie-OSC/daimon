@@ -56,3 +56,16 @@ Future live F2 requires an explicit lead GO, the pinned key file and reviewed
 budget rates. The primary is `gemini-3.8-flash`, with fallback only after a 503 to
 `gemini-flash-latest`, then `gemini-3.5-flash-lite`; key appearance alone does not
 authorize a call. This adapter ships no live path.
+
+F2 offline proof (`tests/parity/test_f2_gemini_default_capability.py`) explicitly
+injects a full-byte GCS publisher and N3 credential resolver. All eleven authored
+skills, including binary font assets, are retained and pinned; no asset filtering
+or implicit publisher is enabled. The wire request maps the six logical builtins
+to one Python code-execution tool and the neutral `daimon-mcp` toolset selector
+to its declared native server once. Unbound selectors and confirmation policies
+are refused. The scenario admits only two read-only MCP tools through N2’s real
+loopback host; the provider endpoint and GCS/model execution remain replayed.
+Valid authorization yields both host tool results; wrong/revoked bearers fail.
+The normalized tape uses the merged credential-audited identity projection.
+This is an offline SDK/host proof, with no native-agent CAS or live certification
+claim. The uninjected adapter stays typed PENDING.
