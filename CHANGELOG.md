@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
 - Pin offline MCP/tool recipes to approved single-server OpenAI authentication; verify nine admitted preparations and explicit NEW17 two-server refusal before resolution or native I/O, preserving authored inputs and outcome gaps.
+- Bind offline catalog Slack and Teams text to actual scoped adapter posts through all three native hosts, preserving manual-scenario and unobserved-effect gaps.
 
 - Bind offline catalog Discord text to actual adapter posts across Anthropic, OpenAI and Gemini, retaining scoped surface receipts and honest partial coverage.
 

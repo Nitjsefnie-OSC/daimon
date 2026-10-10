@@ -23,6 +23,7 @@ from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.testing.discord_surface import DiscordSurfaceCapture
 from daimon.testing.outcome_oracle import SessionUse, TerminalEvidence, TurnEvidence, VisibleText
+from daimon.testing.platform_surface import PlatformSurfaceCapture
 from mux.contracts.events import TurnEndedPayload
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import SendReceipt
@@ -34,12 +35,14 @@ from mux.state.store import binding_slot
 
 if __package__:
     from .catalog_runner import Invocation, ScenarioPlan, expand_text
-    from .discord_catalog_surface import CatalogLifecycle, bind_discord_text
+    from .discord_catalog_surface import bind_discord_text
     from .headless_output import HeadlessOutput, capture_headless_return
+    from .platform_catalog_surface import CatalogLifecycle, bind_platform_text
 else:
     from catalog_runner import Invocation, ScenarioPlan, expand_text
-    from discord_catalog_surface import CatalogLifecycle, bind_discord_text
+    from discord_catalog_surface import bind_discord_text
     from headless_output import HeadlessOutput, capture_headless_return
+    from platform_catalog_surface import CatalogLifecycle, bind_platform_text
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,7 @@ class OpenAITurnCapture:
     evidence: TurnEvidence
     output: HeadlessOutput | None
     surface: DiscordSurfaceCapture | None
+    platform_surface: PlatformSurfaceCapture | None = None
 
 
 async def run_openai_turn(
@@ -131,7 +135,9 @@ async def run_openai_turn(
     cursor = before[-1].sequence if before else -1
     started = time.monotonic()
     output_id = f"{plan.scenario.id}:openai:{session.id}:{expected_root}:headless_return"
-    surface_id = output_id.replace(":headless_return", ":discord_adapter_posts")
+    surface_id = output_id.replace(
+        ":headless_return", f":{plan.scenario.scenario.get('surface')}_adapter_posts"
+    )
     lifecycle = CatalogLifecycle(
         surface=str(plan.scenario.scenario.get("surface")),
         evidence_id=surface_id,
@@ -267,4 +273,15 @@ async def run_openai_turn(
             for a in plan.assertions
         ),
     )
-    return OpenAITurnCapture(evidence, output, lifecycle.capture)
+    evidence = bind_platform_text(
+        evidence,
+        lifecycle.platform_capture,
+        expected_id=surface_id,
+        expected_platform=str(plan.scenario.scenario.get("surface")),
+        observed_s=observed,
+        accounting_required=any(
+            a.get("kind") in {"footer_cost_matches_ledger", "ledger_matches_usage"}
+            for a in plan.assertions
+        ),
+    )
+    return OpenAITurnCapture(evidence, output, lifecycle.capture, lifecycle.platform_capture)

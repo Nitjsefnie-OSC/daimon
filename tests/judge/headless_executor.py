@@ -37,6 +37,7 @@ from daimon.testing.outcome_oracle import (
     VisibleText,
     evaluate,
 )
+from daimon.testing.platform_surface import PlatformSurfaceCapture
 from daimon.testing.provider_fixtures import BackendFixture, ScenarioFixture, load_provider_fixtures
 from mux.contracts.events import TurnEndedPayload
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
@@ -58,10 +59,11 @@ if __package__:
         expand_text,
         sha,
     )
-    from .discord_catalog_surface import CatalogLifecycle, bind_discord_text
+    from .discord_catalog_surface import bind_discord_text
     from .gemini_catalog_replay import execute_gemini_turns
     from .headless_output import HeadlessOutput, capture_headless_return
     from .openai_catalog_replay import execute_openai_turns
+    from .platform_catalog_surface import CatalogLifecycle, bind_platform_text
 else:
     from catalog_runner import (
         FROZEN_TARGET_SHA256,
@@ -74,10 +76,11 @@ else:
         expand_text,
         sha,
     )
-    from discord_catalog_surface import CatalogLifecycle, bind_discord_text
+    from discord_catalog_surface import bind_discord_text
     from gemini_catalog_replay import execute_gemini_turns
     from headless_output import HeadlessOutput, capture_headless_return
     from openai_catalog_replay import execute_openai_turns
+    from platform_catalog_surface import CatalogLifecycle, bind_platform_text
 
 
 TABLE_SCENARIO = "QA-NEW37-MARKDOWN-TABLE-READABLE"
@@ -213,6 +216,7 @@ class CellResult(Record):
     headless_outputs: tuple[HeadlessOutput, ...] = ()
     discord_surfaces: tuple[DiscordSurfaceCapture, ...] = ()
     expected_failure: ExpectedFailure | None = None
+    platform_surfaces: tuple[PlatformSurfaceCapture, ...] = ()
 
     @computed_field
     @property
@@ -355,7 +359,14 @@ async def _run_turn(
     store: MemoryStateStore,
     binding: ProviderBinding,
     scope: Scope,
-) -> tuple[TurnEvidence, int, str, HeadlessOutput | None, DiscordSurfaceCapture | None]:
+) -> tuple[
+    TurnEvidence,
+    int,
+    str,
+    HeadlessOutput | None,
+    DiscordSurfaceCapture | None,
+    PlatformSurfaceCapture | None,
+]:
     """Capture journal authority and all selections in this owned host window."""
     if invocation.turn is None:
         raise ValueError("host invocation has no catalog turn")
@@ -407,7 +418,9 @@ async def _run_turn(
     started = time.monotonic()
     root = cast(str, tape.events[0]["id"])
     output_id = f"{plan.scenario.id}:{plan.backend}:{session.id}:{root}:headless_return"
-    surface_id = output_id.replace(":headless_return", ":discord_adapter_posts")
+    surface_id = output_id.replace(
+        ":headless_return", f":{plan.scenario.scenario.get('surface')}_adapter_posts"
+    )
     lifecycle = CatalogLifecycle(
         surface=str(plan.scenario.scenario.get("surface")),
         evidence_id=surface_id,
@@ -562,6 +575,17 @@ async def _run_turn(
             for a in plan.assertions
         ),
     )
+    evidence = bind_platform_text(
+        evidence,
+        lifecycle.platform_capture,
+        expected_id=surface_id,
+        expected_platform=str(plan.scenario.scenario.get("surface")),
+        observed_s=observed,
+        accounting_required=any(
+            a.get("kind") in {"footer_cost_matches_ledger", "ledger_matches_usage"}
+            for a in plan.assertions
+        ),
+    )
     # Preserve recorded native failures, but never let a host failure PASS.
     if (state.error is not None or lifecycle.terminal_failures) and (
         not terminals or all(item.outcome == "completed" for item in terminals)
@@ -573,6 +597,7 @@ async def _run_turn(
         output.text if output is not None else "",
         output,
         lifecycle.capture,
+        lifecycle.platform_capture,
     )
 
 
@@ -629,6 +654,7 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
     rendered: list[str] = []
     outputs: list[HeadlessOutput] = []
     surfaces: list[DiscordSurfaceCapture] = []
+    platform_surfaces: list[PlatformSurfaceCapture] = []
     requests = 0
     if not gaps and replay is not None:
         store = MemoryStateStore()
@@ -660,11 +686,13 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
                 )
                 await store.put_binding(binding, expected_generation=0)
                 bindings[slot] = binding
-            turn, count, text, output, surface = await _run_turn(
+            turn, count, text, output, surface, platform_surface = await _run_turn(
                 plan, invocation, tapes[cast(int, invocation.turn)], store, bindings[slot], scope
             )
             if surface is not None:
                 surfaces.append(surface)
+            if platform_surface is not None:
+                platform_surfaces.append(platform_surface)
             turns.append(turn)
             requests += count
             rendered.append(text)
@@ -690,6 +718,7 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
         rendered_text=tuple(rendered),
         headless_outputs=tuple(outputs),
         discord_surfaces=tuple(surfaces),
+        platform_surfaces=tuple(platform_surfaces),
     )
 
 
@@ -731,6 +760,7 @@ async def execute_openai_cell(
     evidence = RunEvidence(scenario_id=plan.scenario.id, backend=plan.backend, turns=())
     outputs: tuple[HeadlessOutput, ...] = ()
     surfaces: tuple[DiscordSurfaceCapture, ...] = ()
+    platform_surfaces: tuple[PlatformSurfaceCapture, ...] = ()
     rendered: tuple[str, ...] = ()
     requests = 0
     if not gaps:
@@ -744,6 +774,9 @@ async def execute_openai_cell(
         )
         outputs = tuple(t.output for t in capture.turns if t.output is not None)
         surfaces = tuple(t.surface for t in capture.turns if t.surface is not None)
+        platform_surfaces = tuple(
+            t.platform_surface for t in capture.turns if t.platform_surface is not None
+        )
         rendered = tuple(t.output.text if t.output is not None else "" for t in capture.turns)
         requests = capture.request_count
     gaps.extend(
@@ -763,6 +796,7 @@ async def execute_openai_cell(
         rendered_text=rendered,
         headless_outputs=outputs,
         discord_surfaces=surfaces,
+        platform_surfaces=platform_surfaces,
     )
 
 
@@ -804,6 +838,7 @@ async def execute_gemini_cell(
     evidence = RunEvidence(scenario_id=plan.scenario.id, backend=plan.backend, turns=())
     outputs: tuple[HeadlessOutput, ...] = ()
     surfaces: tuple[DiscordSurfaceCapture, ...] = ()
+    platform_surfaces: tuple[PlatformSurfaceCapture, ...] = ()
     rendered: tuple[str, ...] = ()
     requests = 0
     if not gaps:
@@ -817,6 +852,9 @@ async def execute_gemini_cell(
         )
         outputs = tuple(t.output for t in capture.turns if t.output is not None)
         surfaces = tuple(t.surface for t in capture.turns if t.surface is not None)
+        platform_surfaces = tuple(
+            t.platform_surface for t in capture.turns if t.platform_surface is not None
+        )
         rendered = tuple(t.output.text if t.output is not None else "" for t in capture.turns)
         requests = capture.request_count
     gaps.extend(
@@ -836,6 +874,7 @@ async def execute_gemini_cell(
         rendered_text=rendered,
         headless_outputs=outputs,
         discord_surfaces=surfaces,
+        platform_surfaces=platform_surfaces,
     )
 
 

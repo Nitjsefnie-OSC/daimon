@@ -296,3 +296,21 @@ an old wire tape still refuse exact equality. The transport safety default is
 retained. Only those request fields and their native file/index hashes change;
 authored input text, response frames, saved snapshots and other providers stay
 unchanged. Source-verified current SDK/host replays produce fresh receipts.
+Slack and Teams catalog hosts now forward the same driver lifecycle hooks to
+`SlackSurfaceHarness` and `TeamsSurfaceHarness`. `platform_surfaces` retains
+immutable SDK post receipts scoped to the independently acknowledged native
+session/root and host window. The binding validates the full send/edit/delete
+history and surviving snapshots before supplying body text, card text and
+control labels to the oracle. Text is observed at capture close in message
+creation order; historical drafts remain diagnostic, and notification-only
+fallbacks never supply visible text.
+
+One normal invocation and exactly one terminal adapter delivery close the
+post window. Delivery failures, unclosed runs and unknown visuals retain partial
+text coverage; billing-dependent predicates remain partial without a real
+accounting footer. Cards, tools, approvals, titles, external posts, live ingress
+and browser pixels are not certified by this binding. Newly pinned regression
+microcases exercise both platforms through Anthropic, OpenAI and Gemini, with
+follow-up isolation and the original global predicates retained. Frozen manual
+Slack/Teams rows still have no executable steps/assertions and remain PENDING;
+this binding does not rewrite them or add full-cell PASS credit.

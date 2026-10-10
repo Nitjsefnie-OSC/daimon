@@ -545,12 +545,16 @@ async def check():
     for surface in ("slack", "teams"):
         x["plan"]["scenario"]["scenario"]["surface"] = surface
         r = await e.execute_cell(c.ScenarioPlan.model_validate(x["plan"]), e.ScenarioReplay.model_validate(x["replay"]))
-        if r.status != "PENDING" or not r.headless_outputs:
-            raise RuntimeError("a headless return certified a platform cell under -O")
-        if r.evidence.turns[0].texts or r.evidence.turns[0].text_capture_complete:
-            raise RuntimeError("a platform text window was closed without capture under -O")
-        if any(ch.status != "PENDING" for ch in r.catalog_outcome.checks):
-            raise RuntimeError("a platform text predicate earned credit under -O")
+        if not r.headless_outputs:
+            raise RuntimeError("headless diagnostics lost under -O")
+        if len(r.platform_surfaces) != len(r.evidence.turns):
+            raise RuntimeError("platform posts were not captured under -O")
+        if not r.evidence.turns[0].texts or not r.evidence.turns[0].text_capture_complete:
+            raise RuntimeError("actual platform text evidence lost under -O")
+        actual = " ".join(t.text for t in r.evidence.turns[0].texts)
+        wanted = "FAIL" if "HIDDEN" in actual else "PASS"
+        if r.catalog_outcome.checks[0].status != wanted:
+            raise RuntimeError("platform oracle ignored actual adapter posts under -O")
 asyncio.run(check())
 """
     result = subprocess.run(
@@ -564,21 +568,27 @@ asyncio.run(check())
 
 
 @pytest.mark.parametrize("surface", ["slack", "teams"])
-async def test_platform_text_stays_pending_despite_successful_headless_return(
+async def test_platform_text_binds_actual_posts_without_certifying_other_effects(
     tmp_path: Path,
     surface: str,
 ) -> None:
     row = source()
     row["surface"] = surface
     row["assert"] = [
-        {"kind": "text_present", "turn": 1, "pattern": "^KEPT$"},
+        {"kind": "text_present", "turn": 1, "pattern": "KEPT"},
         {"kind": "text_absent", "turn": 1, "pattern": "NEVER_FORBIDDEN"},
         {"kind": "no_preamble", "turn": 1},
+        {"kind": "card_finalized", "turn": 1},
     ]
     plan = planned(tmp_path, row)
     result = await executor.execute_cell(plan, scripted(plan))
     assert result.status == "PENDING" and result.host_outcome.status == "PASS"
     assert result.rendered_text == ("KEPT", "KEPT") and len(result.headless_outputs) == 2
-    assert all(not t.texts and not t.text_capture_complete for t in result.evidence.turns)
-    assert all(c.status == "PENDING" for c in result.catalog_outcome.checks)
+    assert len(result.platform_surfaces) == 2
+    assert all(t.texts and t.text_capture_complete for t in result.evidence.turns)
+    assert all(c.status == "PASS" for c in result.catalog_outcome.checks[:3])
+    assert any(c.status == "PENDING" for c in result.catalog_outcome.checks[3:])
+    assert not any(
+        t.card_capture_complete or t.tool_capture_complete for t in result.evidence.turns
+    )
     assert len(result.catalog_outcome.checks) == len(plan.assertions) + len(plan.global_assertions)
