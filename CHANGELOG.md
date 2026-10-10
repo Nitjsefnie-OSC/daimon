@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connect GitHub links offered for a named repo open with that repo selected when it is available to add.
 - QA chunk delivery gaps use the answer edit time for cards observed running during the same turn; missing edit evidence remains pending.
 
+- QA running-card edit checks retain direct message snapshots on every poll and report missing or insufficient capture as PENDING.
 - Agents created before the Connect GitHub change get the new guidance on the next restart.
 - Agents no longer suggest pasting a GitHub token. When a private repo can't be read, they offer the Connect GitHub link. Agents that already use a saved token keep working.
 - QA reports model verification as n/a PENDING on confirmed pre-admission skipped turns, preserving product silence failures and recording zero spend.

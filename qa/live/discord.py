@@ -485,18 +485,11 @@ class DiscordBackend:
                     self.thread_parents[turn.thread_id] = parent
             turn.verdicts = [self.classify(m) for m in messages]
             for message, verdict in zip(messages, turn.verdicts, strict=True):
-                # Record positively classified working cards even before their
-                # first edit: a card later converted into an answer chunk needs
-                # proof it ran this turn. card_edits_min counts only entries
-                # carrying a real edit timestamp.
+                # Every positively classified working card is sampled on every
+                # poll, edited or not: a card later converted into an answer
+                # chunk needs proof it ran this turn (chunks_gap_max_s).
                 if verdict == "working":
-                    edit: Message = {
-                        "message_id": message.get("id"),
-                        "edited_timestamp": message.get("edited_timestamp"),
-                        "phase": "running",
-                    }
-                    if edit not in turn.card_history:
-                        turn.card_history.append(edit)
+                    self.sample_running_card(turn, message)
             if "working" in turn.verdicts and turn.progress_seen_s is None:
                 turn.progress_seen_s = elapsed
             terminal = bool(messages) and all(v in self.driver.TERMINAL for v in turn.verdicts)
@@ -517,6 +510,32 @@ class DiscordBackend:
             time.sleep(min(self.config.poll_interval_s, max(0, deadline - time.monotonic())))
         turn.ended_at = utcnow()
         raise WatchTimeout("watch timed out; collected last messages, no terminal proof")
+
+    def sample_running_card(self, turn: Turn, message: Message) -> None:
+        """Read the actual card each poll, including unchanged and never-edited cards."""
+        channel = str(message.get("channel_id") or turn.thread_id or turn.channel_id)
+        self._owned(channel)
+        identity = str(message.get("id") or "")
+        if not identity:
+            raise Pending("running card has no message identity")
+        row = obj(self.driver.call("GET", f"/channels/{channel}/messages/{identity}"))
+        if str(row.get("id")) != identity or str(row.get("channel_id")) != channel:
+            raise Pending("running card readback did not match the owned message")
+        # A card can become terminal between the list read and this direct read.
+        if self.classify(row) != "working":
+            return
+        observed = utcnow()
+        turn.card_history.append(
+            {
+                "message_id": identity,
+                "edited_timestamp": row.get("edited_timestamp"),
+                "phase": "running",
+                "observed_at": observed.isoformat(),
+                "elapsed_s": (observed - turn.started_at).total_seconds(),
+                "poll_interval_s": self.config.poll_interval_s,
+                "message": json.loads(json.dumps(row)),
+            }
+        )
 
     def current_messages(self, turn: Turn) -> list[Message]:
         """Refresh only recorded bot messages inside this run's owned channels."""
