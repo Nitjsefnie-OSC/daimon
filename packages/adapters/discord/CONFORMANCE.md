@@ -7,15 +7,21 @@ callback failure, timeout or cancellation. It never attaches to a live gateway.
 
 `MultiHumanEnvelope` supplies the bot, tenant UUID, guild ID, channel ID, at
 least two `ThreadInputs(first, queued)` under that channel, and a `run` callback.
-Messages must have unique IDs and at least two human authors. Each thread has
+The bot needs its normal gateway identity and a ready tenant in the host DB;
+the tenant UUID must match normal guild derivation. Messages must mention the
+bot, have unique IDs and at least two human authors. Each thread has
 queued follow-ups. `timeout_s` is a finite positive overall deadline.
 
 `run(MentionTurn, AdmissionBarrier | None)` receives the exact actual message,
 guild/tenant and content/attachment overrides passed by Discord's drain. The
 first call per thread gets a barrier. Its host transport signals `started`
 after normal admission and actual root acceptance; it waits for `release`
-before completing that root. The probe enqueues follow-ups through the actual
-reaction/queue method, releases the root and invokes the actual drain method.
+before completing that root. Every first and follow-up message enters through
+`bot.on_message`, including normal protection/liveness reads, busy-thread
+routing and tenant-slot admission. The probe never claims or enqueues a thread
+itself. After follow-up ingress returns it observes the bot's actual pending
+IDs and claimed state, then releases the barrier. The bot owns draining and
+its `finally` release, including resuming deferred continuations.
 Save the original bound mention handler before the probe if forwarding to it;
 forward all captured parameters unchanged. The callback must perform normal
 admission/binding/execution; it must not hand-pin admissions or return verdicts.
@@ -26,7 +32,10 @@ The returned mapping contains `platform`, `threads`, `batches`,
 Thread facts record received and queued message IDs, claimed ownership and
 whether the first callback finished before queuing. Batch facts record the
 thread, first message, caller, actual composed content, override flag and
-attachment IDs. Callback overlap is not a native active-root count.
+attachment IDs. Peak callback overlap is observed at the production-selected
+mention handler boundary; callback completion is recorded at that same boundary.
+Callback overlap is not a native active-root count. Callback failures are also
+raised by the explicit probe even when normal ingress renders them as errors.
 
 The shared C01 oracle also needs independent actual host/provider facts:
 same configuration and credential principal in a channel, distinct workspaces
@@ -37,7 +46,11 @@ and actual persisted usage/ledger facts must prove these separately. A queue
 control with synthetic callbacks is not full C01 or live certification. Missing
 provider choreography and shared-runner activation remain typed PENDING.
 
-The controls use the actual queue/drain/reaction paths and parsed Discord SDK
-messages, threads, users and attachments. They also reject invalid/busy inputs
+The controls use provisioned isolated PostgreSQL rows, actual ingress,
+queue/drain/reaction paths and parsed Discord SDK messages, threads, users and
+attachments. Process-only mutations disable the production busy-thread branch
+or merge callers during production batching; the same independent platform
+oracle rejects both changed mappings. Production release also resumes deferred
+continuations, including on cancellation. They also reject invalid/busy inputs
 before callback side effects and check restoration/cleanup. No provider calls,
 SDK fields, usage rows, golden files or default behavior are fabricated.

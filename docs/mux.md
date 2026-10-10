@@ -1318,12 +1318,16 @@ reuse and before input. Missing or changed configured limits refuse; omission
 preserves existing behavior. If an acknowledged creation fails verification,
 its native session reference remains in the durable creation claim for exact
 owned cleanup, and preparation does not resend it automatically.
+
 ### Discord multi-human host conformance
 
 `daimon.adapters.discord.conformance.multi_human_evidence` is an explicitly
-imported offline probe for a dedicated idle bot. It queues authored follow-up
-messages behind an owner-controlled admitted-root barrier, then invokes the
-actual Discord drain path. Evidence retains thread ownership, caller batch
+imported offline probe for a dedicated idle bot with a normally provisioned
+tenant. Every first and follow-up message passes through `bot.on_message`,
+including protection/liveness reads, busy-thread routing and tenant slots.
+The owner-controlled admitted-root barrier holds the first callback while the
+probe observes production queue state; the bot owns draining and final release,
+including deferred continuations. Evidence retains thread ownership, caller batch
 order, composed text, and attachment identities. The callback performs normal
 host admission/binding/turn execution; provider choreography, independent
 workspace/configuration/principal checks and persisted charge facts remain

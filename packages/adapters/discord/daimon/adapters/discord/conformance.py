@@ -1,4 +1,4 @@
-"""Explicit, offline host probes over Discord's existing queue and drain paths.
+"""Explicit, offline host probes over Discord's existing admission, queue and drain paths.
 
 Nothing imports this module in the application. A probe needs a fresh bot and
 normal host callbacks; it reports facts, never conformance verdicts. The caller
@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.core.ma_identity import derive_tenant_uuid
 
 import discord
 
@@ -34,7 +35,7 @@ class AdmissionBarrier:
     """Host callback signals started after actual admission/root acceptance.
 
     It then waits for release before finishing that root, while the probe
-    enqueues follow-ups. Neither event is a provider acceptance receipt.
+    routes follow-ups through normal ingress. Neither event is an acceptance receipt.
     """
 
     started: asyncio.Event
@@ -61,14 +62,15 @@ class MultiHumanEnvelope:
 async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, object]:
     """Capture actual queue/drain inputs; normal callbacks retain host ownership.
 
-    The first root is held at the owner-supplied barrier. Follow-ups enter via
-    `_queue_behind_inflight_turn`, including its reaction ordering; the actual
-    `_drain_pending_mentions` groups/composes/forwards them. Each callback must
-    perform ordinary admit/bind/run, not supply a pass/fail result. Ledger,
-    workspace, native-root and credential evidence are separate host facts.
+    Every message enters through `on_message`: protection/liveness reads,
+    busy-thread routing, tenant slots, queue/drain and release remain owned by
+    the bot. The capture handler observes callbacks selected by that path and
+    forwards their inputs to the owner. The first root waits at an owner-supplied
+    barrier; queued IDs and ownership are read from production queue state.
+    Ledger, workspace, native-root and credential evidence remain separate.
 
-    A failed/timeout/cancelled probe restores the handler, cancels its task and
-    releases only its own claimed thread. Use a dedicated bot, never a live app.
+    Failure restores the handler and cancels only this probe's ingress task;
+    `on_message` performs its own finally/release. Use a dedicated offline bot.
     """
     bot = envelope.bot
     if (
@@ -77,6 +79,8 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
         or len(envelope.threads) < 2
     ):
         raise ValueError("C01 requires two threads and a finite positive timeout")
+    if envelope.tenant_id != derive_tenant_uuid(platform="discord", workspace_id=envelope.guild_id):
+        raise ValueError("C01 tenant must match the normal Discord guild identity")
     # Do not replace a live handler or reuse an existing queue.
     if bot._processing or bot._pending:  # pyright: ignore[reportPrivateUsage]
         raise ValueError("C01 requires a fresh idle bot")
@@ -113,6 +117,8 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
     prior = bot.__dict__.get("_handle_mention")
     batches: list[Mapping[str, object]] = []
     threads: list[Mapping[str, object]] = []
+    callback_errors: list[Exception] = []
+    finished_callbacks: set[int] = set()
     active: dict[int, int] = {}
     peak: dict[int, int] = {}
     barrier: AdmissionBarrier | None = None
@@ -159,7 +165,13 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                 ),
                 barrier if message.id == first_id else None,
             )
+        except Exception as exc:
+            # on_message is an event-handler boundary and renders errors. A
+            # conformance callback failure must also fail this explicit probe.
+            callback_errors.append(exc)
+            raise
         finally:
+            finished_callbacks.add(message.id)
             active[thread_id] -= 1
 
     bot._handle_mention = handle  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
@@ -169,10 +181,7 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                 thread_id = inputs.first.channel.id
                 first_id = inputs.first.id
                 barrier = AdmissionBarrier(asyncio.Event(), asyncio.Event())
-                bot._thread_queue.claim(thread_id)  # pyright: ignore[reportPrivateUsage]
-                task = asyncio.create_task(
-                    handle(inputs.first, envelope.guild_id, envelope.tenant_id)
-                )
+                task = asyncio.create_task(bot.on_message(inputs.first))
                 waiter = asyncio.create_task(barrier.started.wait())
                 try:
                     # A callback failure must surface immediately rather than
@@ -180,13 +189,15 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                     await asyncio.wait((task, waiter), return_when=asyncio.FIRST_COMPLETED)
                     if task.done():
                         await task
-                        if not barrier.started.is_set() or not inputs.queued:
-                            raise RuntimeError("C01 first callback must hold an admitted root")
+                        if callback_errors:
+                            raise callback_errors[0]
+                        raise RuntimeError("C01 first callback finished before queued inputs")
+                    if active.get(thread_id) != 1:
                         raise RuntimeError("C01 first callback finished before queued inputs")
                     for message in inputs.queued:
-                        await bot._queue_behind_inflight_turn(  # pyright: ignore[reportPrivateUsage]
-                            thread_id, message
-                        )
+                        await bot.on_message(message)
+                        if callback_errors:
+                            raise callback_errors[0]
                     pending = bot._pending.get(thread_id, [])  # pyright: ignore[reportPrivateUsage]
                     threads.append(
                         {
@@ -196,23 +207,20 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                             ),
                             "queued_message_ids": tuple(str(m.id) for m in pending),
                             "claimed_while_queued": thread_id in bot._processing,  # pyright: ignore[reportPrivateUsage]
-                            "first_callback_finished_while_queued": task.done(),
+                            "first_callback_finished_while_queued": first_id in finished_callbacks,
                         }
                     )
                     barrier.release.set()
                     await task
+                    if callback_errors:
+                        raise callback_errors[0]
                     barrier = None
-                    await bot._drain_pending_mentions(  # pyright: ignore[reportPrivateUsage]
-                        thread_id, envelope.guild_id, envelope.tenant_id
-                    )
                 finally:
                     if barrier is not None:
                         barrier.release.set()
                     waiter.cancel()
                     task.cancel()
                     await asyncio.gather(task, waiter, return_exceptions=True)
-                    bot._processing.discard(thread_id)  # pyright: ignore[reportPrivateUsage]
-                    bot._pending.pop(thread_id, None)  # pyright: ignore[reportPrivateUsage]
     finally:
         if prior is None:
             del bot.__dict__["_handle_mention"]

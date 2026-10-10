@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
-import uuid
+import inspect
+import textwrap
+from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from decimal import Decimal
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import daimon.adapters.discord.bot as bot_module
 import discord
 import pytest
+import pytest_asyncio
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.conformance import (
     AdmissionBarrier,
@@ -19,7 +26,15 @@ from daimon.adapters.discord.conformance import (
     multi_human_evidence,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.config import TurnQueueSettings
+from daimon.core.config import McpSettings, TurnQueueSettings
+from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.scope import DeploymentDefault
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+
+from .harness import make_bot
 
 if TYPE_CHECKING:
     from discord.types.message import Message as MessagePayload
@@ -28,12 +43,31 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 
-def _bot() -> DaimonBot:
-    runtime = MagicMock()
-    runtime.settings = MagicMock()
-    runtime.settings.turn_queue = TurnQueueSettings()
-    runtime.settings.discord.max_concurrent_turns = None
-    return DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+@pytest_asyncio.fixture
+async def bot(db_engine: AsyncEngine, db_clean: None) -> DaimonBot:
+    del db_clean
+    # Admission reads can overlap while the first real ingress task is held.
+    # Give each production session its own pooled connection.
+    sessions = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    await provision_tenant(
+        sessions, platform="discord", workspace_id="60", signup_credit=Decimal("10")
+    )
+    settings = MagicMock()
+    settings.mcp = McpSettings()
+    settings.turn_queue = TurnQueueSettings()
+    settings.discord.max_concurrent_turns_per_tenant = 100
+    settings.discord.max_concurrent_turns = None
+    runtime = DiscordRuntime(
+        settings=settings,
+        anthropic=AsyncMock(),
+        sessionmaker=sessions,
+        notebook_rate_limiter=RateLimiter(max_requests=999),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=MagicMock(),
+    )
+    return make_bot(runtime)
 
 
 def _message(message_id: int, *, thread: int, human: int, text: str) -> discord.Message:
@@ -48,6 +82,8 @@ def _message(message_id: int, *, thread: int, human: int, text: str) -> discord.
     message.author.id = human
     message.author.bot = False
     message.author.display_name = f"Human {human}"
+    message.mentions = [SimpleNamespace(id=999)]
+    message.channel.send = AsyncMock()
     message.content = text
     attachment = MagicMock(spec=discord.Attachment)
     attachment.id = message_id + 1000
@@ -58,16 +94,16 @@ def _message(message_id: int, *, thread: int, human: int, text: str) -> discord.
 
 async def _run(_turn: MentionTurn, barrier: AdmissionBarrier | None) -> None:
     if barrier is not None:
-        # Synthetic root barrier: production admission/codec belongs to the
-        # provider-owned envelope, not this queue-only control.
+        # The real adapter admission has selected this callback. Native
+        # preparation/root acceptance remains provider-envelope evidence.
         barrier.started.set()
         await barrier.release.wait()
 
 
-def _envelope(bot: DaimonBot | None = None) -> MultiHumanEnvelope:
+def _envelope(bot: DaimonBot) -> MultiHumanEnvelope:
     return MultiHumanEnvelope(
-        bot=bot or _bot(),
-        tenant_id=uuid.uuid4(),
+        bot=bot,
+        tenant_id=derive_tenant_uuid(platform="discord", workspace_id="60"),
         guild_id="60",
         channel_id=50,
         threads=(
@@ -85,22 +121,11 @@ def _envelope(bot: DaimonBot | None = None) -> MultiHumanEnvelope:
             ),
         ),
         run=_run,
-        timeout_s=1.0,
+        timeout_s=30.0,
     )
 
 
-async def test_actual_drain_preserves_per_caller_order_bytes_attachments_and_thread_ownership() -> (
-    None
-):
-    envelope = _envelope()
-    original = envelope.bot._handle_mention  # pyright: ignore[reportPrivateUsage]
-    seen: list[MentionTurn] = []
-
-    async def run(turn: MentionTurn, barrier: AdmissionBarrier | None) -> None:
-        seen.append(turn)
-        await _run(turn, barrier)
-
-    evidence = await multi_human_evidence(replace(envelope, run=run))
+def _assert_platform_oracle(evidence: Mapping[str, object]) -> None:
     assert evidence["threads"] == (
         {
             "thread_id": "70",
@@ -129,14 +154,29 @@ async def test_actual_drain_preserves_per_caller_order_bytes_attachments_and_thr
         ("80", "6", "10", "other-thread", ("1006",)),
     ]
     assert [b["content_overridden"] for b in batches] == [False, True, True, False, True]
+    assert evidence["peak_callbacks_by_thread"] == {"70": 1, "80": 1}
+    assert evidence["queue_empty_after"] is evidence["processing_empty_after"] is True
+
+
+async def test_actual_drain_preserves_per_caller_order_bytes_attachments_and_thread_ownership(
+    bot: DaimonBot,
+) -> None:
+    envelope = _envelope(bot)
+    original = envelope.bot._handle_mention  # pyright: ignore[reportPrivateUsage]
+    seen: list[MentionTurn] = []
+
+    async def run(turn: MentionTurn, barrier: AdmissionBarrier | None) -> None:
+        seen.append(turn)
+        await _run(turn, barrier)
+
+    evidence = await multi_human_evidence(replace(envelope, run=run))
+    _assert_platform_oracle(evidence)
     assert [t.message.id for t in seen] == [1, 2, 3, 5, 6]
     assert all(t.guild_id == "60" and t.tenant_id == envelope.tenant_id for t in seen)
     assert seen[1].attachments_override == (
         envelope.threads[0].queued[0].attachments[0],
         envelope.threads[0].queued[2].attachments[0],
     )
-    assert evidence["peak_callbacks_by_thread"] == {"70": 1, "80": 1}
-    assert evidence["queue_empty_after"] is evidence["processing_empty_after"] is True
     assert envelope.bot._handle_mention == original  # pyright: ignore[reportPrivateUsage]
     assert "_handle_mention" not in envelope.bot.__dict__
     for thread in envelope.threads:
@@ -145,8 +185,10 @@ async def test_actual_drain_preserves_per_caller_order_bytes_attachments_and_thr
 
 
 @pytest.mark.parametrize("failure", ["exception", "timeout", "cancel"])
-async def test_failure_restores_handler_and_cleans_only_probe_threads(failure: str) -> None:
-    envelope = _envelope()
+async def test_failure_restores_handler_and_cleans_only_probe_threads(
+    bot: DaimonBot, failure: str
+) -> None:
+    envelope = _envelope(bot)
     original = envelope.bot._handle_mention  # pyright: ignore[reportPrivateUsage]
     entered = asyncio.Event()
 
@@ -157,8 +199,9 @@ async def test_failure_restores_handler_and_cleans_only_probe_threads(failure: s
             raise LookupError("controlled callback failure")
         await asyncio.Event().wait()
 
-    task = asyncio.create_task(multi_human_evidence(replace(envelope, run=run, timeout_s=0.05)))
-    await entered.wait()
+    task = asyncio.create_task(multi_human_evidence(replace(envelope, run=run, timeout_s=2.0)))
+    async with asyncio.timeout(30):
+        await entered.wait()
     if failure == "cancel":
         task.cancel()
     expected = {
@@ -172,10 +215,10 @@ async def test_failure_restores_handler_and_cleans_only_probe_threads(failure: s
     assert not envelope.bot._processing and not envelope.bot._pending  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_early_completed_callback_is_rejected_and_existing_instance_handler_restored() -> (
-    None
-):
-    envelope = _envelope()
+async def test_early_completed_callback_is_rejected_and_existing_instance_handler_restored(
+    bot: DaimonBot,
+) -> None:
+    envelope = _envelope(bot)
     original = envelope.bot._handle_mention  # pyright: ignore[reportPrivateUsage]
     envelope.bot.__dict__["_handle_mention"] = original
 
@@ -188,8 +231,8 @@ async def test_early_completed_callback_is_rejected_and_existing_instance_handle
     assert envelope.bot.__dict__["_handle_mention"] is original
 
 
-async def test_reaction_failure_retains_actual_queued_message() -> None:
-    envelope = _envelope()
+async def test_reaction_failure_retains_actual_queued_message(bot: DaimonBot) -> None:
+    envelope = _envelope(bot)
     envelope.threads[0].queued[0].add_reaction = AsyncMock(
         side_effect=RuntimeError("offline reaction")
     )
@@ -211,10 +254,13 @@ async def test_reaction_failure_retains_actual_queued_message() -> None:
         "one_thread",
         "one_human",
         "timeout",
+        "tenant",
     ],
 )
-async def test_invalid_envelope_fails_before_callback_or_queue_side_effects(invalid: str) -> None:
-    envelope = _envelope()
+async def test_invalid_envelope_fails_before_callback_or_queue_side_effects(
+    bot: DaimonBot, invalid: str
+) -> None:
+    envelope = _envelope(bot)
     if invalid == "busy":
         envelope.bot._processing.add(999)  # pyright: ignore[reportPrivateUsage]
     elif invalid == "pending":
@@ -235,6 +281,10 @@ async def test_invalid_envelope_fails_before_callback_or_queue_side_effects(inva
         for thread in envelope.threads:
             for message in (thread.first, *thread.queued):
                 message.author.id = 10
+    elif invalid == "tenant":
+        envelope = replace(
+            envelope, tenant_id=derive_tenant_uuid(platform="discord", workspace_id="99")
+        )
     else:
         envelope = replace(envelope, timeout_s=float("nan"))
     run = AsyncMock()
@@ -286,6 +336,15 @@ def _sdk_message(
             {
                 "id": str(message_id),
                 "type": 0,
+                "mentions": [
+                    {
+                        "id": "999",
+                        "username": "offline-bot",
+                        "discriminator": "0",
+                        "avatar": None,
+                        "bot": True,
+                    }
+                ],
                 "content": f"native-sdk-{message_id} — exact",
                 "author": {
                     "id": str(human_id),
@@ -308,8 +367,9 @@ def _sdk_message(
     )
 
 
-async def test_real_discord_sdk_messages_threads_users_attachments_and_reaction_path() -> None:
-    bot = _bot()
+async def test_real_discord_sdk_messages_threads_users_attachments_and_reaction_path(
+    bot: DaimonBot,
+) -> None:
     inputs = tuple(
         ThreadInputs(
             _sdk_message(bot, first, thread_id=thread, human_id=10),
@@ -322,12 +382,12 @@ async def test_real_discord_sdk_messages_threads_users_attachments_and_reaction_
         evidence = await multi_human_evidence(
             MultiHumanEnvelope(
                 bot=bot,
-                tenant_id=uuid.uuid4(),
+                tenant_id=derive_tenant_uuid(platform="discord", workspace_id="60"),
                 guild_id="60",
                 channel_id=50,
                 threads=inputs,
                 run=_run,
-                timeout_s=1.0,
+                timeout_s=30.0,
             )
         )
     assert isinstance(inputs[0].first, discord.Message)
@@ -352,3 +412,83 @@ async def test_real_discord_sdk_messages_threads_users_attachments_and_reaction_
         (70, 102, "⌛"),
         (80, 202, "⌛"),
     ]
+
+
+@pytest.mark.parametrize("mutation", ["busy_thread_admission", "cross_author_batching"])
+async def test_production_mutation_fails_the_same_independent_platform_oracle(
+    bot: DaimonBot, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    if mutation == "busy_thread_admission":
+        # Mutate the exact production busy-thread branch reported in B1, in
+        # process only. All protection/liveness/slot/finally code stays real.
+        source = textwrap.dedent(inspect.getsource(DaimonBot.on_message))
+        tree = ast.parse(source)
+        matching = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "thread_id in self._processing"
+        ]
+        assert len(matching) == 1, "production admission branch must exist"
+        matching[0].test = ast.Constant(value=False)
+        ast.fix_missing_locations(tree)
+        namespace: dict[str, Any] = vars(bot_module).copy()
+        exec(compile(tree, "<mutated-production-on_message>", "exec"), namespace)
+        monkeypatch.setattr(DaimonBot, "on_message", namespace["on_message"])
+    else:
+
+        def flatten(
+            pending: list[discord.Message], _author: Callable[[discord.Message], int]
+        ) -> list[list[discord.Message]]:
+            return [pending] if pending else []
+
+        monkeypatch.setattr(bot_module, "group_by_author", flatten)
+    evidence = await multi_human_evidence(_envelope(bot))
+    if mutation == "busy_thread_admission":
+        threads = cast(tuple[dict[str, object], ...], evidence["threads"])
+        assert [thread["queued_message_ids"] for thread in threads] == [(), ()]
+        assert evidence["peak_callbacks_by_thread"] == {"70": 2, "80": 2}
+    with pytest.raises(AssertionError):
+        _assert_platform_oracle(evidence)
+    assert evidence["queue_empty_after"] is evidence["processing_empty_after"] is True
+
+
+@pytest.mark.parametrize("exit_mode", ["normal", "cancel"])
+async def test_production_release_resumes_continuation_deferred_during_callback(
+    bot: DaimonBot,
+    exit_mode: str,
+) -> None:
+    envelope = _envelope(bot)
+    resume = AsyncMock()
+    entered = asyncio.Event()
+
+    async def run(turn: MentionTurn, barrier: AdmissionBarrier | None) -> None:
+        if barrier is not None:
+            thread = cast(discord.Thread, turn.message.channel)
+            bot._deferred_dispatch[thread.id] = (  # pyright: ignore[reportPrivateUsage]
+                turn.tenant_id,
+                thread,
+                turn.guild_id,
+            )
+            if exit_mode == "cancel":
+                entered.set()
+                await asyncio.Event().wait()
+        await _run(turn, barrier)
+
+    with patch.object(bot, "dispatch_continuations_in_thread", resume):
+        if exit_mode == "normal":
+            evidence = await multi_human_evidence(replace(envelope, run=run))
+            _assert_platform_oracle(evidence)
+        else:
+            task = asyncio.create_task(multi_human_evidence(replace(envelope, run=run)))
+            async with asyncio.timeout(30):
+                await entered.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        await asyncio.sleep(0)  # execute the bot's normal spawned resumes
+    expected = [70, 80] if exit_mode == "normal" else [70]
+    assert resume.await_count == len(expected)
+    assert [call.kwargs["thread"].id for call in resume.await_args_list] == expected
+    assert all(call.kwargs["tenant_id"] == envelope.tenant_id for call in resume.await_args_list)
+    assert not bot._deferred_dispatch  # pyright: ignore[reportPrivateUsage]
