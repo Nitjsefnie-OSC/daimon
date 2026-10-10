@@ -107,6 +107,12 @@ other channels require a server or workspace admin. Creation metadata and a
 channel default alone do not grant permission to edit setup. Defaults-managed
 specs retain their existing protections, including for admins.
 
+When approval cards are off, a skill add needs a preview followed by the
+requester's next message of `yes` in that thread. Only one preview is active
+per person and thread, across agents. A newer preview replaces the previous
+one. The confirmation names the agent and skill; a replaced preview must be
+previewed and confirmed again before it can be added.
+
 ## Publishing
 
 A turn whose admission would refuse `PUBLISH` gets its session's publish
