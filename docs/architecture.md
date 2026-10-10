@@ -1041,6 +1041,14 @@ search tools return JSON rows, so their results carry the same marker as
 block (`packages/core/daimon/core/agent_guidance.py`) tells every agent what
 the marker means. Only the `<user_query>` is the request.
 
+For a new Discord thread started by a channel mention, the channel backfill
+keeps 25 messages. A separate untrusted `recent_channel_files` block lists up
+to 10 attachments older than that window, from at most 200 channel messages
+within 24 hours of the mention. It includes live attachment URLs, filenames,
+uploaders, upload times and message links, but no older message text. Both
+reads use the same parent channel; a failed older read leaves the 25-message
+context intact.
+
 Third-party MCP tool results travel from Managed Agents straight to the model
 without passing through Daimon, so they carry no marker; the guidance
 paragraph covers them by name ("whatever a tool returns").

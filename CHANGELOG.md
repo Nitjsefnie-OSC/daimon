@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- New Discord threads retain links to recent channel uploads after busy chat moves them outside the 25-message context window.
 - Discord continuations check thread history back to the queued handoff and retry when that history is unavailable, so a newer human reply cannot trigger stale work.
 - Registered Discord tenants with an unjoined guild receive defaults updates on restart, so their agents no longer keep stale guidance.
 - One `yes` now approves only the latest skill-add preview in a thread, even when the previews target different agents.
