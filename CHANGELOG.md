@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the explicitly configured Gemini inline-reuse host codec with lazy owned streams, fenced replay/cancel and neutral interaction usage; keep live host certification and MCP authentication separate.
 - Preserve every Gemini interaction's messages, usage and required actions in reused-session journals; visibly refuse missing runtimes, non-primary models and unsupported host policies before dispatch.
 - Render neutral OpenAI/Gemini drafts on Slack progress cards and omit unverified provider costs while preserving Anthropic behavior.
+- Render neutral OpenAI/Gemini drafts on Teams progress cards and omit unverified provider costs while preserving Anthropic behavior.
 
 - Render neutral OpenAI/Gemini drafts on Discord progress cards while preserving Anthropic output and omitting unverified provider costs.
 

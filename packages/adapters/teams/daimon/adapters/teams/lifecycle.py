@@ -19,6 +19,7 @@ import contextlib
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
@@ -30,6 +31,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.adapters.teams import card
+from daimon.adapters.teams.provider_events import ProviderDraft
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.message_split import split_fenced
@@ -48,8 +50,10 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import termination_reason
+from daimon.core.usage_totals import ProviderUsageTotals
 from microsoft_teams.api import Account, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, ExecuteAction
+from mux.contracts.events import Event
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -145,6 +149,7 @@ class TeamsTurnLifecycle:
         # The summary line's agent, price and money left.
         self._agent_name = agent_name
         self._model_id = model_id
+        self._provider_draft: ProviderDraft | None = None
         self._markup = markup
         self._sessionmaker = sessionmaker
         self._budget_channel_id = budget_channel_id
@@ -225,11 +230,25 @@ class TeamsTurnLifecycle:
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Only the draft rides SSE: tool calls and the phase are read from the
         # turn state on each render, which sees every tool kind.
+        if self._provider_draft is not None:
+            return
         if getattr(event, "type", "") != "agent.message":
             return
         parts: list[object] = getattr(event, "content", [])
         text = "".join(str(getattr(p, "text", "")) for p in parts).strip()
         self._state = card.on_message(self._state, text)
+
+    async def on_provider_event(self, event: Event) -> None:
+        """Cheap local tap; only on_render may send the provider's draft."""
+        if event.native.provider == "anthropic" or self._terminal:
+            return
+        if self._provider_draft is None:
+            self._provider_draft = ProviderDraft()
+        text = self._provider_draft.text(event)
+        if text is not None:
+            self._state = (
+                card.on_message(self._state, text) if text else replace(self._state, draft=None)
+            )
 
     async def on_render(self, state: TurnState) -> None:
         if self._terminal or self._message_id is None:
@@ -278,17 +297,19 @@ class TeamsTurnLifecycle:
         `named_above`: agent identity's bold name leads the answer just above it.
         """
         t = state.usage_totals
-        usage = BetaManagedAgentsSpanModelUsage(
-            input_tokens=t.input_tokens,
-            cache_creation_input_tokens=t.cache_creation_input_tokens,
-            cache_read_input_tokens=t.cache_read_input_tokens,
-            output_tokens=t.output_tokens,
-            speed="standard",
-        )
-        cost = cost_of(usage, MODEL_PRICING.get(self._model_id)) if self._model_id else None
-        if cost is not None:
-            # What the tenant is debited, markup included, so `used` matches `left`.
-            cost = float(debit_amount(cost, markup=self._markup))
+        cost = None
+        if self._provider_draft is None and not isinstance(t, ProviderUsageTotals):
+            usage = BetaManagedAgentsSpanModelUsage(
+                input_tokens=t.input_tokens,
+                cache_creation_input_tokens=t.cache_creation_input_tokens,
+                cache_read_input_tokens=t.cache_read_input_tokens,
+                output_tokens=t.output_tokens,
+                speed="standard",
+            )
+            cost = cost_of(usage, MODEL_PRICING.get(self._model_id)) if self._model_id else None
+            if cost is not None:
+                # What the tenant is debited, markup included, so `used` matches `left`.
+                cost = float(debit_amount(cost, markup=self._markup))
         return format_summary(
             agent_name=None if named_above else self._agent_name,
             elapsed_seconds=self._clock() - self._state.started_at,

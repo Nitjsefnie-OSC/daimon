@@ -1828,3 +1828,5 @@ slash command carries recent channel messages. Run `/dm` again to reset or selec
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
 
 Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.
+
+Teams consumes neutral snapshots and draft fragments through the optional lifecycle tap for alternate providers. Terminal callbacks retire the progress card and deliver authoritative answers; unprompted drafts remain silent. Unknown alternate-provider cost stays absent from the summary instead of becoming an Anthropic usage meter.
