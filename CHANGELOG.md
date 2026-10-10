@@ -63,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain scoped OpenAI/Gemini agent revisions, checked skill bundles and upload ownership in an additive host catalog.
 - Construct OpenAI turn runtimes for explicitly configured channels from scoped operator deployment plans, with deferred credential access and durable journal/usage state.
 - Support complete Gemini skill bundles through an explicitly injected, scoped GCS publisher with immutable version receipts; retain inline text mounts and refuse missing deployment dependencies explicitly.
+### Added
+
+- Offline TARGET-53 Gemini execution through the explicit G2 host with source-pinned native Interactions replays, fenced accepted roots and saved-GET completion. Four cells execute while all 53 Gemini cells remain pending for uncaptured catalog effects/surfaces; no live calls or platform-text credit.
+
 - Restrict complete visible-text evidence from headless returns to headless-surface QA scenarios; keep Discord, Slack and Teams text predicates pending until actual surface capture.
 - Execute pinned OpenAI catalog fixtures through the real fenced G1 host, preserving queued-send/root evidence, strict wire consumption and honest offline oracle failures.
 

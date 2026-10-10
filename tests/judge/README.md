@@ -214,7 +214,7 @@ requests, producing **0 OpenAI PASS / 0 FAIL / 53 PENDING**. Discord text predic
 remain PENDING because no actual Discord output has been captured; raw headless
 returns confer no text credit on those cells. Headless-surface microcases test
 complete returned-text capture and follow-up isolation separately. Platform delivery/rendering,
-remote effects and parity remain uncaptured. Gemini dispatches zero requests.
+remote effects and parity remain uncaptured. The G2 consumer below executes Gemini separately.
 
 
 Until the native factory pins every SDK option explicitly, the consumer refuses
@@ -222,3 +222,28 @@ ambient admin-key, organization, project, webhook-secret or custom-header option
 before client construction. This checks environment variable names only and
 never reads or logs their values. The explicit dummy SDK key/base URL and strict
 mock transport supply the offline boundary; no credential files are read.
+
+
+With G2 stacked, the same `--provider-fixtures` option executes Gemini through
+its registered `gemini.inline_reuse` backend and codec, using an explicit
+`gemini-3.8-flash` revision, caller-private runtime and fenced turn persistence.
+N3's logical session labels pin virgin local driver-created configuration
+records; no provider event, root, usage or terminal is seeded. Cold sessions
+consume the exact native POST, SSE and saved GET. Followups retrieve the old
+interaction before sending and retain its workspace/previous-interaction chain.
+Saved GET status/steps supply authoritative completion; an SSE completion frame
+alone cannot PASS. The accepted native receipt and every journal record bind the
+fresh root to its selected session. Strict wire consumption also proves stream
+closure. An empty Anthropic transport rejects any legacy fallback.
+
+The first Gemini column executes four cells / four turns / 12 mock requests,
+with **0 Gemini PASS / 0 FAIL / 53 PENDING** and eight supplemental host PASS
+checks. The full matrix remains **0 PASS / 0 FAIL / 159 PENDING**: the authored
+turns do not capture the catalog's Discord surface or missing effects. All
+original/global assertions and unbound steps remain. A separate headless-surface
+two-turn microcase checks returned-text isolation and reuse without changing
+any scored scenario. Offline accounting observes one accepted primary dispatch;
+it makes no live spend or price claim and refuses fallback attempts. SDK key,
+project, location, endpoint and Vertex/enterprise options refuse construction
+by environment variable name only. No credential files or live transport are
+used. This slice is conditional on G2 merging; the lead restacks it.

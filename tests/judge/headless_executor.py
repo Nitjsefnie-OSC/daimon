@@ -57,6 +57,7 @@ if __package__:
         expand_text,
         sha,
     )
+    from .gemini_catalog_replay import execute_gemini_turns
     from .headless_output import HeadlessOutput, capture_headless_return
     from .openai_catalog_replay import execute_openai_turns
 else:
@@ -71,6 +72,7 @@ else:
         expand_text,
         sha,
     )
+    from gemini_catalog_replay import execute_gemini_turns
     from headless_output import HeadlessOutput, capture_headless_return
     from openai_catalog_replay import execute_openai_turns
 
@@ -459,7 +461,7 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
             ExecutionGap(
                 code="OPENAI_FIXTURE_UNAVAILABLE"
                 if plan.backend == "openai"
-                else "HOST_BACKEND_PENDING_G2",
+                else "GEMINI_FIXTURE_UNAVAILABLE",
                 location="channel",
             )
         )
@@ -616,6 +618,75 @@ async def execute_openai_cell(
     )
 
 
+async def execute_gemini_cell(
+    plan: ScenarioPlan,
+    scenario: ScenarioFixture,
+    fixture: BackendFixture,
+    *,
+    source_root: Path,
+    repository_root: Path,
+) -> CellResult:
+    if (
+        plan.backend != "gemini"
+        or fixture.backend != "gemini"
+        or scenario.scenario_id != plan.scenario.id
+        or scenario.source.sha256 != plan.scenario.sha256
+        or scenario.source.path != f"scenarios/{plan.scenario.filename}"
+        or fixture not in scenario.providers
+        or fixture.profile != "gemini.inline_reuse"
+        or fixture.model != "gemini-3.8-flash"
+    ):
+        raise ValueError(
+            "Gemini executor requires the pinned scenario and explicit Gemini selection"
+        )
+    gaps = list(_unbound_steps(plan))
+    gaps.extend(
+        ExecutionGap(code="PROVIDER_" + gap.code, location=gap.location) for gap in fixture.gaps
+    )
+    gaps.extend(
+        ExecutionGap(code="COMPLETION_GATE_UNBOUND", location=turn.location)
+        for turn in fixture.turns
+        if turn.completion_gate
+    )
+    try:
+        assertions = _assertions(plan, scenario.values)
+    except ValueError:
+        assertions = cast(list[dict[str, JsonValue]], [*plan.assertions, *plan.global_assertions])
+        gaps.append(ExecutionGap(code="PLACEHOLDER_UNBOUND", location="assertions"))
+    evidence = RunEvidence(scenario_id=plan.scenario.id, backend=plan.backend, turns=())
+    outputs: tuple[HeadlessOutput, ...] = ()
+    rendered: tuple[str, ...] = ()
+    requests = 0
+    if not gaps:
+        capture = await execute_gemini_turns(
+            plan, scenario, fixture, source_root=source_root, repository_root=repository_root
+        )
+        evidence = RunEvidence(
+            scenario_id=plan.scenario.id,
+            backend="gemini",
+            turns=tuple(t.evidence for t in capture.turns),
+        )
+        outputs = tuple(t.output for t in capture.turns if t.output is not None)
+        rendered = tuple(t.output.text if t.output is not None else "" for t in capture.turns)
+        requests = capture.request_count
+    gaps.extend(
+        ExecutionGap(code="CATALOG_CAPABILITY_PENDING", location=g.location) for g in plan.gaps
+    )
+    return CellResult(
+        scenario_id=plan.scenario.id,
+        backend=plan.backend,
+        scored=plan.scored,
+        source_sha256=plan.scenario.sha256,
+        gaps=tuple(gaps),
+        evidence=evidence,
+        catalog_outcome=evaluate(evidence, assertions),
+        host_outcome=evaluate(evidence, _host_assertions(evidence)),
+        request_count=requests,
+        rendered_text=rendered,
+        headless_outputs=outputs,
+    )
+
+
 async def execute_catalog(
     root: Path,
     *,
@@ -635,10 +706,16 @@ async def execute_catalog(
     cells: list[CellResult] = []
     for plan in matrix.plans:
         if plan.scored:
-            if plan.backend == "openai" and pack is not None and provider_fixtures is not None:
-                scenario, fixture = pack.select(plan.scenario.id, "openai")
+            if (
+                plan.backend in ("openai", "gemini")
+                and pack is not None
+                and provider_fixtures is not None
+            ):
+                scenario, fixture = pack.select(plan.scenario.id, plan.backend)
                 cells.append(
-                    await execute_openai_cell(
+                    await (
+                        execute_openai_cell if plan.backend == "openai" else execute_gemini_cell
+                    )(
                         plan,
                         scenario,
                         fixture,
