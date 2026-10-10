@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2281,
+  "files_scanned": 2229,
   "parse_errors": [],
   "calls": [
     {
@@ -17272,10 +17272,19 @@
     },
     {
       "file": "packages/core/tests/turn/test_provider_dispatch.py",
-      "line": 88,
+      "line": 87,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_provider_termination.py",
+      "line": 10,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsSessionRetriesExhausted"
       ],
       "category": "test"
     },
@@ -18232,38 +18241,11 @@
       "category": "test"
     },
     {
-      "file": "packages/testing/daimon/testing/admin_bindings.py",
-      "line": 19,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test-support"
-    },
-    {
       "file": "packages/testing/daimon/testing/factories.py",
       "line": 19,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_usage",
       "names": [
         "BetaManagedAgentsSpanModelUsage"
-      ],
-      "category": "test-support"
-    },
-    {
-      "file": "packages/testing/daimon/testing/isolated_sdk.py",
-      "line": 17,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test-support"
-    },
-    {
-      "file": "packages/testing/daimon/testing/isolated_sdk.py",
-      "line": 165,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
       ],
       "category": "test-support"
     },
@@ -18293,15 +18275,6 @@
       "module": "anthropic.types.beta.beta_managed_agents_model_config",
       "names": [
         "BetaManagedAgentsModelConfig"
-      ],
-      "category": "test-support"
-    },
-    {
-      "file": "packages/testing/daimon/testing/ma.py",
-      "line": 255,
-      "module": "anthropic",
-      "names": [
-        "DEFAULT_TIMEOUT"
       ],
       "category": "test-support"
     },
@@ -18653,15 +18626,6 @@
       "category": "test-support"
     },
     {
-      "file": "packages/testing/daimon/testing/turn_clock.py",
-      "line": 18,
-      "module": "anthropic.types",
-      "names": [
-        "RawMessageStreamEvent"
-      ],
-      "category": "test-support"
-    },
-    {
       "file": "packages/testing/daimon/testing/turn_fakes.py",
       "line": 28,
       "module": "anthropic.types",
@@ -18750,25 +18714,6 @@
         "AsyncAnthropic"
       ],
       "category": "test-support"
-    },
-    {
-      "file": "packages/testing/tests/test_isolated_sdk.py",
-      "line": 317,
-      "module": "anthropic",
-      "names": [
-        "DEFAULT_TIMEOUT",
-        "AsyncAnthropic"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "packages/testing/tests/test_isolated_sdk.py",
-      "line": 355,
-      "module": "anthropic",
-      "names": [
-        "DEFAULT_TIMEOUT"
-      ],
-      "category": "test"
     },
     {
       "file": "packages/testing/tests/test_ma.py",
@@ -19097,51 +19042,6 @@
       "module": "anthropic.types.beta.sessions.beta_managed_agents_unknown_error",
       "names": [
         "BetaManagedAgentsUnknownError"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "tests/judge/discord_catalog_surface.py",
-      "line": 8,
-      "module": "anthropic.types",
-      "names": [
-        "RawMessageStreamEvent"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "tests/judge/gemini_catalog_host.py",
-      "line": 12,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "tests/judge/openai_catalog_host.py",
-      "line": 12,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "tests/judge/platform_catalog_surface.py",
-      "line": 8,
-      "module": "anthropic.types",
-      "names": [
-        "RawMessageStreamEvent"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "tests/judge/test_turn_clock.py",
-      "line": 10,
-      "module": "anthropic.types",
-      "names": [
-        "RawMessageStreamEvent"
       ],
       "category": "test"
     },
