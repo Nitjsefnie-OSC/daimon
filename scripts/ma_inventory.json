@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2255,
+  "files_scanned": 2244,
   "parse_errors": [],
   "calls": [
     {
@@ -3643,135 +3643,6 @@
       ],
       "response_access": [
         "agent.id"
-      ]
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 102,
-      "end": 102,
-      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
-      "category": "test",
-      "resource": "agents.retrieve",
-      "call": "sdk.beta.agents.retrieve(agent.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 103,
-      "end": 105,
-      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
-      "category": "test",
-      "resource": "skills.create",
-      "call": "sdk.beta.skills.create(display_title=title, files=[('SKILL.zip', bundle.zip_bytes, 'application/zip')])",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 106,
-      "end": 106,
-      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
-      "category": "test",
-      "resource": "agents.retrieve",
-      "call": "sdk.beta.agents.retrieve(agent.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 107,
-      "end": 107,
-      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
-      "category": "test",
-      "resource": "skills.list",
-      "call": "sdk.beta.skills.list(limit=1000)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 186,
-      "end": 186,
-      "scope": "test_fork_partition_preserves_sdk_trace_and_raw_shared_pins",
-      "category": "test",
-      "resource": "skills.list",
-      "call": "sdk.beta.skills.list(limit=1000)",
-      "request_keys": [],
-      "response_access": [
-        "page.data"
-      ]
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 262,
-      "end": 262,
-      "scope": "test_fork_create_preserves_pre_refactor_sdk_bytes_and_face_metadata",
-      "category": "test",
-      "resource": "agents.retrieve",
-      "call": "sdk.beta.agents.retrieve('source')",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 263,
-      "end": 272,
-      "scope": "test_fork_create_preserves_pre_refactor_sdk_bytes_and_face_metadata",
-      "category": "test",
-      "resource": "agents.create",
-      "call": "sdk.beta.agents.create(name='copy', model=cast(Model, source.model.model_dump(mode='json')), description=None, system='Preserve this prompt.', metadata=metadata, tools=tools, mcp_servers=servers, skills=[{'type': 'anthropic', 'skill_id': 'pdf', 'version': 'latest'}])",
-      "request_keys": [
-        "skill_id",
-        "type",
-        "version"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 101,
-      "end": 101,
-      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
-      "category": "test",
-      "resource": "skills.list",
-      "call": "sdk.beta.skills.list(limit=1000)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 110,
-      "end": 110,
-      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
-      "category": "test",
-      "resource": "agents.update",
-      "call": "sdk.beta.agents.update(agent.id, skills=pins, version=agent.version)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 119,
-      "end": 119,
-      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
-      "category": "test",
-      "resource": "agents.update",
-      "call": "sdk.beta.agents.update(agent.id, skills=pins, tools=[base], version=agent.version)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 189,
-      "end": 189,
-      "scope": "test_fork_partition_preserves_sdk_trace_and_raw_shared_pins",
-      "category": "test",
-      "resource": "agents.list",
-      "call": "sdk.beta.agents.list(include_archived=False)",
-      "request_keys": [],
-      "response_access": [
-        "row.latest_version"
       ]
     },
     {
@@ -12630,6 +12501,15 @@
       "category": "production"
     },
     {
+      "file": "packages/core/daimon/core/channel_rules.py",
+      "line": 27,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/core/daimon/core/channel_skills.py",
       "line": 27,
       "module": "anthropic",
@@ -15439,27 +15319,6 @@
       "category": "test"
     },
     {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 17,
-      "module": "anthropic.types.beta",
-      "names": [
-        "BetaManagedAgentsAgent",
-        "BetaManagedAgentsSkillParams",
-        "BetaManagedAgentsURLMCPServerParams"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "packages/core/tests/skills/test_service_fidelity.py",
-      "line": 22,
-      "module": "anthropic.types.beta.agent_create_params",
-      "names": [
-        "Model",
-        "Tool"
-      ],
-      "category": "test"
-    },
-    {
       "file": "packages/core/tests/skills/test_sync.py",
       "line": 20,
       "module": "anthropic.types.beta",
@@ -17272,7 +17131,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_provider_dispatch.py",
-      "line": 88,
+      "line": 87,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -18232,15 +18091,6 @@
       "category": "test"
     },
     {
-      "file": "packages/testing/daimon/testing/admin_bindings.py",
-      "line": 19,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test-support"
-    },
-    {
       "file": "packages/testing/daimon/testing/factories.py",
       "line": 19,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_usage",
@@ -18260,7 +18110,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/isolated_sdk.py",
-      "line": 165,
+      "line": 140,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -18653,6 +18503,15 @@
       "category": "test-support"
     },
     {
+      "file": "packages/testing/daimon/testing/turn_clock.py",
+      "line": 17,
+      "module": "anthropic.types",
+      "names": [
+        "RawMessageStreamEvent"
+      ],
+      "category": "test-support"
+    },
+    {
       "file": "packages/testing/daimon/testing/turn_fakes.py",
       "line": 28,
       "module": "anthropic.types",
@@ -18744,7 +18603,7 @@
     },
     {
       "file": "packages/testing/tests/test_isolated_sdk.py",
-      "line": 317,
+      "line": 297,
       "module": "anthropic",
       "names": [
         "DEFAULT_TIMEOUT",
@@ -18754,7 +18613,7 @@
     },
     {
       "file": "packages/testing/tests/test_isolated_sdk.py",
-      "line": 355,
+      "line": 335,
       "module": "anthropic",
       "names": [
         "DEFAULT_TIMEOUT"
@@ -19088,6 +18947,51 @@
       "module": "anthropic.types.beta.sessions.beta_managed_agents_unknown_error",
       "names": [
         "BetaManagedAgentsUnknownError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/discord_catalog_surface.py",
+      "line": 8,
+      "module": "anthropic.types",
+      "names": [
+        "RawMessageStreamEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/gemini_catalog_host.py",
+      "line": 13,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/openai_catalog_host.py",
+      "line": 13,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/platform_catalog_surface.py",
+      "line": 8,
+      "module": "anthropic.types",
+      "names": [
+        "RawMessageStreamEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/test_turn_clock.py",
+      "line": 8,
+      "module": "anthropic.types",
+      "names": [
+        "RawMessageStreamEvent"
       ],
       "category": "test"
     },

@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain acknowledged session references for cleanup on control failure, and
   preserve optional cap omission and default provider behavior.
 - Execute offline catalog steps in source order with measured completion deadlines and short waits; retain completed turn prefixes and typed PENDING at unsupported operations.
+- Add opt-in offline host clock and native-root completion capture helpers, keeping source completion deadlines separate from invocation cleanup and preserving independently acknowledged journal authority.
 
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Document the existing per-tenant table-rendering opt-in for Anthropic, OpenAI and Gemini host turns, retaining plain-text defaults.
