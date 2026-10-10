@@ -63,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain scoped OpenAI/Gemini agent revisions, checked skill bundles and upload ownership in an additive host catalog.
 - Construct OpenAI turn runtimes for explicitly configured channels from scoped operator deployment plans, with deferred credential access and durable journal/usage state.
 - Support complete Gemini skill bundles through an explicitly injected, scoped GCS publisher with immutable version receipts; retain inline text mounts and refuse missing deployment dependencies explicitly.
+- Restrict complete visible-text evidence from headless returns to headless-surface QA scenarios; keep Discord, Slack and Teams text predicates pending until actual surface capture.
+
+- Bind offline QA visible-text predicates to actual scoped headless returns, preserving failed roots and leaving platform/tool/card effects uncaptured.
+
+- Refuse timeout-specific offline catalog credit until the explicit wait_done deadline is bound, keeping those cells PENDING before dispatch.
+- Add strict offline OpenAI/Gemini SDK replay transports and source-pinned TARGET-53 fixture bindings, retaining unsupported operations as explicit gaps for the outcome oracle.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.
