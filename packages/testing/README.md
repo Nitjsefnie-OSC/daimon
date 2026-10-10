@@ -104,9 +104,12 @@ Construction raises `AmbientSDKConfigurationError` if any variable in
 `SDK_ENV_VARS` is present, even with an empty value and even for another provider.
 Gemini additionally refuses every `GOOGLE_`/`GEMINI_` variable name (case
 insensitive), including empty or unknown future settings; unknown names and all
-values are omitted from errors. This includes provider keys, webhook/admin keys,
-org/project settings, custom
-headers, base URLs, Anthropic identity/configuration and Gemini credential,
+values are omitted from errors. Checks iterate names before set membership,
+avoiding `os.environ` membership's implicit value lookup. Both `GOOGLE_API_KEY`
+and `GEMINI_API_KEY` are refused before Gemini construction, even with an explicit
+test key, because Google GenAI 2.7 reads them unconditionally. This includes
+provider keys, webhook/admin keys, org/project settings, custom headers, base
+URLs, Anthropic identity/configuration and Gemini credential,
 Vertex and replay settings. Errors name variables without exposing values. The
 factories never clear the process environment; explicit test keys prevent
 credential-chain fallback. Start tests in a clean environment or remove only

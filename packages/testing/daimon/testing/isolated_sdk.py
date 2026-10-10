@@ -69,7 +69,10 @@ class AmbientSDKConfigurationError(ValueError):
 
 
 def _require_clean_environment() -> None:
-    present = [name for name in SDK_ENV_VARS if name in os.environ]
+    # os.environ inherits Mapping.__contains__, which calls __getitem__ and
+    # reads values. Snapshot keys through iteration before membership checks.
+    names = frozenset(os.environ)
+    present = [name for name in SDK_ENV_VARS if name in names]
     if present:
         raise AmbientSDKConfigurationError(
             "test SDK refuses ambient variables: " + ", ".join(present)
@@ -177,6 +180,8 @@ def build_gemini_client(
     MockTransport implements both transport protocols; another sync transport
     requires an explicit async_transport. No aiohttp/default network fallback.
     """
+    # google-genai 2.7 reads GOOGLE_API_KEY/GEMINI_API_KEY unconditionally,
+    # even with explicit api_key. The shared named preflight refuses both.
     _require_clean_environment()
     _require_clean_gemini_environment()
     _require_explicit_configuration(api_key, base_url)

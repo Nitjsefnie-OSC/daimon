@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from unittest.mock import patch
 
 import httpx
@@ -384,3 +384,100 @@ async def test_anthropic_explicit_test_key_does_not_load_profile_credentials() -
         )
         await client.close()
     credentials.assert_not_called()
+
+
+class _NamesOnlyEnvironment(Mapping[str, str]):
+    """Mapping membership has os.environ's value-fetching semantics."""
+
+    def __init__(self, *names: str) -> None:
+        self.names = names
+        self.value_reads = 0
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.names)
+
+    def __len__(self) -> int:
+        return len(self.names)
+
+    def __getitem__(self, name: str) -> str:
+        self.value_reads += 1
+        raise AssertionError("guard fetched an environment value")
+
+
+@pytest.mark.parametrize("factory", FACTORIES)
+@pytest.mark.parametrize("name", SDK_ENV_VARS)
+def test_environment_preflight_reads_names_only_before_any_sdk_construction(
+    monkeypatch: pytest.MonkeyPatch, factory, name: str
+) -> None:
+    # Inherited Mapping.__contains__ calls __getitem__, just like os.environ.
+    # Names are visible; reading even one value is forbidden in this probe.
+    environment = _NamesOnlyEnvironment(name)
+    transport = httpx.MockTransport(lambda _: httpx.Response(500))
+    with (
+        patch("openai.AsyncOpenAI") as openai_sdk,
+        patch("anthropic.AsyncAnthropic") as anthropic_sdk,
+        patch("google.genai.Client") as gemini_sdk,
+        patch("httpx.Client") as synchronous,
+        patch("httpx.AsyncClient") as asynchronous,
+    ):
+        with monkeypatch.context() as scoped:
+            scoped.setattr(os, "environ", environment)
+            with pytest.raises(AmbientSDKConfigurationError) as error:
+                factory(transport=transport, api_key="explicit-test-key")
+        assert name in str(error.value)
+    assert environment.value_reads == 0
+    openai_sdk.assert_not_called()
+    anthropic_sdk.assert_not_called()
+    gemini_sdk.assert_not_called()
+    synchronous.assert_not_called()
+    asynchronous.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["GOOGLE_FUTURE_ROUTE", "gemini_future_secret_name"])
+def test_unknown_gemini_setting_refuses_without_reading_values_or_exposing_name(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    environment = _NamesOnlyEnvironment(name)
+    transport = httpx.MockTransport(lambda _: httpx.Response(500))
+    with patch("google.genai.Client") as sdk, monkeypatch.context() as scoped:
+        scoped.setattr(os, "environ", environment)
+        with pytest.raises(AmbientSDKConfigurationError) as error:
+            build_gemini_client(transport=transport)
+    assert environment.value_reads == 0
+    assert name not in str(error.value)
+    sdk.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["GOOGLE_API_KEY", "GEMINI_API_KEY"])
+@pytest.mark.parametrize("value", ["", "synthetic-key-never-read"])
+def test_real_environment_gemini_keys_refuse_before_value_lookup_or_sdk_construction(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+    environment_type = type(os.environ)
+    original_getitem = environment_type.__getitem__
+    reads: list[str] = []
+
+    def guarded_getitem(environment, key: str) -> str:
+        if key in SDK_ENV_VARS:
+            reads.append(key)
+            raise AssertionError("guard fetched an ambient provider value")
+        return original_getitem(environment, key)
+
+    transport = httpx.MockTransport(lambda _: httpx.Response(500))
+    with (
+        patch("google.genai.Client") as sdk,
+        patch("httpx.Client") as synchronous,
+        patch("httpx.AsyncClient") as asynchronous,
+        monkeypatch.context() as scoped,
+    ):
+        scoped.setattr(environment_type, "__getitem__", guarded_getitem)
+        with pytest.raises(AmbientSDKConfigurationError) as error:
+            build_gemini_client(transport=transport, api_key="explicit-test-key")
+    assert not reads
+    assert name in str(error.value)
+    if value:
+        assert value not in str(error.value)
+    sdk.assert_not_called()
+    synchronous.assert_not_called()
+    asynchronous.assert_not_called()
