@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import httpx
 
@@ -109,7 +109,21 @@ def build_async_openai(
     _require_async_transport(transport)
     from openai import AsyncOpenAI
 
-    return AsyncOpenAI(
+    class _IsolatedAsyncOpenAI(AsyncOpenAI):
+        # SDK copy/with_options reconstruct self.__class__. Guard allocation
+        # before inherited __init__ can inspect ambient account/auth/headers.
+        # Allocation accepts the SDK's arguments; inherited __init__ retains
+        # its full validation/signature. No argument is consumed or changed.
+        def __new__(cls, *args: object, **kwargs: object) -> Self:  # pyright: ignore[reportInconsistentConstructor]
+            _require_clean_environment()
+            return super().__new__(cls)
+
+        @property
+        def user_agent(self) -> str:
+            # The SDK derives this header from the runtime class name.
+            return super().user_agent.replace(type(self).__name__, AsyncOpenAI.__name__, 1)
+
+    return _IsolatedAsyncOpenAI(
         api_key=api_key,
         admin_api_key=None,
         workload_identity=None,
@@ -142,7 +156,20 @@ def build_async_anthropic(
     _require_async_transport(transport)
     from anthropic import AsyncAnthropic
 
-    return AsyncAnthropic(
+    class _IsolatedAsyncAnthropic(AsyncAnthropic):
+        # Preserve the SDK constructor signature and copy behavior while
+        # refusing late ambient settings before any parent construction.
+        # Allocation accepts the SDK's arguments; inherited __init__ retains
+        # its full validation/signature. No argument is consumed or changed.
+        def __new__(cls, *args: object, **kwargs: object) -> Self:  # pyright: ignore[reportInconsistentConstructor]
+            _require_clean_environment()
+            return super().__new__(cls)
+
+        @property
+        def user_agent(self) -> str:
+            return super().user_agent.replace(type(self).__name__, AsyncAnthropic.__name__, 1)
+
+    return _IsolatedAsyncAnthropic(
         api_key=api_key,
         auth_token=None,
         credentials=None,

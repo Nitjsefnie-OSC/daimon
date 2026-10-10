@@ -113,16 +113,21 @@ URLs, Anthropic identity/configuration and Gemini credential,
 Vertex and replay settings. Errors name variables without exposing values. The
 factories never clear the process environment; explicit test keys prevent
 credential-chain fallback. Start tests in a clean environment or remove only
-the relevant variables with a scoped test fixture. Missing keys, routes or transports also fail before HTTP
-client construction. Generic proxy and certificate environment settings are
+the relevant variables with a scoped test fixture. Missing keys, routes or
+transports also fail before HTTP client construction. Generic proxy and certificate environment settings are
 ignored by the supplied clients.
 
 Close OpenAI and Anthropic clients with their normal async context manager.
 Gemini owns both clients: call `client.close()` and `await client.aio.aclose()`.
 `MockTransport` supplies both transport protocols; a different sync Gemini
-transport requires a separate `async_transport`. New factories default to one
-HTTP attempt, including Gemini models and interactions. Anthropic accepts an
-explicit `max_retries` and `timeout` for tests exercising retry behavior.
+transport requires a separate `async_transport`. OpenAI and Anthropic use SDK subclasses
+whose constructor guard also applies to
+`copy()` and `with_options()`. Late ambient settings therefore refuse the copy
+before SDK initialization; existing clients and caller-owned environments remain
+unchanged. Clean copies retain the SDK's arguments, owned HTTP clients and wire
+shape. New factories default to one HTTP attempt, including Gemini models and
+interactions. Anthropic accepts an explicit `max_retries` and `timeout` for tests
+exercising retry behavior.
 
 The existing `build_fake_anthropic`, `build_stub_anthropic` and
 `ScriptedTransport.client` inherit the isolation guard. Their test key, provider

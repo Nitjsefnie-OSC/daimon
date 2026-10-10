@@ -481,3 +481,206 @@ def test_real_environment_gemini_keys_refuse_before_value_lookup_or_sdk_construc
     sdk.assert_not_called()
     synchronous.assert_not_called()
     asynchronous.assert_not_called()
+
+
+COPY_ENTRYPOINTS = ("openai", "anthropic", "fake", "stub", "scripted")
+
+
+def _owned_copy_client(entrypoint: str, handler):
+    from daimon.testing.ma import MARouter, build_fake_anthropic, build_stub_anthropic
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    if entrypoint == "openai":
+        return build_async_openai(transport=httpx.MockTransport(handler))
+    if entrypoint == "anthropic":
+        return build_async_anthropic(transport=httpx.MockTransport(handler))
+    if entrypoint == "fake":
+        return build_fake_anthropic(handler)
+    if entrypoint == "stub":
+        return build_stub_anthropic(handler)
+    router = MARouter()
+    router.add("GET", r"/v1/models", lambda request, _match: handler(request))
+    return ScriptedTransport(router=router).client()
+
+
+@pytest.mark.parametrize("entrypoint", COPY_ENTRYPOINTS)
+@pytest.mark.parametrize("method", ["copy", "with_options"])
+@pytest.mark.parametrize("name", SDK_ENV_VARS)
+async def test_every_owned_sdk_copy_refuses_late_environment_before_parent_construction(
+    monkeypatch: pytest.MonkeyPatch, entrypoint: str, method: str, name: str
+) -> None:
+    client = _owned_copy_client(entrypoint, lambda _: httpx.Response(500))
+    environment = _NamesOnlyEnvironment(name)
+    try:
+        with (
+            patch(
+                "openai.AsyncOpenAI.__init__", side_effect=AssertionError("parent constructor")
+            ) as openai_parent,
+            patch(
+                "anthropic.AsyncAnthropic.__init__",
+                side_effect=AssertionError("parent constructor"),
+            ) as anthropic_parent,
+            monkeypatch.context() as scoped,
+        ):
+            scoped.setattr(os, "environ", environment)
+            with pytest.raises(AmbientSDKConfigurationError) as error:
+                getattr(client, method)()
+        assert name in str(error.value)
+        assert environment.value_reads == 0
+        openai_parent.assert_not_called()
+        anthropic_parent.assert_not_called()
+    finally:
+        await client.close()
+
+
+LATE_DRIVER_SETTINGS = (
+    ("openai", "OPENAI_ADMIN_KEY", "synthetic-admin"),
+    ("openai", "OPENAI_WEBHOOK_SECRET", "synthetic-webhook"),
+    ("openai", "OPENAI_ORG_ID", "synthetic-org"),
+    ("openai", "OPENAI_PROJECT_ID", "synthetic-project"),
+    ("openai", "OPENAI_CUSTOM_HEADERS", "X-Poison: synthetic-header"),
+    *(
+        (entrypoint, name, value)
+        for entrypoint in ("anthropic", "fake", "stub", "scripted")
+        for name, value in (
+            ("ANTHROPIC_WEBHOOK_SIGNING_KEY", "synthetic-webhook"),
+            ("ANTHROPIC_CUSTOM_HEADERS", "X-Poison: synthetic-header"),
+        )
+    ),
+)
+
+
+@pytest.mark.parametrize("entrypoint,name,value", LATE_DRIVER_SETTINGS)
+async def test_real_driver_copies_refuse_late_ambient_settings_without_requests(
+    monkeypatch: pytest.MonkeyPatch, entrypoint: str, name: str, value: str
+) -> None:
+    from mux.drivers.anthropic.transport import mutation_client, single_attempt_mutation
+    from mux.drivers.openai.transport import SDKTransport
+
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    client = _owned_copy_client(entrypoint, handle)
+    retry_budget = client.max_retries
+    try:
+        monkeypatch.setenv(name, value)
+        with pytest.raises(AmbientSDKConfigurationError) as error:
+            if entrypoint == "openai":
+                SDKTransport(client)
+            else:
+                with single_attempt_mutation():
+                    mutation_client(client)
+        assert name in str(error.value) and value not in str(error.value)
+        assert not calls
+        assert client.max_retries == retry_budget
+        assert client._custom_headers == {}
+        assert client._client._trust_env is False
+        if entrypoint == "openai":
+            assert (
+                client.admin_api_key
+                is client.webhook_secret
+                is client.organization
+                is client.project
+                is None
+            )
+        else:
+            assert client.webhook_key is None
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("entrypoint", COPY_ENTRYPOINTS)
+async def test_clean_copies_preserve_native_wire_owner_and_retry_budgets(entrypoint: str) -> None:
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+    client = _owned_copy_client(entrypoint, handle)
+    try:
+        copies = (client.copy(), client.with_options())
+        await client.models.list()
+        for copied in copies:
+            assert type(copied) is type(client)
+            assert copied._client is client._client
+            assert copied.max_retries == client.max_retries
+            assert copied.timeout == client.timeout
+            await copied.models.list()
+        assert len(calls) == 3
+        original = calls[0]
+        for request in calls[1:]:
+            assert (request.method, request.url, request.content, request.headers) == (
+                original.method,
+                original.url,
+                original.content,
+                original.headers,
+            )
+        native_name = "AsyncOpenAI" if entrypoint == "openai" else "AsyncAnthropic"
+        assert original.headers["User-Agent"].startswith(native_name + "/Python ")
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("entrypoint", COPY_ENTRYPOINTS)
+async def test_clean_real_driver_copy_keeps_single_attempt_and_original_client(
+    entrypoint: str,
+) -> None:
+    from mux.drivers.anthropic.transport import mutation_client, single_attempt_mutation
+    from mux.drivers.openai.transport import SDKTransport
+
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    client = _owned_copy_client(entrypoint, handle)
+    budget = client.max_retries
+    try:
+        if entrypoint == "openai":
+            driver = SDKTransport(client)
+            assert driver._client.max_retries == 0
+            assert driver._client._client is client._client
+            await driver.request("GET", "/models")
+        else:
+            with single_attempt_mutation():
+                copied = mutation_client(client)
+                assert copied.max_retries == 0 and copied._client is client._client
+                await copied.models.list()
+            assert mutation_client(client) is client
+        assert len(calls) == 1
+        assert client.max_retries == budget
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted"])
+@pytest.mark.parametrize("name", SDK_ENV_VARS)
+def test_shared_builder_preflight_never_fetches_environment_values(
+    monkeypatch: pytest.MonkeyPatch, entrypoint: str, name: str
+) -> None:
+    # Import the shared entrypoints before the names-only environment is active.
+    from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    environment = _NamesOnlyEnvironment(name)
+    with (
+        patch("anthropic.AsyncAnthropic.__init__") as parent,
+        patch("httpx.AsyncClient") as http_client,
+        monkeypatch.context() as scoped,
+    ):
+        scoped.setattr(os, "environ", environment)
+        with pytest.raises(AmbientSDKConfigurationError):
+            if entrypoint == "fake":
+                build_fake_anthropic(lambda _: httpx.Response(500))
+            elif entrypoint == "stub":
+                build_stub_anthropic()
+            else:
+                ScriptedTransport().client()
+    assert environment.value_reads == 0
+    parent.assert_not_called()
+    http_client.assert_not_called()
