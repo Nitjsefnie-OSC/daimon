@@ -142,7 +142,7 @@ async def test_removing_pending_does_not_fake_a_default_pass(manifest: DefaultMa
         replace(instance, pending=None),
     )
     assert result.status == "fail"
-    assert result.evidence == ("probe raised ValueError",)
+    assert result.evidence == ("probe raised UnsupportedCapability",)
     instance.transport.assert_consumed()
 
 
@@ -154,7 +154,7 @@ async def test_full_binary_default_skill_is_rejected_without_provider_io(
     bundle = next(s.upload for s in manifest.skills if s.name == "pymc-artifact-style")
     assert sum(len(file.content) for file in bundle.files) > MAX_BUNDLE_BYTES
     assert any(file.path.endswith(".ttf") for file in bundle.files)
-    with pytest.raises(ValueError, match="inline size limit"):
+    with pytest.raises(UnsupportedCapability, match="skill_bundle_gcs_deployment"):
         await instance.driver.skills.create(instance.scope, bundle, key="binary-default")
     instance.transport.assert_consumed()
 

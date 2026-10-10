@@ -25,6 +25,7 @@ from mux.contracts.resources import (
     SkillVersion,
 )
 from mux.contracts.usage import UsageObservation
+from mux.drivers.gemini.skill_deployment import GCSBundleDeployment
 from mux.drivers.gemini.transport import Object
 
 
@@ -55,6 +56,9 @@ class SkillRecord:
     skill: Skill
     bundles: dict[str, SkillUpload] = field(default_factory=dict[str, SkillUpload])
     versions: dict[str, SkillVersion] = field(default_factory=dict[str, SkillVersion])
+    deployments: dict[str, GCSBundleDeployment] = field(
+        default_factory=dict[str, GCSBundleDeployment]
+    )
 
 
 @dataclass

@@ -6,9 +6,32 @@ resources; no key discovery, SDK client or live invocation is installed.
 
 F1 currently returns typed `ADAPTER_DEPENDENCY` before provisioning. The full
 authored default includes the complete `pymc-artifact-style` skill, with binary
-fonts/images and a bundle larger than the driver's text-only 2 MiB limit.
-The other ten complete default skill bundles are feasible offline. A text-only
-subset does not establish equivalence to all eleven complete bundles.
+fonts/images beyond native inline limits. The driver supports an explicit
+`skill_bundle_publisher` implementing `SkillBundlePublisher`: it receives every
+original file byte and returns a `GCSBundleDeployment` for a versioned directory.
+The receipt binds tenant, account, provider account, version and the exact sorted
+path/SHA-256 manifest. It is validated before acknowledgement and again when a
+pin is mounted; storage persists it across restart. Each directory mounts at
+`.agents/skills/<skill-id>`, retaining every relative path and binary asset.
+Create/publish replays do not publish twice; old pins retain their old directory.
+
+The official [environment documentation](https://ai.google.dev/gemini-api/docs/agent-environment)
+(`source-G-env.txt:447-490,1449-1450`) defines raw-text inline sources at 1 MiB
+per file and 2 MiB total, and GCS directory sources up to 2 GB. The driver retains
+a 64 MiB bundle bound for host storage. Combined inline mounts respect native
+limits. With no publisher, binary/oversize skill bundles refuse explicitly with
+`UnsupportedCapability("skill_bundle_gcs_deployment")`; ordinary text bundles
+retain their existing inline representation. External bundles still require a
+UTF-8 root SKILL.md, safe canonical paths and no file/directory collisions.
+
+The host must supply an authorized, idempotent publisher, immutable retention
+and provider-readable GCS access; the driver discovers no bucket/credentials
+and does not make content public. Its receipt is the publisher's attestation,
+not an independent remote download verification. Offline tests carry all eleven
+real default bundles byte-for-byte through a scripted publisher and the actual
+SDK over MockTransport. They certify compiler/pin behavior, not a live GCS
+deployment. F1's adapter supplies no publisher, so its dependency remains
+honest. A text-only subset never establishes full default parity.
 
 The Gemini API supports remote MCP over streamable HTTP, with optional headers
 (`source-G-runtime.txt:587-613`), and filesystem-native skills under
@@ -18,7 +41,7 @@ does not provide. The shared F1 session also needs the driver's required explici
 binding/thread extension. All six logical builtins route through native
 `code_execution` (`source-G-runtime.txt:231,242-243`); native filesystem tool
 identities are not modelled by the driver. The remaining gaps concern the
-adapters for complete skills, authenticated MCP and session binding.
+adapters for authorized skill publication, authenticated MCP and session binding.
 
 No upstream deployment evidence or successful default turn is fabricated.
 Removing the pending declaration cannot pass the current full scenario.
@@ -30,5 +53,6 @@ tapes fail. F1 is separate from C01–C18; the existing Gemini
 matrix remains eight PASS and ten typed PENDING. No full live certificate exists.
 
 Future live F2 requires an explicit lead GO, the pinned key file and reviewed
-budget rates. Only `gemini-3.5-flash-lite` may be selected; key appearance alone
-does not authorize a call. This adapter ships no live path.
+budget rates. The primary is `gemini-3.8-flash`, with fallback only after a 503 to
+`gemini-flash-latest`, then `gemini-3.5-flash-lite`; key appearance alone does not
+authorize a call. This adapter ships no live path.

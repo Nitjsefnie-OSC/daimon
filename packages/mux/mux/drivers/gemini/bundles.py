@@ -6,6 +6,7 @@ from pydantic import JsonValue
 
 from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.resources import SkillUpload, WorkspaceSource
+from mux.drivers.gemini.skill_deployment import validate_deployment
 from mux.drivers.gemini.storage import Records, SkillRecord, owner
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE
@@ -13,6 +14,8 @@ from mux.state.operations import request_digest
 
 SKILL_SOURCE = "gemini.inline"
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024
+MAX_INLINE_FILE_BYTES = 1024 * 1024
+MAX_DEPLOYED_BUNDLE_BYTES = 64 * 1024 * 1024
 
 
 def relative_path(path: str) -> str:
@@ -38,7 +41,7 @@ def text_bytes(body: bytes) -> str:
         raise UnsupportedCapability(("binary_inline_source",), INLINE_REUSE.profile_id) from None
 
 
-def validate_bundle(bundle: SkillUpload) -> str:
+def validate_bundle(bundle: SkillUpload, *, external: bool = False) -> str:
     if not bundle.files or len(bundle.files) > 256:
         raise ValueError("skill bundle needs between one and 256 files")
     paths = [relative_path(file.path) for file in bundle.files]
@@ -46,10 +49,26 @@ def validate_bundle(bundle: SkillUpload) -> str:
         raise ValueError("skill paths must be canonical")
     if len(set(paths)) != len(paths) or "SKILL.md" not in paths:
         raise ValueError("skill bundle needs unique paths and a root SKILL.md")
-    if sum(len(file.content) for file in bundle.files) > MAX_BUNDLE_BYTES:
-        raise ValueError("skill bundle exceeds the inline size limit")
-    for file in bundle.files:
-        text_bytes(file.content)
+    if any(str(parent) in paths for path in paths for parent in PurePosixPath(path).parents):
+        raise ValueError("skill bundle file paths overlap")
+    try:
+        next(file.content for file in bundle.files if file.path == "SKILL.md").decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("root SKILL.md must be UTF-8 text") from None
+    if sum(len(file.content) for file in bundle.files) > MAX_DEPLOYED_BUNDLE_BYTES:
+        raise ValueError("skill bundle exceeds the deployment size limit")
+    if not external:
+        if sum(len(file.content) for file in bundle.files) > MAX_BUNDLE_BYTES or any(
+            len(file.content) > MAX_INLINE_FILE_BYTES for file in bundle.files
+        ):
+            raise UnsupportedCapability(("skill_bundle_gcs_deployment",), INLINE_REUSE.profile_id)
+        for file in bundle.files:
+            try:
+                text_bytes(file.content)
+            except UnsupportedCapability:
+                raise UnsupportedCapability(
+                    ("skill_bundle_gcs_deployment",), INLINE_REUSE.profile_id
+                ) from None
     canonical = bundle.model_copy(
         update={"files": tuple(sorted(bundle.files, key=lambda f: f.path))}
     )
@@ -76,6 +95,13 @@ def skill_sources(
         bundle = record.bundles.get(pin.version)
         if bundle is None or (pin.digest is not None and pin.digest != pin.version):
             raise ProviderError("conflict", retryable=False, native_code="skill_pin_mismatch")
+        deployment = record.deployments.get(pin.version)
+        if deployment is not None:
+            validate_deployment(deployment, scope, account, pin.version, bundle)
+            sources.append(
+                {"type": "gcs", "source": deployment.source, "target": f".agents/skills/{pin.id}"}
+            )
+            continue
         for file in bundle.files:
             sources.append(
                 {
@@ -118,9 +144,20 @@ def inline_files(
 def validate_targets(sources: list[JsonValue]) -> None:
     """Reject ambiguous mounts, including workspace-relative aliases."""
     targets: list[str] = []
+    inline_bytes = 0
     for source in sources:
         if not isinstance(source, dict):
             raise ValueError("expected a workspace source object")
+        if source.get("type") == "inline":
+            content = source.get("content")
+            if not isinstance(content, str):
+                raise ValueError("expected inline source text")
+            size = len(content.encode("utf-8"))
+            inline_bytes += size
+            if size > MAX_INLINE_FILE_BYTES or inline_bytes > MAX_BUNDLE_BYTES:
+                raise UnsupportedCapability(
+                    ("skill_bundle_gcs_deployment",), INLINE_REUSE.profile_id
+                )
         path = source.get("target")
         if not isinstance(path, str):
             raise ValueError("expected a workspace source target")
