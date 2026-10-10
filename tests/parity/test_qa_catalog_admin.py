@@ -238,8 +238,11 @@ async def test_a_remote_per_model_bind_is_refused_before_any_forwarding(
     where: str, owned: _Owned
 ) -> None:
     """One routed bind on either factory points elsewhere: refused, nothing connects."""
-    from daimon.core._models import CredentialRequest  # pyright: ignore[reportPrivateUsage]
-    from daimon.testing.headless_bindings import BindingRefused, isolated_anthropic
+    from daimon.testing.headless_bindings import (
+        BindingRefused,
+        credential_request_route,
+        isolated_anthropic,
+    )
     from sqlalchemy import event
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -248,7 +251,7 @@ async def test_a_remote_per_model_bind_is_refused_before_any_forwarding(
     )
     remote_connects: list[object] = []
     event.listen(remote.sync_engine, "connect", lambda *_: remote_connects.append(1))
-    routed = _NeverOpened(bind=owned.factory.kw["bind"], binds={CredentialRequest: remote})
+    routed = _NeverOpened(bind=owned.factory.kw["bind"], binds=credential_request_route(remote))
 
     class _Product:
         anthropic = isolated_anthropic(lambda request: httpx.Response(500))
