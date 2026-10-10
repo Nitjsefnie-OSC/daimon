@@ -152,6 +152,65 @@ def test_picker_preselects_only_available_requested_repo(
     assert 'value="2"' not in page.body.decode()
 
 
+@pytest.mark.parametrize(
+    ("requested_repo", "already_granted", "expected"),
+    [
+        ("ACME/DATA", False, True),
+        ("acme/other", False, False),
+        (None, False, False),
+        ("ACME/DATA", True, False),
+    ],
+)
+def test_agent_editor_preselects_requested_repo_in_add_dialog(
+    requested_repo: str | None, already_granted: bool, expected: bool
+) -> None:
+    installation = oauth_github._Installation(
+        id=1,
+        owner_id=1,
+        owner_login="acme",
+        repository_selection="selected",
+        repos=(oauth_github._Repo(1, 1, 1, "acme/data", True),),
+    )
+    grants = (
+        [
+            github_access.AgentRepo(
+                repo_id=1,
+                full_name="acme/data",
+                scope="agent",
+                max_access="read",
+                baseline_access="read",
+                ceiling_access="read",
+                staged=False,
+                status="active",
+                added_by_account_id=None,
+                added_at=datetime.now(UTC),
+                granted_by_account_id=None,
+                granted_at=datetime.now(UTC),
+            )
+        ]
+        if already_granted
+        else []
+    )
+    page = oauth_github._agent_editor_page(
+        root="https://mcp.test",
+        state="state",
+        invitation_hash="invitation",
+        secret="secret",
+        agent_name="Test Agent",
+        workspace="Test Server",
+        platform="discord",
+        grants=grants,
+        installations=[installation],
+        snapshot="snapshot",
+        cancel_url="https://discord.com",
+        install_url="https://github.com/apps/test/installations/new",
+        requested_repo=requested_repo,
+    )
+    dialog = page.body.decode().split('<dialog id="repo-picker"', 1)[1].split("</dialog>", 1)[0]
+    assert ('class="gh-picker-toggle" type="checkbox" checked>' in dialog) is expected
+    assert ('data-name="acme/data"' in dialog) is not already_granted
+
+
 def test_done_page_names_github_and_discord_with_marks() -> None:
     page = oauth_github._done_page(
         count=2,
