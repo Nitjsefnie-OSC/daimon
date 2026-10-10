@@ -1635,6 +1635,27 @@ async def _consume_with_reconnect(
                 reason = normalized_termination_reason(normalized)
                 if reason is not None:
                     normalized_terminal_cell[0] = reason
+                    if (
+                        normalized.native.provider != "anthropic"
+                        and normalized.thread_id is None
+                        and reason.is_failure
+                    ):
+                        # SDK-shaped display records are not foreign-provider
+                        # outcome truth. Preserve Anthropic's legacy finalizer,
+                        # including its retries_exhausted compatibility, while
+                        # retaining the admitted provider's authoritative end.
+                        state_cell[0] = dataclasses.replace(
+                            state_cell[0],
+                            termination=reason,
+                            error=TurnError(
+                                kind="upstream",
+                                message=(
+                                    "provider terminated the session"
+                                    if reason == TerminationReason.SESSION_TERMINATED
+                                    else "provider ended the turn with an error"
+                                ),
+                            ),
+                        )
             if event.type == "session.status_terminated":
                 return
             # Unknown root idle reasons stay opaque in normalization. The

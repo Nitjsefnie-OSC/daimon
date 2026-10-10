@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add opt-in offline host clock and native-root completion capture helpers, keeping source completion deadlines separate from invocation cleanup and preserving independently acknowledged journal authority.
 
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
+- Preserve authoritative OpenAI and Gemini root failure reasons in terminal delivery and stored turn outcomes; Anthropic completion compatibility is unchanged.
 
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Document the existing per-tenant table-rendering opt-in for Anthropic, OpenAI and Gemini host turns, retaining plain-text defaults.
