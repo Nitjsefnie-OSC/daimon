@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add explicit scoped OpenAI host resource edges for skill-preserving channel copies and Add-skill, retaining checked bundles before attachment and publishing immutable native agents under local catalog CAS; preserve Anthropic request bytes.
 
 - Retain scoped OpenAI/Gemini agent revisions, checked skill bundles and upload ownership in an additive host catalog.
+- Construct OpenAI turn runtimes for explicitly configured channels from scoped operator deployment plans, with deferred credential access and durable journal/usage state.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.
