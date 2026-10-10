@@ -1351,3 +1351,8 @@ that is distinct from a native successful outcome. Owner callbacks and the
 shared oracle supply independent admission, workspace, principal, journal and
 charge evidence. Application imports, default queues and provider pending
 declarations are unchanged; a raw platform control does not certify C01.
+An explicitly imported Gemini SDK conformance component checks cancellation/EOF
+occupancy and usage revision replay on MockTransport. Tool/mount updates, native
+vaults and deletion keep their typed limits; live certificates and exact-spend
+settlement are separate. See
+`packages/mux/mux/drivers/gemini/CONFORMANCE-SDK.md`.

@@ -659,3 +659,8 @@ OpenAI interaction preparation has an actual SDK proof composing exact skill
 upload, immutable hosted pin, remote MCP, an uploaded file and an unavailable
 function action. A file mount does not establish a repository checkout; canonical
 C11 remains PENDING while those scenario requirements are unavailable.
+The explicit Gemini `offline_sdk_adapter` component proves the unchanged
+C06/C07 cancellation and usage oracles through actual SDK request/response bytes.
+It retains C08/C09 refusals, declares other component envelopes PENDING and leaves
+the standard offline matrix unchanged. No live settlement or host factory is
+installed. See [SDK conformance component](mux/drivers/gemini/CONFORMANCE-SDK.md).

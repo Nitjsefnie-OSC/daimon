@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an explicitly imported Discord C01 conformance probe over the existing per-thread mention queue and caller batching, with owner-controlled root barriers and raw platform evidence.
 - Add an explicitly imported Discord C01 conformance probe through normal ingress, tenant-slot admission, per-thread queues and caller batching, with owner-controlled root barriers, production release and mutation-sensitive raw platform evidence.
 - Add explicitly imported Slack and Teams C01 platform conformance hooks that retain actual orchestration, caller batching, file metadata and queue cleanup without changing application defaults.
+- Add an explicit Gemini MockTransport SDK conformance component for cancellation and usage revisions, retaining typed next-turn mutation/vault limits and the standard offline matrix.
 
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Verify explicitly selected OpenAI native session spend caps before host input,
