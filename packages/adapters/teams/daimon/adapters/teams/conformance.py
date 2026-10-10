@@ -87,6 +87,7 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
     prior = app.__dict__.get("_run_turn_guarded")
     batches: list[Mapping[str, object]] = []
     threads: list[Mapping[str, object]] = []
+    finished_callbacks: set[str] = set()
     active: dict[str, int] = {}
     peak: dict[str, int] = {}
     barrier: AdmissionBarrier | None = None
@@ -115,6 +116,7 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
             )
             batch["callback_returned"] = True
         finally:
+            finished_callbacks.add(inbound.activity_id)
             active[key] -= 1
 
     app._run_turn_guarded = turn  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
@@ -148,7 +150,7 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                             ),
                             "queued_message_ids": tuple(i.activity_id for i in pending),
                             "claimed_while_queued": key in app._processing,  # pyright: ignore[reportPrivateUsage]
-                            "first_callback_finished_while_queued": task.done(),
+                            "first_callback_finished_while_queued": first_id in finished_callbacks,
                         }
                     )
                     barrier.release.set()
@@ -160,8 +162,6 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                     waiter.cancel()
                     task.cancel()
                     await asyncio.gather(task, waiter, return_exceptions=True)
-                    app._processing.discard(key)  # pyright: ignore[reportPrivateUsage]
-                    app._pending.pop(key, None)  # pyright: ignore[reportPrivateUsage]
     finally:
         if prior is None:
             del app.__dict__["_run_turn_guarded"]

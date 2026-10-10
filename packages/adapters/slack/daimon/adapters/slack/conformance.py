@@ -95,6 +95,7 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
     prior = app.__dict__.get("_run_thread_turn")
     batches: list[Mapping[str, object]] = []
     threads: list[Mapping[str, object]] = []
+    finished_callbacks: set[str] = set()
     active: dict[str, int] = {}
     peak: dict[str, int] = {}
     barrier: AdmissionBarrier | None = None
@@ -141,6 +142,7 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
             )
             batch["callback_returned"] = True
         finally:
+            finished_callbacks.add(str(event.get("ts") or ""))
             active[thread_id] -= 1
 
     app._run_thread_turn = turn  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
@@ -186,7 +188,7 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                             ),
                             "queued_message_ids": tuple(str(e["ts"]) for e in pending),
                             "claimed_while_queued": thread_id in app._processing,  # pyright: ignore[reportPrivateUsage]
-                            "first_callback_finished_while_queued": task.done(),
+                            "first_callback_finished_while_queued": first_ts in finished_callbacks,
                         }
                     )
                     barrier.release.set()
@@ -198,10 +200,6 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                     waiter.cancel()
                     task.cancel()
                     await asyncio.gather(task, waiter, return_exceptions=True)
-                    # Normal orchestration owns release/settlement. Dedicated
-                    # app makes these leftovers attributable only to this probe.
-                    app._processing.discard(thread_id)  # pyright: ignore[reportPrivateUsage]
-                    app._pending.pop(thread_id, None)  # pyright: ignore[reportPrivateUsage]
     finally:
         if prior is None:
             del app.__dict__["_run_thread_turn"]

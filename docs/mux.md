@@ -1340,7 +1340,10 @@ and default admission, queues and rendering are unchanged.
 The explicitly imported `daimon.adapters.slack.conformance` and
 `daimon.adapters.teams.conformance` probes use dedicated idle apps and normal
 platform orchestration, including real host cap/protection/setup reads and
-queue settlement. An owner-controlled native-root barrier holds the first
+queue settlement and final release; the probe does not clear production state.
+Completion/overlap are observed at the selected callback boundary. Mutation
+controls bypass real busy-thread routing or merge callers and fail the same
+independent platform fixture. An owner-controlled native-root barrier holds the first
 turn while authored follow-ups queue. Slack keeps each caller's first trigger
 and composed file IDs; Teams keeps the last reply activity, earlier composed
 IDs and ordered file names/kinds. Facts retain whether the callback returned;

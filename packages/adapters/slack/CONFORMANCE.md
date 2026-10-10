@@ -41,3 +41,9 @@ thread, team, web client, content override and files. The probe temporarily
 captures `_run_thread_turn`. Caller batches retain their first event, composed
 text and ordered file IDs. Actual SDK reaction requests and removals use the
 original event timestamp, including when it differs from the message timestamp.
+
+Production orchestration alone owns thread claims, queue settlement and final
+release; the probe does not discard processing state or clear pending inputs.
+Callback completion/overlap are observed at the production-selected callback
+boundary. In-process mutations bypass the real busy-thread branch or collapse
+cross-author grouping, and the same independent platform fixture rejects both.

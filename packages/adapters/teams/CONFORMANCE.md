@@ -42,3 +42,9 @@ routing and continuation dispatch. Teams replies to each caller's last message
 and retains earlier `composed_ids`, every `message_id` and ordered files.
 The callback receives full original file objects; returned facts expose only
 file kind/name and omit download URLs.
+
+Production orchestration alone owns thread claims, queue settlement and final
+release; the probe does not discard processing state or clear pending inputs.
+Callback completion/overlap are observed at the production-selected callback
+boundary. In-process mutations bypass the real busy-thread branch or collapse
+cross-author grouping, and the same independent platform fixture rejects both.
