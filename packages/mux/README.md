@@ -589,3 +589,48 @@ the bearer and removes the isolated schema. Run with a lane-owned local
 scripted, and MCP backing data is synthetic: this is offline composition
 evidence, not live F2 certification. It opens no tunnel and reads no provider
 key. Live Anthropic F2 still needs a disposable key and separate lead GO.
+
+The host may use `daimon.core.stores.neutral_catalog.PostgresNeutralCatalog` for durable alternate-backend agent revisions and retained skill bundles with upload ownership. Its local revision is separate from native revisions: drivers continue to refuse unsupported native mutation. Tenant/account/provider-workspace boundaries and immutable exact-version bundles are enforced in the store; host policy and native calls remain with the resource edge. No mux dependency on this host store is introduced.
+
+Host skill authoring decisions live in `daimon.core.skills.ownership` and
+`daimon.core.skills.service`. The service accepts a tenant-authorized host
+resource/ledger edge and opaque agent values; it has no SDK client or native
+storage columns. Refusals precede upload, and the host records the upload before
+attachment so a retry can reuse it. The default Anthropic edge preserves native
+requests. This extraction does not provide missing alternate-provider mutation,
+owned-bundle download or storage itself; the explicit host composition below
+supplies retained bundles and immutable native replacement for OpenAI.
+
+Explicit OpenAI host resource operations now use
+`daimon.core.neutral_resources.NeutralResourceHost` over the retained catalog.
+The caller injects an authorized driver, tenant/account Scope, project, database
+sessions and claimed operation key. `add_host_agent_skill` requires the caller's
+fresh policy/pin gate; `fork_host_agent` repeats the existing FORK policy and
+queues the copy's face. `set_channel_rule(resource_host=...)` uses this edge for
+its copy and locked policy write, without an Anthropic resource request.
+
+An Add-skill upload is committed as an exact checked bundle before attachment.
+Attachment creates a new immutable native agent and publishes it under the
+catalog's local CAS; old agent refs and already-bound sessions are preserved.
+Catalog publication failures retain the native ref and log it for reconciliation.
+A lost CAS can return the committed winner's identity on a same-key replay,
+including an identity retained by a historical revision; it never proves the
+replacement unpublished. This edge performs no automatic CAS cleanup without a
+fenced identity/history proof. A restarted
+Add-skill operation locates owned retained versions and reads the actual native
+latest version; it never guesses from version ordering or creates another upload
+after a known attachment failure. The caller owns operation claiming and unknown
+native-upload reconciliation; this helper adds no retry loop or operation journal.
+
+Forks preserve shared library pins, upload source-owned bundles under distinct
+ids for the copy, omit foreign-agent skills and report failed copies. Owned
+unversioned pins require an injected scoped resolver for the native default
+version, which can differ from the newest version. Missing ownership, retained
+bytes or resolution refuses before mutation. Native agent revision fingerprints
+remain descriptive: session preparation uses unpinned native `Revision(local=0)`,
+never the catalog CAS revision or that fingerprint as a provider precondition.
+
+These helpers require the explicit persistent-workspace OpenAI profile and
+catalog provisioning. Default Anthropic calls use their existing edge and native
+bytes. Gemini host resource operations remain pending G2; live host/runtime
+resolver wiring and model execution are separate from these offline SDK proofs.

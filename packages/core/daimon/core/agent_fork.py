@@ -42,7 +42,6 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_NAME,
     build_metadata,
-    skill_owner_candidates,
     strip_tenant_prefix,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -50,12 +49,15 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_agent, retrieve_agent
+from daimon.core.neutral_resources import HostAgentCopy, NeutralResourceHost
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
+from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_skills
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
+from mux.contracts.resources import Agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _FORK_COPY_FIELDS = frozenset(
@@ -114,26 +116,40 @@ async def _split_scoped_skills(
         agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
         for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
     ]
-    split = _SkillSplit([], [], [])
+    attached: list[AttachedSkillOwnership] = []
     for skill in skills:
         skill_id = str(skill.get("skill_id"))
         body = body_by_id.get(skill_id)
         upload = upload_by_id.get(skill_id)
-        owners = skill_owner_candidates(
-            body or "",
-            stored_owner=upload.agent_name if upload is not None else None,
-            agent_names=agent_names,
+        pinned = skill.get("version")
+        attached.append(
+            AttachedSkillOwnership(
+                id=skill_id,
+                custom=skill.get("type") == "custom",
+                title=body,
+                version=str(pinned) if pinned else None,
+                upload_owner=upload.agent_name if upload is not None else None,
+            )
         )
-        if not owners:
-            split.kept.append(skill)
-        elif owners == frozenset({source_name}) and body is not None:
-            pinned = skill.get("version")
-            latest = rows[skill_id].latest_version
-            version = str(pinned) if pinned and pinned != "latest" else latest
-            split.own.append(_OwnSkill(skill_id, body, version, upload))
-        else:
-            split.dropped.append(body or skill_id)
-    return split
+    partition = partition_copy_skills(attached, source_name=source_name, agent_names=agent_names)
+    own: list[_OwnSkill] = []
+    for skill in partition.own:
+        # The old consumer read latest_version only for source-owned skills.
+        # Shared/catalog rows may be SDK-accepted partial records.
+        latest = rows[skill.id].latest_version
+        own.append(
+            _OwnSkill(
+                skill.id,
+                skill.title,
+                skill.version if skill.version is not None else latest,
+                upload_by_id.get(skill.id),
+            )
+        )
+    return _SkillSplit(
+        [skills[position] for position in partition.kept_positions],
+        own,
+        list(partition.dropped),
+    )
 
 
 async def _no_recheck(_agent: BetaManagedAgentsAgent) -> None:
@@ -333,4 +349,58 @@ async def fork_agent(
     )
 
 
-__all__ = ["AgentCopy", "copy_agent", "fork_agent"]
+async def fork_host_agent(
+    host: NeutralResourceHost,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    source_name: str,
+    new_name: str,
+    subject: Subject,
+    default_agent_name: str | None,
+    public_url: str | None = None,
+    extra_metadata: Mapping[str, str] | None = None,
+) -> HostAgentCopy:
+    """The same fork policy, with explicit neutral catalog/native resources."""
+    tenant_id = uuid.UUID(host.scope.tenant_id)
+    source = await host.find(source_name)
+    if source is None:
+        raise DaimonError(f"There is no agent named {source_name} to copy.")
+
+    async def recheck(agent: Agent) -> None:
+        async with sessionmaker() as session:
+            try:
+                policy = await load_access_policy(session, tenant_id=tenant_id)
+            except AccessPolicyUnreadable as exc:
+                raise DaimonError("The access policy can't be read.") from exc
+        decision = authorize(
+            policy,
+            subject=subject,
+            action=Action.FORK,
+            agent=build_agent_ref(agent.spec.name, agent.spec.metadata or {}),
+        )
+        if decision.reason == "agent_has_rule":
+            raise DaimonError(
+                f"{source_name} has an agent rule limiting where it runs, so it can't be copied."
+            )
+        if not decision:
+            raise DaimonError("Only a workspace or server admin can copy an agent.")
+
+    await recheck(source.revision.agent)
+    made = await host.fork(
+        source.revision.catalog_id,
+        new_name,
+        recheck=recheck,
+        public_url=public_url,
+        extra_metadata=extra_metadata,
+    )
+    queue_agent_face(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=new_name,
+        metadata=made.agent.metadata,
+        default_agent_name=default_agent_name,
+    )
+    return made
+
+
+__all__ = ["AgentCopy", "copy_agent", "fork_agent", "fork_host_agent"]

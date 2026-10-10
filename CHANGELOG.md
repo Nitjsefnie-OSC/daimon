@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
 
 - Reject unbound authentication on every native OpenAI MCP tool before credential resolution or session POST, including secondary and anonymous-only servers; verify secret-free actual SDK DEBUG logs.
+- Retain alternate native agent identities on catalog publication failures, including same-key committed winners and historical pins; compare optional tool fields after native normalization without changing authored intent.
+
+- Add explicit scoped OpenAI host resource edges for skill-preserving channel copies and Add-skill, retaining checked bundles before attachment and publishing immutable native agents under local catalog CAS; preserve Anthropic request bytes.
+
+- Retain scoped OpenAI/Gemini agent revisions, checked skill bundles and upload ownership in an additive host catalog.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.
@@ -44,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Render neutral OpenAI/Gemini drafts on Teams progress cards and omit unverified provider costs while preserving Anthropic behavior.
 
 - Render neutral OpenAI/Gemini drafts on Discord progress cards while preserving Anthropic output and omitting unverified provider costs.
+- Extract provider-independent skill ownership and Add-skill orchestration, preserving the default Anthropic requests and upload recovery behavior.
 
 - Add explicit OpenAI Agents hosted container-size and integer-cent session spend controls; refresh the driver contract audit against official documentation fetched on 2026-10-10.
 - Alias opaque Gemini probe identities before recording and settle the latest interaction usage revision, including export failures.
