@@ -635,6 +635,14 @@ response and thought tokens are combined into inclusive neutral output tokens.
 Unsupported capabilities fail admission or refuse before provider mutation.
 Existing default resolution continues to select Anthropic.
 
+Gemini workspace snapshots accept 40 MiB binary members within a 64 MiB archive
+budget, checked on both received and expanded bytes. Snapshot member reads and
+artifact downloads use chunks of at most 64 KiB; unsafe or incomplete archives
+still fail with typed errors. Ordinary artifact uploads retain their separate
+16 MiB cap. The host's 20 MiB compressed checkpoint-bundle limit is unchanged:
+the snapshot budget governs expanded workspace files, rather than the bundle
+delivered to a successor.
+
 Required actions exclude saved calls with matching results, including filesystem
 calls automatically executed in the environment. Open steps from in-progress
 snapshots enter authoritative history only after the interaction pauses or ends.

@@ -174,6 +174,12 @@ Downloads verify the discovered content digest; unavailable or changed files
 produce typed errors. Unsafe, oversized or malformed archives are refused without
 extracting files to disk. Native vaults and workspace-file deletion are unsupported.
 
+Workspace snapshot members use the snapshot's 64 MiB budget, allowing a 40 MiB
+file even though ordinary artifact uploads retain their separate 16 MiB limit.
+Both the received archive and its expanded tar contents remain capped at 64 MiB;
+member reads and artifact downloads use chunks of at most 64 KiB. This snapshot
+limit does not change the host's 20 MiB compressed checkpoint-bundle policy.
+
 ### OpenAI driver core
 
 `mux.drivers.openai.OpenAIDriver` is an explicitly constructed, unwired Agents API

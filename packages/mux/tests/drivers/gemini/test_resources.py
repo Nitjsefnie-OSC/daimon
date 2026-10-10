@@ -394,10 +394,10 @@ def test_snapshot_enforces_compressed_and_expanded_limits(monkeypatch: pytest.Mo
     with pytest.raises(ProviderError, match="snapshot_too_large"):
         parse_snapshot(archive)
     monkeypatch.setattr("mux.drivers.gemini.resources.MAX_SNAPSHOT_BYTES", 20000)
-    monkeypatch.setattr("mux.drivers.gemini.resources.MAX_ARTIFACT_BYTES", 999)
+    monkeypatch.setattr("mux.drivers.gemini.resources.MAX_SNAPSHOT_MEMBER_BYTES", 999)
     with pytest.raises(ProviderError, match="invalid_snapshot"):
         parse_snapshot(archive)
-    monkeypatch.setattr("mux.drivers.gemini.resources.MAX_ARTIFACT_BYTES", 1000)
+    monkeypatch.setattr("mux.drivers.gemini.resources.MAX_SNAPSHOT_MEMBER_BYTES", 1000)
     monkeypatch.setattr("mux.drivers.gemini.resources.MAX_SNAPSHOT_BYTES", 1999)
     with pytest.raises(ProviderError, match="snapshot_too_large"):
         parse_snapshot(snapshot({"a": b"a" * 1000, "b": b"b" * 1000}))

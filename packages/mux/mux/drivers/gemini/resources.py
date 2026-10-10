@@ -20,6 +20,8 @@ from mux.state.operations import request_digest
 
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+# Workspace members may exceed an upload; the expanded snapshot still caps their sum.
+MAX_SNAPSHOT_MEMBER_BYTES = MAX_SNAPSHOT_BYTES
 
 
 def parse_snapshot(body: bytes) -> dict[str, bytes]:
@@ -50,18 +52,22 @@ def parse_snapshot(body: bytes) -> dict[str, bytes]:
                 if (
                     not member.isfile()
                     or path in files
-                    or member.size > MAX_ARTIFACT_BYTES
+                    or member.size < 0
+                    or member.size > MAX_SNAPSHOT_MEMBER_BYTES
                     or total > MAX_SNAPSHOT_BYTES
                 ):
                     raise ValueError("unsafe archive member")
                 source = archive.extractfile(member)
                 if source is None:
                     raise ValueError("missing archive member body")
+                data = bytearray()
                 with source:
-                    data = source.read(MAX_ARTIFACT_BYTES + 1)
-                if len(data) != member.size:
-                    raise ValueError("incomplete archive member")
-                files[path] = data
+                    while len(data) < member.size:
+                        chunk = source.read(min(65536, member.size - len(data)))
+                        if not chunk:
+                            raise ValueError("incomplete archive member")
+                        data.extend(chunk)
+                files[path] = bytes(data)
         return files
     except (tarfile.TarError, OSError, EOFError, ValueError, zlib.error):
         raise ProviderError("upstream", retryable=False, native_code="invalid_snapshot") from None
