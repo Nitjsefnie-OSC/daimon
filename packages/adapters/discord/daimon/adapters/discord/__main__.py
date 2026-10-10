@@ -17,6 +17,7 @@ from daimon.core.health import start_liveness_responder
 from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
 from daimon.core.runtime_health import runtime_health
+from daimon.core.stores.worker_ownership import OWNER_HARD_EXIT_S
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -27,12 +28,12 @@ log = structlog.get_logger()
 
 async def drain_on_owner_loss(bot: DaimonBot) -> None:
     await bot.runtime.ownership_lost.wait()
-    deadline = asyncio.get_running_loop().call_later(100, os._exit, 1)
+    deadline = asyncio.get_running_loop().call_later(OWNER_HARD_EXIT_S, os._exit, 1)
     try:
         await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]  # entrypoint owns shutdown
     finally:
         # Cancellation cleanup can leave a task running after close(). The
-        # heartbeat grace assumes this process stops all writes by 120 s.
+        # heartbeat grace includes this hard exit deadline.
         deadline.cancel()
         os._exit(1)
 

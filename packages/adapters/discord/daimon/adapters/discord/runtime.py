@@ -27,6 +27,12 @@ from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.core.stores.worker_ownership import (
+    OWNER_LOSS_GRACE_S,
+    OWNER_PROBE_INTERVAL_S,
+    OWNER_PROBE_TIMEOUT_S,
+    OWNER_RETRY_BUDGET_S,
+)
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy import text
@@ -36,15 +42,19 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, a
 log = structlog.get_logger()
 
 
+class OwnershipExpired(Exception):
+    """A replacement may already have reclaimed this owner's work."""
+
+
 @asynccontextmanager
 async def hold_worker_owner(
     engine: AsyncEngine,
     *,
     owner_key: int,
     ownership_lost: asyncio.Event,
-    probe_interval_s: float = 5,
+    probe_interval_s: float = OWNER_PROBE_INTERVAL_S,
 ) -> AsyncIterator[None]:
-    """Fail stop on a lost owner connection; other workers honor its grace."""
+    """Retry brief owner-connection loss; fail stop before reclaim becomes safe."""
     # asyncpg failures can surface as raw socket errors, not SQLAlchemyError.
     failures = (
         SQLAlchemyError,
@@ -55,7 +65,7 @@ async def hold_worker_owner(
         TimeoutError,
     )
 
-    async def acquire() -> AsyncConnection:
+    async def acquire(*, reconnect: bool = False) -> AsyncConnection:
         candidate = await engine.connect()
         try:
             owned = await candidate.scalar(
@@ -64,6 +74,14 @@ async def hold_worker_owner(
             await candidate.commit()
             if not owned:
                 raise SQLAlchemyError("worker owner key is still held")
+            if reconnect and not await candidate.scalar(
+                text("""SELECT EXISTS (
+                         SELECT 1 FROM discord_worker_heartbeats
+                         WHERE owner_key = :key AND seen_at >
+                           clock_timestamp() - (:grace * interval '1 second'))"""),
+                {"key": owner_key, "grace": OWNER_LOSS_GRACE_S},
+            ):
+                raise OwnershipExpired("owner heartbeat expired before reacquisition")
             await candidate.execute(
                 text("""INSERT INTO discord_worker_heartbeats (owner_key, seen_at)
                      VALUES (:key, clock_timestamp())
@@ -71,14 +89,31 @@ async def hold_worker_owner(
                 {"key": owner_key},
             )
             await candidate.commit()
+            if not reconnect:
+                await candidate.execute(
+                    text("""DELETE FROM discord_worker_heartbeats
+                         WHERE owner_key != :key AND seen_at <
+                           clock_timestamp() - (:age * interval '1 second')
+                           AND NOT EXISTS (
+                             SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                               AND granted AND objsubid = 1
+                               AND database = (SELECT oid FROM pg_database
+                                               WHERE datname = current_database())
+                               AND classid = CAST(discord_worker_heartbeats.owner_key >> 32 AS oid)
+                               AND objid = CAST(
+                                 discord_worker_heartbeats.owner_key & 4294967295 AS oid)
+                           )"""),
+                    {"key": owner_key, "age": 3 * OWNER_LOSS_GRACE_S},
+                )
+                await candidate.commit()
             return candidate
         except BaseException:
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
                 await candidate.invalidate()
                 await candidate.close()
             raise
 
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
         connection: AsyncConnection | None = await acquire()
 
     async def discard() -> None:
@@ -86,7 +121,7 @@ async def hold_worker_owner(
         stale, connection = connection, None
         if stale is not None:
             try:
-                async with asyncio.timeout(5):
+                async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
                     await stale.invalidate()
                     await stale.close()
             except failures as err:
@@ -98,7 +133,7 @@ async def hold_worker_owner(
             await asyncio.sleep(probe_interval_s)
             try:
                 assert connection is not None
-                async with asyncio.timeout(5):
+                async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
                     await connection.execute(
                         text("""UPDATE discord_worker_heartbeats
                              SET seen_at = clock_timestamp() WHERE owner_key = :key"""),
@@ -107,10 +142,30 @@ async def hold_worker_owner(
                     await connection.commit()
                 continue
             except Exception as err:
+                log.warning("discord.worker_owner_probe_failed", error_type=type(err).__name__)
+            deadline = asyncio.get_running_loop().time() + OWNER_RETRY_BUDGET_S
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await discard()
+                    while True:
+                        try:
+                            async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
+                                connection = await acquire(reconnect=True)
+                            log.info("discord.worker_owner_recovered")
+                            break
+                        except OwnershipExpired:
+                            raise
+                        except failures as err:
+                            log.warning(
+                                "discord.worker_owner_retry_failed",
+                                error_type=type(err).__name__,
+                            )
+                            await asyncio.sleep(1)
+            except (TimeoutError, OwnershipExpired) as err:
                 log.error("discord.worker_owner_lost", error_type=type(err).__name__)
                 ownership_lost.set()
-            await discard()
-            return
+                await discard()
+                return
 
     guard_task = asyncio.create_task(guard(), name="discord.worker_owner_guard")
     try:
@@ -121,7 +176,7 @@ async def hold_worker_owner(
             await guard_task
         if connection is not None:  # pyright: ignore[reportUnnecessaryComparison]  # guard can discard it
             try:
-                async with asyncio.timeout(5):
+                async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
                     await connection.execute(
                         text("DELETE FROM discord_worker_heartbeats WHERE owner_key = :key"),
                         {"key": owner_key},

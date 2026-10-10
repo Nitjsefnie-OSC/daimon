@@ -3,11 +3,21 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# The owner probes every 5 s and fails stop on its first failed probe. Its
-# shutdown allows 60 s for turns, then 10 s for notices and 5 s each for turn
-# cleanup and card edits. The 120 s grace also covers probe/query scheduling
-# and connection teardown. This assumes the event loop runs within that bound.
-OWNER_LOSS_GRACE_S = 120
+# From the last committed heartbeat, stop occurs within probe interval + probe
+# timeout + reconnect budget + hard exit. The margin covers event-loop scheduling
+# and connection teardown; this timing bound is required for exclusion.
+OWNER_PROBE_INTERVAL_S = 5
+OWNER_PROBE_TIMEOUT_S = 5
+OWNER_RETRY_BUDGET_S = 30
+OWNER_HARD_EXIT_S = 100
+OWNER_SCHEDULING_MARGIN_S = 40
+OWNER_LOSS_GRACE_S = (
+    OWNER_PROBE_INTERVAL_S
+    + OWNER_PROBE_TIMEOUT_S
+    + OWNER_RETRY_BUDGET_S
+    + OWNER_HARD_EXIT_S
+    + OWNER_SCHEDULING_MARGIN_S
+)
 
 
 async def owner_is_alive(session: AsyncSession, owner_key: int) -> bool:

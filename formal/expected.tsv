@@ -265,6 +265,8 @@ discord_webhooks	Cadence	CadenceWebhookSkewUnsafe	violates:NoHookBacklog	2	-	cou
 github_repo_editor	RepoEditor	RepoEditorSafe	clean	59	-	atomic browser save, stale snapshot and repeated POST
 github_repo_editor	RepoEditor	RepoEditorStale	violates:NoStaleSave	22	-	atomic browser save, stale snapshot and repeated POST
 github_repo_editor	RepoEditor	RepoEditorReplay	violates:AtMostOneSave	55	-	atomic browser save, stale snapshot and repeated POST
-discord_startup_replay	StartupReplay	ReplaySafe	clean	732	-	two workers, connection loss, bounded fail-stop and admission dedupe
-discord_startup_replay	StartupReplay	ReplayNoAdmission	violates:NoDuplicate	78	-	without admission, redelivery starts a second turn
-discord_startup_replay	StartupReplay	ReplayNoGrace	violates:NoTakeoverOfLiveWorker	88	-	connection loss lets another worker reclaim before the live owner stops
+discord_startup_replay	StartupReplay	ReplaySafe	clean	1020	-	two workers, transient reconnect or bounded fail-stop, and admission dedupe
+discord_startup_replay	StartupReplay	ReplayNoAdmission	violates:NoDuplicate	83	-	without admission, redelivery starts a second turn
+discord_startup_replay	StartupReplay	ReplayNoGrace	violates:NoTakeoverOfLiveWorker	94	-	connection loss lets another worker reclaim before the live owner stops
+discord_startup_replay	StartupReplay	ReplayShortGrace	violates:NoTakeoverOfLiveWorker	234	-	grace shorter than retry plus stop allows live-owner takeover
+discord_startup_replay	StartupReplay	ReplayRecoveryWitness	violates:NoTransientRecovery	36	-	a transient probe failure can recover while the worker stays live

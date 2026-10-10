@@ -1,7 +1,9 @@
 """A lost owner connection fails stop; recovery waits out its live turns."""
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -65,23 +67,152 @@ async def test_transient_owner_connection_loss_does_not_cancel_worker(
             assert pid is not None
             assert await session.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
             await session.commit()
-        await asyncio.wait_for(ownership_lost.wait(), timeout=5)
-        assert not task.done(), "the entrypoint must drain the worker after owner loss"
-        assert attempts == 1, "a disconnected worker must never reacquire its old key"
+        await asyncio.wait_for(_wait_for_second_update(lambda: attempts - 1), timeout=5)
+        await asyncio.wait_for(_wait_for_lock(db_nullpool_engine, owner_key), timeout=5)
+        await asyncio.sleep(0.1)
+        assert not ownership_lost.is_set()
+        assert not task.done(), "the worker must keep serving after reconnection"
         stopped.set()
         await asyncio.wait_for(task, timeout=5)
-        async with factory() as session:
-            assert await owner_is_alive(session, owner_key), "the fail-stop grace survives exit"
-            await session.execute(
-                text("""UPDATE discord_worker_heartbeats
-                     SET seen_at = clock_timestamp() - interval '121 seconds'
-                     WHERE owner_key = :key"""),
-                {"key": owner_key},
-            )
-            assert not await owner_is_alive(session, owner_key)
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_one_timed_out_heartbeat_recovers_without_stopping(
+    db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lost = asyncio.Event()
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    original_execute = AsyncConnection.execute
+    updates = 0
+
+    async def block_first_update(
+        self: AsyncConnection, statement: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        nonlocal updates
+        if str(statement).lstrip().startswith("UPDATE discord_worker_heartbeats"):
+            updates += 1
+            if updates == 1:
+                blocked.set()
+                await release.wait()
+        return await original_execute(self, statement, *args, **kwargs)
+
+    async with hold_worker_owner(
+        db_nullpool_engine, owner_key=718251, ownership_lost=lost, probe_interval_s=0.01
+    ):
+        factory = async_sessionmaker(db_nullpool_engine)
+        async with factory() as session:
+            first_seen = await session.scalar(
+                text("SELECT seen_at FROM discord_worker_heartbeats WHERE owner_key = 718251")
+            )
+        monkeypatch.setattr(AsyncConnection, "execute", block_first_update)
+        await asyncio.wait_for(blocked.wait(), timeout=2)
+        await asyncio.sleep(5.1)
+        release.set()
+        await asyncio.wait_for(_wait_for_second_update(lambda: updates), timeout=5)
+        await asyncio.sleep(0.05)
+        assert not lost.is_set()
+        async with factory() as session:
+            second_seen = await session.scalar(
+                text("SELECT seen_at FROM discord_worker_heartbeats WHERE owner_key = 718251")
+            )
+        assert first_seen is not None and second_seen is not None and second_seen > first_seen
+
+
+async def _wait_for_second_update(count: Callable[[], int]) -> None:
+    while count() < 2:
+        await asyncio.sleep(0.01)
+
+
+async def _wait_for_lock(engine: AsyncEngine, owner_key: int) -> None:
+    factory = async_sessionmaker(engine)
+    while True:
+        async with factory() as session:
+            held = await session.scalar(
+                text("""SELECT EXISTS (SELECT 1 FROM pg_locks
+                     WHERE locktype = 'advisory' AND granted AND classid = 0
+                       AND objid = :key AND objsubid = 1)"""),
+                {"key": owner_key},
+            )
+        if held:
+            return
+        await asyncio.sleep(0.02)
+
+
+async def test_reconnect_after_grace_fails_stop(db_nullpool_engine: AsyncEngine) -> None:
+    owner_key = 718252
+    lost = asyncio.Event()
+    owner_engine = MagicMock(spec=AsyncEngine)
+    attempts = 0
+    allow_reconnect = False
+
+    def connect() -> AsyncConnection:
+        nonlocal attempts
+        attempts += 1
+        if attempts > 1 and not allow_reconnect:
+            raise ConnectionRefusedError("database unavailable")
+        return db_nullpool_engine.connect()
+
+    owner_engine.connect.side_effect = connect
+    factory = async_sessionmaker(db_nullpool_engine)
+    async with hold_worker_owner(
+        owner_engine, owner_key=owner_key, ownership_lost=lost, probe_interval_s=0.01
+    ):
+        async with factory() as session:
+            pid = await session.scalar(
+                text("""SELECT pid FROM pg_locks WHERE locktype = 'advisory'
+                     AND granted AND classid = 0 AND objid = :key AND objsubid = 1"""),
+                {"key": owner_key},
+            )
+            assert pid is not None
+            assert await session.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+            await session.commit()
+        await asyncio.wait_for(_wait_for_second_update(lambda: attempts), timeout=3)
+        async with factory() as session:
+            await session.execute(
+                text("""UPDATE discord_worker_heartbeats
+                     SET seen_at = clock_timestamp() - interval '181 seconds'
+                     WHERE owner_key = :key"""),
+                {"key": owner_key},
+            )
+            await session.commit()
+        allow_reconnect = True
+        await asyncio.wait_for(lost.wait(), timeout=5)
+        assert attempts >= 3
+
+
+async def test_startup_prunes_only_expired_heartbeats(db_nullpool_engine: AsyncEngine) -> None:
+    factory = async_sessionmaker(db_nullpool_engine)
+    locked = await db_nullpool_engine.connect()
+    async with factory() as session:
+        await session.execute(
+            text("""INSERT INTO discord_worker_heartbeats (owner_key, seen_at)
+                 VALUES (718253, clock_timestamp() - interval '541 seconds'),
+                        (718254, clock_timestamp() - interval '179 seconds'),
+                        (718256, clock_timestamp() - interval '541 seconds')
+                 ON CONFLICT (owner_key) DO UPDATE SET seen_at = EXCLUDED.seen_at""")
+        )
+        await session.commit()
+    try:
+        await locked.execute(text("SELECT pg_advisory_lock(718256)"))
+        await locked.commit()
+        async with (
+            hold_worker_owner(db_nullpool_engine, owner_key=718255, ownership_lost=asyncio.Event()),
+            factory() as session,
+        ):
+            keys = set(
+                (
+                    await session.scalars(
+                        text("""SELECT owner_key FROM discord_worker_heartbeats
+                             WHERE owner_key IN (718253, 718254, 718255, 718256)""")
+                    )
+                ).all()
+            )
+            assert keys == {718254, 718255, 718256}
+    finally:
+        await locked.close()
 
 
 @pytest.mark.parametrize(
@@ -96,6 +227,15 @@ async def test_sustained_owner_loss_drains_without_cancellation(
 
     exit_process = MagicMock()
     monkeypatch.setattr("daimon.adapters.discord.__main__.os._exit", exit_process)
+    monkeypatch.setattr("daimon.adapters.discord.runtime.OWNER_RETRY_BUDGET_S", 0.2)
+    owner_key = (
+        718212
+        + {
+            "SQLAlchemyError": 0,
+            "ConnectionRefusedError": 1,
+            "CannotConnectNowError": 2,
+        }[reconnect_error.__name__]
+    )
 
     ownership_lost, stopped = asyncio.Event(), asyncio.Event()
     bot = MagicMock()
@@ -105,18 +245,18 @@ async def test_sustained_owner_loss_drains_without_cancellation(
     try:
         async with hold_worker_owner(
             db_nullpool_engine,
-            owner_key=718212,
+            owner_key=owner_key,
             ownership_lost=ownership_lost,
             probe_interval_s=0.01,
         ):
-            # The first failed probe immediately signals the fail-stop drain.
+            # Repeated failed probes exhaust the bounded reconnect period.
             execute = AsyncMock(side_effect=TimeoutError)
             monkeypatch.setattr("sqlalchemy.ext.asyncio.AsyncConnection.execute", execute)
             reconnect = MagicMock(side_effect=reconnect_error("offline"))
             monkeypatch.setattr(AsyncEngine, "connect", reconnect)
             await asyncio.wait_for(stopped.wait(), timeout=5)
             await watcher
-            assert reconnect.call_count == 0, "a failed owner must not reconnect"
+            assert reconnect.call_count >= 1
             bot._drain_and_close.assert_awaited_once()
             exit_process.assert_called_once_with(1)
             assert ownership_lost.is_set()
@@ -184,7 +324,8 @@ async def test_connection_loss_cannot_reclaim_live_pending_message(
                 session, tenant_id=tenant.id, channel_id="1", message_id="2", owner_key=718242
             )
             await session.rollback()
-        await asyncio.wait_for(lost.wait(), timeout=5)
+        await asyncio.wait_for(_wait_for_lock(db_nullpool_engine, owner_key), timeout=5)
+        assert not lost.is_set()
 
 
 async def test_connection_loss_cannot_recover_live_card(
@@ -229,4 +370,5 @@ async def test_connection_loss_cannot_recover_live_card(
         async with factory() as session:
             assert await lock_orphaned_turn(session, row=row) is None
             await session.rollback()
-        await asyncio.wait_for(lost.wait(), timeout=5)
+        await asyncio.wait_for(_wait_for_lock(db_nullpool_engine, owner_key), timeout=5)
+        assert not lost.is_set()
