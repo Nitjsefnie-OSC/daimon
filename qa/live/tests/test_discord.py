@@ -1059,3 +1059,42 @@ def test_collect_gives_every_card_in_a_poll_the_same_listing_time(
     a, b = turn.card_history
     assert a["listed_at"] == b["listed_at"]
     assert a["listed_at"] <= a["observed_at"] < b["observed_at"]
+
+    assert evaluate(edits, [turn], backend, FakeJudge()).status == "FAIL"
+
+
+def test_progress_text_snapshot_survives_final_card_edit(
+    backend: DiscordBackend,
+    driver: FakeDriver,
+) -> None:
+    from contextlib import suppress
+
+    from qa.live.types import WatchTimeout
+
+    polls = 0
+
+    def messages(channel_id: str, *, after: str, daimon_id: str) -> list[Message]:
+        nonlocal polls
+        polls += 1
+        return [
+            {
+                "id": "x",
+                "channel_id": "thread",
+                "content": "Queued" if polls == 1 else "Done",
+                "working": polls == 1,
+            }
+        ]
+
+    driver.turn_messages = messages  # type: ignore[method-assign]
+    turn = Turn(1, "trigger", "parent", utcnow())
+    backend.owned.add("parent")
+    with suppress(WatchTimeout):
+        backend.collect(turn, 0.1)
+    assert turn.messages[0]["content"] == "Done"
+    assert len(turn.progress_text_history) == 1
+    snapshot = turn.progress_text_history[0]
+    assert snapshot["classification"] == "working"
+    assert isinstance(snapshot["elapsed_s"], float)
+    frozen = snapshot["message"]
+    assert isinstance(frozen, dict) and frozen["content"] == "Queued"
+    assert turn.progress_first_poll_s is not None

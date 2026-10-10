@@ -417,3 +417,15 @@ A known busy deploy that outlasts the quiet wait remains a silent not-quiet
 outcome. A snapshot begun near the wait deadline has a separate, bounded
 60-second query grace budget; the quiet wait remains 15 minutes and genuine
 GitHub transport or authentication failures remain alertable harness PENDING.
+
+Queue scenarios that send a thread follow-up before the first `wait_done` start
+watching mentions immediately. The follow-up uses the preceding turn's observed
+thread and never waits for its terminal answer or guesses a thread ID. Watchers
+finish before assertions, teardown, and accounting.
+
+`progress_text_seen {turn, pattern, within_s}` checks frozen non-terminal card
+text at the actual poll time. JSON retains `progress_text_history`, first-poll
+time, and observation coverage. Creation/edit timestamps do not backdate text
+seen on a late poll. Missing early coverage is PENDING; a completed observation
+without a matching early progress message FAILs. Tenant-cap mutation still needs
+an explicitly configured isolated QA operator hook.

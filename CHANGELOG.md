@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - After posting the Connect GitHub card, the agent no longer repeats the card's steps in its reply.
 - Connect GitHub links offered for a named repo open with that repo selected when it is available to add.
 - QA chunk delivery gaps use the answer edit time for cards observed running during the same turn; missing edit evidence remains pending.
+- QA observes queue progress text during live turns and can post thread follow-ups before the first answer completes.
 
 - QA running-card edit checks retain direct message snapshots on every poll and report missing or insufficient capture as PENDING.
 - QA running-card edit checks retain direct message snapshots on every poll, count successive changes, and report missing, sparse or gapped capture as PENDING. A failed card readback is recorded as unavailable instead of stopping the scenario.
