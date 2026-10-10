@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import secrets
 import uuid
@@ -34,8 +35,14 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 from pydantic import JsonValue
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+)
 from starlette.types import ASGIApp
 
 # A public-shaped name the product's URL policy accepts; the probe's transport
@@ -45,6 +52,61 @@ _GUILD_ID = 700000000000000027
 _REQUESTER = "7000000000000000270"
 _MA_AGENT_ID = "agent_qa_headless_new27"
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)\}")
+_OWNED_DATABASE = "DAIMON_DATABASE__TEST_URL"
+
+
+class BindingRefused(ValueError):
+    """A binding was pointed at something this run does not own; nothing was contacted."""
+
+
+def _owned_database_identity(database_url: str) -> tuple[object, ...]:
+    """The QA host's disposable-DB policy, then this run's own test DB only."""
+    from daimon.testing.qa_mcp_host import QaHostError, check_database
+
+    try:
+        check_database(database_url)
+    except QaHostError as err:
+        raise BindingRefused(str(err)) from None
+    owned = os.environ.get(_OWNED_DATABASE)
+    if not owned:
+        raise BindingRefused(f"{_OWNED_DATABASE} names no owned test database")
+    url, mine = make_url(database_url), make_url(owned)
+    identity = (url.host, url.port or 5432, url.database, url.username)
+    if identity != (mine.host, mine.port or 5432, mine.database, mine.username):
+        raise BindingRefused(f"database {url.database!r} is not this run's test database")
+    return identity
+
+
+def check_owned_sessionmaker(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    """Refuse, before any connection, a factory not explicitly bound to the owned test DB.
+
+    Only the factory's configuration is read; no session is opened and the
+    engine never connects.
+    """
+    if sessionmaker.kw.get("binds"):
+        raise BindingRefused("per-entity binds are refused; bind one engine explicitly")
+    bind = sessionmaker.kw.get("bind")
+    if isinstance(bind, AsyncConnection):
+        engine = bind.engine
+    elif isinstance(bind, AsyncEngine):
+        engine = bind
+    else:
+        raise BindingRefused("the session factory needs an explicit AsyncEngine bind")
+    _owned_database_identity(engine.url.render_as_string(hide_password=False))
+
+
+def _owned_url(url: str, origins: frozenset[str]) -> str:
+    """Refuse any final URL that is not on one of this run's served loopback origins."""
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL:
+        raise BindingRefused("http_check URL does not parse") from None
+    if parsed.userinfo:
+        raise BindingRefused("http_check URL must not carry credentials")
+    origin = f"{parsed.scheme}://{parsed.host}:{parsed.port}"
+    if parsed.scheme != "http" or parsed.host != "127.0.0.1" or origin not in origins:
+        raise BindingRefused("http_check URL is not on a served loopback origin")
+    return url
 
 
 class DbCheckInvalid(ValueError):
@@ -56,7 +118,7 @@ class _Loopback(httpx.AsyncBaseTransport):
 
     def __init__(self, origin: str) -> None:
         self._origin = httpx.URL(origin)
-        self._inner = httpx.AsyncHTTPTransport()
+        self._inner = httpx.AsyncHTTPTransport(trust_env=False)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         request.url = request.url.copy_with(
@@ -71,8 +133,8 @@ class _Loopback(httpx.AsyncBaseTransport):
 def loopback_transport(served_url: str) -> httpx.AsyncBaseTransport:
     """A transport mapping a public-shaped URL to a served loopback QA host."""
     origin = httpx.URL(served_url)
-    if origin.host != "127.0.0.1":
-        raise ValueError("the QA host is served on loopback only")
+    if origin.scheme != "http" or origin.host != "127.0.0.1" or origin.port is None:
+        raise BindingRefused("the QA host is served on loopback only")
     return _Loopback(f"{origin.scheme}://{origin.host}:{origin.port}")
 
 
@@ -126,6 +188,7 @@ async def submit_mcp_token(
     write, an attach) is answered 500 and recorded, so a receipt always shows
     whether the token was stored.
     """
+    check_owned_sessionmaker(sessionmaker)
     from cryptography.fernet import Fernet
     from daimon.adapters.discord.credential_modals import McpCredentialModal
     from daimon.adapters.discord.runtime import DiscordRuntime
@@ -250,6 +313,7 @@ async def db_check(
     sessionmaker: async_sessionmaker[AsyncSession], sql: str, values: Mapping[str, str]
 ) -> JsonValue:
     """Run one frozen single-row query read-only and return its single value."""
+    check_owned_sessionmaker(sessionmaker)
     bound = bind_placeholders(sql, values)
     if ";" in bound.rstrip().rstrip(";") or not bound.lstrip().lower().startswith("select"):
         raise ValueError("db_check runs exactly one SELECT")
@@ -323,7 +387,14 @@ def expand_url(template: str, values: Mapping[str, str]) -> str:
 async def http_check(template: str, values: Mapping[str, str]) -> HttpReceipt:
     """GET the expanded URL without credentials or redirects, as the catalog states."""
     url = expand_url(template, values)
-    async with httpx.AsyncClient(follow_redirects=False, timeout=10.0) as http:
+    origins = frozenset(
+        f"{o.scheme}://{o.host}:{o.port}"
+        for o in (httpx.URL(v) for k, v in values.items() if k.startswith("env."))
+    )
+    # The final URL decides, not its placeholders: a literal or nested external
+    # URL is refused here, before any client exists. No proxy or netrc is read.
+    _owned_url(url, origins)
+    async with httpx.AsyncClient(follow_redirects=False, timeout=10.0, trust_env=False) as http:
         response = await http.get(url)
     return HttpReceipt(
         url=url,
@@ -357,14 +428,14 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
     from daimon.adapters.mcp.server import create_mcp_app
     from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
     from daimon.testing.ma import build_stub_anthropic
-    from daimon.testing.qa_mcp_host import check_database, scrubbed_environment
+    from daimon.testing.qa_mcp_host import scrubbed_environment
     from notebook_host import config as notebook_config
     from notebook_host import main as notebook_main
     from pydantic import HttpUrl, PostgresDsn, SecretStr
     from report_host import config as report_config
     from report_host import main as report_main
 
-    check_database(database_url)
+    _owned_database_identity(database_url)
     admin = [SecretStr(secrets.token_urlsafe(32))]
     with scrubbed_environment():
         settings = Settings(

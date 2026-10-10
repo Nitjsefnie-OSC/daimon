@@ -185,3 +185,94 @@ def test_http_check_semantics_and_url_safety() -> None:
         expand_url(str(NEW24[0]["url"]), {**origin, "nonce": "../admin"})
     with pytest.raises(ValueError, match="unbound placeholder"):
         expand_url(str(NEW24[0]["url"]), {"env.notebook_host": "http://127.0.0.1:9"})
+
+
+# Safety boundaries: refusals happen before any connection or client exists.
+
+
+class _NeverOpened(async_sessionmaker[AsyncSession]):
+    """A factory that fails the test if a binding ever opens a session from it."""
+
+    def __call__(self, **local_kw: object) -> AsyncSession:  # type: ignore[override]
+        raise AssertionError("a refused binding opened a session")
+
+
+def _factory_for(url: str, connects: list[object]) -> async_sessionmaker[AsyncSession]:
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(url)
+    event.listen(engine.sync_engine, "connect", lambda *_: connects.append(url))
+    return _NeverOpened(bind=engine)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Never connected to: the factories below are refused before any session.
+        "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon",
+        "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test_nc_other",
+        "postgresql+asyncpg://daimon:daimon@db.example.com:5432/daimon_test_nc_n2",
+        "postgresql+asyncpg://daimon:daimon@localhost:5432/qa?host=db.example.com",
+    ],
+)
+async def test_a_binding_refuses_a_database_it_does_not_own_before_connecting(url: str) -> None:
+    from daimon.testing.headless_bindings import BindingRefused
+
+    connects: list[object] = []
+    factory = _factory_for(url, connects)
+    with pytest.raises(BindingRefused):
+        await submit_mcp_token(
+            factory, mcp_transport=httpx.MockTransport(_no_egress), token=NEW27_TOKEN
+        )
+    with pytest.raises(BindingRefused):
+        await db_check(factory, "select 1", {})
+    with pytest.raises(BindingRefused):
+        async with serve_catalog_hosts(url, Path("/nonexistent")):
+            pass
+    assert connects == []
+
+
+async def test_a_binding_refuses_a_factory_without_one_explicit_bind() -> None:
+    from daimon.testing.headless_bindings import BindingRefused
+
+    with pytest.raises(BindingRefused, match="explicit"):
+        await db_check(_NeverOpened(), "select 1", {})
+    with pytest.raises(BindingRefused, match="binds"):
+        await db_check(_NeverOpened(binds={object: object()}), "select 1", {})
+
+
+def _no_egress(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"egress attempted: {request.url}")
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "https://external.invalid/secret",
+        "https://external.invalid/?next={env.notebook_host}",
+        "http://user:pw@127.0.0.1:9/x",
+        "http://127.0.0.1:10/qa-missing-{nonce}/",
+        "http://localhost:9/x",
+    ],
+)
+async def test_http_check_refuses_any_final_url_off_the_served_origins(
+    template: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.testing import headless_bindings
+    from daimon.testing.headless_bindings import BindingRefused
+
+    def no_client(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a client was built for a refused URL")
+
+    monkeypatch.setattr(headless_bindings.httpx, "AsyncClient", no_client)
+    with pytest.raises(BindingRefused):
+        await http_check(template, {"env.notebook_host": "http://127.0.0.1:9", "nonce": "abc"})
+
+
+def test_the_probe_transport_maps_to_loopback_only() -> None:
+    from daimon.testing.headless_bindings import BindingRefused
+
+    for url in ("https://127.0.0.1:9/mcp", "http://10.0.0.1:9/mcp", "http://127.0.0.1/mcp"):
+        with pytest.raises(BindingRefused):
+            loopback_transport(url)
