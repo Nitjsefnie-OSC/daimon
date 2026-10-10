@@ -394,6 +394,12 @@ def compile_agent(spec: AgentSpec, *, authenticated_mcp: bool = False) -> Object
                 "url_context",
             ):
                 tools.append({"type": tool.name})
+            elif tool.kind == "mcp_toolset" and any(
+                connection.name == tool.name for connection in spec.mcp_servers or ()
+            ):
+                # The neutral toolset selects its declared server. compile_mcp
+                # emits the native tool once and applies auth/policy validation.
+                continue
             elif tool.kind == "custom":
                 tools.append(
                     {

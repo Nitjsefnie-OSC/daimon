@@ -1273,3 +1273,9 @@ remain the default. Missing authorized publication is a typed deployment
 dependency; offline compiler proofs do not promote live F1/QA parity. The host
 supplies GCS access/retention and authenticated MCP separately. See the Gemini
 [default-capability notes](../packages/mux/mux/drivers/gemini/DEFAULT-CAPABILITY.md).
+
+Gemini accepts a neutral MCP toolset selector only when it names a declared
+server; the server’s auth and policy checks remain mandatory. The F2 offline
+proof uses all original default skill bytes, one mapped code-execution tool,
+and two read-only MCP calls served by a disposable loopback host. Model/GCS
+execution stays replayed and the uninjected default adapter remains PENDING.

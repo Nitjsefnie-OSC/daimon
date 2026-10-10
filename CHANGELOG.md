@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document the existing per-tenant table-rendering opt-in for Anthropic, OpenAI and Gemini host turns, retaining plain-text defaults.
 - Validate every Gemini MCP destination, including anonymous and unmarked native intent, before persistence or I/O; reject credential-bearing URLs and invalid server names, and prevent moving a scoped auth marker onto an adjacent function.
 - Re-admit Gemini session intent against owned agent/environment resources on every send; removed inline artifacts/skills and pre-explicit-tools saved requests require preparation again in this opt-in backend.
+- Map declared Gemini MCP toolset selectors to their native server once, with
+  an offline full-default skills/builtins/authenticated loopback MCP proof and
+  wrong/revoked bearer refusals; unconfigured adapters remain typed PENDING.
 
 - Add opt-in scoped single-server HTTPS MCP authentication to the Gemini driver, with closed native intent/policies, fresh SDK-dispatch resolution, secret-free persistence and DEBUG logs, and fail-closed replay/continuation admission.
 

@@ -610,3 +610,8 @@ adapter, binary/oversize bundles refuse `skill_bundle_gcs_deployment`; normal
 text bundles retain inline mounts. See
 [the capability notes](mux/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
 offline evidence. A scripted publisher does not certify a live full default.
+
+The Gemini F2 offline proof retains the full default skill bundle and maps the
+logical toolset to one native code-execution tool plus its declared authenticated
+MCP server. N2’s loopback host serves both read-only tools; wrong/revoked bearers
+fail. Explicit deployment/auth adapters are required; no live/CAS claim is made.
