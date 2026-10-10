@@ -471,3 +471,71 @@ remains the separate signed operation for evidence-backed actual spend; a
 recovery neither claims actual nor deletes history. Pre-upgrade rows and signed
 reconciliation digests remain readable unchanged. Canonical config/ledger
 changes are operator actions after the exact digest is signed.
+
+### Whole-column admission
+
+`ColumnPlan` describes 1–53 full-cell-executable receipts for one allowlisted
+provider/model. Each `ColumnCellPlan` pins the recorded receipt SHA256, turn and
+request counts, inclusive token counters, per-request input/output ceilings,
+maximum request count and infrastructure allowance. `propose_column_hold(plan)`
+reads without writing and returns a ledger-bound `ColumnHoldApproval`, including
+each cell's projected cost and conservative upper bound. Recorded counters are
+offline sizing evidence, never live actual spend. Unknown counters use the bound
+as the projection. The bound charges every permitted input token at the highest
+reviewed input/cache-write rate and every permitted output token at the output
+rate, plus all allowed infrastructure sessions at their maximum duration and
+billing quantum. Token and infrastructure pricing must be dated and current;
+ceilings must cover the recorded execution. OpenAI and Anthropic require explicit
+infrastructure allowances, even when the offline receipt has no native runtime.
+
+The lead reviews the immutable proposal and pins its exact `digest` in trusted
+config `approved_column_holds`. `reserve_column(approval)` acquires one atomic
+hold for the sum of the cell bounds. It refuses unsigned, changed, foreign,
+expired or repriced proposals, duplicate column IDs, latched provider lines and
+bounds exceeding the remaining provider or total stop. Stops remain 80% of the
+configured caps; all existing actuals, holds and opening spend count. There is no
+partial admission. Repeating an active admission returns its existing receipt;
+a terminal approval cannot be reused. The default approval window is one hour;
+a separately reviewed proposal may allow up to 24 hours.
+
+Every cell must explicitly declare `tool_policy="no_separate_tool_charges"`.
+Unknown tool charges refuse projection/admission. A Gemini runner must enforce
+its explicit empty native tools policy when using this contract. Separately
+priced native tools need another pricing policy before they can be admitted.
+These are budget admission ceilings; they do not install native SDK spending
+controls. A runner must enforce its request/token/runtime ceilings and retain a
+margin for an uncapped native session. Observed overruns latch further provider
+admission, including claims within an already admitted column.
+
+The runner uses the column API without reserving another per-cell hold:
+
+```python
+held = guard.reserve_column(reviewed_approval)
+guard.start_column_cell(held.run_id, cell_id)  # Persist before any provider I/O.
+# Execute only this claimed cell and retain complete native usage before cleanup.
+guard.settle_column_cell(held.run_id, cell_id, actual=complete_usage)
+guard.finish_column(held.run_id, status="completed")
+```
+
+Claims are single use and recheck the approval window, pinned prices, current
+stops and provider latches. Settlement accepts existing `ActualSpend` evidence:
+dated per-request counters and complete billed infrastructure intervals. Usage
+cannot predate the persisted claim. Request and infrastructure identities must
+be disjoint across the column's cells. Known counters, runtime, completeness and
+proven dollar floors cannot decrease across updates. Exact settlement replays
+are idempotent; a cell with known actual spend cannot be revised. Unknown cells
+may later accept complete covering evidence, including after terminal closure.
+Only completely measured cells contribute to the column's actual/token/runtime
+totals; partial component floors remain in that cell's held balance.
+
+`finish_column` fences further claims and releases only never-started cells.
+An in-flight or incompletely measured cell keeps its conservative hold and is
+reported as `estimated_unverified`; closing the runner does not turn it into
+zero spend. The caller's terminal verdict does not certify a QA PASS: receipts
+retain each never-started, failed and uncertain cell. Ledger rows, the independent
+sequence anchor and the checkpoint retain the existing crash/rollback refusal.
+Ordinary probe receipts omit the new optional column field, preserving their
+serialized bytes and signed reconciliation digests. Upgrade ledger consumers
+before the first column receipt. Runner wiring, batch operator reconciliation
+and batch latch recovery are separate work; ordinary operator APIs refuse column
+receipts. This offline slice makes no provider calls or shared-ledger changes.

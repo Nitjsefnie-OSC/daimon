@@ -423,6 +423,7 @@ class BudgetConfig(ProbeModel):
     approved_latch_recoveries: frozenset[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]] = (
         frozenset()
     )
+    approved_column_holds: frozenset[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]] = frozenset()
 
     @model_validator(mode="after")
     def total(self) -> BudgetConfig:
@@ -523,6 +524,117 @@ class LatchRecovery(ProbeModel):
         return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
 
 
+class RecordedCellReceipt(ProbeModel):
+    """Offline execution counters, never evidence of live billable actuals."""
+
+    cell_id: Identifier
+    provider: Identifier
+    model: Identifier
+    receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    full_cell_executable: bool = Field(strict=True)
+    request_count: Count
+    turn_count: Count
+    tokens: TokenUsage
+    session_count: Count = 0
+    max_session_seconds: Count | None = None
+    tool_policy: Literal["no_separate_tool_charges", "unknown"] = "unknown"
+
+
+class ColumnCellPlan(ProbeModel):
+    recorded: RecordedCellReceipt
+    per_request_limits: TokenLimits
+    request_limit: int = Field(strict=True, ge=1, le=1_000_000)
+    container_allowance: ContainerAllowance | None = None
+
+
+class CellCostEstimate(ProbeModel):
+    plan: ColumnCellPlan
+    limits: TokenLimits
+    price: ModelPrice
+    session_prices: tuple[SessionPrice, ...]
+    estimated_usd: Money
+    upper_bound_usd: Money
+
+
+class ColumnPlan(ProbeModel):
+    column_id: Identifier
+    provider: Identifier
+    model: Identifier
+    cells: tuple[ColumnCellPlan, ...] = Field(min_length=1, max_length=53)
+
+
+class ColumnHoldApproval(ProbeModel):
+    """One lead-signed admission, bound to a ledger and its exact cell ceilings."""
+
+    operation: Literal["COLUMN-HOLD"] = "COLUMN-HOLD"
+    ledger_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    column_id: Identifier
+    provider: Identifier
+    model: Identifier
+    created_at: datetime
+    expires_at: datetime
+    cells: tuple[CellCostEstimate, ...] = Field(min_length=1, max_length=53)
+
+    @model_validator(mode="after")
+    def scoped(self) -> ColumnHoldApproval:
+        if (
+            self.created_at.tzinfo is None
+            or self.expires_at.tzinfo is None
+            or not self.created_at < self.expires_at <= self.created_at + timedelta(days=1)
+        ):
+            raise ValueError("column approval needs a bounded aware time window")
+        names = [cell.plan.recorded.cell_id for cell in self.cells]
+        if len(names) != len(set(names)):
+            raise ValueError("column cell IDs must be unique")
+        if any(
+            cell.plan.recorded.provider != self.provider or cell.plan.recorded.model != self.model
+            for cell in self.cells
+        ):
+            raise ValueError("column must use one provider and model")
+        if any(
+            sensitive_identifier(name)
+            for name in (self.column_id, self.provider, self.model, *names)
+        ):
+            raise ValueError("column metadata must not contain credentials")
+        return self
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+
+    @property
+    def bound_usd(self) -> Decimal:
+        with localcontext() as context:
+            context.prec = 80
+            return sum((cell.upper_bound_usd for cell in self.cells), Decimal(0))
+
+
+class ColumnCellReceipt(ProbeModel):
+    cell_id: Identifier
+    state: Literal["pending", "running", "closed", "not_started"]
+    started_at: datetime | None = None
+    verdict: Literal["completed", "failed", "cancelled"] | None = None
+    actual_evidence: ActualSpend | None = None
+    actual_usd: Money | None = None
+    token_usd: Money | None = None
+    container_usd: Money | None = None
+    held_usd: Money
+    admission_blocked: bool = Field(default=False, strict=True)
+
+
+class ColumnState(ProbeModel):
+    approval: ColumnHoldApproval
+    revision: Count = 0
+    terminal_status: Literal["completed", "failed", "cancelled"] | None = None
+    cells: tuple[ColumnCellReceipt, ...]
+
+
+def _absent_column(value: object) -> bool:
+    # Keep ordinary receipts and old signatures byte-identical.
+    return value is None
+
+
 class SpendReceipt(ProbeModel):
     version: Literal[1, 2] = 1
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
@@ -558,6 +670,7 @@ class SpendReceipt(ProbeModel):
     container_usd: Money | None = None
     reconcile: Reconciliation | None = None
     latch_recovery: LatchRecovery | None = None
+    column: ColumnState | None = Field(default=None, exclude_if=_absent_column)
     reason: Literal[
         "admitted",
         "settled",
@@ -573,6 +686,9 @@ class SpendReceipt(ProbeModel):
 
     @model_validator(mode="after")
     def accounting(self) -> SpendReceipt:
+        if self.column is not None:
+            BudgetGuard.validate_column_receipt(self)
+            return self
         # An overrun latches admission independently of its current billable total.
         if self.status == "overrun":
             object.__setattr__(self, "admission_blocked", True)
@@ -859,6 +975,11 @@ class BudgetGuard:
                     continue
                 previous = runs.get(receipt.run_id)
                 if (
+                    receipt.column is not None
+                    and receipt.column.approval.ledger_id != binding.ledger_id
+                ):
+                    raise BudgetLedgerError("column hold belongs to another ledger")
+                if (
                     previous is not None
                     and previous.admission_blocked
                     and receipt.status != "latch_recovered"
@@ -872,6 +993,14 @@ class BudgetGuard:
                 if previous is None:
                     if receipt.status != "reserved":
                         raise BudgetLedgerError("spend receipt has no reservation")
+                    if receipt.column is not None and (
+                        receipt.column.revision != 0
+                        or receipt.column.terminal_status is not None
+                        or any(cell.state != "pending" for cell in receipt.column.cells)
+                    ):
+                        raise BudgetLedgerError("column needs its original complete hold")
+                elif previous.column is not None or receipt.column is not None:
+                    BudgetGuard._check_column_transition(previous, receipt)
                 elif receipt.status == "latch_recovered":
                     approval = receipt.latch_recovery
                     if approval is None:
@@ -927,7 +1056,7 @@ class BudgetGuard:
                 ):
                     raise BudgetLedgerError("invalid spend receipt transition")
                 runs[receipt.run_id] = receipt
-        except (ValidationError, ValueError):
+        except (ValidationError, ValueError, BudgetRefused):
             raise BudgetLedgerError("invalid spend receipt") from None
         return runs
 
@@ -1325,6 +1454,8 @@ class BudgetGuard:
         """
         reservation = Reservation.model_validate(reservation.model_dump())
         original = reservation.receipt
+        if original.column is not None:
+            raise BudgetLedgerError("use the per-cell column settlement API")
         if original.price is not None and (
             reservation.price != original.price or limits != original.limits
         ):
@@ -1446,6 +1577,8 @@ class BudgetGuard:
         """Read-only proposal; evidence hash binds the reviewed export/calculation."""
         with self._locked() as (_file, _lock, checkpoint, runs, _config):
             current = runs.get(run_id)
+            if current is not None and current.column is not None:
+                raise BudgetLedgerError("use the per-cell column settlement API")
             if (
                 current is None
                 or current.actual_usd is not None
@@ -1481,6 +1614,8 @@ class BudgetGuard:
             if proposal.digest not in config.approved_reconciliations:
                 raise BudgetRefused("reconciliation needs the lead-signed proposal digest")
             current = runs.get(proposal.run_id)
+            if current is not None and current.column is not None:
+                raise BudgetLedgerError("use the per-cell column settlement API")
             if (
                 current is None
                 or current.actual_usd is not None
@@ -1534,6 +1669,10 @@ class BudgetGuard:
     def _check_latch_recovery(
         current: SpendReceipt, proposal: LatchRecovery, ledger_id: str
     ) -> None:
+        if current.column is not None:
+            raise BudgetLedgerError(
+                "column overruns require owner review; recovery is not supported"
+            )
         if (
             current.status != "overrun"
             or not current.admission_blocked
@@ -1599,5 +1738,631 @@ class BudgetGuard:
                     "latch_recovery": proposal,
                 }
             )
+            self._append(file, receipt, checkpoint, checkpoint.opening_spend, lock)
+            return receipt
+
+    @staticmethod
+    def _estimate_column_cell(
+        plan: ColumnCellPlan,
+        price: ModelPrice,
+        session_prices: tuple[SessionPrice, ...],
+        at: datetime,
+    ) -> CellCostEstimate:
+        recorded = plan.recorded
+        if (
+            not recorded.full_cell_executable
+            or recorded.tool_policy != "no_separate_tool_charges"
+            or plan.request_limit < recorded.request_count
+            or price.effective_from is None
+            or price.source is None
+            or at.tzinfo is None
+            or at.astimezone(UTC).date() < price.effective_from
+            or price.effective_until is not None
+            and at.astimezone(UTC).date() >= price.effective_until
+            or price.actual_input_limit is not None
+            and plan.per_request_limits.input_tokens > price.actual_input_limit
+        ):
+            raise BudgetRefused("cell needs executable receipts and current bounded pricing")
+        limits = TokenLimits(
+            input_tokens=plan.per_request_limits.input_tokens * plan.request_limit,
+            output_tokens=plan.per_request_limits.output_tokens * plan.request_limit,
+        )
+        if (
+            recorded.tokens.minimum_input_tokens > limits.input_tokens
+            or (recorded.tokens.output_tokens or 0) > limits.output_tokens
+        ):
+            raise BudgetRefused("cell ceilings cannot undercount recorded execution")
+        bound = price.reserve(limits)
+        estimate = price.estimate(recorded.tokens)
+        allowance = plan.container_allowance
+        if allowance is None:
+            if (
+                recorded.provider in ("openai", "anthropic")
+                or recorded.session_count
+                or recorded.max_session_seconds
+            ):
+                raise BudgetRefused("recorded infrastructure needs an explicit allowance")
+        else:
+            session_price = next(
+                (
+                    p
+                    for p in session_prices
+                    if p.meter == allowance.meter
+                    and p.memory_gb == allowance.memory_gb
+                    and BudgetGuard._price_current(p, at)
+                ),
+                None,
+            )
+            if (
+                session_price is None
+                or recorded.session_count > allowance.sessions
+                or (recorded.max_session_seconds or 0) > allowance.seconds_per_session
+            ):
+                raise BudgetRefused(
+                    "cell infrastructure needs current pricing and sufficient ceilings"
+                )
+            with localcontext() as context:
+                context.prec = 80
+                bound += allowance.sessions * session_price.cost(allowance.seconds_per_session)
+                if estimate is not None:
+                    estimate += recorded.session_count * session_price.cost(
+                        recorded.max_session_seconds
+                        if recorded.max_session_seconds is not None
+                        else allowance.seconds_per_session
+                    )
+        return CellCostEstimate(
+            plan=plan,
+            limits=limits,
+            price=price,
+            session_prices=session_prices,
+            estimated_usd=bound if estimate is None else estimate,
+            upper_bound_usd=bound,
+        )
+
+    def propose_column_hold(self, plan: ColumnPlan) -> ColumnHoldApproval:
+        """Read-only quote. The lead pins its digest before any hold or provider I/O."""
+        plan = ColumnPlan.model_validate(plan.model_dump())
+        with self._locked() as (_file, _lock, checkpoint, _runs, config):
+            budget = config.providers.get(plan.provider)
+            if budget is None or plan.model not in LIVE_MODEL_ALLOWLIST.get(plan.provider, ()):
+                raise BudgetRefused("column provider/model is not allowlisted")
+            price = budget.models.get(plan.model)
+            if price is None:
+                raise BudgetRefused("column model needs reviewed pricing")
+            now = datetime.now(UTC)
+            cells = tuple(
+                self._estimate_column_cell(cell, price, budget.session_prices, now)
+                for cell in plan.cells
+            )
+            return ColumnHoldApproval(
+                ledger_id=checkpoint.binding.ledger_id,
+                run_id=uuid4().hex,
+                column_id=plan.column_id,
+                provider=plan.provider,
+                model=plan.model,
+                created_at=now,
+                expires_at=now + timedelta(hours=1),
+                cells=cells,
+            )
+
+    def reserve_column(self, approval: ColumnHoldApproval) -> SpendReceipt:
+        """Admit the entire column atomically, including other runs' actuals and holds."""
+        approval = ColumnHoldApproval.model_validate(approval.model_dump())
+        with self._locked() as (file, lock, checkpoint, runs, config):
+            if approval.digest not in config.approved_column_holds:
+                raise BudgetRefused("column hold needs the lead-signed proposal digest")
+            if approval.ledger_id != checkpoint.binding.ledger_id:
+                raise BudgetLedgerError("column hold belongs to another ledger")
+            prior = runs.get(approval.run_id)
+            if prior is not None:
+                if prior.column is None or prior.column.approval != approval:
+                    raise BudgetLedgerError("column hold ID already belongs to another run")
+                if prior.column.terminal_status is not None:
+                    raise BudgetRefused("terminal column approval cannot be reused")
+                return prior
+            if any(
+                r.column is not None and r.column.approval.column_id == approval.column_id
+                for r in runs.values()
+            ):
+                raise BudgetRefused("column ID already admitted")
+            now = datetime.now(UTC)
+            if not approval.created_at <= now < approval.expires_at:
+                raise BudgetRefused("column approval is expired or not yet valid")
+            budget = config.providers.get(approval.provider)
+            if budget is None or approval.model not in LIVE_MODEL_ALLOWLIST.get(
+                approval.provider, ()
+            ):
+                raise BudgetRefused("column provider/model is not allowlisted")
+            price = budget.models.get(approval.model)
+            if price is None or any(
+                self._estimate_column_cell(c.plan, price, budget.session_prices, now) != c
+                for c in approval.cells
+            ):
+                raise BudgetRefused("column pricing or bounds changed since approval")
+            opening = dict(checkpoint.opening_spend)
+            for provider, configured in config.providers.items():
+                opening[provider] = max(
+                    opening.get(provider, Decimal(0)), configured.opening_spend_usd
+                )
+            totals = self._totals(runs, opening)
+            with localcontext() as context:
+                context.prec = 80
+                if (
+                    totals.get(approval.provider, Decimal(0)) + approval.bound_usd
+                    > budget.cap_usd * Decimal(".8")
+                    or sum(totals.values(), Decimal(0)) + approval.bound_usd
+                    > config.total_cap_usd * Decimal(".8")
+                    or any(
+                        r.admission_blocked and r.provider == approval.provider
+                        for r in runs.values()
+                    )
+                ):
+                    raise BudgetRefused("column bound exceeds the remaining provider/total line")
+            state = ColumnState(
+                approval=approval,
+                cells=tuple(
+                    ColumnCellReceipt(
+                        cell_id=c.plan.recorded.cell_id,
+                        state="pending",
+                        held_usd=c.upper_bound_usd,
+                    )
+                    for c in approval.cells
+                ),
+            )
+            receipt = self._column_receipt(state, now)
+            self._append(file, receipt, checkpoint, opening, lock)
+            return receipt
+
+    @staticmethod
+    def _column_cell_price(
+        quote: CellCostEstimate, cell: ColumnCellReceipt, approval: ColumnHoldApproval
+    ) -> ColumnCellReceipt:
+        if cell.state in ("pending", "running"):
+            if cell.verdict is not None or cell.actual_evidence is not None:
+                raise ValueError("unsettled column cells cannot carry terminal evidence")
+            if cell.state == "pending" and cell.started_at is not None:
+                raise ValueError("pending cells have no claim timestamp")
+            if cell.state == "running" and (
+                cell.started_at is None
+                or cell.started_at.tzinfo is None
+                or cell.started_at < approval.created_at
+            ):
+                raise ValueError("running cell needs its persisted claim timestamp")
+            return ColumnCellReceipt(
+                cell_id=cell.cell_id,
+                state=cell.state,
+                started_at=cell.started_at,
+                held_usd=quote.upper_bound_usd,
+            )
+        if cell.state == "not_started":
+            if (
+                cell.actual_evidence is not None
+                or cell.verdict != "cancelled"
+                or cell.started_at is not None
+            ):
+                raise ValueError("never-started cells cannot claim usage")
+            return ColumnCellReceipt(
+                cell_id=cell.cell_id,
+                state="not_started",
+                verdict="cancelled",
+                held_usd=Decimal(0),
+                actual_usd=Decimal(0),
+                token_usd=Decimal(0),
+                container_usd=Decimal(0),
+            )
+        if (
+            cell.verdict is None
+            or cell.started_at is None
+            or cell.started_at.tzinfo is None
+            or cell.started_at < approval.created_at
+        ):
+            raise ValueError("closed cell needs its execution verdict")
+        original = SpendReceipt(
+            version=2,
+            run_id=approval.run_id,
+            provider=approval.provider,
+            model=approval.model,
+            fixture_id="F1",
+            timestamp=approval.created_at,
+            status="reserved",
+            reason="admitted",
+            reserved_usd=quote.upper_bound_usd,
+            cost_estimate_usd=quote.upper_bound_usd,
+            price=quote.price,
+            limits=quote.limits,
+            container_allowance=quote.plan.container_allowance,
+            session_prices=quote.session_prices,
+        )
+        actual = cell.actual_evidence
+        measured: Decimal | None = None
+        token: Decimal | None = None
+        container: Decimal | None = None
+        blocked = False
+        floor = quote.upper_bound_usd
+        if actual is not None:
+            if any(
+                r.observed_at.tzinfo is None or r.observed_at < cell.started_at
+                for r in actual.requests
+            ) or any(
+                c.started_at.tzinfo is None or c.started_at < cell.started_at
+                for c in actual.containers or ()
+            ):
+                raise ValueError("usage is stale or predates the cell's I/O claim")
+            _, token, container, lower, known = BudgetGuard._measured(original, actual)
+            with localcontext() as context:
+                context.prec = 80
+                measured = (
+                    token + container if token is not None and container is not None else None
+                )
+            blocked = (
+                BudgetGuard._exceeded(original, quote.limits, actual, lower, known)
+                or len(actual.requests) > quote.plan.request_limit
+                or any(
+                    r.tokens.minimum_input_tokens > quote.plan.per_request_limits.input_tokens
+                    or (r.tokens.output_tokens or 0) > quote.plan.per_request_limits.output_tokens
+                    for r in actual.requests
+                )
+                or bool(actual.containers)
+                and quote.plan.container_allowance is None
+            )
+            with localcontext() as context:
+                context.prec = 80
+                floor = max(
+                    floor,
+                    known,
+                    quote.upper_bound_usd
+                    - quote.price.reserve(quote.limits)
+                    + quote.price.reserve(quote.limits, usage=lower),
+                )
+        return ColumnCellReceipt(
+            cell_id=cell.cell_id,
+            state="closed",
+            started_at=cell.started_at,
+            verdict=cell.verdict,
+            actual_evidence=actual,
+            actual_usd=measured,
+            token_usd=token,
+            container_usd=container,
+            held_usd=Decimal(0) if measured is not None else floor,
+            admission_blocked=blocked,
+        )
+
+    @staticmethod
+    def _column_receipt(state: ColumnState, timestamp: datetime) -> SpendReceipt:
+        with localcontext() as context:
+            context.prec = 80
+            known = [c.actual_usd for c in state.cells if c.actual_usd is not None]
+            actual = sum(known, Decimal(0)) if known else None
+            held = sum((c.held_usd for c in state.cells), Decimal(0))
+            token = sum(
+                (c.token_usd or Decimal(0) for c in state.cells if c.actual_usd is not None),
+                Decimal(0),
+            )
+            container = sum(
+                (c.container_usd or Decimal(0) for c in state.cells if c.actual_usd is not None),
+                Decimal(0),
+            )
+            charged = (actual or Decimal(0)) + held
+        blocked = any(c.admission_blocked for c in state.cells)
+        unknown = any(c.state == "closed" and c.actual_usd is None for c in state.cells)
+        status = (
+            "reserved"
+            if state.terminal_status is None
+            else "overrun"
+            if blocked
+            else "uncertain"
+            if unknown and state.terminal_status == "completed"
+            else state.terminal_status
+        )
+        return SpendReceipt.model_construct(
+            version=2,
+            run_id=state.approval.run_id,
+            provider=state.approval.provider,
+            model=state.approval.model,
+            fixture_id="F1",
+            timestamp=timestamp,
+            status=status,
+            reserved_usd=state.approval.bound_usd,
+            cost_estimate_usd=charged,
+            actual_usd=actual,
+            held_usd=held,
+            token_usd=token if known else None,
+            container_usd=container if known else None,
+            admission_blocked=blocked,
+            accounting_status="actual"
+            if actual is not None and held == 0
+            else "estimated_unverified"
+            if unknown or state.terminal_status is not None
+            else "pending",
+            reason="overrun"
+            if blocked
+            else "admitted"
+            if state.revision == 0
+            else "unknown_usage"
+            if unknown
+            else "settled",
+            column=state,
+        )
+
+    @staticmethod
+    def validate_column_receipt(receipt: SpendReceipt) -> None:
+        """Validate a column's pinned pricing, disjoint usage and exact accounting."""
+        state = receipt.column
+        if state is None:
+            raise ValueError("missing column state")
+        approval = state.approval
+        if tuple(c.cell_id for c in state.cells) != tuple(
+            c.plan.recorded.cell_id for c in approval.cells
+        ):
+            raise ValueError("column cells changed")
+        if state.terminal_status is not None and any(
+            c.state in ("pending", "running") for c in state.cells
+        ):
+            raise ValueError("terminal column cannot leave a cell claim open")
+        requests: set[str] = set()
+        containers: set[str] = set()
+        for quote, cell in zip(approval.cells, state.cells, strict=True):
+            if cell.started_at is not None and cell.started_at > receipt.timestamp:
+                raise ValueError("claim timestamp is newer than the ledger receipt")
+            if (
+                BudgetGuard._estimate_column_cell(
+                    quote.plan, quote.price, quote.session_prices, approval.created_at
+                )
+                != quote
+                or BudgetGuard._column_cell_price(quote, cell, approval) != cell
+            ):
+                raise ValueError("column estimate or settlement disagrees with pinned evidence")
+            if cell.actual_evidence is not None:
+                ids = {r.id for r in cell.actual_evidence.requests}
+                infra = {c.id for c in cell.actual_evidence.containers or ()}
+                if requests & ids or containers & infra:
+                    raise ValueError("column cell usage must be disjoint")
+                requests.update(ids)
+                containers.update(infra)
+        expected = BudgetGuard._column_receipt(state, receipt.timestamp)
+        if receipt.model_dump() != expected.model_dump() or receipt.timestamp.tzinfo is None:
+            raise ValueError("column accounting disagrees with cell totals")
+
+    @staticmethod
+    def _check_column_transition(previous: SpendReceipt, current: SpendReceipt) -> None:
+        before, after = previous.column, current.column
+        if (
+            before is None
+            or after is None
+            or before.approval != after.approval
+            or after.revision != before.revision + 1
+            or current.timestamp < previous.timestamp
+            or (current.actual_usd or 0) < (previous.actual_usd or 0)
+            or before.terminal_status is not None
+            and after.terminal_status != before.terminal_status
+        ):
+            raise BudgetLedgerError("column identity, revision or settled actual regressed")
+        finishing = before.terminal_status is None and after.terminal_status is not None
+        changed = 0
+        for quote, old, new in zip(after.approval.cells, before.cells, after.cells, strict=True):
+            if old == new:
+                continue
+            if old.started_at is not None and old.started_at != new.started_at:
+                raise BudgetLedgerError("column claim timestamp cannot change")
+            changed += 1
+            if finishing:
+                allowed = (
+                    old.state == "pending"
+                    and new.state == "not_started"
+                    or (
+                        old.state == "running"
+                        and new.state == "closed"
+                        and new.verdict == "cancelled"
+                        and new.actual_evidence is None
+                    )
+                )
+            else:
+                allowed = (
+                    before.terminal_status is None
+                    and not previous.admission_blocked
+                    and current.timestamp < before.approval.expires_at
+                    and old.state == "pending"
+                    and new.state == "running"
+                    or old.state == "running"
+                    and new.state == "closed"
+                    or old.state == new.state == "closed"
+                    and old.actual_usd is None
+                    and new.actual_evidence is not None
+                )
+            if not allowed or old.admission_blocked and not new.admission_blocked:
+                raise BudgetLedgerError("column claim or admission latch regressed")
+            if old.actual_evidence is not None and (
+                new.actual_evidence is None
+                or not BudgetGuard._column_evidence_covers(
+                    quote, new.actual_evidence, old.actual_evidence
+                )
+            ):
+                raise BudgetLedgerError("cell evidence cannot drop charges or become stale")
+        if not finishing and changed != 1:
+            raise BudgetLedgerError("column update must change exactly one cell")
+
+    @staticmethod
+    def _column_evidence_covers(
+        quote: CellCostEstimate, actual: ActualSpend, proof: ActualSpend
+    ) -> bool:
+        if (
+            not BudgetGuard._covers_proof(actual, proof)
+            or proof.usage_complete
+            and not actual.usage_complete
+            or proof.containers is not None
+            and actual.containers is None
+        ):
+            return False
+        requests = {r.id: r for r in actual.requests}
+        for old in proof.requests:
+            new = requests[old.id]
+            if any(
+                (prior := getattr(old.tokens, field)) is not None
+                and ((current := getattr(new.tokens, field)) is None or current < prior)
+                for field in TokenUsage.model_fields
+            ):
+                return False
+            if old.pricing_basis == quote.price.pricing_basis and (
+                new.pricing_basis != old.pricing_basis
+                or quote.price.minimum_charge(new.tokens, new.observed_at)
+                < quote.price.minimum_charge(old.tokens, old.observed_at)
+            ):
+                return False
+        containers = {c.id: c for c in actual.containers or ()}
+        return all(containers[c.id].seconds >= c.seconds for c in proof.containers or ())
+
+    def _update_column_cell(
+        self,
+        run_id: str,
+        cell_id: str,
+        *,
+        start: bool,
+        actual: ActualSpend | None = None,
+        status: Literal["completed", "failed", "cancelled"] = "completed",
+    ) -> SpendReceipt:
+        with self._locked() as (file, lock, checkpoint, runs, config):
+            original = runs.get(run_id)
+            if original is None or original.column is None:
+                raise BudgetLedgerError("column hold does not exist")
+            state = original.column
+            index = next((i for i, c in enumerate(state.cells) if c.cell_id == cell_id), None)
+            if index is None:
+                raise BudgetLedgerError("cell does not belong to this column hold")
+            old = state.cells[index]
+            opening = checkpoint.opening_spend
+            if start:
+                budget = config.providers.get(original.provider)
+                opening = dict(checkpoint.opening_spend)
+                for provider, configured in config.providers.items():
+                    opening[provider] = max(
+                        opening.get(provider, Decimal(0)), configured.opening_spend_usd
+                    )
+                totals = self._totals(runs, opening)
+                with localcontext() as context:
+                    context.prec = 80
+                    line_exceeded = (
+                        budget is None
+                        or totals.get(original.provider, Decimal(0))
+                        > budget.cap_usd * Decimal(".8")
+                        or sum(totals.values(), Decimal(0)) > config.total_cap_usd * Decimal(".8")
+                    )
+                if (
+                    state.terminal_status is not None
+                    or datetime.now(UTC) >= state.approval.expires_at
+                    or any(
+                        r.admission_blocked and r.provider == original.provider
+                        for r in runs.values()
+                    )
+                    or budget is None
+                    or budget.models.get(original.model) != state.approval.cells[0].price
+                    or budget.session_prices != state.approval.cells[0].session_prices
+                    or any(
+                        self._estimate_column_cell(
+                            quote.plan, quote.price, quote.session_prices, datetime.now(UTC)
+                        )
+                        != quote
+                        for quote in state.approval.cells
+                    )
+                    or line_exceeded
+                ):
+                    raise BudgetRefused("terminal/overrun column refuses new cell claims")
+                if old.state != "pending":
+                    raise BudgetLedgerError("column cell already claimed")
+                new = old.model_copy(update={"state": "running", "started_at": datetime.now(UTC)})
+            else:
+                if old.state not in ("running", "closed"):
+                    raise BudgetLedgerError("cell must be claimed before provider I/O")
+                if actual is not None:
+                    actual = ActualSpend.model_validate(actual.model_dump())
+                candidate = ColumnCellReceipt(
+                    cell_id=cell_id,
+                    state="closed",
+                    verdict=status,
+                    started_at=old.started_at,
+                    actual_evidence=actual,
+                    held_usd=Decimal(0),
+                )
+                try:
+                    new = self._column_cell_price(
+                        state.approval.cells[index], candidate, state.approval
+                    )
+                except (ValueError, BudgetRefused):
+                    raise BudgetLedgerError("invalid or stale column usage evidence") from None
+                if old == new:
+                    return original
+            cells = list(state.cells)
+            cells[index] = new
+            updated = state.model_copy(
+                update={"cells": tuple(cells), "revision": state.revision + 1}
+            )
+            try:
+                receipt = SpendReceipt.model_validate(
+                    self._column_receipt(updated, datetime.now(UTC)).model_dump()
+                )
+            except (ValueError, BudgetRefused):
+                raise BudgetLedgerError("invalid or overlapping column usage evidence") from None
+            self._check_column_transition(original, receipt)
+            self._append(file, receipt, checkpoint, opening, lock)
+            return receipt
+
+    def start_column_cell(self, run_id: str, cell_id: str) -> SpendReceipt:
+        """Claim once BEFORE I/O. Pending cells alone can later release unused holds."""
+        return self._update_column_cell(run_id, cell_id, start=True)
+
+    def settle_column_cell(
+        self,
+        run_id: str,
+        cell_id: str,
+        *,
+        actual: ActualSpend | None = None,
+        status: Literal["completed", "failed", "cancelled"] = "completed",
+    ) -> SpendReceipt:
+        """Settle complete dated evidence; uncertain cells retain their bound.
+
+        Exact replays are idempotent. Unknown cells may accept a newer covering
+        snapshot after column termination; settled actuals cannot be revised away.
+        """
+        return self._update_column_cell(run_id, cell_id, start=False, actual=actual, status=status)
+
+    def finish_column(
+        self, run_id: str, *, status: Literal["completed", "failed", "cancelled"]
+    ) -> SpendReceipt:
+        """Fence new claims, release never-started cells, preserve uncertain charges."""
+        with self._locked() as (file, lock, checkpoint, runs, _config):
+            original = runs.get(run_id)
+            if original is None or original.column is None:
+                raise BudgetLedgerError("column hold does not exist")
+            state = original.column
+            if state.terminal_status is not None:
+                if state.terminal_status == status:
+                    return original
+                raise BudgetLedgerError("column already terminated")
+            cells = tuple(
+                self._column_cell_price(
+                    quote,
+                    ColumnCellReceipt(
+                        cell_id=cell.cell_id,
+                        state="not_started" if cell.state == "pending" else "closed",
+                        verdict="cancelled",
+                        started_at=cell.started_at,
+                        held_usd=Decimal(0),
+                    ),
+                    state.approval,
+                )
+                if cell.state in ("pending", "running")
+                else cell
+                for quote, cell in zip(state.approval.cells, state.cells, strict=True)
+            )
+            updated = state.model_copy(
+                update={
+                    "cells": cells,
+                    "revision": state.revision + 1,
+                    "terminal_status": status,
+                }
+            )
+            receipt = SpendReceipt.model_validate(
+                self._column_receipt(updated, datetime.now(UTC)).model_dump()
+            )
+            self._check_column_transition(original, receipt)
             self._append(file, receipt, checkpoint, checkpoint.opening_spend, lock)
             return receipt
