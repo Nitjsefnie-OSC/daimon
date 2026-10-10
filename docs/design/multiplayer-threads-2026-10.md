@@ -150,8 +150,9 @@ shared mapping ID, policy version and a monotonically increasing execution epoch
 An epoch is a number that distinguishes one execution from its replacement.
 Unique platform message IDs prevent duplicate delivery from creating new work.
 
-Use a durable shared-session admission record and a database uniqueness rule for
-one active execution. Keep each message's arrival order; batch only contiguous
+Key the shared queue on `(tenant, session)`. Use a durable shared-session
+admission record and a database uniqueness rule for one active execution.
+Keep each message's arrival order; batch only contiguous
 messages from the same author. Global/tenant admission limits still apply.
 Do not send a teammate's message
 to discover whether MA is busy. Shared mode must distinguish a live owner from
@@ -384,21 +385,120 @@ unseen events. All three corrections are incorporated above. The design owner
 checked the edits; a second independent review has not been performed. This
 review does not approve enabling external operations.
 
-The design incorporates these integration constraints:
+The following dispositions address each numbered integration constraint. They
+clarify implementation acceptance; the recommendation and release gates remain
+unchanged. The design owner checked this clarification without claiming a new
+independent review.
 
-1. GitHub access: one working repo, App-only setup, explicit baseline plus sender
-   elevation, and requester-bound connection invitations. Shared access must not
-   bypass current resource policy or personal isolation checks.
-2. Approval behavior: one driver per shared session; retain queued messages during
-   an active approval; requester-only Stop, Approve and Deny; one card per call.
-   A confirmation counts as accepted only after the corresponding tool result is
-   observed. Restart retires stale controls with a notice to the original requester
-   before admitting new work. Use configured queue and approval durations.
-3. CI: preserve existing suites and gates, including defaults verification and
-   staging smoke checks. Add real-database concurrent creation, stale owner,
-   revocation, adapter parity, recovery and billing checks. Extend formal-check
-   path filters for new dispatcher files and retain unsafe witnesses with replay
-   against actual code.
+### 9.1 GitHub access constraints
+
+1. **Working repo and connection flow.** Keep repo grants scoped to the agent,
+   at most one working repo, and none by default. The pilot imports that repo
+   only after the audience check in section 5.1, as a reviewed file snapshot;
+   agent ownership alone does not authorize redistribution to every reader.
+   Other repo grants do not become shared mounts or token exports. The ordinary
+   product's token-only access paths and credential-group limits remain unchanged.
+   Shared mode uses the App Connect flow without requesting or suggesting PATs.
+   Human management requests retain the clear-ask and undo behavior; model tools
+   in the shared session cannot change grants. Legacy personal sessions continue
+   under their existing rules.
+2. **Caller identity and token strength.** Treat a session credential's identity
+   as its owner, never as the current requester. Shared execution must not inherit
+   the creator's permission elevation. Section 5.3 preserves the permission
+   formula with an explicit shared baseline grant and live sender authorization,
+   applied only in the backend. The suggested baseline-only sandbox credential
+   remains option 5; the selected pilot supplies no ambient credential at all.
+   A broker lookup of the currently running sender is insufficient for an unseen
+   delayed call. Section 5.4's attribution gate must be satisfied before enabling
+   sender-dependent operations. Audit records distinguish requester, provider
+   principal, effective scope and source of authority. Provider-returned expiry
+   governs backend tokens; a local refresh interval is not a vendor guarantee.
+3. **Management, refresh and invitations.** Shared management uses the verified
+   human requester and cannot fall back to the session creator's running turn.
+   Connect cards and private invitations stay bound to their requester. Grant
+   changes must not silently replace a shared session and discard teammates'
+   files. Freeze affected operations, re-evaluate live grants and policy version,
+   and preserve/export work before any explicit replacement. No shared-mode
+   decision may depend solely on an existing session fingerprint omitting grant
+   changes. An in-place credential refresh remains a separate capability to prove;
+   unsupported vault replacement is not a solution. Existing read-only repo
+   panels and the no-PAT-hint behavior remain unchanged.
+
+### 9.2 CI constraints
+
+1. **Model and evidence.** Place the bounded model in `formal/` and follow
+   `discord_card_lifecycle`: action-to-code/await mapping, safe and deliberately
+   unsafe configurations, counterexample witnesses, pinned verdicts and state
+   counts in `formal/expected.tsv`, then replay against actual code. Cover two
+   callers, private/shared modes, simultaneous first creation, queueing,
+   cancellation/retry, approval waits, restart/replacement and membership or
+   credential revocation. Require one executing owner, no stale owner clearing
+   or overwriting its successor, and immutable actor/principal/session-generation/
+   policy binding for each credential use and approval. Preserve private account,
+   tenant and thread isolation, fresh opt-in without private history import,
+   explicit shared-data visibility, and correct audit/billing without duplicate
+   charges. State fairness and upstream assumptions for progress. Before code
+   exists, model results are provisional; actual replay and MA contract evidence
+   are required for implementation acceptance.
+2. **Suites and scenarios.** Extend core tests in
+   `stores/test_thread_sessions.py`, `turn/test_session_identity.py`,
+   `test_sessions_isolated.py`, `test_session_preparation.py`,
+   `test_session_fence_retry.py`, and the snapshot/refresh and broker/credential
+   tests. Retain account/NULL isolation; add real-database concurrent first join,
+   legacy-row migration, stale-owner, revocation and actor-versus-billing checks.
+   Extend parity cases `test_thread_queue_equivalence.py`, `test_dead_session.py`,
+   `test_session_refresh.py`, `test_turn_billed.py` and relevant continuation,
+   participation and card cases. A two-user Discord scenario must cover opt-in,
+   shared files, policy-authorized actions when enabled, outsider refusal,
+   cancellation/restart and private-thread regression. Keep existing Slack/Teams
+   private behavior; no Teams feature is proposed. Preserve every core/MCP shard,
+   Discord/Slack/Teams/parity suite and lint/build gate. Add new binding/broker
+   paths to both push and PR formal-workflow filters.
+3. **Defaults and deployment gates.** Preserve strict defaults verification and
+   only its existing narrowly scoped staging exception. Do not reseed test tenants
+   or alter shipped defaults to make a check pass. Changes to defaults or settings
+   require matching tests, documentation and generated configuration. Preserve
+   migration-before-refresh, usage evidence, the existing Haiku staging smoke and
+   promotion gates. A single-caller smoke does not prove multiplayer isolation:
+   use fake coverage first, then a separate bounded two-caller contract scenario
+   with controlled credentials if authorized. These constraints confer no merge,
+   staging or production deployment authority on this design effort.
+
+### 9.3 Approval and recovery constraints
+
+1. **Ownership and queue.** Key shared `ThreadQueue` processing and pending work
+   on `(tenant, session)`, with a durable owner and generation, not on the caller.
+   Exactly one driver stream runs per session. Keep FIFO order and the existing
+   configured wait/cap limits; queued teammates count toward those limits and
+   receive the ordinary timeout/refusal outcome. A teammate's message stays in
+   Daimon's queue throughout an approval pause. It must not be sent to MA: the
+   driver's confirmation-related 400 recovery sends `user.interrupt`, which would
+   cancel the active requester's approval. Only a proven orphan may enter that
+   recovery path. Mentions, Stop and summaries address the turn's requester; Stop
+   refuses other callers. Process-local queue flags do not replace durable
+   ownership across workers or restarts.
+2. **Approval and origin.** Show `Requested by @A` and retain the requester-only
+   Approve/Deny footer and refusal behavior, including Slack's in-thread refusal.
+   Keep one card per tool call, deny on the configured expiry, and count acceptance
+   only after observing the corresponding tool result. Preserve the agent's
+   ask-before-publishing policy and `tool_safety.PUBLISH_TOOLS`; sharing does not
+   let a different caller bypass it. Where the later backend path uses turn-origin
+   records, each row must belong to that immutable turn and sender and be deleted
+   at turn end. Never resolve the origin through another caller or the session
+   creator. The shared write tools also enforce the exact-payload approval in
+   section 5.2; required approvals cannot be delegated to a teammate.
+3. **Restart and orphan recovery.** Keep personal row lookup and replacement
+   notices scoped to the personal caller. Shared recovery instead reconciles the
+   session's durable owner, generation and all affected turn-card intents. A
+   restart may leave approval cards with dead controls; retire them with a plain
+   notice to each original requester before admitting new work. Interrupting a
+   proven orphan affects every pending confirmation in that MA session, so record
+   an outcome for each call and notify each requester. An uncertain owner or
+   incomplete reconciliation keeps the session frozen. Retain existing drain and
+   deployment timeout settings. Dropped mentions during drain are an existing
+   follow-up, not a promised fix in this design; accepted shared queue items must
+   survive restart or receive an explicit terminal outcome. A teammate's first
+   message must never trigger silent cancellation as a side effect of admission.
 
 ## 10. Decision requested
 
