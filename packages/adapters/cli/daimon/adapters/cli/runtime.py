@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.core.config import Settings
@@ -17,9 +19,39 @@ from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+if TYPE_CHECKING:
+    # Typing only: the default CLI path never imports the neutral resource host.
+    from daimon.core.neutral_resources import NeutralResourceHost
+
 # A command that creates an agent waits this long for its face: a background
 # render dies with the process. The render takes about a second.
 FACE_WAIT_S = 10.0
+
+
+class ResourceHostFactory(Protocol):
+    """An operator-supplied OpenAI resource host for one tenant, built on request.
+
+    The CLI asks for a host only after it has read the target's routing fresh
+    (the channel's backend revision, or the agent's neutral catalog row) and
+    found the OpenAI profile. The factory owns the provider credentials and
+    workspace; the CLI never builds a provider client itself.
+    """
+
+    # The provider workspace the factory's hosts use, so routing can read the
+    # neutral catalog before any host is requested.
+    @property
+    def account_scope_id(self) -> str: ...
+
+    def __call__(
+        self, *, tenant_id: uuid.UUID, account_id: uuid.UUID, principal_id: str, operation_key: str
+    ) -> NeutralResourceHost: ...
+
+
+CLI_AUTHORIZATION_ID = "cli-deployment-operator"
+
+
+def cli_principal_id(rt: CliRuntime) -> str:
+    return f"cli:{rt.settings.cli.local_user}"
 
 
 @dataclass(frozen=True)
@@ -29,6 +61,10 @@ class CliRuntime:
     sessionmaker: async_sessionmaker[AsyncSession]
     deployment_default: DeploymentDefault
     resolver_cache: ResolverCache
+    # The explicit operator deployment capability for OpenAI agents and channel
+    # copies. None (the default, and all `build_runtime` provides) keeps every
+    # command on its existing Anthropic path.
+    resource_hosts: ResourceHostFactory | None = None
 
 
 @asynccontextmanager
