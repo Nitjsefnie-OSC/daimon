@@ -153,3 +153,66 @@ Offline admin proof fixtures skip a contributor's plain local `daimon_test`
 outside exact GitHub Actions CI, with a clear lane-database/isolation reason.
 The shared admission guard remains strict: invalid CI provenance and routed
 foreign engines are errors, rather than skipped authorization failures.
+```python
+from daimon.testing.slack_surface import SlackSurfaceHarness
+
+capture = await SlackSurfaceHarness(
+    evidence_id="qa:turn:1",
+    session_id=acknowledged_session,
+    root_turn_id=acknowledged_root,
+).run(invoke_real_turn)
+```
+
+Use `TeamsSurfaceHarness` for Teams. The invocation receives a real lifecycle;
+call `post_initial()` as the host does, and then run the actual turn driver with
+that lifecycle. The callback return is ignored. Harness options select the real
+adapter's notification, table, identity, summary, and host-balance configuration.
+Balance reads require an explicitly supplied sessionmaker and tenant.
+
+Slack uses real `AsyncWebClient` methods to serialize Block Kit objects, then a
+fake `api_call` accepts only owned `chat.postMessage`, `chat.update` and
+`chat.delete` calls. Teams uses the actual SDK `MessageActivityInput` objects and
+`TimedSender` through an injectable fake `TeamsSender`. Unknown operations,
+foreign destinations and unowned edits fail closed. These boundaries never
+fall through to a real platform client.
+
+`PlatformSurfaceCapture` is an immutable JSON-roundtrippable receipt with
+identity, monotonic window bounds, ordered post events and surviving messages.
+Each event preserves the serialized request separately from the accepted
+message payload. Edits retain message order, delete events retire messages, and
+history remains unchanged. Receipts freeze when the invocation exits, including
+when it raises or is cancelled. The harness accepts one invocation only.
+
+`post_capture_complete` requires one observed adapter terminal hook, a normally
+returned invocation, and no delivery failures. It does not assert successful
+root completion: a real error card can finish a post window. Swallowed send,
+control or retirement failures also make the window incomplete; partial posts
+remain available. `text_capture_complete` additionally requires no opaque visual
+in any observed state, including a draft later replaced by an answer.
+
+Message observations keep `body_texts`, `card_texts`, `control_labels` and
+`fallback_text` separate. Slack markdown blocks retain full displayed text even
+when the notification fallback is clipped or escaped; Slack native table cells
+are recorded in delivery order. Teams adaptive-card text and controls retain
+SDK wire aliases, and plain answer edits remove the old card. Accessibility and
+notification fallbacks must not be flattened as an extra displayed answer.
+Images, file attachments and unsupported visual nodes leave incomplete text
+coverage. Captured strings are posted text leaves, not browser pixels or OCR.
+
+A QA consumer must independently match the receipt to acknowledged native
+session/root and host window evidence before binding `VisibleText`. Preserve
+transient event text for absence/preamble assertions; final surviving messages
+alone cannot establish what was visible earlier. Control labels and card text
+are visible leaves, but the receipt does not certify card finalization, tool or
+approval effects, admission, platform ingress, authentication or live delivery.
+No QA cell becomes PASS just because a harness returned a receipt.
+
+Pinned OpenAI and Gemini provider replays use the shared isolated SDK factories,
+with explicit offline transports and zero retries. Ambient provider settings
+are refused before replay dispatch; injected clients do not inherit proxy or
+TLS configuration. Request matching and source/version pins remain unchanged.
+
+Catalog lifecycle wrappers still need the separately owned normalized-event
+tap forwarding before native preview/draft completeness can be certified.
+Keep those dependent checks PENDING; final lifecycle posts and native-root
+completion receipts do not establish that additional coverage.

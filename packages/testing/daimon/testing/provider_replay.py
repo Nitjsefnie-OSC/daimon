@@ -18,12 +18,10 @@ from pathlib import Path
 from typing import Literal, NoReturn
 
 import httpx
+from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
 from daimon.testing.ma_transport import RecordedRequest
-from google import genai
-from google.genai.types import HttpOptions, HttpRetryOptions
 from mux.drivers.gemini.transport import SDKTransport as GeminiTransport
 from mux.drivers.openai.transport import SDKTransport as OpenAITransport
-from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 type Backend = Literal["openai", "gemini"]
@@ -268,25 +266,22 @@ async def provider_replay(
     if version(tape.sdk_distribution) != tape.sdk_version:
         raise ValueError("SDK version differs from the replay source pin")
     wire = WireReplay(tape)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(wire.dispatch)) as http:
-        if backend == "openai":
-            async with AsyncOpenAI(
-                api_key="offline-placeholder",
-                base_url="https://offline.invalid/v1",
-                http_client=http,
-                max_retries=0,
-            ) as client:
-                yield ProviderReplay(backend, OpenAITransport(client), wire)
-        else:
-            gemini = genai.Client(
-                api_key="offline-placeholder",
-                http_options=HttpOptions(
-                    base_url="https://offline.invalid",
-                    httpx_async_client=http,
-                    retry_options=HttpRetryOptions(attempts=1),
-                ),
-            )
-            try:
-                yield ProviderReplay(backend, GeminiTransport(gemini), wire)
-            finally:
-                await gemini.aio.aclose()
+    transport = httpx.MockTransport(wire.dispatch)
+    if backend == "openai":
+        async with build_async_openai(
+            api_key="offline-placeholder",
+            base_url="https://offline.invalid/v1",
+            transport=transport,
+        ) as client:
+            yield ProviderReplay(backend, OpenAITransport(client), wire)
+    else:
+        gemini = build_gemini_client(
+            api_key="offline-placeholder",
+            base_url="https://offline.invalid",
+            transport=transport,
+        )
+        try:
+            yield ProviderReplay(backend, GeminiTransport(gemini), wire)
+        finally:
+            await gemini.aio.aclose()
+            gemini.close()

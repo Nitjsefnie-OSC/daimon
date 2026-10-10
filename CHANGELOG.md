@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Execute offline catalog steps in source order with measured completion deadlines and short waits; retain completed turn prefixes and typed PENDING at unsupported operations.
 ### Added
 
+- Use shared isolated SDK factories for pinned offline OpenAI and Gemini replays, refusing ambient provider settings before dispatch.
 - Execute source-ordered offline TARGET-53 catalog steps through the three selected backend hosts, with bounded completion waits, strict native replay consumption and explicit PENDING for unsupported operations and effects.
 - Bind catalog text to actual headless or Discord/Slack/Teams adapter captures, retain transient posts for forbidden-text checks, and report equivalent default-disabled table controls as EXPECTED-FAIL.
 - Add opt-in offline host clock and native-root completion capture helpers, keeping source completion deadlines separate from invocation cleanup and preserving independently acknowledged journal authority.
