@@ -1363,6 +1363,10 @@ plan for another channel or configuration revision. Default Anthropic channels
 do not construct provider runtimes. An explicitly selected provider whose
 deployment constructor is absent is refused before provider transport access.
 
+Inspecting the runtime mapping's size or profile names never constructs a
+provider runtime. `PreparedTurn.runtime` is optional and defaults to `None`;
+its private usage recorder remains outside the public prepared-turn fields.
+
 ### OpenAI deployment runtime
 
 Install the `daimon-mux[openai]` extra in deployments that explicitly enable

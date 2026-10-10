@@ -760,3 +760,51 @@ async def test_scoped_runtime_lookup_never_shares_a_profile_between_channel_revi
         assert lookups[0].get(PROFILE) is first and lookups[1].get(PROFILE) is second
         assert len(seen) == 2 and not deps.turn_runtimes
     assert not transport.requests
+
+
+@pytest.mark.parametrize(
+    "selected,injected,expected",
+    [
+        (False, None, 0),
+        (True, None, 1),
+        (True, PROFILE, 1),
+        (True, "gemini.inline_reuse", 2),
+        (False, PROFILE, 1),
+    ],
+)
+async def test_runtime_mapping_cardinality_is_lazy_and_keeps_injected_profiles(
+    db_session_factory: async_sessionmaker[AsyncSession], selected, injected, expected
+) -> None:
+    def forbidden(request: ProviderPreparationRequest) -> TurnRuntime:
+        raise AssertionError("mapping inspection must not construct a provider runtime")
+
+    runtime = TurnRuntime(lambda config, scope: (config, scope), object(), object())
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        deps = replace(
+            deps_for(client, db_session_factory),
+            turn_runtimes={injected: runtime} if injected is not None else {},
+        )
+        request = ProviderPreparationRequest(
+            deps,
+            admission() if selected else replace(admission(), backend_revision=None),
+            SCOPE,
+            TENANT,
+            "slack",
+            "user",
+            "thread",
+            ACCOUNT,
+            True,
+            preparation.DEFAULT_MA_CAPABILITIES,
+            None,
+            NOW,
+            lambda: NOW,
+        )
+        lookup = runtime_module.ScopedTurnRuntimes(request, forbidden)
+        assert len(lookup) == expected
+        assert len(list(lookup)) == expected
+        assert bool(lookup) == bool(expected)
+        if injected is not None:
+            assert lookup[injected] is runtime
+        assert lookup.resolved is (runtime if selected and injected == PROFILE else None)
+    assert not transport.requests

@@ -94,4 +94,6 @@ class ScopedTurnRuntimes(Mapping[str, TurnRuntime]):
         return iter(dict.fromkeys((*self._runtimes, *((self._profile,) if self._profile else ()))))
 
     def __len__(self) -> int:
-        return len(tuple(self))
+        return len(self._runtimes) + int(
+            self._profile is not None and self._profile not in self._runtimes
+        )
