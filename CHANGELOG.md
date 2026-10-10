@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
 
 - Reject unbound authentication on every native OpenAI MCP tool before credential resolution or session POST, including secondary and anonymous-only servers; verify secret-free actual SDK DEBUG logs.
+- Construct opt-in Gemini channel runtimes from authorized deployment plans with explicit tools, durable record transactions and persisted attempt holds, leaving defaults unchanged.
+
 - Refuse ambient OpenAI custom headers before configured client construction so process headers cannot replace channel credentials or project routing.
 
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.

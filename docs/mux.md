@@ -1287,3 +1287,65 @@ Configured OpenAI runtimes refuse `OPENAI_CUSTOM_HEADERS` before constructing
 a client, including changes introduced after runtime preparation. This prevents
 ambient header injection from replacing the selected channel key or project;
 the refusal never includes header contents.
+
+### Gemini deployment runtime
+
+Install `daimon-mux[gemini]` only for deployments selecting
+`gemini.inline_reuse` with `gemini-3.8-flash`. Enable the same explicit mux and
+channel-backend flags used for OpenAI. `DAIMON_TURN__PROVIDER_RUNTIME_FILE` may
+contain both providers; selection requires the exact admitted profile, tenant,
+platform, channel, account and configuration digest.
+
+A Gemini entry uses the common selector fields plus:
+
+```json
+{
+  "profile": "gemini.inline_reuse",
+  "tenant_id": "<tenant UUID>",
+  "platform": "slack",
+  "channel_id": "<channel ID>",
+  "account_id": "<authorized account UUID>",
+  "config_digest": "<admitted ConfigRevision.digest>",
+  "project": "<actual Gemini project associated with this key>",
+  "api_key_env": "GEMINI_CHANNEL_KEY",
+  "agent_name": "configured-agent",
+  "system": "<explicit native system instruction>",
+  "tools": [],
+  "environment": {"name": "inline-workspace"},
+  "records_path": "/var/lib/daimon/gemini-records.sqlite",
+  "holds_path": "/var/lib/daimon/gemini-holds.sqlite",
+  "hold_usd": "0.05",
+  "cap_usd": "0.25"
+}
+```
+
+`tools` is required: `[]` sends an explicitly empty native list. Omitted/null
+tools refuse before key access. Search, URL context, execution or custom tools
+run only when an operator explicitly lists a supported `ToolSpec`. The separate
+Gemini explicit-tools product also protects older requests; it is required
+before live deployment. Unsupported workspace/MCP/confirmation policies refuse.
+Anthropic admission agent/environment IDs never become Gemini identities.
+
+Provision the parent directories and persistent local volumes before enabling
+the channel. SQLite commits the complete driver record transaction and
+serializes workers sharing the same database; all workers for a provider
+account must share the paths. Account data is partitioned by authorized tenant,
+account and project. The two paths must be absolute and distinct, so a durable
+hold can commit before native dispatch without deadlocking a record transaction.
+These files are created only when the configured provider uses them; no store,
+manifest or provider key is read on the default path. Newly created files are
+private to the process owner. Multi-host storage requires a separate adapter.
+
+Each Flash attempt first persists an explicit operator hold, then retains its
+accepted/refused/unknown receipt. Holds are estimates, not actual spend. They
+remain reserved until an accounting reconciler supplies verified provider and
+infrastructure actuals; this slice never treats a refusal as a free call or
+releases an unknown outcome. Exhausting the configured hold cap refuses further
+attempts. The provider usage outbox preserves native usage with unknown prices
+and infrastructure costs pending. Automatic actual settlement/hold release is a
+follow-up; this runtime is not a live certificate or QA parity claim.
+
+Credential discovery happens only in the selected authorized transport factory.
+Private request-owned SDK clients use the explicit key, pinned Google origin,
+`vertexai=False`, no environment proxies and no native mutation retries. Stream
+completion, close, cancellation and close failure dispose the client lifetime.

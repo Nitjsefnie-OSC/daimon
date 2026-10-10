@@ -55,6 +55,10 @@ def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         from daimon.core.turn.openai_deployment import build_openai_runtime
 
         factory = build_openai_runtime
+    if factory is None and revision.profile == "gemini.inline_reuse":
+        from daimon.core.turn.gemini_deployment import build_gemini_runtime
+
+        factory = build_gemini_runtime
     if factory is None:
         raise AdmissionDenied(reason="backend_unsupported")
     return factory(request)

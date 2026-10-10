@@ -604,3 +604,11 @@ digest. Credential environment references are revealed only after preparation's
 policy recheck; SDK construction remains private to the OpenAI driver. Default
 channels do not inspect the manifest or provider credentials. Durable host
 journal/usage adapters are used; unknown accounting stays pending.
+
+Gemini application deployment uses an explicitly admitted manifest plan with a
+required tools list (including `[]`), authorized native system/environment
+specs and a deferred key reference. The host supplies complete durable SQLite
+record transactions and separately committed attempt holds; the private driver
+owns configured request/stream clients without ambient routing. Unknown actual
+costs remain pending and holds stay reserved until reconciliation. No Gemini
+runtime, manifest or credential is discovered for an unconfigured channel.
