@@ -1471,3 +1471,12 @@ Discord renders the scoped provider-action callback as separate browser-origin a
 Slack attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
 
 Teams attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
+### Neutral lifecycle event identity
+
+The optional `on_provider_event(Event)` lifecycle tap receives non-Anthropic
+normalized frames. Its per-turn identity ledger survives reconnects and is
+separate from the native compatibility display ledger, so a revised media item
+can reach the tap without replaying the native display event. Missing hooks are
+a no-op. The recovery lifecycle wrapper forwards the optional tap; the
+Anthropic native callback keeps its existing order and payload.
