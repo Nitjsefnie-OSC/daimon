@@ -816,3 +816,9 @@ retained interaction usage still passes through the existing recorder: unknown
 usage remains pending, while known revisions are charged once. Storage,
 validation and accounting errors propagate. Successful turns and reconnects
 retain mandatory native usage reconciliation.
+
+Explicit Gemini conformance recovery and inline-skill preparation hooks have
+actual-SDK offline crash and request-byte proofs. They preserve unknown delivery
+and required-action occupancy; C04/C11 remain typed PENDING in the shared matrix.
+See [driver conformance hooks](mux/drivers/gemini/CONFORMANCE-HOOKS.md). These hooks
+are not installed by the host factory and perform no live key discovery.

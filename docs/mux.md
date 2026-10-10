@@ -1680,3 +1680,12 @@ parsed reply references alongside production admission, queue and card facts.
 Authored equal-text mentions retain distinct identities and their real separate
 threads. A reply to a later answer chunk uses its emitted message identifier and
 resolved SDK author, with native completion evidence supplied independently.
+
+Gemini driver-owned conformance hooks are opt-in: `recover_send` preserves typed
+unknown delivery without native key lookup or resending; `prepare_inline_skill`
+binds a local immutable bundle and host-supplied session before interaction-time
+deployment. Actual-SDK MockTransport tests retain exact request bytes and prove
+required-action occupancy. C04/C11 remain shared-fixture PENDING until complete
+host/provider envelopes are composed. See
+`packages/mux/mux/drivers/gemini/CONFORMANCE-HOOKS.md`
+for the evidence boundary; no live calls or default selection changes.
