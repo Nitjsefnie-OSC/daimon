@@ -41,6 +41,7 @@ from typing import Literal, Protocol
 
 import anthropic as anthropic_pkg
 import structlog
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
@@ -94,6 +95,7 @@ from daimon.core.stores.thread_session_lineage import (
     mark_superseded,
 )
 from daimon.core.stores.thread_sessions import (
+    get_live_thread_session,
     get_thread_session_by_id,
     set_budget_channel_stamp,
     update_mutable_fingerprint,
@@ -548,6 +550,41 @@ async def prepare_session_for_turn(
     return await retry_fences(attempt)
 
 
+async def _resolve_legacy_budget_stamp(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    account_id: uuid.UUID,
+) -> tuple[uuid.UUID, BetaManagedAgentsSession] | None:
+    """Commit the MA stamp before preparation can lock the mapping row."""
+    async with deps.sessionmaker() as session:
+        row = await get_live_thread_session(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=account_id,
+        )
+    if row is None or row.budget_channel_id != "":
+        return None
+    try:
+        observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+    except anthropic_pkg.APIError as error:
+        # A transient read leaves the unknown marker for the next bind.
+        log.warning(
+            "session_preparation.budget_stamp_unreadable",
+            session_id=row.ma_session_id,
+            error=type(error).__name__,
+        )
+        return None
+    stamp = observed.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
+    async with deps.sessionmaker() as session, session.begin():
+        await set_budget_channel_stamp(session, id=row.id, budget_channel_id=stamp)
+    return row.id, observed
+
+
 async def _prepare_session_for_turn_locked(
     deps: TurnDeps,
     admission: Admission,
@@ -614,6 +651,17 @@ async def _prepare_session_for_turn_locked(
             decided=fresh.admission,
         )
 
+    stamp_observation = (
+        await _resolve_legacy_budget_stamp(
+            deps,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=session_account_id,
+        )
+        if reuse_existing
+        else None
+    )
     async with deps.sessionmaker() as db, db.begin():
         await lock_preparation(
             db,
@@ -669,22 +717,12 @@ async def _prepare_session_for_turn_locked(
         else:
             source_exists = identity.session_exists
             observed = identity.observed
-            if row.budget_channel_id == "" and source_exists:
-                if observed is None:
-                    try:
-                        observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
-                    except anthropic_pkg.APIError as error:
-                        # A transient read must not replace every legacy session.
-                        # Keep the unknown marker so the next bind can retry.
-                        log.warning(
-                            "session_preparation.budget_stamp_unreadable",
-                            session_id=row.ma_session_id,
-                            error=type(error).__name__,
-                        )
-                if observed is not None:
-                    stamp = observed.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
-                    await set_budget_channel_stamp(db, id=row.id, budget_channel_id=stamp)
-                    row = row.model_copy(update={"budget_channel_id": stamp})
+            if (
+                observed is None
+                and stamp_observation is not None
+                and stamp_observation[0] == row.id
+            ):
+                observed = stamp_observation[1]
             if identity.session_exists:
                 recorded = await recorded_snapshot(
                     deps.anthropic, deps.sessionmaker, existing=row, observed=observed

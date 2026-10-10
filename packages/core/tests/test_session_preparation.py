@@ -619,6 +619,61 @@ async def test_legacy_budget_stamp_uses_ma_before_deciding_replacement(
     assert isinstance(third, PreparedTurn) and third.ma_session_id == second.ma_session_id
 
 
+@pytest.mark.parametrize("missing_snapshot", [True, False], ids=["reuse", "replace"])
+async def test_legacy_budget_stamp_does_not_block_independent_writes(
+    db_session: AsyncSession,
+    db_nullpool_engine: AsyncEngine,
+    missing_snapshot: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    deps = _deps(factory, _Transport())
+    first = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-a"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
+    async with factory() as session:
+        original = await get_thread_session_by_id(session, id=first.mapping_id)
+    assert original is not None and original.effective_config is not None
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "UPDATE thread_sessions SET budget_channel_id = '', "
+                "effective_config = CASE WHEN :missing THEN NULL ELSE effective_config END "
+                "WHERE id = :id"
+            ),
+            {"id": first.mapping_id, "missing": missing_snapshot},
+        )
+    async with factory() as session:
+        legacy = await get_thread_session_by_id(session, id=first.mapping_id)
+    assert legacy is not None and (legacy.effective_config is None) is missing_snapshot
+
+    admitted = "channel-a" if missing_snapshot else "channel-b"
+    second = await asyncio.wait_for(
+        _prepare(
+            deps,
+            replace(_admission(account=account), budget_channel_id=admitted),
+            tenant=tenant,
+            account=account,
+        ),
+        timeout=2,
+    )
+    assert isinstance(second, PreparedTurn)
+    assert (second.ma_session_id == first.ma_session_id) is missing_snapshot
+    async with factory() as session:
+        predecessor = await get_thread_session_by_id(session, id=first.mapping_id)
+    assert predecessor is not None and predecessor.budget_channel_id == "channel-a"
+    if missing_snapshot:
+        assert predecessor.effective_config is not None
+    else:
+        assert predecessor.status == "superseded"
+
+
 async def test_legacy_budget_stamp_read_failure_keeps_mapping_unknown(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
