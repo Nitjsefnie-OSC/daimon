@@ -1223,7 +1223,10 @@ credential-referenced HTTPS MCP connection. The callback receives the complete
 `Scope`, credential reference and exact destination and must authorize that
 tuple. Its default is None; credential-referenced intent then refuses before
 provider I/O. Ordinary no-MCP agents retain explicit `tools=[]`, and the
-existing credential-free anonymous MCP shape remains supported.
+credential-free anonymous HTTPS MCP shape remains supported. Every MCP
+connection, including anonymous intent and unmarked native SDK requests, rejects
+userinfo, queries, fragments, ambiguous authorities, whitespace, invalid names
+and non-HTTPS URLs before persistence, provider I/O or SDK DEBUG logging.
 
 Authenticated policies accept exactly `allowed_tools`, a nonempty distinct list
 of tool names. The native Interactions shape is
@@ -1231,8 +1234,8 @@ of tool names. The native Interactions shape is
 fields, wildcards, mixed anonymous/authenticated connections and multiple bound
 servers refuse. Authentication cannot be supplied by saved native headers,
 unknown tool types/spelling variants, undeclared tool fields or top-level
-request credential carriers. Bound destinations reject userinfo, queries,
-fragments, ambiguous authorities and non-HTTPS URLs.
+request credential carriers. The dispatch binding must stay on its exact
+`mcp_server` tool and destination; moving it to an adjacent function refuses.
 
 Only references and credential-free native intent persist in driver storage.
 Each new send checks the complete request against the owned agent/environment
