@@ -208,7 +208,7 @@ jobs:
           DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
         run: uv run alembic upgrade head
       - name: pytest (discord)
-        run: uv run pytest packages/adapters/discord -n auto
+        run: uv run pytest packages/adapters/discord -n auto -vv --tb=short
 
   pytest-slack:
     runs-on: ubuntu-latest
