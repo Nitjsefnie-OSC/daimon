@@ -13,6 +13,7 @@ from daimon.testing.discord_surface import (
     DiscordSurfaceCapture,
     DiscordSurfaceHarness,
 )
+from daimon.testing.host_clock import current_host_clock
 from daimon.testing.outcome_oracle import TurnEvidence, VisibleText
 from daimon.testing.turn_fakes import RecordingLifecycle
 
@@ -31,6 +32,7 @@ class CatalogLifecycle(RecordingLifecycle):
         super().__init__()
         self.harness = (
             DiscordSurfaceHarness(
+                clock=current_host_clock(),
                 evidence_id=evidence_id,
                 session_id=session_id,
                 root_turn_id=root_turn_id,

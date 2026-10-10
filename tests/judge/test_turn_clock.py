@@ -1,15 +1,19 @@
 """Real SDK/turn/journal timing, with an independent controlled arrival clock."""
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn.state import TurnState
+from daimon.testing.host_clock import HostClock, use_host_clock
 from daimon.testing.outcome_oracle import RunEvidence, TurnEvidence, evaluate
 from daimon.testing.turn_clock import ClockedLifecycle, NativeRoot, await_root_completion
 from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef
 from mux.state.memory import MemoryStateStore
 
@@ -24,73 +28,64 @@ async def test_root_deadline_joins_actual_send_and_journal_before_cleanup_wait(
 ) -> None:
     clock = ArrivalClock()
 
-    class ArrivalLifecycle(RecordingLifecycle):
-        async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
-            await super().on_sse_event(event)
-            if event.type == "session.status_idle":
-                clock.value = arrival_s
+    class ProofStore(MemoryStateStore):
+        async def read_events(
+            self, session_id: str, *, after: int = -1, limit: int = 1000
+        ) -> Sequence[Event]:
+            events = await super().read_events(session_id, after=after, limit=limit)
+            return (
+                []
+                if missing_journal and any(e.type == "session.turn_ended" for e in events)
+                else events
+            )
 
-    delegate = ArrivalLifecycle()
-    observer = ClockedLifecycle(delegate, clock=clock)
-    store = MemoryStateStore()
+    store = ProofStore()
     monkeypatch.setattr(executor, "MemoryStateStore", lambda: store)
-    monkeypatch.setattr(executor, "RecordingLifecycle", lambda: delegate)
     actual_run = executor.run_turn
     cleanup_entered = asyncio.Event()
     cleanup_drained = asyncio.Event()
     row = source("QA-UNSCORED-ROOT-DEADLINE")
     row["surface"] = "headless"
     row["steps"] = row["steps"][:3]
+    row["steps"][2]["timeout_s"] = 3.0
     plan = planned(tmp_path, row)
     tape = scripted(plan)
-    root = tape.turns[0].events[0]["id"]
 
-    async def measured(**kwargs):
-        kwargs["lifecycle"] = observer
-        session = kwargs["session_ref"]
-        scope = kwargs["scope"]
-        before = len(await store.read_events(session.id))
+    async def measured(**kwargs: Any) -> TurnState:
+        observer = kwargs["lifecycle"]
+        assert isinstance(observer, ClockedLifecycle)
+        actual_event = observer.on_sse_event
 
-        async def invoke():
-            try:
-                result = await actual_run(**kwargs)
-                cleanup_entered.set()
-                # The real invocation stays active beyond its source root
-                # budget; only the independent cleanup watchdog may time it.
-                if arrival_s == 2.0 and not missing_journal:
-                    await asyncio.sleep(3.1)
-                else:
-                    await asyncio.Event().wait()
-                return result
-            finally:
-                cleanup_drained.set()
+        async def arrived(event: RawMessageStreamEvent) -> None:
+            await actual_event(event)
+            if str(event.type) == "session.status_idle":
+                clock.value = arrival_s
 
-        async def proof() -> NativeRoot:
-            operation = await store.get_operation(scope, "host-turn-1:send:0")
-            if (
-                operation is None
-                or not operation.result
-                or operation.result.get("input_ids") != [root]
-            ):
-                raise ValueError("missing actual acknowledged send claim")
-            journal = (await store.read_events(session.id))[before:]
-            return NativeRoot(session, root, () if missing_journal else journal)
-
-        return await await_root_completion(
-            invoke(), lifecycle=observer, timeout_s=3.0, native_root=proof, watchdog_s=8.0
-        )
+        observer.on_sse_event = arrived
+        try:
+            result = await actual_run(**kwargs)
+            cleanup_entered.set()
+            if arrival_s == 2.0 and not missing_journal:
+                await asyncio.sleep(3.1)
+            else:
+                await asyncio.Event().wait()
+            return result
+        finally:
+            cleanup_drained.set()
 
     monkeypatch.setattr(executor, "run_turn", measured)
-    if arrival_s > 3.0:
-        with pytest.raises(TimeoutError, match="root completion deadline"):
-            await executor.execute_cell(plan, tape)
-    elif missing_journal:
-        with pytest.raises(ValueError, match="no authoritative native terminal"):
-            await executor.execute_cell(plan, tape)
-    else:
-        result = await executor.execute_cell(plan, tape)
-        assert result.request_count == 3
-        assert len(result.evidence.turns) == 1
+    with use_host_clock(HostClock(clock)):
+        if arrival_s > 3.0:
+            with pytest.raises(TimeoutError, match="root completion deadline"):
+                await executor.execute_cell(plan, tape)
+        elif missing_journal:
+            with pytest.raises(ValueError, match="no authoritative native terminal"):
+                await executor.execute_cell(plan, tape)
+        else:
+            result = await executor.execute_cell(plan, tape)
+            assert result.request_count == 3
+            assert len(result.evidence.turns) == 1
+            assert result.step_receipts[1].completion_clock is not None
     if arrival_s == 2.0 and not missing_journal:
         assert cleanup_entered.is_set()
     assert cleanup_drained.is_set()
@@ -155,24 +150,24 @@ async def test_actual_root_callback_time_is_independent_of_return_cleanup_and_de
 ) -> None:
     clock = ArrivalClock()
 
-    class ArrivalLifecycle(RecordingLifecycle):
-        async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
-            await super().on_sse_event(event)
-            if event.type == "session.status_idle":
-                # Independent native arrival control, not the oracle's max value.
-                clock.value = arrival_s
-
-    delegate = ArrivalLifecycle()
-    observer = ClockedLifecycle(delegate, clock=clock)
+    observers: list[ClockedLifecycle] = []
     store = MemoryStateStore()
     monkeypatch.setattr(executor, "MemoryStateStore", lambda: store)
-    monkeypatch.setattr(executor, "RecordingLifecycle", lambda: delegate)
     actual_run = executor.run_turn
 
-    async def measured(**kwargs):
-        kwargs["lifecycle"] = observer
+    async def measured(**kwargs: Any) -> TurnState:
+        observer = kwargs["lifecycle"]
+        assert isinstance(observer, ClockedLifecycle)
+        observers.append(observer)
+        actual_event = observer.on_sse_event
+
+        async def arrived(event: RawMessageStreamEvent) -> None:
+            await actual_event(event)
+            if str(event.type) == "session.status_idle":
+                clock.value = arrival_s
+
+        observer.on_sse_event = arrived
         result = await actual_run(**kwargs)
-        # Post-terminal work belongs to invocation return, not root completion.
         clock.value = 99.0
         return result
 
@@ -182,7 +177,11 @@ async def test_actual_root_callback_time_is_independent_of_return_cleanup_and_de
     row["steps"] = row["steps"][:3]
     row["assert"] = [{"kind": "done_within_s", "turn": 1, "max": 3.0}]
     plan = planned(tmp_path, row)
-    result = await executor.execute_cell(plan, scripted(plan))
+    with use_host_clock(HostClock(clock)):
+        result = await executor.execute_cell(plan, scripted(plan))
+    observer = observers[0]
+    delegate = observer.delegate
+    assert isinstance(delegate, RecordingLifecycle)
     assert result.request_count == 3
     turn = result.evidence.turns[0]
     journal = await store.read_events(turn.session_id)

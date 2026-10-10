@@ -10,13 +10,14 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from daimon.testing.host_clock import ClockSample, HostClock, current_host_clock
 from daimon.testing.outcome_oracle import TurnEvidence
 from daimon.testing.provider_fixtures import BackendFixture, FixtureGap
+from daimon.testing.turn_clock import await_clocked_step
 from pydantic import model_validator
 
 if __package__:
@@ -46,6 +47,9 @@ class StepReceipt(Record):
     root_turn_id: str | None = None
     timeout_s: float | None = None
     delay_s: float | None = None
+    started_clock: ClockSample | None = None
+    finished_clock: ClockSample | None = None
+    completion_clock: ClockSample | None = None
 
     @model_validator(mode="after")
     def bound_measurement(self) -> StepReceipt:
@@ -58,6 +62,9 @@ class StepReceipt(Record):
                     self.root_turn_id,
                     self.timeout_s,
                     self.delay_s,
+                    self.started_clock,
+                    self.finished_clock,
+                    self.completion_clock,
                 )
             ):
                 raise ValueError("pending step cannot claim a measured execution")
@@ -67,6 +74,17 @@ class StepReceipt(Record):
             or self.code != "BOUND"
         ):
             raise ValueError("step has no owned execution hook")
+        if self.started_clock is not None or self.finished_clock is not None:
+            a, b = self.started_clock, self.finished_clock
+            if a is None or b is None or a.clock_id != b.clock_id or a.order >= b.order:
+                raise ValueError("step clock samples do not share ordered host observations")
+            if a.observed_s != self.started_s or b.observed_s != self.finished_s:
+                raise ValueError("step clock samples differ from measured execution")
+            c = self.completion_clock
+            if c is not None and (c.clock_id != a.clock_id or not a.order < c.order < b.order):
+                raise ValueError("native completion is outside the step clock window")
+        elif self.completion_clock is not None:
+            raise ValueError("completion clock has no step window")
         start, end = number(self.started_s), number(self.finished_s)
         if start is None or end is None or end < start:
             raise ValueError("step has no valid measured execution window")
@@ -244,6 +262,8 @@ async def run_steps(
     scenario PASS. Exact remote-effect gaps are observational and remain PENDING
     after native turns run. Unknown hook reasons remain execution barriers.
     """
+    supplied_clock = current_host_clock()
+    clock = supplied_clock if isinstance(supplied_clock, HostClock) else HostClock(supplied_clock)
     validate_step_sources(plan)
     static = step_gaps(plan)
     gaps = list(static)
@@ -293,7 +313,9 @@ async def run_steps(
             )
             stopped = True
             continue
-        started = time.monotonic()
+        start_sample = clock.sample()
+        started = start_sample.observed_s
+        completion_clock: ClockSample | None = None
         root: str | None = None
         timeout: float | None = None
         delay: float | None = None
@@ -301,7 +323,16 @@ async def run_steps(
             await prepare_channel(i)
         elif i.operation == "host_turn":
             timeout = _deadline(plan, i)
-            evidence = await asyncio.wait_for(invoke(i, timeout), timeout=timeout)
+            measured = await await_clocked_step(invoke(i, timeout), timeout_s=timeout, clock=clock)
+            evidence = measured.value
+            if measured.completion is not None:
+                proof = measured.completion
+                if (
+                    proof.session_id != evidence.session_id
+                    or proof.root_turn_id != evidence.root_turn_id
+                ):
+                    raise ValueError("host evidence differs from independently verified completion")
+                completion_clock = proof.clock_sample
             if evidence.turn != i.turn or not evidence.root_turn_id:
                 raise ValueError("host step returned a foreign or missing turn identity")
             completed[evidence.turn] = evidence
@@ -345,6 +376,7 @@ async def run_steps(
                     raise TimeoutError("catalog completion deadline exceeded")
         else:
             raise ValueError("unbound source operation reached execution")
+        finish_sample = clock.sample()
         receipts.append(
             StepReceipt(
                 location=i.location,
@@ -352,7 +384,10 @@ async def run_steps(
                 status="executed",
                 code="BOUND",
                 started_s=started,
-                finished_s=time.monotonic(),
+                finished_s=finish_sample.observed_s,
+                started_clock=start_sample,
+                finished_clock=finish_sample,
+                completion_clock=completion_clock,
                 turn=i.turn,
                 root_turn_id=root,
                 timeout_s=timeout,

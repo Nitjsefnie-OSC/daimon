@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2244,
+  "files_scanned": 2245,
   "parse_errors": [],
   "calls": [
     {
@@ -18504,7 +18504,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/turn_clock.py",
-      "line": 17,
+      "line": 18,
       "module": "anthropic.types",
       "names": [
         "RawMessageStreamEvent"
@@ -18961,7 +18961,7 @@
     },
     {
       "file": "tests/judge/gemini_catalog_host.py",
-      "line": 13,
+      "line": 12,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -18970,7 +18970,7 @@
     },
     {
       "file": "tests/judge/openai_catalog_host.py",
-      "line": 13,
+      "line": 12,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -18988,7 +18988,7 @@
     },
     {
       "file": "tests/judge/test_turn_clock.py",
-      "line": 8,
+      "line": 10,
       "module": "anthropic.types",
       "names": [
         "RawMessageStreamEvent"

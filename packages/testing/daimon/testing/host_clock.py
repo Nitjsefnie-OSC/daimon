@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from pydantic import BaseModel, ConfigDict, Field
+
+_HOST_CLOCK: ContextVar[HostClock | None] = ContextVar("offline_host_clock", default=None)
 
 
 class ClockSample(BaseModel):
@@ -50,3 +54,18 @@ class HostClock:
         if self._last is None:
             raise ValueError("host clock has no observation")
         return self._last
+
+
+def current_host_clock() -> Callable[[], float]:
+    """Read the executor clock; ordinary callers retain monotonic time."""
+    return _HOST_CLOCK.get() or time.monotonic
+
+
+@contextmanager
+def use_host_clock(clock: HostClock) -> Iterator[None]:
+    """Inject one clock through async host children, restoring caller context."""
+    token = _HOST_CLOCK.set(clock)
+    try:
+        yield
+    finally:
+        _HOST_CLOCK.reset(token)

@@ -10,6 +10,7 @@ import asyncio
 import math
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
@@ -22,7 +23,7 @@ from daimon.core.turn.lifecycle import (
     TurnLifecycle,
 )
 from daimon.core.turn.state import TurnState
-from daimon.testing.host_clock import ClockSample, HostClock
+from daimon.testing.host_clock import ClockSample, HostClock, use_host_clock
 from mux.contracts.events import Event, TurnEndedPayload
 from mux.contracts.ids import ResourceRef
 
@@ -42,6 +43,74 @@ class NativeRoot:
     session: ResourceRef
     root_turn_id: str
     journal: Sequence[Event]
+
+
+@dataclass(frozen=True)
+class RootCompletion:
+    session_id: str
+    root_turn_id: str
+    clock_sample: ClockSample
+
+
+@dataclass(frozen=True)
+class ClockedStep[Result]:
+    value: Result
+    completion: RootCompletion | None
+
+
+_STEP_COMPLETION: ContextVar[asyncio.Future[RootCompletion] | None] = ContextVar(
+    "verified_step_completion", default=None
+)
+
+
+async def await_clocked_step[Result](
+    invocation: Awaitable[Result], *, timeout_s: float, clock: HostClock, watchdog_s: float = 10.0
+) -> ClockedStep[Result]:
+    """Keep the source deadline until actual native proof releases it.
+
+    Generic hooks receive no extra time. Only await_root_completion can publish
+    the verified root signal; timestamps alone cannot extend this deadline.
+    """
+    loop = asyncio.get_running_loop()
+    completion: asyncio.Future[RootCompletion] = loop.create_future()
+    token = _STEP_COMPLETION.set(completion)
+    try:
+        with use_host_clock(clock):
+            task = asyncio.ensure_future(invocation)
+    finally:
+        _STEP_COMPLETION.reset(token)
+    stop = loop.time() + watchdog_s
+    try:
+        start = clock.sample()
+        for value in (timeout_s, watchdog_s):
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError("completion budgets must be finite and positive")
+        done, _ = await asyncio.wait(
+            (task, completion),
+            timeout=min(timeout_s, watchdog_s),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            raise TimeoutError("catalog root completion deadline exceeded")
+        if task.done():
+            task.result()  # Preserve actual host errors before inspecting any signal.
+        proof = completion.result() if completion.done() and not completion.cancelled() else None
+        if proof is not None:
+            sample = proof.clock_sample
+            if sample.clock_id != start.clock_id or sample.order <= start.order:
+                raise ValueError("native completion differs from the executor clock window")
+            if sample.observed_s - start.observed_s > timeout_s:
+                raise TimeoutError("catalog root completion deadline exceeded")
+        elif clock() - start.observed_s > timeout_s:
+            raise TimeoutError("catalog root completion deadline exceeded")
+        value = await asyncio.wait_for(task, timeout=max(0.0, stop - loop.time()))
+        return ClockedStep(value, proof)
+    finally:
+        if not task.done():
+            task.cancel()
+        if not completion.done():
+            completion.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 class ClockedLifecycle:
@@ -216,6 +285,16 @@ async def await_root_completion[Result](
         )
         if completed - lifecycle.started_s > timeout_s:
             raise TimeoutError("catalog root completion deadline exceeded")
+        step_signal = _STEP_COMPLETION.get()
+        if step_signal is not None:
+            sample = lifecycle.sample
+            if sample is None or sample.clock_sample is None:
+                raise ValueError("verified root has no shared executor clock sample")
+            if step_signal.done():
+                raise ValueError("host step reported multiple verified roots")
+            step_signal.set_result(
+                RootCompletion(proof.session.id, proof.root_turn_id, sample.clock_sample)
+            )
         return await asyncio.wait_for(task, timeout=max(0.0, stop - loop.time()))
     finally:
         for pending in (task, signal):

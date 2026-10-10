@@ -35,3 +35,35 @@ def test_backwards_clock_preserves_the_last_actual_sample() -> None:
     assert clock.last == opening
     following = clock.sample()
     assert following.order == 2 and following.observed_s == 3.0
+
+
+def test_nested_executor_clock_restores_context_after_failure() -> None:
+    from daimon.testing.host_clock import current_host_clock, use_host_clock
+
+    original = current_host_clock()
+    outer, inner = HostClock(lambda: 1.0), HostClock(lambda: 2.0)
+    with use_host_clock(outer):
+        assert current_host_clock() is outer
+        with pytest.raises(RuntimeError, match="offline failure"), use_host_clock(inner):
+            assert current_host_clock() is inner
+            raise RuntimeError("offline failure")
+        assert current_host_clock() is outer
+    assert current_host_clock() is original
+
+
+async def test_parallel_executors_have_independent_clock_domains() -> None:
+    import asyncio
+
+    from daimon.testing.host_clock import current_host_clock, use_host_clock
+
+    async def observe(clock: HostClock) -> ClockSample:
+        with use_host_clock(clock):
+            await asyncio.sleep(0)
+            assert current_host_clock() is clock
+            return clock.sample()
+
+    first, second = await asyncio.gather(
+        observe(HostClock(lambda: 2.0)), observe(HostClock(lambda: 2.0))
+    )
+    assert first.clock_id != second.clock_id
+    assert first.order == second.order == 1

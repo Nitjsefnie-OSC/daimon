@@ -7,7 +7,6 @@ No transport, key, SDK client, session creation or provider fallback is discover
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
@@ -22,8 +21,10 @@ from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.testing.discord_surface import DiscordSurfaceCapture
+from daimon.testing.host_clock import current_host_clock
 from daimon.testing.outcome_oracle import SessionUse, TerminalEvidence, TurnEvidence, VisibleText
 from daimon.testing.platform_surface import PlatformSurfaceCapture
+from daimon.testing.turn_clock import ClockedLifecycle, NativeRoot, await_root_completion
 from mux.contracts.events import TurnEndedPayload
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import SendReceipt
@@ -134,7 +135,8 @@ async def run_openai_turn(
     if expected_root in prior_roots:
         raise ValueError("OpenAI expected root already belongs to a prior invocation")
     cursor = before[-1].sequence if before else -1
-    started = time.monotonic()
+    clock = current_host_clock()
+    started = clock()
     output_id = f"{plan.scenario.id}:openai:{session.id}:{expected_root}:headless_return"
     surface_id = output_id.replace(
         ":headless_return", f":{plan.scenario.scenario.get('surface')}_adapter_posts"
@@ -147,11 +149,36 @@ async def run_openai_turn(
         model_id=channel.agent_model,
     )
     states: list[TurnState] = []
+    clocked = ClockedLifecycle(lifecycle, clock=clock, started_s=started)
     output: HeadlessOutput | None = None
+
+    async def native_root() -> NativeRoot:
+        operation = await store.get_operation(scope, key + ":send:0")
+        if (
+            operation is None
+            or operation.operation.status not in ("accepted", "processed")
+            or not operation.result
+        ):
+            raise ValueError("OpenAI input lacks a persisted accepted send claim")
+        receipt = SendReceipt.model_validate(operation.result)
+        if receipt.operation_id != key + ":send:0" or receipt.status not in ("queued", "processed"):
+            raise ValueError("OpenAI input differs from its accepted owned operation")
+        # The native queued receipt has no input/root ids. Root identity is established
+        # independently by the fresh, authoritative running/ended journal below.
+        journal = await store.read_events(session.id, after=cursor)
+        if any(
+            e.turn_id is not None and e.turn_id not in prior_roots | {expected_root}
+            for e in journal
+        ):
+            raise ValueError("OpenAI journal contains an unowned fresh root")
+        if await store.get_binding(binding_slot(binding)) != binding:
+            raise ValueError("native completion binding changed")
+        return NativeRoot(session, expected_root, journal)
+
     with persistence.activate():
 
         async def invoke() -> str:
-            state = await asyncio.wait_for(
+            state = await await_root_completion(
                 run_turn(
                     anthropic=sentinel,
                     scope=scope,
@@ -161,13 +188,15 @@ async def run_openai_turn(
                     backend_request=request,
                     path="mux",
                     user_message=request_text,
-                    lifecycle=lifecycle,
+                    lifecycle=clocked,
                     cancel=asyncio.Event(),
                     billing=BillingExempt(reason="headless-unrecorded"),
                     stream_read_timeout_s=5.0,
                     render_interval_s=3600,
                 ),
-                timeout=timeout_s,
+                lifecycle=clocked,
+                timeout_s=timeout_s,
+                native_root=native_root,
             )
             states.append(state)
             if state.error is not None:
@@ -176,14 +205,14 @@ async def run_openai_turn(
 
         async def captured() -> None:
             nonlocal output
-            output = await capture_headless_return(invoke, evidence_id=output_id)
+            output = await capture_headless_return(invoke, evidence_id=output_id, clock=clock)
 
         try:
             await lifecycle.run(captured)
         except TurnError as error:
             if not states or states[-1].error is not error:
                 raise
-    observed = time.monotonic()
+    observed = clock()
     if len(states) != 1 or len(lifecycle.terminal_success) + len(lifecycle.terminal_failures) != 1:
         raise ValueError("OpenAI host invocation did not close exactly once")
     state = states[0]
@@ -213,6 +242,9 @@ async def run_openai_turn(
     ):
         raise ValueError("OpenAI journal contains an unowned fresh root")
     roots = [e for e in journal if e.turn_id == expected_root and e.thread_id is None]
+    completed = clocked.completion_time(
+        session=session, root_turn_id=expected_root, journal=journal
+    )
     terminals: list[TerminalEvidence] = []
     for event in roots:
         if event.type == "session.turn_ended":
@@ -226,7 +258,7 @@ async def run_openai_turn(
                     root_turn_id=expected_root,
                     authority=event.authority,
                     outcome=payload.outcome,
-                    observed_s=observed,
+                    observed_s=completed,
                 )
             )
     if not roots or not any(t.authority in ("record", "reconciled") for t in terminals):

@@ -8,6 +8,7 @@ from datetime import datetime
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason, acknowledge
 from daimon.core.turn.state import TurnState
+from daimon.testing.host_clock import current_host_clock
 from daimon.testing.outcome_oracle import (
     OutcomeReport,
     RunEvidence,
@@ -43,6 +44,7 @@ class CatalogLifecycle(DiscordCatalogLifecycle):
         if surface == "slack":
             # The catalog's ordinary table case preserves the adapter's default.
             self.platform_harness = SlackSurfaceHarness(
+                clock=current_host_clock(),
                 evidence_id=evidence_id,
                 session_id=session_id,
                 root_turn_id=root_turn_id,
@@ -51,6 +53,7 @@ class CatalogLifecycle(DiscordCatalogLifecycle):
             )
         elif surface == "teams":
             self.platform_harness = TeamsSurfaceHarness(
+                clock=current_host_clock(),
                 evidence_id=evidence_id,
                 session_id=session_id,
                 root_turn_id=root_turn_id,

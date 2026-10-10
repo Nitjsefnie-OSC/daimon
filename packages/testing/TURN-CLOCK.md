@@ -30,7 +30,26 @@ actual SDK/core/mux regression controls use offline native tapes and independent
 set completion arrivals. They test timely versus late completion and return
 cleanup beyond a source budget; they do not certify a frozen catalog cell.
 
-The ordered catalog dispatcher must preserve the separate completion and
-cleanup budgets when binding these helpers. Existing source gaps, original
-assertions and oracle windows remain intact. Native-prefix execution and
-complete scenario verdicts must be reported separately.
+Existing source gaps, original assertions and oracle windows remain intact.
+Native-prefix execution and complete scenario verdicts are reported separately.
+
+The ordered QA dispatcher now binds these helpers for Anthropic, OpenAI and
+Gemini. `await_clocked_step` keeps the original cancellation budget for generic
+hooks. Only the private signal from a settled real lifecycle and independently
+verified native send/binding/fresh journal releases that root deadline. A later
+return stays watchdog bounded. Returned evidence must name the same session and
+root as the verified completion; callbacks or clock labels cannot supply them.
+
+Inject a `HostClock` with `use_host_clock(clock)` around a catalog invocation.
+The context follows asynchronous children and restores the caller afterward.
+Actual adapter harnesses and headless-return capture use that same clock. Step
+receipts serialize opening, verified completion and closing samples, preserving
+one sequence at equal times without renumbering message-local identities.
+Pending steps have no measured samples. Terminal evidence records actual root
+completion; visible headless text records its later return boundary.
+
+This binding preserves original catalog bytes, assertions, native payloads,
+request receipts, unsupported-operation barriers and typed PENDING gaps. N9's
+ordered-step unit already removed the 14 timeout barriers per provider column;
+clock binding does not count those again. Controlled timing microcases remain
+unscored, and full-cell verdicts are reported separately from timed prefixes.
