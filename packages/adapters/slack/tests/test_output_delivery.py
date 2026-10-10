@@ -14,8 +14,8 @@ from typing import Any
 
 import httpx
 from anthropic.types.beta import FileMetadata
-from daimon.adapters.slack.output_delivery import deliver_session_outputs
-from daimon.core.output_delivery import MAX_BYTES_PER_FILE
+from daimon.adapters.slack.output_delivery import deliver_provider_output, deliver_session_outputs
+from daimon.core.output_delivery import MAX_BYTES_PER_FILE, DeliverableFile
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from yarl import URL
 
@@ -536,3 +536,46 @@ async def test_delivery_posts_oversize_notice_and_deletes_entry_without_upload(
     ]
     assert upload_requests == [], "an oversize file must produce no upload requests at all"
     assert deletes == ["file_big"], "the oversize entry must be deleted after the notice"
+
+
+async def test_neutral_bytes_reach_actual_slack_sdk_upload_flow(fake_slack_web_client: Any) -> None:
+    mock = fake_slack_web_client.mock
+    mock.post(
+        _GET_URL,
+        payload={
+            "ok": True,
+            "file_id": "F-neutral",
+            "upload_url": "https://files.slack.com/upload/v1/neutral",
+        },
+    )
+    mock.post(_UPLOAD, status=200, body="OK", content_type="text/plain")
+    mock.post(_COMPLETE, payload={"ok": True, "files": [{"id": "F-neutral", "title": "chart.png"}]})
+    content = b"\x89PNG\r\n\x1a\n\x00provider-image"
+    assert await deliver_provider_output(
+        DeliverableFile("neutral:gemini:root:image", "chart", "image/png", len(content), content),
+        fake_slack_web_client.client,
+        channel_id="C1",
+        thread_ts="1.2",
+    )
+    uploads = [
+        call
+        for (_, url), calls in mock.requests.items()
+        if "files.slack.com" in str(url)
+        for call in calls
+    ]
+    assert len(uploads) == 1
+    assert uploads[0].kwargs["data"] == content
+    complete = [url for (_, url) in mock.requests if "completeUploadExternal" in str(url)]
+    assert len(complete) == 1 and complete[0].query["channel_id"] == "C1"
+    assert complete[0].query["thread_ts"] == "1.2"
+    assert all("content_type" not in url.query for (_, url) in mock.requests)
+
+
+async def test_neutral_mismatched_size_never_contacts_slack(fake_slack_web_client: Any) -> None:
+    assert not await deliver_provider_output(
+        DeliverableFile("neutral:openai:root:file", "report.txt", "text/plain", 99, b"data"),
+        fake_slack_web_client.client,
+        channel_id="C1",
+        thread_ts="1.2",
+    )
+    assert not fake_slack_web_client.mock.requests
