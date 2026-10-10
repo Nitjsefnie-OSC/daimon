@@ -6,20 +6,20 @@ The model has one message, two workers, one crash, one connection loss, and one 
 
 | Model action | Code source |
 | --- | --- |
-| `Restart`, `Replay`, `Gateway` | `packages/adapters/discord/daimon/adapters/discord/bot.py:1641-1643,1724-1763,2119-2280` |
-| `Claim` | `packages/core/daimon/core/stores/discord_message_admissions.py:14-72`; `packages/core/daimon/core/stores/worker_ownership.py:7-40` |
-| `Start` | `packages/adapters/discord/daimon/adapters/discord/bot.py:2395-2420`; `packages/core/daimon/core/stores/discord_message_admissions.py:75-96` |
-| `Crash` | `packages/adapters/discord/daimon/adapters/discord/runtime.py:55-75`; `packages/core/daimon/core/stores/worker_ownership.py:15-40` |
-| `ConnectionLoss` | `packages/adapters/discord/daimon/adapters/discord/runtime.py:95-120` (failed owner probe, lock already gone) |
-| `Stop` | `packages/adapters/discord/daimon/adapters/discord/__main__.py:27-29`; `packages/adapters/discord/daimon/adapters/discord/bot.py:793-843` |
-| `GraceElapsed` | `packages/core/daimon/core/stores/worker_ownership.py:7-40` (database clock and persisted heartbeat) |
+| `Restart`, `Replay`, `Gateway` | `packages/adapters/discord/daimon/adapters/discord/bot.py:1695,1782,2176` |
+| `Claim` | `packages/core/daimon/core/stores/discord_message_admissions.py:14-72`; `packages/core/daimon/core/stores/worker_ownership.py:13-37` |
+| `Start` | `packages/adapters/discord/daimon/adapters/discord/bot.py:2451,2617`; `packages/core/daimon/core/stores/discord_message_admissions.py:75-96` |
+| `Crash` | `packages/adapters/discord/daimon/adapters/discord/runtime.py:53-80`; `packages/core/daimon/core/stores/worker_ownership.py:13-37` |
+| `ConnectionLoss` | `packages/adapters/discord/daimon/adapters/discord/runtime.py:98-115` (failed owner probe, lock already gone) |
+| `Stop` | `packages/adapters/discord/daimon/adapters/discord/__main__.py:28-37`; `packages/adapters/discord/daimon/adapters/discord/bot.py:797-847` |
+| `GraceElapsed` | `packages/core/daimon/core/stores/worker_ownership.py:10-37` (database clock and persisted heartbeat) |
 
 | Bound or assumption | Value and source |
 | --- | --- |
 | Workers | Two, minimum for takeover; production has no two-worker cap. |
 | Message and redelivery | One each; enough for duplicate execution. |
 | Crash and connection loss | At most one of each; `ConnectionLoss` does not imply `Stop`. |
-| Grace | Logical ordering in TLC. Production: heartbeat every 5 s; failed probe has a 5 s timeout; drain allows 60 s for turns, 10 s for notices, 5 s for cancellation cleanup and 5 s for card writes. A 120 s grace leaves scheduling and close margin. Assumes the event loop schedules the guard and drain within that margin and cancellation/close complete within their budgets. |
+| Grace | Logical ordering in TLC. Production: heartbeat every 5 s; failed probe has a 5 s timeout; owner-loss drain has a 100 s hard exit deadline. The last heartbeat can precede loss by 5 s, so stop occurs within 115 s of that heartbeat under the assumption that the event loop schedules the probe, timeout, drain, and exit timer on time. The 120 s grace leaves 5 s of margin. |
 | Replay | Enabled and covers the message; production default remains 0 minutes. |
 
 | Config | Verdict | States | Meaning |
