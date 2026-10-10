@@ -655,3 +655,7 @@ The opt-in OpenAI offline adapter now exercises C04 through actual SDK delivery
 and a restartable fenced StateStore bridge. Ambiguous accepted input remains
 unknown without another POST or a guessed native input identity. Its seven
 offline passes do not certify live crash recovery or production host storage.
+OpenAI interaction preparation has an actual SDK proof composing exact skill
+upload, immutable hosted pin, remote MCP, an uploaded file and an unavailable
+function action. A file mount does not establish a repository checkout; canonical
+C11 remains PENDING while those scenario requirements are unavailable.
