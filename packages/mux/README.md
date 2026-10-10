@@ -612,8 +612,11 @@ its copy and locked policy write, without an Anthropic resource request.
 An Add-skill upload is committed as an exact checked bundle before attachment.
 Attachment creates a new immutable native agent and publishes it under the
 catalog's local CAS; old agent refs and already-bound sessions are preserved.
-Only a definite losing CAS permits deleting an unpublished replacement. An
-uncertain database commit keeps the native ref for reconciliation. A restarted
+Catalog publication failures retain the native ref and log it for reconciliation.
+A lost CAS can return the committed winner's identity on a same-key replay,
+including an identity retained by a historical revision; it never proves the
+replacement unpublished. This edge performs no automatic CAS cleanup without a
+fenced identity/history proof. A restarted
 Add-skill operation locates owned retained versions and reads the actual native
 latest version; it never guesses from version ordering or creates another upload
 after a known attachment failure. The caller owns operation claiming and unknown

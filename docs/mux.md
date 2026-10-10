@@ -1248,6 +1248,13 @@ before replacing the catalog agent under local CAS. A known failed attachment
 can reuse that retained upload after restart. An unknown native upload remains
 the caller's claimed-operation reconciliation responsibility.
 
+Catalog publication failures retain and log the native identity, including a
+cancelled or ambiguous commit. A lost CAS does not prove an idempotently created
+agent unpublished: a current or historical catalog revision can name that same
+identity. Automatic CAS cleanup requires a fenced identity/history proof and is
+not attempted by this edge. Readback compares the fields after OpenAI's optional
+tool normalization while preserving the authored description and schema.
+
 `fork_host_agent` applies the existing FORK authorization, copies source-owned
 bundle bytes under new native skill ids, keeps shared library pins and omits
 foreign-agent skills. Passing this host to `set_channel_rule` exercises the same

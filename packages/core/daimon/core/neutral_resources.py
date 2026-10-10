@@ -89,6 +89,21 @@ def skill_upload(bundle: SkillBundle) -> SkillUpload:
         )
 
 
+def _openai_native_tools(spec: AgentSpec) -> tuple[ToolSpec, ...]:
+    """Compare the compiled/read-back fields while retaining authored intent."""
+    return tuple(
+        ToolSpec(
+            name=tool.name,
+            kind=tool.kind,
+            description=(tool.description or None) if tool.kind == "custom" else None,
+            input_schema=dict(tool.input_schema or {}) if tool.kind == "custom" else None,
+            permission=tool.permission,
+        )
+        for tool in spec.tools or ()
+        if tool.kind != "mcp_toolset" and not (tool.kind == "builtin" and tool.name == "bash")
+    )
+
+
 class NeutralResourceHost:
     """Explicit tenant/account/workspace edge, supplied by the authorized host.
 
@@ -165,13 +180,7 @@ class NeutralResourceHost:
             or fresh.spec.model != row.agent.spec.model
             or fresh.spec.system != row.agent.spec.system
             or fresh.spec.skills != row.agent.spec.skills
-            or tuple(fresh.spec.tools or ())
-            != tuple(
-                tool
-                for tool in row.agent.spec.tools or ()
-                if tool.kind != "mcp_toolset"
-                and not (tool.kind == "builtin" and tool.name == "bash")
-            )
+            or tuple(fresh.spec.tools or ()) != _openai_native_tools(row.agent.spec)
             or tuple(fresh.spec.mcp_servers or ()) != tuple(row.agent.spec.mcp_servers or ())
             or any(
                 (fresh.spec.metadata or {}).get(key) != (row.agent.spec.metadata or {}).get(key)
@@ -214,18 +223,24 @@ class NeutralResourceHost:
         # Keep authored intent, rather than reusing driver's compiled metadata
         # chunks or losing hosted Bash/MCP toolset declarations on the next edit.
         authored = created.model_copy(update={"spec": spec})
+        published = False
         try:
-            return await self.catalog.put_agent(
+            row = await self.catalog.put_agent(
                 self.scope, catalog_id, authored, expected_revision=expected_revision
             )
-        except CatalogConflict:
-            # Only definite CAS failure permits cleanup. An unknown DB commit
-            # may have published this ref; never delete it on generic failure.
-            try:
-                await self.backend.agents.delete(self.scope, created.ref, key=key + ":cleanup")
-            except Exception:
-                _log.warning("neutral_resources.unpublished_agent_cleanup_failed")
-            raise
+            published = True
+            return row
+        finally:
+            # An idempotent replay can return a ref already published by the
+            # winning operation, including a historical catalog revision. A
+            # lost CAS or commit acknowledgement never proves it unpublished.
+            # Without a fenced identity/history proof, retain it for reconciliation.
+            if not published:
+                _log.warning(
+                    "neutral_resources.agent_publication_failed_native_retained",
+                    catalog_id=catalog_id,
+                    native_agent_id=created.ref.id,
+                )
 
     async def concrete(self, pin: SkillRef) -> SkillRef:
         if pin.version is not None:

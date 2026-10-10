@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -98,21 +99,19 @@ def spec(name: str = "source", pins: tuple[SkillRef, ...] = ()) -> AgentSpec:
 
 
 def raw_agent(requested: AgentSpec, scope: Scope, id_: str = "original") -> dict[str, object]:
-    tools: list[dict[str, object]] = [
-        {"type": tool.name}
-        for tool in requested.tools or ()
-        if tool.kind == "builtin" and tool.name != "bash"
-    ]
-    tools.extend(
-        {
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description or "",
-            "parameters": dict(tool.input_schema or {}),
-        }
-        for tool in requested.tools or ()
-        if tool.kind == "custom"
-    )
+    tools: list[dict[str, object]] = []
+    for tool in requested.tools or ():
+        if tool.kind == "builtin" and tool.name != "bash":
+            tools.append({"type": tool.name})
+        elif tool.kind == "custom":
+            tools.append(
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": dict(tool.input_schema or {}),
+                }
+            )
     tools.extend(
         {
             "type": "mcp",
@@ -694,7 +693,7 @@ async def test_fork_policy_refuses_before_any_native_io(setup: Setup, subject: S
     assert not case.trace.requests
 
 
-async def test_catalog_cas_race_keeps_the_winner_and_deletes_only_the_unpublished_replacement(
+async def test_catalog_cas_race_retains_native_replacements_without_a_fenced_unpublished_proof(
     setup: Setup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case = SDKCase(setup)
@@ -710,7 +709,6 @@ async def test_catalog_cas_race_keeps_the_winner_and_deletes_only_the_unpublishe
         reply("GET", "/skills/uploaded/versions/1", version()),
         reply("POST", "/agents", raw_agent(desired, case.scope, "losing-replacement")),
         reply("POST", "/agents", raw_agent(winner, case.scope, "winning-replacement")),
-        reply("DELETE", "/agents/losing-replacement", {}),
     )
     async with case.sdk() as sdk:
         host = case.host(sdk)
@@ -733,14 +731,138 @@ async def test_catalog_cas_race_keeps_the_winner_and_deletes_only_the_unpublishe
     current = await case.catalog.get_agent(case.scope, "source")
     assert current is not None and current.local_revision == 2
     assert current.agent.ref.id == "winning-replacement" and current.agent.spec == winner
-    assert [request.path for request in case.trace.requests if request.method == "DELETE"] == [
-        "/v1/agents/losing-replacement"
-    ]
+    assert all(request.method != "DELETE" for request in case.trace.requests)
     assert len(await case.catalog.list_skills(case.scope)) == 1
 
 
+@pytest.mark.parametrize("historical", [False, True])
+async def test_same_key_create_replay_never_deletes_the_committed_native_winner(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch, historical: bool
+) -> None:
+    case = SDKCase(setup)
+    desired = spec().model_copy(update={"system": "Changed prompt."})
+    later = desired.model_copy(update={"system": "A later committed prompt."})
+    await case.seed_agent(spec())
+    response = raw_agent(desired, case.scope, "idempotent-winner")
+    case.trace.queue(reply("POST", "/agents", response), reply("POST", "/agents", response))
+    if historical:
+        case.trace.queue(reply("POST", "/agents", raw_agent(later, case.scope, "later-winner")))
+    case.trace.queue(reply("GET", "/agents/idempotent-winner", response))
+    async with case.sdk() as sdk:
+        host = case.host(sdk)
+        put = host.catalog.put_agent
+
+        async def replay(scope: Scope, catalog_id: str, agent: Agent, *, expected_revision: int):
+            winner = await host.backend.agents.create(scope, desired, key="same-claimed-operation")
+            await put(
+                scope,
+                catalog_id,
+                winner.model_copy(update={"spec": desired}),
+                expected_revision=expected_revision,
+            )
+            if historical:
+                newest = await host.backend.agents.create(scope, later, key="later-operation")
+                await put(
+                    scope,
+                    catalog_id,
+                    newest.model_copy(update={"spec": later}),
+                    expected_revision=expected_revision + 1,
+                )
+            return await put(scope, catalog_id, agent, expected_revision=expected_revision)
+
+        monkeypatch.setattr(host.catalog, "put_agent", replay)
+        with pytest.raises(CatalogConflict):
+            await host.publish("source", desired, expected_revision=1, key="same-claimed-operation")
+        committed = await case.catalog.get_agent(case.scope, "source", local_revision=2)
+        assert committed is not None and committed.agent.ref.id == "idempotent-winner"
+        native = await host.backend.agents.retrieve(case.scope, committed.agent.ref)
+        assert native.ref == committed.agent.ref and native.spec.system == desired.system
+    case.trace.assert_consumed()
+    current = await case.catalog.get_agent(case.scope, "source")
+    assert current is not None
+    assert (current.local_revision, current.agent.ref.id) == (
+        (3, "later-winner") if historical else (2, "idempotent-winner")
+    )
+    create_keys = [key for path, _beta, key in case.headers if path == "/v1/agents"]
+    assert create_keys[:2] == ["same-claimed-operation", "same-claimed-operation"]
+    creates = [request for request in case.trace.requests if request.method == "POST"]
+    assert creates[0].body == creates[1].body
+    assert all(request.method != "DELETE" for request in case.trace.requests)
+
+
+@pytest.mark.parametrize(
+    "normalization", ["empty_description", "omitted_schema", "builtin_annotations", "toolset"]
+)
+async def test_native_read_accepts_compiled_optional_fields_and_retains_authored_intent(
+    setup: Setup, normalization: str
+) -> None:
+    case = SDKCase(setup)
+    custom = ToolSpec(
+        name="helper",
+        kind="custom",
+        description="" if normalization == "empty_description" else "Help this workspace.",
+        input_schema=None
+        if normalization == "omitted_schema"
+        else {"type": "object", "properties": {}},
+    )
+    tools = (*(spec().tools or ()), custom)
+    servers: tuple[MCPConnection, ...] = ()
+    if normalization == "builtin_annotations":
+        tools += (
+            ToolSpec(
+                name="tool_search",
+                kind="builtin",
+                description="Authored host annotation.",
+                input_schema={"type": "object"},
+            ),
+        )
+    elif normalization == "toolset":
+        tools += (ToolSpec(name="service", kind="mcp_toolset", description="Host annotation."),)
+        servers = (MCPConnection(name="service", url="https://service.example.com/mcp"),)
+    requested = spec().model_copy(update={"tools": tools, "mcp_servers": servers})
+    case.trace.queue(
+        reply("POST", "/agents", raw_agent(requested, case.scope)),
+        reply("GET", "/agents/original", raw_agent(requested, case.scope)),
+    )
+    async with case.sdk() as sdk:
+        host = case.host(sdk)
+        await host.publish("source", requested, expected_revision=0, key="publish-with-annotations")
+        read = await host.read("source")
+    case.trace.assert_consumed()
+    assert read.agent.spec == requested
+    sent = case.trace.requests[0].json()
+    assert isinstance(sent, dict)
+    assert sent["tools"] == raw_agent(requested, case.scope)["tools"]
+
+
+@pytest.mark.parametrize("field", ["description", "parameters"])
+async def test_native_read_still_refuses_changes_to_consumed_custom_tool_fields(
+    setup: Setup, field: str
+) -> None:
+    case = SDKCase(setup)
+    requested = spec().model_copy(
+        update={"tools": (ToolSpec(name="helper", kind="custom", description="", input_schema={}),)}
+    )
+    await case.seed_agent(requested)
+    raw = raw_agent(requested, case.scope)
+    raw["tools"] = [
+        {
+            "type": "function",
+            "name": "helper",
+            "description": "Different description." if field == "description" else "",
+            "parameters": {"type": "string"} if field == "parameters" else {},
+        }
+    ]
+    case.trace.queue(reply("GET", "/agents/original", raw))
+    async with case.sdk() as sdk:
+        with pytest.raises(CatalogConflict):
+            await case.host(sdk).read("source")
+    case.trace.assert_consumed()
+
+
+@pytest.mark.parametrize("failure", [OSError, asyncio.CancelledError])
 async def test_unknown_catalog_commit_keeps_the_published_native_ref_and_restart_performs_no_mutation(
-    setup: Setup, monkeypatch: pytest.MonkeyPatch
+    setup: Setup, monkeypatch: pytest.MonkeyPatch, failure: type[BaseException]
 ) -> None:
     case = SDKCase(setup)
     original = spec()
@@ -763,10 +885,10 @@ async def test_unknown_catalog_commit_keeps_the_published_native_ref_and_restart
 
         async def lost_ack(scope: Scope, catalog_id: str, agent: Agent, *, expected_revision: int):
             await put(scope, catalog_id, agent, expected_revision=expected_revision)
-            raise OSError("offline lost catalog commit acknowledgement")
+            raise failure("offline lost catalog commit acknowledgement")
 
         monkeypatch.setattr(host.catalog, "put_agent", lost_ack)
-        with pytest.raises(OSError):
+        with pytest.raises(failure):
             await add_host_agent_skill(host, catalog_id="source", bundle=bundle(), recheck=allow)
         recovered = await add_host_agent_skill(
             case.host(sdk, "restart"), catalog_id="source", bundle=bundle(), recheck=allow
