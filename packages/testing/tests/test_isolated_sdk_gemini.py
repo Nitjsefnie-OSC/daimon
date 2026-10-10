@@ -33,7 +33,7 @@ def clean_sdk_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     import os
 
     for name in tuple(os.environ):
-        if name in SDK_ENV_VARS or name.upper().startswith(("GOOGLE_", "GEMINI_")):
+        if name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_")):
             monkeypatch.delenv(name, raising=False)
     yield
 

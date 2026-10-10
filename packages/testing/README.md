@@ -102,9 +102,10 @@ async with build_async_openai(transport=transport) as client:
 
 Construction raises `AmbientSDKConfigurationError` if any variable in
 `SDK_ENV_VARS` is present, even with an empty value and even for another provider.
-Gemini additionally refuses every `GOOGLE_`/`GEMINI_` variable name (case
-insensitive), including empty or unknown future settings; unknown names and all
-values are omitted from errors. Checks iterate names before set membership,
+Every factory additionally refuses unknown `ANTHROPIC_`/`OPENAI_`/`GOOGLE_`/`GEMINI_`
+variable names (case insensitive), including empty or future settings; unknown
+names and all values are omitted from errors. The same check guards late OpenAI
+and Anthropic SDK copies. Checks iterate names before set membership,
 avoiding `os.environ` membership's implicit value lookup. Both `GOOGLE_API_KEY`
 and `GEMINI_API_KEY` are refused before Gemini construction, even with an explicit
 test key, because Google GenAI 2.7 reads them unconditionally. This includes

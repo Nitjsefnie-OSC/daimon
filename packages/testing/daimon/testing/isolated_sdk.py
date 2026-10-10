@@ -73,6 +73,14 @@ def _require_clean_environment() -> None:
     # reads values. Snapshot keys through iteration before membership checks.
     names = frozenset(os.environ)
     present = [name for name in SDK_ENV_VARS if name in names]
+    # Future provider settings can contain secrets in their names as well as
+    # values. Refuse all four prefixes, without reporting unknown names.
+    if any(
+        name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_"))
+        and name not in SDK_ENV_VARS
+        for name in names
+    ):
+        raise AmbientSDKConfigurationError("test SDK refuses ambient provider configuration")
     if present:
         raise AmbientSDKConfigurationError(
             "test SDK refuses ambient variables: " + ", ".join(present)

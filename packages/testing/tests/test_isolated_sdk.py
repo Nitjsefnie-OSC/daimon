@@ -20,6 +20,23 @@ from daimon.testing.isolated_sdk import (
 )
 
 FACTORIES = (build_async_openai, build_async_anthropic, build_gemini_client)
+UNKNOWN_PROVIDER_NAMES = tuple(
+    prefix + "PRIVATE_FUTURE_SETTING"
+    for prefix in (
+        "ANTHROPIC_",
+        "OPENAI_",
+        "GOOGLE_",
+        "GEMINI_",
+        "anthropic_",
+        "openai_",
+        "google_",
+        "gemini_",
+        "Anthropic_",
+        "OpenAI_",
+        "Google_",
+        "Gemini_",
+    )
+)
 
 
 def _environment_snapshot() -> str:
@@ -30,13 +47,13 @@ def _environment_snapshot() -> str:
 @pytest.fixture(autouse=True)
 def clean_provider_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for name in tuple(os.environ):
-        if name in SDK_ENV_VARS or name.upper().startswith(("GOOGLE_", "GEMINI_")):
+        if name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_")):
             monkeypatch.delenv(name, raising=False)
     yield
 
 
 @pytest.mark.parametrize("factory", FACTORIES)
-@pytest.mark.parametrize("name", SDK_ENV_VARS)
+@pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
 @pytest.mark.parametrize(
     "value", ["", "offline-secret-do-not-log", "X-Poison: sentinel\nX-Other: value"]
 )
@@ -51,7 +68,10 @@ def test_every_provider_variable_refuses_each_factory_before_construction(
         pytest.raises(AmbientSDKConfigurationError) as error,
     ):
         factory(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
-    assert name in str(error.value)
+    if name in SDK_ENV_VARS:
+        assert name in str(error.value)
+    else:
+        assert name not in str(error.value)
     if value:
         assert value not in str(error.value)
     assert _environment_snapshot() == before
@@ -405,7 +425,7 @@ class _NamesOnlyEnvironment(Mapping[str, str]):
 
 
 @pytest.mark.parametrize("factory", FACTORIES)
-@pytest.mark.parametrize("name", SDK_ENV_VARS)
+@pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
 def test_environment_preflight_reads_names_only_before_any_sdk_construction(
     monkeypatch: pytest.MonkeyPatch, factory, name: str
 ) -> None:
@@ -424,7 +444,10 @@ def test_environment_preflight_reads_names_only_before_any_sdk_construction(
             scoped.setattr(os, "environ", environment)
             with pytest.raises(AmbientSDKConfigurationError) as error:
                 factory(transport=transport, api_key="explicit-test-key")
-        assert name in str(error.value)
+        if name in SDK_ENV_VARS:
+            assert name in str(error.value)
+        else:
+            assert name not in str(error.value)
     assert environment.value_reads == 0
     openai_sdk.assert_not_called()
     anthropic_sdk.assert_not_called()
@@ -446,6 +469,27 @@ def test_unknown_gemini_setting_refuses_without_reading_values_or_exposing_name(
     assert environment.value_reads == 0
     assert name not in str(error.value)
     sdk.assert_not_called()
+
+
+@pytest.mark.parametrize("factory", FACTORIES)
+@pytest.mark.parametrize("name", UNKNOWN_PROVIDER_NAMES[:4])
+def test_mixed_known_and_unknown_provider_names_refuse_without_value_reads_or_unknown_names(
+    monkeypatch: pytest.MonkeyPatch, factory, name: str
+) -> None:
+    environment = _NamesOnlyEnvironment("OPENAI_ADMIN_KEY", name)
+    transport = httpx.MockTransport(lambda _: httpx.Response(500))
+    with (
+        patch("httpx.Client") as synchronous,
+        patch("httpx.AsyncClient") as asynchronous,
+        monkeypatch.context() as scoped,
+    ):
+        scoped.setattr(os, "environ", environment)
+        with pytest.raises(AmbientSDKConfigurationError) as error:
+            factory(transport=transport)
+    assert name not in str(error.value)
+    assert environment.value_reads == 0
+    synchronous.assert_not_called()
+    asynchronous.assert_not_called()
 
 
 @pytest.mark.parametrize("name", ["GOOGLE_API_KEY", "GEMINI_API_KEY"])
@@ -505,7 +549,7 @@ def _owned_copy_client(entrypoint: str, handler):
 
 @pytest.mark.parametrize("entrypoint", COPY_ENTRYPOINTS)
 @pytest.mark.parametrize("method", ["copy", "with_options"])
-@pytest.mark.parametrize("name", SDK_ENV_VARS)
+@pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
 async def test_every_owned_sdk_copy_refuses_late_environment_before_parent_construction(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, method: str, name: str
 ) -> None:
@@ -525,7 +569,10 @@ async def test_every_owned_sdk_copy_refuses_late_environment_before_parent_const
             scoped.setattr(os, "environ", environment)
             with pytest.raises(AmbientSDKConfigurationError) as error:
                 getattr(client, method)()
-        assert name in str(error.value)
+        if name in SDK_ENV_VARS:
+            assert name in str(error.value)
+        else:
+            assert name not in str(error.value)
         assert environment.value_reads == 0
         openai_parent.assert_not_called()
         anthropic_parent.assert_not_called()
@@ -659,7 +706,7 @@ async def test_clean_real_driver_copy_keeps_single_attempt_and_original_client(
 
 
 @pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted"])
-@pytest.mark.parametrize("name", SDK_ENV_VARS)
+@pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
 def test_shared_builder_preflight_never_fetches_environment_values(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, name: str
 ) -> None:
@@ -674,13 +721,15 @@ def test_shared_builder_preflight_never_fetches_environment_values(
         monkeypatch.context() as scoped,
     ):
         scoped.setattr(os, "environ", environment)
-        with pytest.raises(AmbientSDKConfigurationError):
+        with pytest.raises(AmbientSDKConfigurationError) as error:
             if entrypoint == "fake":
                 build_fake_anthropic(lambda _: httpx.Response(500))
             elif entrypoint == "stub":
                 build_stub_anthropic()
             else:
                 ScriptedTransport().client()
+    if name in UNKNOWN_PROVIDER_NAMES:
+        assert name not in str(error.value)
     assert environment.value_reads == 0
     parent.assert_not_called()
     http_client.assert_not_called()
