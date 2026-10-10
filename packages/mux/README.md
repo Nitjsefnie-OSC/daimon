@@ -564,3 +564,4 @@ Final table rendering belongs to the platform adapter. The host's existing
 tables for Anthropic, OpenAI and Gemini alike; missing/false stays plain text.
 Codecs and journals retain the provider's original text. See
 [`docs/mux.md`](../../docs/mux.md#opt-in-table-rendering) for configuration.
+Host adapters may consume normalized Events through an optional local lifecycle tap. Discord uses authoritative snapshots and ordered preview fragments for drafts, without granting previews terminal or history authority. ProviderUsageTotals retain observation provenance and are never reconstructed into Anthropic display meters.

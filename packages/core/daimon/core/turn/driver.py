@@ -114,6 +114,7 @@ from daimon.core.turn.termination import (
     termination_reason,
 )
 from daimon.core.usage_billing import ObservationBilled
+from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
@@ -1599,6 +1600,15 @@ async def _consume_with_reconnect(
             if item.usage is not None and item.usage.session.provider != "anthropic":
                 await _bill_once(billing, item.usage, billed_event_ids)
                 state_cell[0] = apply_usage_observation(state_cell[0], item.usage)
+            normalized = item.normalized
+            if (
+                normalized is not None
+                and normalized.native.provider != "anthropic"
+                and (event is None or event.id not in delivered_event_ids)
+            ):
+                hook = getattr(lifecycle, "on_provider_event", None)
+                if hook is not None:
+                    await cast(Callable[[Event], Awaitable[None]], hook)(normalized)
             if event is None:
                 # Usage-only native frames have no display event to decode.
                 # N4's codec edge owns the optional native field declaration.

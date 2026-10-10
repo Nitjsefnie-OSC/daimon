@@ -125,6 +125,13 @@ Discord, Slack and Teams run the same two-stage chokepoint in `daimon.core.turn`
 The staging is deliberate — neither stage returns a boolean, both raise typed
 errors, so an adapter cannot forget a gate.
 
+Discord displays non-Anthropic message snapshots and preview fragments through
+the optional `on_provider_event` lifecycle tap. It updates local draft state;
+the render task posts progress and the existing terminal callbacks retire the
+card and deliver the final answer. Anthropic keeps its native event tap.
+Alternate-provider usage does not become an Anthropic meter; an unverified
+display cost is omitted.
+
 **Stage one, `admit()` — `packages/core/daimon/core/turn/admission.py`.** One
 call does identity resolution, config resolution, and every pre-turn gate, and
 returns a frozen `Admission` (account id, MA agent, MA environment, resolved

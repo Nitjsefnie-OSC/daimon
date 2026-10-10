@@ -1207,3 +1207,7 @@ native table blocks. Teams already renders tables natively. Provider text in the
 journal remains unchanged. Streaming previews and fenced examples remain text;
 rendering or attachment failures preserve the original answer. See
 [platform table rendering](architecture.md#platform-table-rendering) for limits.
+
+## Provider turn displays
+
+Discord consumes neutral message snapshots and ordered previews through an optional local lifecycle tap. Previews affect the draft only; existing host terminal callbacks finalize the progress card and deliver the authoritative answer. Anthropic retains its native display path. Alternate-provider usage remains observation-based, and an unverified cost is omitted from the footer. Generic confirmation cards retain Approve/Deny and approved/denied/expired states.
