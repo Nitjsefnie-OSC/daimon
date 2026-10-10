@@ -8,8 +8,10 @@ import pytest
 from mux.conformance import Registry, run
 from mux.conformance.fixtures import FIXTURES
 from mux.conformance.runner import Adapter, ConformanceFailure, PendingKind, run_fixture
+from mux.contracts.actions import UserMessage
 from mux.contracts.admission import Admission
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ResolvedBackend
+from mux.contracts.events import TextPart
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope
 from mux.contracts.profile import Capability, Support
 from mux.contracts.receipts import CancelReceipt, StopObservation
@@ -22,6 +24,7 @@ from mux.drivers.openai.conformance import (
     OpenAIScriptedTransport,
     register,
 )
+from mux.drivers.openai.conformance_state import OpenAIConformanceEvents
 from mux.drivers.openai.normalize import EventNormalizer
 from mux.drivers.openai.sessions import OpenAISessions
 from mux.drivers.openai.transport import Object
@@ -336,3 +339,94 @@ async def test_missing_pending_declaration_cannot_silently_pass(
     )
     result = await run_fixture("C11", adapter)
     assert result.status == "fail" and result.pending_reason is None
+
+
+@pytest.mark.asyncio
+async def test_c04_wire_acceptance_survives_all_crashes_without_another_post(
+    adapters: OpenAIOfflineFactory,
+) -> None:
+    adapter = adapters()
+    result = await run_fixture("C04", adapter)
+    assert result.status == "pass"
+    wire = script(adapter)
+    assert [send.key for send in wire.upstream_sends] == ["crash-0", "crash-2", "crash-3"]
+    assert len(wire.accepted_inputs) == 3
+    assert wire.mutation_count == 3
+    assert wire.reconciled_sends == ()  # Saved text supplies no native key association.
+    assert any(request.url.path.endswith("/items") for request in wire.requests)
+    assert all(not send.receipt.input_ids for send in wire.upstream_sends)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost", [False, True])
+async def test_c04_lost_or_empty_ack_remains_unknown_after_restart(
+    adapters: OpenAIOfflineFactory,
+    lost: bool,
+) -> None:
+    adapter = adapters()
+    wire = script(adapter)
+    scenario = await wire.arrange("C04")
+    if lost:
+        wire.fault("timeout_after_accept")
+    inputs = (UserMessage(content=(TextPart(text="identical native content"),)),)
+    initial = await adapter.driver.events.send(
+        scenario.scope, scenario.session.ref, inputs, key="uncertain"
+    )
+    assert initial.status == ("outcome_unknown" if lost else "queued")
+    assert adapter.store is not None
+    reopened = wire.restart_store(adapter.store)
+    before = wire.mutation_count
+    # Unrelated saved input with exactly the same text cannot prove correlation.
+    wire.accepted_inputs.append({**wire.accepted_inputs[0], "id": "unrelated-identical-input"})
+    recovered = await adapter.driver.events.send(
+        scenario.scope, scenario.session.ref, inputs, key="uncertain"
+    )
+    assert recovered.status == "outcome_unknown" and recovered.input_ids == ()
+    assert recovered.operation_id == initial.operation_id
+    record = await reopened.get_operation(scenario.scope, "uncertain")
+    assert record is not None
+    assert record.operation.status == ("outcome_unknown" if lost else "accepted")
+    assert wire.mutation_count == before == 1
+    assert len(wire.upstream_sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_c04_recovery_invented_input_identity_mutant_is_killed(
+    adapters: OpenAIOfflineFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mux.contracts.receipts import SendReceipt
+
+    original = OpenAIConformanceEvents.send
+
+    async def invent(self, scope, session, events, *, key, expected_turn=None):
+        result = await original(self, scope, session, events, key=key, expected_turn=expected_turn)
+        if result.status == "outcome_unknown":
+            return SendReceipt(
+                operation_id=result.operation_id, status="processed", input_ids=(key,)
+            )
+        return result
+
+    monkeypatch.setattr(OpenAIConformanceEvents, "send", invent)
+    adapter = adapters()
+    with pytest.raises(ConformanceFailure, match="ambiguous intent must stay unknown"):
+        await FIXTURES["C04"](adapter.driver, adapter.store, adapter.transport)
+
+
+@pytest.mark.asyncio
+async def test_c04_blind_resend_mutant_is_killed(
+    adapters: OpenAIOfflineFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = OpenAIConformanceEvents.send
+
+    async def resend(self, scope, session, events, *, key, expected_turn=None):
+        result = await original(self, scope, session, events, key=key, expected_turn=expected_turn)
+        if result.status == "outcome_unknown":
+            await OpenAIEvents.send(self, scope, session, events, key=key)
+        return result
+
+    monkeypatch.setattr(OpenAIConformanceEvents, "send", resend)
+    adapter = adapters()
+    with pytest.raises(ConformanceFailure, match="ambiguous/accepted recovery resent input"):
+        await FIXTURES["C04"](adapter.driver, adapter.store, adapter.transport)
