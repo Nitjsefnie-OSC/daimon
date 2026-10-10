@@ -24,6 +24,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionHook,
     ProviderActionPrompt,
 )
+from mux.contracts.ids import ResourceRef
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -235,6 +236,7 @@ class ProviderActionOptions(TypedDict, total=False):
 def provider_action_options(
     prepared: PreparedTurn, factory: Callable[[], ProviderActionHook]
 ) -> ProviderActionOptions:
-    if prepared.session_ref is not None and prepared.session_ref.provider != "anthropic":
+    ref = getattr(prepared, "session_ref", None)
+    if isinstance(ref, ResourceRef) and ref.provider != "anthropic":
         return {"provider_action": factory()}
     return {}

@@ -286,10 +286,13 @@ async def test_unbound_prompt_posts_nothing(
     assert not bodies(fake_slack_web_client, "chat.postMessage") and not host.pending
 
 
-@pytest.mark.parametrize("provider", [None, "anthropic", "openai", "gemini"])
+@pytest.mark.parametrize("provider", [None, "missing", "anthropic", "openai", "gemini"])
 def test_default_path_attaches_no_new_callback(provider: str | None) -> None:
     ref = SESSION.model_copy(update={"provider": provider}) if provider is not None else None
-    prepared = cast(PreparedTurn, SimpleNamespace(session_ref=ref))
+    prepared = cast(
+        PreparedTurn,
+        SimpleNamespace() if provider == "missing" else SimpleNamespace(session_ref=ref),
+    )
     called = 0
 
     def factory():
