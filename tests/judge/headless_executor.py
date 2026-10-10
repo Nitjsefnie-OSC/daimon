@@ -35,6 +35,7 @@ from daimon.testing.outcome_oracle import (
     VisibleText,
     evaluate,
 )
+from daimon.testing.provider_fixtures import BackendFixture, ScenarioFixture, load_provider_fixtures
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.events import TurnEndedPayload
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
@@ -57,6 +58,7 @@ if __package__:
         sha,
     )
     from .headless_output import HeadlessOutput, capture_headless_return
+    from .openai_catalog_replay import execute_openai_turns
 else:
     from catalog_runner import (
         FROZEN_TARGET_SHA256,
@@ -70,6 +72,7 @@ else:
         sha,
     )
     from headless_output import HeadlessOutput, capture_headless_return
+    from openai_catalog_replay import execute_openai_turns
 
 
 class ReplayTurn(Record):
@@ -452,7 +455,14 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
         assertions = cast(list[dict[str, JsonValue]], [*plan.assertions, *plan.global_assertions])
         gaps.append(ExecutionGap(code="PLACEHOLDER_UNBOUND", location="assertions"))
     if plan.backend != "anthropic":
-        gaps.append(ExecutionGap(code="HOST_BACKEND_PENDING_G1_G2", location="channel"))
+        gaps.append(
+            ExecutionGap(
+                code="OPENAI_FIXTURE_UNAVAILABLE"
+                if plan.backend == "openai"
+                else "HOST_BACKEND_PENDING_G2",
+                location="channel",
+            )
+        )
     else:
         gaps.extend(_unbound_steps(plan))
         if replay is None:
@@ -537,21 +547,106 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
     )
 
 
+async def execute_openai_cell(
+    plan: ScenarioPlan,
+    scenario: ScenarioFixture,
+    fixture: BackendFixture,
+    *,
+    source_root: Path,
+    repository_root: Path,
+) -> CellResult:
+    if (
+        plan.backend != "openai"
+        or fixture.backend != "openai"
+        or scenario.scenario_id != plan.scenario.id
+        or scenario.source.sha256 != plan.scenario.sha256
+        or scenario.source.path != f"scenarios/{plan.scenario.filename}"
+        or fixture not in scenario.providers
+        or fixture.profile != "openai.persistent_workspace"
+        or fixture.model != "gpt-6-luna"
+    ):
+        raise ValueError(
+            "OpenAI executor requires the pinned scenario and explicit OpenAI selection"
+        )
+    gaps = list(_unbound_steps(plan))
+    gaps.extend(
+        ExecutionGap(code="PROVIDER_" + gap.code, location=gap.location) for gap in fixture.gaps
+    )
+    gaps.extend(
+        ExecutionGap(code="COMPLETION_GATE_UNBOUND", location=turn.location)
+        for turn in fixture.turns
+        if turn.completion_gate
+    )
+    try:
+        assertions = _assertions(plan, scenario.values)
+    except ValueError:
+        assertions = cast(list[dict[str, JsonValue]], [*plan.assertions, *plan.global_assertions])
+        gaps.append(ExecutionGap(code="PLACEHOLDER_UNBOUND", location="assertions"))
+    evidence = RunEvidence(scenario_id=plan.scenario.id, backend=plan.backend, turns=())
+    outputs: tuple[HeadlessOutput, ...] = ()
+    rendered: tuple[str, ...] = ()
+    requests = 0
+    if not gaps:
+        capture = await execute_openai_turns(
+            plan, scenario, fixture, source_root=source_root, repository_root=repository_root
+        )
+        evidence = RunEvidence(
+            scenario_id=plan.scenario.id,
+            backend="openai",
+            turns=tuple(t.evidence for t in capture.turns),
+        )
+        outputs = tuple(t.output for t in capture.turns if t.output is not None)
+        rendered = tuple(t.output.text if t.output is not None else "" for t in capture.turns)
+        requests = capture.request_count
+    gaps.extend(
+        ExecutionGap(code="CATALOG_CAPABILITY_PENDING", location=g.location) for g in plan.gaps
+    )
+    return CellResult(
+        scenario_id=plan.scenario.id,
+        backend=plan.backend,
+        scored=plan.scored,
+        source_sha256=plan.scenario.sha256,
+        gaps=tuple(gaps),
+        evidence=evidence,
+        catalog_outcome=evaluate(evidence, assertions),
+        host_outcome=evaluate(evidence, _host_assertions(evidence)),
+        request_count=requests,
+        rendered_text=rendered,
+        headless_outputs=outputs,
+    )
+
+
 async def execute_catalog(
     root: Path,
     *,
     integration_sha: str,
     run_id: str,
     replays: tuple[ScenarioReplay, ...],
+    provider_fixtures: Path | None = None,
 ) -> ExecutionReport:
     # Always regenerate from pinned source files, never execute an unvalidated saved plan.
     matrix: CatalogMatrix = build_matrix(root, integration_sha=integration_sha, run_id=run_id)
     by_id = {replay.scenario_id: replay for replay in replays}
     if len(by_id) != len(replays) or set(by_id) - set(matrix.target_ids):
         raise ValueError("replays must uniquely identify frozen target scenarios")
+    pack = (
+        load_provider_fixtures(provider_fixtures, catalog_root=root) if provider_fixtures else None
+    )
     cells: list[CellResult] = []
     for plan in matrix.plans:
         if plan.scored:
+            if plan.backend == "openai" and pack is not None and provider_fixtures is not None:
+                scenario, fixture = pack.select(plan.scenario.id, "openai")
+                cells.append(
+                    await execute_openai_cell(
+                        plan,
+                        scenario,
+                        fixture,
+                        source_root=provider_fixtures.parent / "catalog",
+                        repository_root=Path(__file__).resolve().parents[2],
+                    )
+                )
+                continue
             cells.append(
                 await execute_cell(
                     plan, by_id.get(plan.scenario.id) if plan.backend == "anthropic" else None
@@ -569,6 +664,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("catalog", type=Path)
     parser.add_argument("--replays", type=Path, required=True)
+    parser.add_argument("--provider-fixtures", type=Path)
     parser.add_argument("--integration-sha", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -581,6 +677,7 @@ def main() -> None:
             integration_sha=args.integration_sha,
             run_id=args.run_id,
             replays=replays,
+            provider_fixtures=args.provider_fixtures.resolve() if args.provider_fixtures else None,
         )
     )
     args.output.write_text(result.model_dump_json(indent=2) + "\n")

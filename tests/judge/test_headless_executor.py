@@ -127,7 +127,9 @@ async def test_unwired_backends_stay_pending_with_zero_dispatch(
     result = await executor.execute_cell(plan, None)
     assert result.status == "PENDING" and result.request_count == 0
     assert not result.evidence.turns
-    assert [g.code for g in result.gaps] == ["HOST_BACKEND_PENDING_G1_G2"]
+    assert [g.code for g in result.gaps] == [
+        "OPENAI_FIXTURE_UNAVAILABLE" if backend == "openai" else "HOST_BACKEND_PENDING_G2"
+    ]
 
 
 @pytest.mark.parametrize(

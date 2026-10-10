@@ -118,8 +118,9 @@ provider tool records are never executed locally. Administrative setup, context
 fetch, attachments, burst concurrency, waits and special reply routing remain
 explicit execution gaps. Original setup/teardown commands are never run, and
 no workspace cleanup occurs. Preview/reconnect tapes need a later capture slice.
-OpenAI and Gemini dispatch zero requests and remain typed PENDING until G1/G2
-host wiring is available. The matrix planner still tracks the 30 extras separately;
+Without native fixture inputs OpenAI stays `OPENAI_FIXTURE_UNAVAILABLE`;
+Gemini stays PENDING until its G2 host binding is available. The OpenAI
+fixture consumer below enables explicit G1 execution. The matrix planner still tracks the 30 extras separately;
 the executor report scores only the frozen 159 cells.
 
 Results distinguish full-cell status from `catalog_outcome` (all original/global
@@ -187,3 +188,37 @@ headless view. Authored offline tapes can PASS deterministic returned-text
 predicates for headless-surface scenarios only; they certify neither model instruction following nor Discord
 rendering, human actions or provider/platform parity. Missing execution steps,
 explicit wait deadlines and catalog capability gaps still remain PENDING.
+
+
+Supply `--provider-fixtures packages/testing/fixtures/target53/index.json` to
+execute the OpenAI column through merged G1. N3's fixture loader verifies the
+frozen target, original catalog bytes and native payload hashes; the consumer
+also verifies the selected codec source and public projection. Each channel
+persists an explicit Luna revision. The selected, already prepared session is
+owned by a thread binding; this slice does not certify resource provisioning.
+
+The consumer supplies exact cold history and session-read replies alongside
+N3's native Agents session input/SSE recipe. Every HTTP reply and SSE frame must
+be consumed once and every stream closed. Queued sends have no input/root IDs;
+the runner checks the persisted accepted send claim, then binds output to the
+fresh authoritative journal root. Prior owned roots may appear in follow-up
+history but cannot supply current output. An empty scripted Anthropic client
+refuses any legacy fallback. Billing is exempt for these offline turns; no
+provider usage or billed-spend claim is made.
+
+Unbound setup, attachments, native tool/workspace recipes, completion gates,
+explicit wait deadlines and routing hooks refuse dispatch. No external gate is
+released early to earn credit. All source predicates and gaps remain in the
+report. The first G1 consumer executes four frozen cells / four turns / 24 mock
+requests, producing **0 OpenAI PASS / 0 FAIL / 53 PENDING**. Discord text predicates
+remain PENDING because no actual Discord output has been captured; raw headless
+returns confer no text credit on those cells. Headless-surface microcases test
+complete returned-text capture and follow-up isolation separately. Platform delivery/rendering,
+remote effects and parity remain uncaptured. Gemini dispatches zero requests.
+
+
+Until the native factory pins every SDK option explicitly, the consumer refuses
+ambient admin-key, organization, project, webhook-secret or custom-header options
+before client construction. This checks environment variable names only and
+never reads or logs their values. The explicit dummy SDK key/base URL and strict
+mock transport supply the offline boundary; no credential files are read.

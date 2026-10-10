@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Construct OpenAI turn runtimes for explicitly configured channels from scoped operator deployment plans, with deferred credential access and durable journal/usage state.
 - Support complete Gemini skill bundles through an explicitly injected, scoped GCS publisher with immutable version receipts; retain inline text mounts and refuse missing deployment dependencies explicitly.
 - Restrict complete visible-text evidence from headless returns to headless-surface QA scenarios; keep Discord, Slack and Teams text predicates pending until actual surface capture.
+- Execute pinned OpenAI catalog fixtures through the real fenced G1 host, preserving queued-send/root evidence, strict wire consumption and honest offline oracle failures.
 
 - Bind offline QA visible-text predicates to actual scoped headless returns, preserving failed roots and leaving platform/tool/card effects uncaptured.
 
