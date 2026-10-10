@@ -87,8 +87,9 @@ def native(id_: str, *, status: str = "completed", output: int | None = 0) -> Ob
 class GeminiScript(FakeTransport):
     """Seeds native responses through real driver calls, never edits projections."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, model: str = "fixture") -> None:
         super().__init__()
+        self.model = model
         self.storage = MemoryStorage()
         self.store = MemoryStateStore()
         self.timeout_after_accept = False
@@ -113,7 +114,7 @@ class GeminiScript(FakeTransport):
             raise ValueError("declared deferred fixture must be dispatched through run_fixture")
         agent = await self.ma.agents.create(
             self.scope,
-            AgentSpec(name="fixture", model=ModelRef(provider="gemini", id="fixture")),
+            AgentSpec(name="fixture", model=ModelRef(provider="gemini", id=self.model)),
             key="fixture-agent",
         )
         env = await self.ma.environments.create(
