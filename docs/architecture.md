@@ -1843,3 +1843,12 @@ Discord attaches the typed provider-action callback only to prepared non-Anthrop
 Slack attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
 
 Teams attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
+
+### Neutral output upload edges
+
+Discord, Slack and Teams output-delivery modules accept verified `DeliverableFile`
+bytes through `deliver_provider_output`. The caller owns admitted tenant/session/root
+validation. Uploads reuse answer attachment edits, Slack's external upload flow,
+and Teams Graph or requester-bound consent with SharePoint PUT. These edges
+perform no provider selection, native payload parsing or artifact deletion.
