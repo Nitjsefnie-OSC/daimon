@@ -46,10 +46,11 @@ from __future__ import annotations
 import os
 import re
 import secrets
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Literal, cast
 from urllib.parse import urlparse
+from weakref import WeakKeyDictionary
 
 import pytest
 import pytest_asyncio
@@ -80,6 +81,7 @@ _DROP_CHUNK_SIZE = 4
 # when the next test's wipe times out on a lock that test left behind.
 _last_db_test: str | None = None
 _TEST_CRYPTO_KEYS = (Fernet.generate_key().decode("ascii"),)
+_TEST_ENGINE_SCHEMAS: WeakKeyDictionary[AsyncEngine, str] = WeakKeyDictionary()
 
 
 def _require_test_dsn() -> str:
@@ -138,7 +140,7 @@ def build_test_engine(
     _check_identifier(schema)
     if poolclass is not None:
         engine_kwargs["poolclass"] = poolclass
-    return create_async_engine(
+    engine = create_async_engine(
         url,
         connect_args={
             "server_settings": {
@@ -149,6 +151,71 @@ def build_test_engine(
         execution_options={"crypto_keys": _TEST_CRYPTO_KEYS},
         **engine_kwargs,
     )
+    _TEST_ENGINE_SCHEMAS[engine] = schema
+    return engine
+
+
+def isolated_test_schema(engine: AsyncEngine) -> str | None:
+    """Return schema provenance only for an engine made by build_test_engine.
+
+    An execution-option string or a lookalike URL is not builder provenance.
+    This lookup never connects; callers must also check the owned schema pattern.
+    """
+    return _TEST_ENGINE_SCHEMAS.get(engine)
+
+
+def require_owned_sessionmaker(sm_or_engine: object) -> None:
+    """Refuse foreign main/routed binds without acquiring any connection.
+
+    Local PostgreSQL lane databases are admitted. The sole shared-name exception
+    is GitHub Actions CI with a builder-registered schema owned by this process.
+    Connection binds inherit their actual engine's policy; unbound factories,
+    synchronous binds and malformed routing maps are refused. No defaults change.
+    """
+    refusal = "Test hooks require owned local lane engines or registered isolated CI schemas"
+    bindings: tuple[object, ...]
+    if isinstance(sm_or_engine, AsyncEngine):
+        bindings = (sm_or_engine,)
+    elif isinstance(sm_or_engine, async_sessionmaker):
+        factory = cast(async_sessionmaker[AsyncSession], sm_or_engine)
+        kwargs = cast(dict[str, object], factory.kw)
+        routed = kwargs.get("binds")
+        if routed is None:
+            bindings = (kwargs.get("bind"),)
+        elif isinstance(routed, Mapping):
+            bindings = (kwargs.get("bind"), *cast(Mapping[object, object], routed).values())
+        else:
+            raise ValueError(refusal)
+    else:
+        raise ValueError(refusal)
+
+    for binding in bindings:
+        if isinstance(binding, AsyncConnection):
+            engine = binding.engine
+        elif isinstance(binding, AsyncEngine):
+            engine = binding
+        else:
+            raise ValueError(refusal)
+        url = engine.url
+        schema = isolated_test_schema(engine)
+        schema_match = WORKER_SCHEMA_PATTERN.fullmatch(schema) if schema is not None else None
+        isolated_ci = (
+            url.database == "daimon_test"
+            and os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("CI") == "true"
+            and schema_match is not None
+            and int(schema_match[1]) == os.getpid()
+        )
+        if (
+            url.get_backend_name() != "postgresql"
+            or url.host not in ("localhost", "127.0.0.1")
+            or url.query
+            or not (
+                re.fullmatch(r"daimon_test_nc_[A-Za-z0-9][A-Za-z0-9_]{0,47}", url.database or "")
+                or isolated_ci
+            )
+        ):
+            raise ValueError(refusal)
 
 
 def _wipe_sql(schema: str) -> str:
