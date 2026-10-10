@@ -17,12 +17,35 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import httpx
+from anthropic import AsyncAnthropic
 from daimon.testing.admin_bindings import AdminBindings, AdminReceipt
-from daimon.testing.headless_bindings import submit_mcp_token
+from daimon.testing.headless_bindings import (
+    BindingRefused,
+    refuse_ambient_anthropic,
+    submit_mcp_token,
+)
 from mux.contracts.ids import Provider
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 MCP_TOKEN_CALL = "credential_submit.mcp_token"
+_OFFLINE_HOST = "anthropic.invalid"
+
+
+def _refuse_retained(client: AsyncAnthropic) -> None:
+    """Refuse a product client that kept a signing key, extra headers or a real host."""
+    retained = [
+        name
+        for name, kept in (
+            ("webhook_key", bool(client.webhook_key)),
+            ("base_url", client.base_url.host != _OFFLINE_HOST),
+            ("custom_headers", bool(client._custom_headers)),  # pyright: ignore[reportPrivateUsage]
+        )
+        if kept
+    ]
+    if retained:
+        raise BindingRefused(f"the admin client retained ambient settings: {', '.join(retained)}")
+
+
 _ENV = re.compile(r"\{(env\.[a-z0-9_]+)\}")
 
 
@@ -37,10 +60,13 @@ class CatalogAdmin:
     product: AdminBindings | None = None
 
     async def __call__(self, source: Mapping[str, Any], values: Mapping[str, str]) -> AdminReceipt:
+        # Before any binding runs: no ambient Anthropic override may reach a client.
+        refuse_ambient_anthropic()
         if source.get("do") == "admin" and source.get("tool") == "headless":
             return await self._headless(source, values)
         if self.product is None:
             return self._pending("admin", "ADMIN_PRODUCT_BINDINGS_UNBOUND")
+        _refuse_retained(self.product.anthropic)
         return await self.product.execute(source, values)
 
     async def _headless(self, source: Mapping[str, Any], values: Mapping[str, str]) -> AdminReceipt:

@@ -99,7 +99,11 @@ async def test_an_unbindable_source_stays_typed_pending_with_no_effect(
 async def test_every_other_source_goes_to_the_product_admin_bindings() -> None:
     seen: list[tuple[Mapping[str, Any], Mapping[str, str]]] = []
 
+    from daimon.testing.headless_bindings import isolated_anthropic
+
     class _Product:
+        anthropic = isolated_anthropic(lambda request: httpx.Response(500))
+
         async def execute(
             self, source: Mapping[str, Any], values: Mapping[str, str]
         ) -> AdminReceipt:
@@ -114,3 +118,117 @@ async def test_every_other_source_goes_to_the_product_admin_bindings() -> None:
     receipt = await admin(D7_STEP, ENV)
     assert seen == [(D7_STEP, ENV)]
     assert receipt.operation == "channel_skills_add"
+
+
+# Credential isolation: no ambient Anthropic override reaches any client.
+
+AMBIENT = ("ANTHROPIC_WEBHOOK_SIGNING_KEY", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BASE_URL")
+
+
+def _owned_never_opened(connects: list[object]) -> async_sessionmaker[AsyncSession]:
+    """Bound to this run's own test DB (so the DB guard passes), but never opened."""
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(os.environ["DAIMON_DATABASE__TEST_URL"])
+    event.listen(engine.sync_engine, "connect", lambda *_: connects.append(1))
+
+    class _NeverOpened(async_sessionmaker[AsyncSession]):
+        def __call__(self, **local_kw: object) -> AsyncSession:  # type: ignore[override]
+            raise AssertionError("a refused binding opened a session")
+
+    return _NeverOpened(bind=engine)
+
+
+@pytest.mark.parametrize("name", AMBIENT)
+@pytest.mark.parametrize("value", ["", "https://ambient.invalid\nX-Ambient: 1"])
+async def test_an_ambient_anthropic_setting_is_refused_before_any_effect(
+    name: str, value: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from daimon.testing.headless_bindings import (
+        BindingRefused,
+        serve_catalog_hosts,
+        submit_mcp_token,
+    )
+
+    def no_egress(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"egress attempted: {request.url}")
+
+    class _Product:
+        async def execute(self, *_: object) -> AdminReceipt:
+            raise AssertionError("the product binding ran under an ambient override")
+
+    monkeypatch.setenv(name, value)
+    connects: list[object] = []
+    sessions = _owned_never_opened(connects)
+    transport = httpx.MockTransport(no_egress)
+    with pytest.raises(BindingRefused, match=name):
+        await submit_mcp_token(sessions, mcp_transport=transport, token="t")
+    with pytest.raises(BindingRefused, match=name):
+        async with serve_catalog_hosts(os.environ["DAIMON_DATABASE__TEST_URL"], tmp_path):
+            pass
+    admin = CatalogAdmin(
+        "openai", sessions, mcp_transport=transport, product=cast(AdminBindings, _Product())
+    )
+    for step in (NEW27_STEP, D7_STEP):
+        with pytest.raises(BindingRefused, match=name):
+            await admin(step, ENV)
+    assert connects == []
+
+
+async def test_the_isolated_client_takes_nothing_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.testing.headless_bindings import BindingRefused, isolated_anthropic
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"egress attempted: {request.url}")
+
+    client = isolated_anthropic(handler)
+    assert client.webhook_key == ""
+    assert client.base_url.host == "anthropic.invalid"
+    assert client._custom_headers == {}  # pyright: ignore[reportPrivateUsage]
+    # Set after construction: every copy path re-checks before the SDK re-reads it.
+    for name in AMBIENT:
+        monkeypatch.setenv(name, "late")
+        with pytest.raises(BindingRefused, match=name):
+            client.copy()
+        with pytest.raises(BindingRefused, match=name):
+            client.with_options(timeout=1)
+        monkeypatch.delenv(name)
+    assert client.with_options(timeout=1).webhook_key == ""
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"webhook_key": "retained-signing-key"},
+        {"base_url": "https://api.anthropic.com"},
+        {"default_headers": {"X-Retained": "1"}},
+    ],
+)
+async def test_a_product_client_that_retained_ambient_settings_is_refused(
+    kwargs: dict[str, Any],
+) -> None:
+    from anthropic import AsyncAnthropic
+    from daimon.testing.headless_bindings import BindingRefused
+
+    class _Product:
+        anthropic = AsyncAnthropic(
+            api_key="x",
+            base_url=kwargs.get("base_url", "https://anthropic.invalid"),
+            webhook_key=kwargs.get("webhook_key", ""),
+            default_headers=kwargs.get("default_headers"),
+        )
+
+        async def execute(self, *_: object) -> AdminReceipt:
+            raise AssertionError("ran with a client that retained ambient settings")
+
+    admin = CatalogAdmin(
+        "openai",
+        cast(async_sessionmaker[AsyncSession], None),
+        product=cast(AdminBindings, _Product()),
+    )
+    with pytest.raises(BindingRefused, match="retained"):
+        await admin(D7_STEP, ENV)

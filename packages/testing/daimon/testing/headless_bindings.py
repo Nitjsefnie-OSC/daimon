@@ -24,15 +24,16 @@ import os
 import re
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+from anthropic import AsyncAnthropic
 from pydantic import JsonValue
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -57,6 +58,56 @@ _OWNED_DATABASE = "DAIMON_DATABASE__TEST_URL"
 
 class BindingRefused(ValueError):
     """A binding was pointed at something this run does not own; nothing was contacted."""
+
+
+# Read by the Anthropic SDK whenever a client is built or copied, whatever the
+# caller passes: a signing key, extra headers, or a different destination.
+AMBIENT_ANTHROPIC = (
+    "ANTHROPIC_WEBHOOK_SIGNING_KEY",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_BASE_URL",
+)
+_OFFLINE_BASE_URL = "https://anthropic.invalid"
+
+
+def refuse_ambient_anthropic() -> None:
+    """Refuse, by name, any ambient Anthropic override present (even empty)."""
+    present = [name for name in AMBIENT_ANTHROPIC if name in os.environ]
+    if present:
+        raise BindingRefused(f"ambient Anthropic settings are refused: {', '.join(present)}")
+
+
+class _IsolatedAnthropic(AsyncAnthropic):
+    """An SDK client whose copies re-check the environment before they are built."""
+
+    def copy(self, *args: Any, **kwargs: Any) -> Self:  # noqa: ANN401
+        refuse_ambient_anthropic()
+        return super().copy(*args, **kwargs)
+
+    with_options = copy  # pyright: ignore[reportAssignmentType, reportIncompatibleVariableOverride]
+
+
+def isolated_anthropic(handler: Callable[[httpx.Request], httpx.Response]) -> AsyncAnthropic:
+    """An offline SDK client built only from explicit values, never the environment.
+
+    Every value the SDK would otherwise read from the environment is passed
+    explicitly, and the three it reads regardless are refused by name first.
+    """
+    refuse_ambient_anthropic()
+    return _IsolatedAnthropic(
+        api_key="offline-fixture",
+        base_url=_OFFLINE_BASE_URL,
+        webhook_key="",
+        default_headers={},
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url=_OFFLINE_BASE_URL, trust_env=False
+        ),
+    )
+
+
+def _refuse_all(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(500, json={"error": {"message": "not served offline"}})
 
 
 def _owned_database_identity(database_url: str) -> tuple[object, ...]:
@@ -189,6 +240,7 @@ async def submit_mcp_token(
     whether the token was stored.
     """
     check_owned_sessionmaker(sessionmaker)
+    refuse_ambient_anthropic()
     import discord
     from cryptography.fernet import Fernet
     from daimon.adapters.discord.credential_modals import McpCredentialModal
@@ -205,7 +257,6 @@ async def submit_mcp_token(
         peek_credential_request,
     )
     from daimon.testing.factories import make_account, make_tenant
-    from daimon.testing.ma import build_stub_anthropic
     from pydantic import HttpUrl
 
     async with sessionmaker() as session, session.begin():
@@ -260,7 +311,7 @@ async def submit_mcp_token(
     settings.mcp.jwt_secret.get_secret_value.return_value = "q" * 32
     runtime = DiscordRuntime(
         settings=settings,
-        anthropic=build_stub_anthropic(managed_agents),
+        anthropic=isolated_anthropic(managed_agents),
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
@@ -434,7 +485,6 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
     """
     from daimon.adapters.mcp.server import create_mcp_app
     from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
-    from daimon.testing.ma import build_stub_anthropic
     from daimon.testing.qa_mcp_host import scrubbed_environment
     from notebook_host import config as notebook_config
     from notebook_host import main as notebook_main
@@ -443,6 +493,7 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
     from report_host import main as report_main
 
     _owned_database_identity(database_url)
+    refuse_ambient_anthropic()
     admin = [SecretStr(secrets.token_urlsafe(32))]
     with scrubbed_environment():
         settings = Settings(
@@ -455,7 +506,7 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
             ),
         )
         mcp = create_mcp_app(
-            settings=settings, anthropic=build_stub_anthropic(), billing_config=None
+            settings=settings, anthropic=isolated_anthropic(_refuse_all), billing_config=None
         )
         notebooks = notebook_main.create_app(
             notebook_config.Settings(
