@@ -1430,7 +1430,7 @@ directories at `.agents/skills/<skill-id>`. Existing text-only inline mounts
 remain the default. Missing authorized publication is a typed deployment
 dependency; offline compiler proofs do not promote live F1/QA parity. The host
 supplies GCS access/retention and authenticated MCP separately. See the Gemini
-[default-capability notes](../packages/mux/mux/drivers/gemini/DEFAULT-CAPABILITY.md).
+`packages/mux/mux/drivers/gemini/DEFAULT-CAPABILITY.md`.
 
 Gemini accepts a neutral MCP toolset selector only when it names a declared
 server; the server’s auth and policy checks remain mandatory. The F2 offline
