@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.
+- Add an explicitly imported Discord C01 conformance probe over the existing per-thread mention queue and caller batching, with owner-controlled root barriers and raw platform evidence.
+- Add an explicitly imported Discord C01 conformance probe through normal ingress, tenant-slot admission, per-thread queues and caller batching, with owner-controlled root barriers, production release and mutation-sensitive raw platform evidence.
+
+- Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
+- Verify explicitly selected OpenAI native session spend caps before host input,
+  retain acknowledged session references for cleanup on control failure, and
+  preserve optional cap omission and default provider behavior.
 
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Document the existing per-tenant table-rendering opt-in for Anthropic, OpenAI and Gemini host turns, retaining plain-text defaults.
