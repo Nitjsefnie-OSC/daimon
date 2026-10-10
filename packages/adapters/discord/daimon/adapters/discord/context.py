@@ -8,13 +8,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
-from daimon.adapters.discord.vision import (
-    MAX_VISION_IMAGE_DIMENSION,
-    is_oversized_image,
-    is_vision_image_attachment,
-)
+from daimon.adapters.discord.vision import is_oversized_image, is_vision_image_attachment
+from daimon.core.media.vision import MAX_VISION_IMAGE_DIMENSION
 from daimon.core.turn_keys import render_keys_element
 from daimon.core.untrusted import untrusted_block
 
@@ -23,6 +21,11 @@ import discord
 # Number of parent-channel messages fetched when a channel mention creates a new thread.
 # Bot replies are included so the agent sees the full conversational context.
 CHANNEL_BACKFILL_LIMIT = 25
+# A bounded second scan keeps recent uploads visible after channel chatter
+# pushes them outside the conversational window. Discord history is newest first.
+CHANNEL_FILE_SCAN_LIMIT = 200
+CHANNEL_FILE_MAX_AGE = timedelta(hours=24)
+CHANNEL_FILE_LIMIT = 10
 
 # Replayed messages come from everyone in the conversation, not only the
 # person asking, so they ride in the shared untrusted envelope. Only the
@@ -411,7 +414,50 @@ async def build_channel_context_xml(
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
     """
-    messages = [m async for m in channel.history(limit=limit)]
+    try:
+        recent = [m async for m in channel.history(limit=limit)]
+    except discord.HTTPException:
+        recent = []
+
+    # The first page is the conversational context. Scan only older messages
+    # for files, using the same channel visibility as that first read. Neither
+    # older message text nor history images are added to the conversation.
+    older_files: list[str] = []
+    cutoff = trigger.created_at - CHANNEL_FILE_MAX_AGE
+    if (
+        0 < limit < CHANNEL_FILE_SCAN_LIMIT
+        and len(recent) == limit
+        and recent[-1].created_at >= cutoff
+    ):
+        seen_ids = {m.id for m in recent}
+        try:
+            async for msg in channel.history(
+                limit=CHANNEL_FILE_SCAN_LIMIT - len(recent),
+                before=discord.Object(id=recent[-1].id),
+            ):
+                if msg.created_at < cutoff:
+                    break
+                if msg.id == trigger.id or msg.id in seen_ids:
+                    continue
+                for att in msg.attachments:
+                    older_files.append(
+                        f"<attachment filename={quoteattr(att.filename)}"
+                        f" url={quoteattr(att.url)}"
+                        f" uploader={quoteattr(msg.author.display_name)}"
+                        f" uploaded_at={quoteattr(msg.created_at.isoformat())}"
+                        f" jump_url={quoteattr(msg.jump_url)}/>"
+                    )
+                    if len(older_files) == CHANNEL_FILE_LIMIT:
+                        break
+                if len(older_files) == CHANNEL_FILE_LIMIT:
+                    break
+        except Exception:
+            # The file list is optional: any failed or dropped read (an HTTP
+            # error, a timeout, a reset connection) keeps the conversation and
+            # leaves the section out. Cancellation still propagates.
+            older_files = []
+
+    messages = recent
     messages.sort(key=lambda m: m.created_at)
     messages = [m for m in messages if m.id != trigger.id]
 
@@ -438,6 +484,8 @@ async def build_channel_context_xml(
     lines.extend(
         untrusted_block("channel_context", body, {"count": str(len(messages)), **_HISTORY_SOURCE})
     )
+    if older_files:
+        lines.extend(untrusted_block("recent_channel_files", older_files, _HISTORY_SOURCE))
 
     lines.append("")
     lines.append(

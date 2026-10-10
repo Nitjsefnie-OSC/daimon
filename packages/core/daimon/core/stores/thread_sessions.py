@@ -274,6 +274,7 @@ async def create_thread_session(
     ma_session_id: str,
     ma_agent_id: str | None = None,
     channel_id: str | None = None,
+    budget_channel_id: str | None = None,
     watermark_message_id: str | None = None,
     created_at: datetime | None = None,
     effective_config: SessionSnapshot | None = None,
@@ -310,6 +311,7 @@ async def create_thread_session(
         "ma_session_id": ma_session_id,
         "ma_agent_id": ma_agent_id,
         "channel_id": channel_id,
+        "budget_channel_id": budget_channel_id,
         "watermark_message_id": watermark_message_id,
         "effective_config": (
             None if effective_config is None else effective_config.model_dump(mode="json")
@@ -327,6 +329,17 @@ async def create_thread_session(
     await session.flush()
     await session.refresh(orm)
     return ThreadSessionRow.model_validate(orm)
+
+
+async def set_budget_channel_stamp(
+    session: AsyncSession, *, id: _uuid.UUID, budget_channel_id: str | None
+) -> None:
+    """Backfill the immutable MA stamp on a legacy mapping after reading MA."""
+    await session.execute(
+        update(ThreadSession)
+        .where(ThreadSession.id == id, ThreadSession.budget_channel_id == "")
+        .values(budget_channel_id=budget_channel_id)
+    )
 
 
 async def update_watermark(

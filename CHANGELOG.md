@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reused chat sessions are replaced when their budget channel changes, so the usage sweep charges missed turns to the channel that admitted them.
+- New Discord threads retain links to recent channel uploads after busy chat moves them outside the 25-message context window.
+- Discord continuations check thread history back to the queued handoff and retry when that history is unavailable, so a newer human reply cannot trigger stale work.
+- Follow-up turns obey the tenant's current concurrency cap after an operator changes it, without starting queued turns above a lowered cap.
 - Registered Discord tenants with an unjoined guild receive defaults updates on restart, so their agents no longer keep stale guidance.
 - One `yes` now approves only the latest skill-add preview in a thread, even when the previews target different agents.
 - Agents created before the Connect GitHub change get the new guidance on the next restart.

@@ -3804,8 +3804,12 @@ class DaimonBot(commands.Bot):
         # Over a cap the turn waits here, behind its ordinary card: the queue
         # is never shown. Stop ends the wait like any turn; the max wait is a
         # safeguard that ends the card with the ordinary error.
+        assert self.runtime.settings.discord is not None
         slot = await wait_for_slot(
-            cancel, sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id
+            cancel,
+            sessionmaker=self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            default_cap=self.runtime.settings.discord.max_concurrent_turns_per_tenant,
         )
         if slot != "started":
             ended = {

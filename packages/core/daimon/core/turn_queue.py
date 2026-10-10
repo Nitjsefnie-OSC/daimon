@@ -55,7 +55,7 @@ WaitResult = Literal["started", "cancelled", "timed_out"]
 _live_queues: weakref.WeakSet[TurnQueue] = weakref.WeakSet()
 # Waits kept for the heartbeat's percentiles between two windows.
 _WAIT_SAMPLE = 4096
-# The cap a follow-up re-admits with when its first turn claimed past the caps.
+# Fallback for a direct readmission of a continuation wake that ignored caps.
 _UNCAPPED = 1_000_000
 
 
@@ -92,12 +92,10 @@ class TurnTicket:
         *,
         state: Literal["queued", "running"],
         now: float,
-        cap: int | None,
         fields: dict[str, object],
     ) -> None:
         self._queue = queue
         self.tenant_id = tenant_id
-        self.cap = cap
         self.state: Literal["queued", "running", "done"] = state
         # Whether this turn ever waited: its admission gates ran before the wait.
         self.waited = state == "queued"
@@ -154,9 +152,9 @@ class TurnTicket:
             self._queue.leave(self)
         return "timed_out"
 
-    def successor(self) -> TurnTicket | None:
+    def successor(self, *, cap: int | None = None) -> TurnTicket | None:
         """A fresh ticket for the next turn in this thread (`TurnQueue.readmit`)."""
-        return self._queue.readmit(self)
+        return self._queue.readmit(self, cap=cap)
 
     def release(self) -> None:
         """Return the slot, or leave the queue. Safe to call more than once."""
@@ -257,13 +255,13 @@ class TurnQueue:
         if not self._can_run(tenant_id):
             return None
         return self._start(
-            TurnTicket(self, tenant_id, state="running", now=self.clock(), cap=cap, fields={})
+            TurnTicket(self, tenant_id, state="running", now=self.clock(), fields={})
         )
 
     def claim(self, tenant_id: uuid.UUID, /) -> TurnTicket:
         """A slot now, past both caps: for a turn whose admission ignores them
         (a Teams continuation wake) but must still count as running."""
-        ticket = TurnTicket(self, tenant_id, state="running", now=self.clock(), cap=None, fields={})
+        ticket = TurnTicket(self, tenant_id, state="running", now=self.clock(), fields={})
         return self._start(ticket)
 
     def admit(self, tenant_id: uuid.UUID, /, *, cap: int, **fields: object) -> TurnTicket | None:
@@ -287,9 +285,7 @@ class TurnQueue:
                 **fields,
             )
             return None
-        ticket = TurnTicket(
-            self, tenant_id, state="queued", now=self.clock(), cap=cap, fields=fields
-        )
+        ticket = TurnTicket(self, tenant_id, state="queued", now=self.clock(), fields=fields)
         self._queues.setdefault(tenant_id, deque()).append(ticket)
         if tenant_id not in self._rotation:
             self._rotation.append(tenant_id)
@@ -306,13 +302,15 @@ class TurnQueue:
         )
         return ticket
 
-    def readmit(self, previous: TurnTicket) -> TurnTicket | None:
+    def readmit(self, previous: TurnTicket, *, cap: int | None = None) -> TurnTicket | None:
         """A fresh ticket for the next turn in `previous`'s thread, through the
-        same admission as a new turn: a slot now, else the back of the queue."""
-        cap = previous.cap if previous.cap is not None else self._caps.get(previous.tenant_id)
+        same admission as a new turn: a slot now, else the back of the queue.
+        Never restore the previous ticket's saved cap over a newer one."""
+        if cap is None:
+            cap = self._caps.get(previous.tenant_id, _UNCAPPED)
         return self.admit(
             previous.tenant_id,
-            cap=cap if cap is not None else _UNCAPPED,
+            cap=cap,
             **previous._fields,  # pyright: ignore[reportPrivateUsage]
         )
 

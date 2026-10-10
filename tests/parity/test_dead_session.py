@@ -107,6 +107,7 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
         account_id=principal.account_id,
         ma_session_id=_DEAD_SESSION_ID,
         ma_agent_id=AGENT_ID,
+        budget_channel_id=_parent,
         watermark_message_id="100",
     )
     await db_session.commit()
@@ -223,6 +224,7 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session_s
         account_id=principal.account_id,
         ma_session_id=_DEAD_SESSION_ID,
         ma_agent_id=AGENT_ID,
+        budget_channel_id="C_DEAD_SESSION_PARITY",
         watermark_message_id="9000005000.000000",
     )
     await db_session.commit()

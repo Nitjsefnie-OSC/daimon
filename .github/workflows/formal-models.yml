@@ -14,6 +14,8 @@ on:
     paths:
       - "formal/**"
       - ".github/workflows/formal-models.yml"
+      - "packages/core/daimon/core/turn_queue.py"
+      - "packages/core/daimon/core/turn/slots.py"
       - "packages/core/daimon/core/agent_identity.py"
       - "packages/testing/daimon/testing/db.py"
       - "packages/testing/tests/test_db.py"
@@ -128,6 +130,9 @@ on:
     paths:
       - "formal/**"
       - ".github/workflows/formal-models.yml"
+      # turn_queue/
+      - "packages/core/daimon/core/turn_queue.py"
+      - "packages/core/daimon/core/turn/slots.py"
       # test_schema_cleanup/
       - "packages/core/daimon/core/agent_identity.py"
       - "packages/testing/daimon/testing/db.py"

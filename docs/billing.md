@@ -204,9 +204,11 @@ Two boundaries of the design worth stating plainly:
   `max_concurrent_turns_per_tenant`, default 3, or the tenant's `turn-cap`
   override) times one turn's cost. A turn over that cap waits in the turn
   queue after `admit()`; it runs the balance gate again once it holds a slot,
-  so queued turns do not widen the bound. An MCP `start_turn` session is
-  worse. Its spend
-  reaches the ledger only when the scheduler's usage sweep next reads the
+  so queued turns do not widen the bound. Follow-up turns read the tenant's
+  current turn cap before taking a new queue ticket. Once the adapter observes
+  a lower cap, running turns finish, but new turns wait until enough slots are
+  free. An MCP `start_turn` session is worse. Its spend reaches the ledger only
+  when the scheduler's usage sweep next reads the
   session: up to two sweep passes plus one tick interval later, and not at
   all while the sweep is switched off (its default, see "The sweep" below).
   Until then the gate reads a balance that leaves out earlier headless turns,
@@ -257,6 +259,17 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
   reads; it is kept apart from `daimon_channel`, where the conversation runs,
   so a DM counts toward its source channel without being placed in it.
+  If the channel charged by policy changes between turns, Daimon replaces the
+  session before the next turn. A running old session must finish first. This
+  keeps the sweep's session stamp aligned with that turn's admission even when
+  its live usage event was missed. The immutable stamp is also kept in
+  `thread_sessions.budget_channel_id`; older mappings read their stamp from MA
+  on the next bind and replace only if it differs. If MA cannot be read, the
+  mapping stays unknown and the read is retried on a later bind. A replacement
+  checkpoint runs on the old session, so its live debit and any recovered
+  debit both count against the old session's stamped channel. The new turn's
+  admission gates still apply before replacement; the checkpoint does not
+  independently gate the old channel's balance or budget.
 - **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
   or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
   budget with a `starts_at` gates nothing before it, and a fixed one nothing
