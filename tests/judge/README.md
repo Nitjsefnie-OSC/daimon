@@ -168,18 +168,22 @@ receipt as an execution input. CLI replay rebuilds these observations from the
 source-pinned transport, rather than trusting a prior result report.
 
 `headless_outputs` retains the receipts; `rendered_text` is a compatibility view
-of their returned strings. A nonblank actual return contributes one `VisibleText`
+of their returned strings. For `surface: headless` only, a nonblank actual return contributes one `VisibleText`
 at the caller-receipt time. An empty return has complete text capture and no
 visible message. A host exception produces no output receipt or text coverage;
 a native failed root that the host actually returns from still retains its
 returned text and its independent failed root outcome. No pre-tool narration,
 tool result or transient render snapshot is promoted into visible evidence.
-The selected host delivers only its returned string, so that return closes its
-text window. Card/reaction/log/tool/approval coverage remains false; native
+Only a headless-surface scenario delivers its returned string directly, so
+that return closes its text window. For Discord, Slack and Teams scenarios,
+headless receipts remain diagnostic output: `texts` stays empty and
+`text_capture_complete` stays false until the scenario's actual surface is captured.
+Text predicates on those platforms remain PENDING; notices, cards, drafts,
+footers, truncation and joined chunks are not observed by a headless return. Card/reaction/log/tool/approval coverage remains false; native
 completion and native tool records do not fill those domains.
 
 N3's effects oracle evaluates every original/global predicate against this
 headless view. Authored offline tapes can PASS deterministic returned-text
-predicates; they certify neither model instruction following nor Discord
+predicates for headless-surface scenarios only; they certify neither model instruction following nor Discord
 rendering, human actions or provider/platform parity. Missing execution steps,
 explicit wait deadlines and catalog capability gaps still remain PENDING.

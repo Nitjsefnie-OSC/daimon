@@ -420,9 +420,13 @@ async def _run_turn(
                 text=output.text,
             ),
         )
-        if output is not None and output.has_visible_text
+        if output is not None
+        and output.has_visible_text
+        and plan.scenario.scenario.get("surface") == "headless"
         else (),
-        text_capture_complete=output is not None,
+        text_capture_complete=(
+            output is not None and plan.scenario.scenario.get("surface") == "headless"
+        ),
     )
     # Preserve recorded native failures, but never let a host failure PASS.
     if (state.error is not None or lifecycle.terminal_failures) and (

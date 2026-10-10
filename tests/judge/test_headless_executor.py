@@ -105,6 +105,8 @@ async def test_original_and_global_assertions_remain_pending_not_dropped_for_cre
     tmp_path: Path,
 ) -> None:
     row = source()
+    row["surface"] = "headless"
+    assert row["surface"] == "headless"
     row["assert"].append({"kind": "card_finalized", "turn": 1})
     plan = planned(tmp_path, row)
     result = await executor.execute_cell(plan, scripted(plan))
@@ -208,8 +210,11 @@ async def test_corrupt_native_records_cannot_make_completed_evidence(
         await executor.execute_cell(plan, replay)
 
 
-async def test_native_failed_turn_is_a_real_oracle_failure(tmp_path: Path) -> None:
-    plan = planned(tmp_path, source())
+@pytest.mark.parametrize("surface", ["headless", "discord"])
+async def test_native_failed_turn_is_a_real_oracle_failure(tmp_path: Path, surface: str) -> None:
+    row = source()
+    row["surface"] = surface
+    plan = planned(tmp_path, row)
     body = scripted(plan).model_dump(mode="json")
     body["turns"][0]["events"][-1]["stop_reason"] = {"type": "retries_exhausted"}
     replay = executor.ScenarioReplay.model_validate(body)
@@ -218,7 +223,7 @@ async def test_native_failed_turn_is_a_real_oracle_failure(tmp_path: Path) -> No
     assert result.host_outcome.checks[0].code == "TURN_NOT_COMPLETED"
     # The current host returns text on retries_exhausted when state.error is
     # unset. Capture that real return without promoting the failed root.
-    assert result.evidence.turns[0].text_capture_complete
+    assert result.evidence.turns[0].text_capture_complete == (surface == "headless")
     assert result.evidence.turns[0].terminals[0].outcome == "errored"
     assert len(result.headless_outputs) == 2
 
@@ -535,6 +540,15 @@ async def check():
         raise RuntimeError("native narration became visible evidence")
     if t.tools or t.tool_capture_complete or t.cards or t.card_capture_complete:
         raise RuntimeError("unbound native tool/card effect was certified")
+    for surface in ("discord", "slack", "teams"):
+        x["plan"]["scenario"]["scenario"]["surface"] = surface
+        r = await e.execute_cell(c.ScenarioPlan.model_validate(x["plan"]), e.ScenarioReplay.model_validate(x["replay"]))
+        if r.status != "PENDING" or not r.headless_outputs:
+            raise RuntimeError("a headless return certified a platform cell under -O")
+        if r.evidence.turns[0].texts or r.evidence.turns[0].text_capture_complete:
+            raise RuntimeError("a platform text window was closed without capture under -O")
+        if any(ch.status != "PENDING" for ch in r.catalog_outcome.checks):
+            raise RuntimeError("a platform text predicate earned credit under -O")
 asyncio.run(check())
 """
     result = subprocess.run(
@@ -545,3 +559,24 @@ asyncio.run(check())
     )
     if result.returncode:
         raise AssertionError(result.stderr.decode())
+
+
+@pytest.mark.parametrize("surface", ["discord", "slack", "teams"])
+async def test_platform_text_stays_pending_despite_successful_headless_return(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    row = source()
+    row["surface"] = surface
+    row["assert"] = [
+        {"kind": "text_present", "turn": 1, "pattern": "^KEPT$"},
+        {"kind": "text_absent", "turn": 1, "pattern": "NEVER_FORBIDDEN"},
+        {"kind": "no_preamble", "turn": 1},
+    ]
+    plan = planned(tmp_path, row)
+    result = await executor.execute_cell(plan, scripted(plan))
+    assert result.status == "PENDING" and result.host_outcome.status == "PASS"
+    assert result.rendered_text == ("KEPT", "KEPT") and len(result.headless_outputs) == 2
+    assert all(not t.texts and not t.text_capture_complete for t in result.evidence.turns)
+    assert all(c.status == "PENDING" for c in result.catalog_outcome.checks)
+    assert len(result.catalog_outcome.checks) == len(plan.assertions) + len(plan.global_assertions)
