@@ -269,3 +269,22 @@ scenario exercises `render_tables=False`, the existing ordinary adapter default:
 raw pipe rows in the actual posts produce a real oracle FAIL.
 
 Focused verification: `uv run pytest -q -o addopts='' tests/judge/test_discord_catalog_surface.py tests/judge/test_headless_executor.py tests/judge/test_openai_catalog.py tests/judge/test_gemini_catalog.py packages/testing/tests/test_discord_surface.py`.
+
+Catalog baseline reporting retains raw `CellResult.status` and oracle diagnostics,
+and adds `reported_status` to distinguish `EXPECTED-FAIL`. Only the reviewed
+QA-NEW37 source and its first raw-pipe predicate qualify under the actual default
+`render_tables=False` harness. A completed native root and complete real adapter
+text capture are required. Extra/global/host failures remain ordinary FAIL;
+expected failures never become PASS. `scored_counts` includes a separate
+`EXPECTED-FAIL` bucket within the unchanged 159-cell denominator.
+
+The original Anthropic table replay is non-equivalent: it has internal pipes,
+no Markdown separator, and Taste rather than the requested Price. Its prior PASS
+is withdrawn. Before dispatch, authored Anthropic table controls must provide
+three columns / four rows, outer pipes, a separator, and Fruit / Colour-or-Color /
+Price headers. An unqualified control is
+`PENDING / REPLAY_TABLE_CONTROL_NOT_EQUIVALENT`; the readability oracle is kept
+unchanged. Synthetic matched-input controls are unscored. The fixture owner can
+supply an equivalent table independently; it then exercises the same observed
+expected default-off failure as the OpenAI/Gemini controls. No native content,
+catalog predicate, source pin or application default is rewritten for a PASS.

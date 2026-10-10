@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -79,6 +80,58 @@ else:
     from openai_catalog_replay import execute_openai_turns
 
 
+TABLE_SCENARIO = "QA-NEW37-MARKDOWN-TABLE-READABLE"
+TABLE_SOURCE_SHA256 = "9f12f8845f03468665c1bc13a86122ff2922fd3bf59dd8d02a0387da7831a2ca"
+TABLE_PATTERN = r"(?m)^\s*\|.*\|\s*$"
+
+
+class ExpectedFailure(Record):
+    code: Literal["DISCORD_TABLE_RENDERING_DISABLED"] = "DISCORD_TABLE_RENDERING_DISABLED"
+    source_sha256: Literal["9f12f8845f03468665c1bc13a86122ff2922fd3bf59dd8d02a0387da7831a2ca"] = (
+        TABLE_SOURCE_SHA256
+    )
+    assertion_index: Literal[0] = 0
+    diagnostic: Literal["FORBIDDEN_VISIBLE_TEXT"] = "FORBIDDEN_VISIBLE_TEXT"
+
+
+def _expected_failure(plan: ScenarioPlan) -> ExpectedFailure | None:
+    if (
+        plan.scenario.id == TABLE_SCENARIO
+        and plan.scenario.sha256 == TABLE_SOURCE_SHA256
+        and plan.scenario.scenario.get("surface") == "discord"
+        and str(plan.scenario.scenario.get("notes", "")).startswith(
+            "Expected FAIL while table_rendering defaults off."
+        )
+        and plan.assertions
+        and plan.assertions[0] == {"kind": "text_absent", "turn": 1, "pattern": TABLE_PATTERN}
+    ):
+        # CatalogLifecycle explicitly uses the unchanged render_tables=False default.
+        return ExpectedFailure()
+    return None
+
+
+def _equivalent_table_control(text: str) -> bool:
+    """Qualify authored comparison input, independently of the readability oracle.
+
+    This is an offline fixture check, not a model-response requirement. A matched
+    control supplies the requested three columns and four rows as a Markdown
+    table. A regex miss on a malformed/wrong-column fixture earns no PASS.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 6 or any(not line.startswith("|") or not line.endswith("|") for line in lines):
+        return False
+    cells = [[cell.strip() for cell in line[1:-1].split("|")] for line in lines]
+    if any(len(row) != 3 or any(not cell for cell in row) for row in cells):
+        return False
+    header = [cell.casefold() for cell in cells[0]]
+    return (
+        header[0] == "fruit"
+        and header[1] in {"colour", "color"}
+        and header[2] == "price"
+        and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells[1])
+    )
+
+
 class ReplayTurn(Record):
     turn: int = Field(ge=1)
     request_text: str
@@ -97,6 +150,26 @@ class ReplayTurn(Record):
         ]:
             raise ValueError("replay must begin with the submitted user message")
         return self
+
+
+def _equivalent_table_replay(tape: ReplayTurn) -> bool:
+    parts: list[str] = []
+    for event in tape.events:
+        if event.get("type") == "agent.tool_use":
+            return False
+        if event.get("type") != "agent.message":
+            continue
+        content = event.get("content")
+        if not isinstance(content, list):
+            return False
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "text":
+                return False
+            text = part.get("text")
+            if not isinstance(text, str):
+                return False
+            parts.append(text)
+    return _equivalent_table_control("\n".join(parts))
 
 
 class ScenarioReplay(Record):
@@ -139,6 +212,7 @@ class CellResult(Record):
     rendered_text: tuple[str, ...] = ()
     headless_outputs: tuple[HeadlessOutput, ...] = ()
     discord_surfaces: tuple[DiscordSurfaceCapture, ...] = ()
+    expected_failure: ExpectedFailure | None = None
 
     @computed_field
     @property
@@ -148,6 +222,37 @@ class CellResult(Record):
         if self.gaps:
             return "PENDING"
         return self.catalog_outcome.status
+
+    @model_validator(mode="after")
+    def expected_failure_source(self) -> CellResult:
+        if self.expected_failure is not None and (
+            self.scenario_id != TABLE_SCENARIO
+            or self.source_sha256 != self.expected_failure.source_sha256
+        ):
+            raise ValueError("expected failure differs from reviewed catalog source")
+        return self
+
+    @computed_field
+    @property
+    def reported_status(self) -> Literal["PASS", "FAIL", "EXPECTED-FAIL", "PENDING"]:
+        failures = [
+            i for i, check in enumerate(self.catalog_outcome.checks) if check.status == "FAIL"
+        ]
+        if (
+            self.status == "FAIL"
+            and self.expected_failure is not None
+            and self.host_outcome.status == "PASS"
+            and not self.gaps
+            and failures == [self.expected_failure.assertion_index]
+            and self.catalog_outcome.checks[0].code == self.expected_failure.diagnostic
+            and self.catalog_outcome.checks[0].kind == "text_absent"
+            and self.catalog_outcome.checks[0].turn == 1
+            and self.evidence.turns
+            and all(t.text_capture_complete for t in self.evidence.turns)
+            and self.discord_surfaces
+        ):
+            return "EXPECTED-FAIL"
+        return self.status
 
 
 class ExecutionReport(Record):
@@ -178,8 +283,8 @@ class ExecutionReport(Record):
     @property
     def scored_counts(self) -> dict[str, int]:
         return {
-            status: sum(c.scored and c.status == status for c in self.cells)
-            for status in ("PASS", "FAIL", "PENDING")
+            status: sum(c.scored and c.reported_status == status for c in self.cells)
+            for status in ("PASS", "FAIL", "EXPECTED-FAIL", "PENDING")
         }
 
 
@@ -511,6 +616,15 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
                 raise ValueError("host invocation lacks turn/text")
             if expand_text(invocation.text, replay.values) != tapes[invocation.turn].request_text:
                 raise ValueError("replay request differs from the planned text")
+    if replay is not None and plan.scenario.id == TABLE_SCENARIO:
+        for tape in replay.turns:
+            if not _equivalent_table_replay(tape):
+                gaps.append(
+                    ExecutionGap(
+                        code="REPLAY_TABLE_CONTROL_NOT_EQUIVALENT",
+                        location=f"replay.turn[{tape.turn}]",
+                    )
+                )
     turns: list[TurnEvidence] = []
     rendered: list[str] = []
     outputs: list[HeadlessOutput] = []
@@ -567,6 +681,7 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
         backend=plan.backend,
         scored=plan.scored,
         source_sha256=plan.scenario.sha256,
+        expected_failure=_expected_failure(plan),
         gaps=tuple(gaps),
         evidence=evidence,
         catalog_outcome=evaluate(evidence, assertions),
@@ -639,6 +754,7 @@ async def execute_openai_cell(
         backend=plan.backend,
         scored=plan.scored,
         source_sha256=plan.scenario.sha256,
+        expected_failure=_expected_failure(plan),
         gaps=tuple(gaps),
         evidence=evidence,
         catalog_outcome=evaluate(evidence, assertions),
@@ -711,6 +827,7 @@ async def execute_gemini_cell(
         backend=plan.backend,
         scored=plan.scored,
         source_sha256=plan.scenario.sha256,
+        expected_failure=_expected_failure(plan),
         gaps=tuple(gaps),
         evidence=evidence,
         catalog_outcome=evaluate(evidence, assertions),

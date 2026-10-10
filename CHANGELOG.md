@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify explicitly selected OpenAI native session spend caps before host input,
   retain acknowledged session references for cleanup on control failure, and
   preserve optional cap omission and default provider behavior.
+- Report known offline Discord table baseline defects as EXPECTED-FAIL, and refuse score credit for non-equivalent Anthropic table controls.
 
 - Bind offline catalog Discord text to actual adapter posts across Anthropic, OpenAI and Gemini, retaining scoped surface receipts and honest partial coverage.
 

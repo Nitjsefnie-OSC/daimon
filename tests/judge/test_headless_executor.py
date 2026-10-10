@@ -304,7 +304,7 @@ async def test_full_frozen_matrix_runs_host_turns_and_keeps_other_backends_pendi
         tmp_path, integration_sha=HEAD, run_id="fixture", replays=(scripted(plan),)
     )
     assert result.target_sha256 == sha(target_bytes)
-    assert result.scored_counts == {"PASS": 1, "FAIL": 0, "PENDING": 158}
+    assert result.scored_counts == {"PASS": 1, "FAIL": 0, "EXPECTED-FAIL": 0, "PENDING": 158}
     assert len(result.cells) == 159 and {c.scenario_id for c in result.cells} == set(target_ids)
     assert sum(c.request_count for c in result.cells) == 6
     assert all(

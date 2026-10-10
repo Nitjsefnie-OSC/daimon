@@ -34,6 +34,7 @@ async def test_actual_discord_table_posts_fail_the_catalog_predicate() -> None:
         plan, scenario, fixture, source_root=CATALOG, repository_root=REPO
     )
     assert result.status == "FAIL"
+    assert result.reported_status == "EXPECTED-FAIL"
     assert result.host_outcome.status == "PASS"
     assert result.evidence.turns[0].texts
     assert result.evidence.turns[0].text_capture_complete
