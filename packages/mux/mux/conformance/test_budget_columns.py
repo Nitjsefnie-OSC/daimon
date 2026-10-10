@@ -790,6 +790,33 @@ def test_claim_stop_comparison_is_exact_under_low_decimal_precision(tmp_path: Pa
     assert disk(guard) == before
 
 
+@pytest.mark.parametrize("provider", MODELS)
+def test_fractional_settlement_is_exact_under_low_precision_and_reopens(
+    tmp_path: Path, provider: str
+) -> None:
+    guard = guard_at(tmp_path)
+    config = json.loads(guard.config_path.read_text())
+    config["providers"][provider]["models"][MODELS[provider]]["input"] = "0.33333333"
+    guard.config_path.write_text(json.dumps(config))
+    held = admit(guard, column(provider, count=1))
+    guard.start_column_cell(held.run_id, "A00")
+    with localcontext() as context:
+        context.prec = 6
+        settled = guard.settle_column_cell(
+            held.run_id, "A00", actual=evidence("A00", incoming=1234)
+        )
+        assert settled.actual_usd == Decimal(".01086133333022")
+        assert settled.token_usd == Decimal(".00086133333022")
+        assert settled.container_usd == Decimal(".01")
+        assert settled.held_usd == 0
+        final = guard.finish_column(held.run_id, status="completed")
+    assert final.actual_usd == Decimal(".01086133333022")
+    assert SpendReceipt.model_validate_json(final.model_dump_json()) == final
+    assert BudgetGuard(guard.config_path, guard.spend_path).report() == (final,)
+    checkpoint = json.loads(guard.checkpoint_path.read_text())
+    assert Decimal(checkpoint["provider_totals"][provider]) == Decimal(".01086133333022")
+
+
 def test_claim_persists_increased_opening_spend_even_if_config_is_later_lowered(
     tmp_path: Path,
 ) -> None:
@@ -849,9 +876,10 @@ def test_optimized_python_keeps_admission_and_accounting_checks(tmp_path: Path) 
     # Explicit RuntimeError checks survive -O; this exercises the public API in
     # a clean child process without assertions, provider settings or network I/O.
     script = """
+import json
 import sys
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from unittest.mock import patch
 from mux.conformance.budget import BudgetLedgerError, BudgetRefused
@@ -887,6 +915,22 @@ with patch('mux.conformance.budget.datetime', wraps=datetime) as clock:
         raise RuntimeError('complete proof did not settle exactly once under -O')
     if guard.report() != (final,):
         raise RuntimeError('reopened ledger lost final identity under -O')
+    fractional = guard_at(Path(sys.argv[1]) / 'fractional')
+    config = json.loads(fractional.config_path.read_text())
+    config['providers']['openai']['models']['gpt-6-luna']['input'] = '0.33333333'
+    fractional.config_path.write_text(json.dumps(config))
+    held = admit(fractional, column(count=1))
+    fractional.start_column_cell(held.run_id, 'A00')
+    with localcontext() as context:
+        context.prec = 6
+        settled = fractional.settle_column_cell(
+            held.run_id, 'A00', actual=evidence('A00', incoming=1234)
+        )
+        if settled.actual_usd != Decimal('.01086133333022'):
+            raise RuntimeError('low-precision settlement rounded actual under -O')
+        final = fractional.finish_column(held.run_id, status='completed')
+    if fractional.report() != (final,) or final.actual_usd != Decimal('.01086133333022'):
+        raise RuntimeError('fractional persisted actual failed normal-context validation under -O')
 print('optimized column checks PASS')
 """
     result = subprocess.run(

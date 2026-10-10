@@ -527,6 +527,8 @@ are idempotent; a cell with known actual spend cannot be revised. Unknown cells
 may later accept complete covering evidence, including after terminal closure.
 Only completely measured cells contribute to the column's actual/token/runtime
 totals; partial component floors remain in that cell's held balance.
+Column measurement, bound checks and totals use decimal precision 80 regardless
+of the caller's precision; persisted actuals revalidate under the same policy.
 
 `finish_column` fences further claims and releases only never-started cells.
 An in-flight or incompletely measured cell keeps its conservative hold and is

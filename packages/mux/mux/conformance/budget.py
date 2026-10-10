@@ -1988,25 +1988,26 @@ class BudgetGuard:
                 for c in actual.containers or ()
             ):
                 raise ValueError("usage is stale or predates the cell's I/O claim")
-            _, token, container, lower, known = BudgetGuard._measured(original, actual)
             with localcontext() as context:
                 context.prec = 80
+                # Measurement accumulates costs too: preserve its digits before
+                # pricing totals, comparing bounds or persisting the receipt.
+                _, token, container, lower, known = BudgetGuard._measured(original, actual)
                 measured = (
                     token + container if token is not None and container is not None else None
                 )
-            blocked = (
-                BudgetGuard._exceeded(original, quote.limits, actual, lower, known)
-                or len(actual.requests) > quote.plan.request_limit
-                or any(
-                    r.tokens.minimum_input_tokens > quote.plan.per_request_limits.input_tokens
-                    or (r.tokens.output_tokens or 0) > quote.plan.per_request_limits.output_tokens
-                    for r in actual.requests
+                blocked = (
+                    BudgetGuard._exceeded(original, quote.limits, actual, lower, known)
+                    or len(actual.requests) > quote.plan.request_limit
+                    or any(
+                        r.tokens.minimum_input_tokens > quote.plan.per_request_limits.input_tokens
+                        or (r.tokens.output_tokens or 0)
+                        > quote.plan.per_request_limits.output_tokens
+                        for r in actual.requests
+                    )
+                    or bool(actual.containers)
+                    and quote.plan.container_allowance is None
                 )
-                or bool(actual.containers)
-                and quote.plan.container_allowance is None
-            )
-            with localcontext() as context:
-                context.prec = 80
                 floor = max(
                     floor,
                     known,

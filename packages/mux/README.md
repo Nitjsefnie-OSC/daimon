@@ -709,6 +709,7 @@ Teams attaches the scoped provider-action callback only for prepared alternate-p
 The manual conformance budget guard supports one lead-signed hold for a backend
 column of up to 53 fully executable cells. Recorded counters size a conservative
 token/runtime bound; disjoint complete native evidence settles each claimed
-cell exactly once. Terminal closure releases never-started cells and retains
+cell exactly once, using decimal precision 80 from measurement through totals.
+Terminal closure releases never-started cells and retains
 unknown usage as held. Runner adoption and native spending controls remain
 separate from this offline API. See the [column admission contract](mux/conformance/README.md#whole-column-admission).
