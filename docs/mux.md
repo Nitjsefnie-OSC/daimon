@@ -1334,3 +1334,20 @@ workspace/configuration/principal checks and persisted charge facts remain
 with the host envelope. The probe returns facts, never a verdict, and does
 not activate a shared C01 fixture or certify a live run. Application imports
 and default admission, queues and rendering are unchanged.
+
+### Slack and Teams multi-human host conformance
+
+The explicitly imported `daimon.adapters.slack.conformance` and
+`daimon.adapters.teams.conformance` probes use dedicated idle apps and normal
+platform orchestration, including real host cap/protection/setup reads and
+queue settlement and final release; the probe does not clear production state.
+Completion/overlap are observed at the selected callback boundary. Mutation
+controls bypass real busy-thread routing or merge callers and fail the same
+independent platform fixture. An owner-controlled native-root barrier holds the first
+turn while authored follow-ups queue. Slack keeps each caller's first trigger
+and composed file IDs; Teams keeps the last reply activity, earlier composed
+IDs and ordered file names/kinds. Facts retain whether the callback returned;
+that is distinct from a native successful outcome. Owner callbacks and the
+shared oracle supply independent admission, workspace, principal, journal and
+charge evidence. Application imports, default queues and provider pending
+declarations are unchanged; a raw platform control does not certify C01.
