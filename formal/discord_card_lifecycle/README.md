@@ -3,7 +3,7 @@
 Question: can an older Discord write restore a visible Working card after the
 turn's terminal card or restarted notice has been applied?
 
-`CardLifecycle.tla` is the current bounded-terminal model. It separates issuing
+`CardLifecycle.tla` is the current bounded-terminal model. `ResumeOrphan` represents #613 recovering a completed provider answer onto the existing card; `RetireOrphan` represents the restart notice. Both go through `edit_recovered_card` in `lifecycle.py` and emit the card write sequence. It separates issuing
 a write, dispatching it, and Discord applying it. A terminal edit can overtake
 on-wire progress; its later completion schedules a repair on the same message.
 `CardUncertain.tla` refines the terminal boundary: the ten-second wait can end
@@ -36,7 +36,7 @@ accidentally modeled away.
 | `CardTerminalReplacement` `OldEditNotFound`, `StartOldSend`, `DropOldSend` | `lifecycle.py:_perform_edit_message`; Discord `10008` enters missing-card recovery, which checks the terminal token before replacement send |
 | `CardTerminalReplacement` `OldSendReturns`, `ReconcileOldSend` | `lifecycle.py:_perform_edit_message`, `_reconcile_late_replacement`; an already-started stale send is deleted before the old task completes |
 | `Crash` | `packages/adapters/discord/daimon/adapters/discord/bot.py:1130-1158`; a new process enters the boot barrier |
-| `RetireOrphan`, `DropOrphan` | `bot.py:1159-1275`, `packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py:511-569`; the boot sweep edits the old message or reports that it could not |
+| `RetireOrphan`, `ResumeOrphan`, `DropOrphan` | `bot.py:1221-1400`, `packages/adapters/discord/daimon/adapters/discord/lifecycle.py:1388-1431`, `packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py:522-585`; the boot sweep edits the old message or reports that it could not |
 | `CardHandover` edit/send/terminal/handover/repair actions | `73cef3f9c:packages/adapters/discord/daimon/adapters/discord/lifecycle.py:80-205`, `:423-690`, `:746-775` |
 
 `CardLifecycle` uses one card, one on-wire progress edit, one optional
@@ -65,8 +65,8 @@ recovery attempts and five-second retries in
 | `Card655Replacement` | violates `NoStaleReplacement` | 32 | a late replacement can show Working separately |
 | `Card655Handover` | violates `RepairScheduled` | 61 | old repair ownership is lost at handover |
 | `CardQueue` | clean | 148 | a late progress completion schedules repair within one live process |
-| `CardQueueRestart` | violates `RestartStable` | 57 | an old request may land after boot retirement |
-| `CardQueueOrphanDrop` | violates `NoWorkingAfterRetirement` | 20 | boot lacks a route to edit the old card |
+| `CardQueueRestart` | violates `RestartStable` | 63 | an old request may land after boot retirement |
+| `CardQueueOrphanDrop` | violates `NoWorkingAfterRetirement` | 21 | boot lacks a route to edit the old card |
 | `CardUncertainSafe` | clean | 18 | a late terminal result retains readiness and repairs either progress ordering |
 | `CardUncertainDropped` | violates `RepairQueued` | 18 | the old timeout loses readiness after HTTP 200 |
 | `CardTerminalReplacementSafe` | clean | 20 | stale terminal work cannot leave or own a second card |

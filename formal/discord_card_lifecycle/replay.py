@@ -82,7 +82,7 @@ class CardTrace:
             self.actions.append("Crash")
         elif event == "turn.card_orphan_retirement_completed":
             self.retired = True
-            self.actions.append("RetireOrphan")
+            self.actions.append("ResumeOrphan" if item.get("recovered_answer") else "RetireOrphan")
         elif event == "turn.card_orphan_retirement_dropped":
             self.actions.append("DropOrphanRetirement")
 

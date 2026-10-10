@@ -224,8 +224,8 @@ discord_card_lifecycle	CardLifecycle	Card655	violates:TerminalStable	23	-	#655 p
 discord_card_lifecycle	CardLifecycle	Card655Replacement	violates:NoStaleReplacement	32	-	#655 late missing-card replacement leaves another Working card
 discord_card_lifecycle	CardLifecycle	Card655Handover	violates:RepairScheduled	61	-	#655 loses repair ownership across dead-session handover
 discord_card_lifecycle	CardLifecycle	CardQueue	clean	148	-	late active-process progress schedules terminal repair; excludes process death
-discord_card_lifecycle	CardLifecycle	CardQueueRestart	violates:RestartStable	57	-	process death leaves an on-wire request able to overtake boot retirement
-discord_card_lifecycle	CardLifecycle	CardQueueOrphanDrop	violates:NoWorkingAfterRetirement	20	-	boot cannot edit an orphaned card when its webhook token is unavailable
+discord_card_lifecycle	CardLifecycle	CardQueueRestart	violates:RestartStable	63	-	process death leaves an on-wire request able to overtake boot retirement
+discord_card_lifecycle	CardLifecycle	CardQueueOrphanDrop	violates:NoWorkingAfterRetirement	21	-	boot cannot edit an orphaned card when its webhook token is unavailable
 discord_card_lifecycle	CardUncertain	CardUncertainSafe	clean	18	-	bounded wait retains terminal outcome and repairs late progress
 discord_card_lifecycle	CardUncertain	CardUncertainDropped	violates:RepairQueued	18	-	12f716c25 drops tracking when timeout precedes successful edit return
 discord_card_lifecycle	CardTerminalReplacement	CardTerminalReplacementSafe	clean	20	-	retained terminal request checks ownership before sending and deletes an in-flight duplicate
@@ -275,3 +275,8 @@ discord_webhooks	Cadence	CadenceWebhookSkewUnsafe	violates:NoHookBacklog	2	-	cou
 github_repo_editor	RepoEditor	RepoEditorSafe	clean	59	-	atomic browser save, stale snapshot and repeated POST
 github_repo_editor	RepoEditor	RepoEditorStale	violates:NoStaleSave	22	-	atomic browser save, stale snapshot and repeated POST
 github_repo_editor	RepoEditor	RepoEditorReplay	violates:AtMostOneSave	55	-	atomic browser save, stale snapshot and repeated POST
+discord_startup_replay	StartupReplay	ReplaySafe	clean	1020	-	two workers, transient reconnect or bounded fail-stop, and admission dedupe
+discord_startup_replay	StartupReplay	ReplayNoAdmission	violates:NoDuplicate	83	-	without admission, redelivery starts a second turn
+discord_startup_replay	StartupReplay	ReplayNoGrace	violates:NoTakeoverOfLiveWorker	94	-	connection loss lets another worker reclaim before the live owner stops
+discord_startup_replay	StartupReplay	ReplayShortGrace	violates:NoTakeoverOfLiveWorker	234	-	grace shorter than retry plus stop allows live-owner takeover
+discord_startup_replay	StartupReplay	ReplayRecoveryWitness	violates:NoTransientRecovery	36	-	a transient probe failure can recover while the worker stays live

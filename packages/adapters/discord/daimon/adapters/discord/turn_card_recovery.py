@@ -13,11 +13,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, edit_recovered_card
 from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.core.stores.discord_message_admissions import finish_messages, release_unposted_messages
 from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
@@ -50,6 +52,7 @@ def is_definite_recovery_failure(err: BaseException) -> bool:
     if isinstance(err, discord.ClientException) and str(err) in (
         "own webhook token unavailable",
         "own webhook no longer exists",
+        "webhook channel unavailable",
     ):
         return True
     return err.__cause__ is not None and is_definite_recovery_failure(err.__cause__)
@@ -60,6 +63,8 @@ async def post_initial_turn_card(
     *,
     tenant_id: UUID,
     thread_id: str,
+    message_ids: tuple[str, ...] = (),
+    owner_key: int | None = None,
     make_lifecycle: Callable[
         [UUID, Callable[[discord.Message], Awaitable[None]]], DiscordTurnLifecycle
     ],
@@ -81,6 +86,10 @@ async def post_initial_turn_card(
             platform="discord",
             thread_id=thread_id,
             turn_token=uuid4(),
+            owner_key=owner_key,
+        )
+        await finish_messages(
+            session, tenant_id=tenant_id, message_ids=message_ids, intent_id=intent.id
         )
         await session.commit()
     log.info(
@@ -114,6 +123,7 @@ async def retire_terminal_turn_card(
     expected_message_id: str | None,
     no_post_confirmed: bool = False,
     allow_prepared_without_message: bool = False,
+    requeue_unposted_messages: bool = False,
 ) -> bool:
     """Retire by response ID, or explicitly permit retirement of a prepared NULL-ID row.
 
@@ -128,6 +138,8 @@ async def retire_terminal_turn_card(
             retired = await retire_turn_card_intent(
                 session, id=intent_id, expected_message_id=expected_message_id
             )
+            if retired and requeue_unposted_messages and expected_message_id is None:
+                await release_unposted_messages(session, intent_id=intent_id)
             await session.commit()
         return retired
     except SQLAlchemyError:
@@ -455,6 +467,7 @@ async def reconcile_turn_card_intent(
                 intent_id=intent.id,
                 expected_message_id=None,
                 allow_prepared_without_message=True,
+                requeue_unposted_messages=True,
             )
             return
 
@@ -540,13 +553,18 @@ async def _mark_card_interrupted(
             )
             if transport._destination() is None:  # pyright: ignore[reportPrivateUsage]
                 return False
-            replacement = await transport.edit(
-                message, embed=embed, view=None, _allow_replacement=False
-            )
-            if isinstance(replacement, discord.Message) and replacement.id != message.id:
-                return False
+
+            async def edit_card(card: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
+                return await transport.edit(card, **kwargs, _allow_replacement=False)
         else:
-            await message.edit(embed=embed, view=None)
+
+            async def edit_card(card: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
+                return await card.edit(**kwargs)
+
+        if not await edit_recovered_card(
+            message, turn_id=intent_id, edit=edit_card, embed=embed, view=None
+        ):
+            return False
         log.info(
             "turn.card_orphan_retirement_completed",
             turn_id=str(intent_id),

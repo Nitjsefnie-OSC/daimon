@@ -1379,3 +1379,51 @@ class DiscordTurnLifecycle:
         because a cancellation reaches this class through the success hook.
         """
         return self._was_answered
+
+
+class _RecoveryReplacement(Exception):
+    """A transport returned another card despite replacement being disabled."""
+
+
+async def edit_recovered_card(
+    message: discord.Message,
+    *,
+    turn_id: uuid.UUID,
+    edit: EditFn,
+    **kwargs: Any,  # noqa: ANN401
+) -> bool:
+    """Apply a restart recovery edit through the terminal card write sequencer.
+
+    The old process has exited, so there is no live lifecycle to adopt. A new
+    lifecycle owns this existing card and never posts a replacement if it was
+    deleted while recovery was fetching it.
+    """
+
+    async def no_replacement(**_kwargs: Any) -> discord.Message:  # noqa: ANN401
+        raise RuntimeError("restart recovery must not post a replacement card")
+
+    async def guarded_edit(
+        card: discord.Message,
+        **edit_kwargs: Any,  # noqa: ANN401
+    ) -> discord.Message | None:
+        edited = await edit(card, **edit_kwargs)
+        if isinstance(edited, discord.Message) and edited.id != card.id:
+            raise _RecoveryReplacement()
+        return edited
+
+    lifecycle = DiscordTurnLifecycle(
+        send=no_replacement,
+        edit=guarded_edit,
+        urgent_edit=guarded_edit,
+        agent_name="Daimon",
+        model_id="recovery",
+        turn_id=turn_id,
+        adopt_message_ref=message,
+    )
+    lifecycle._terminal = True  # pyright: ignore[reportPrivateUsage]
+    try:
+        return await lifecycle._edit_message(  # pyright: ignore[reportPrivateUsage]
+            message, terminal_override=True, recover_missing=False, missing_is_error=True, **kwargs
+        )
+    except _RecoveryReplacement:
+        return False

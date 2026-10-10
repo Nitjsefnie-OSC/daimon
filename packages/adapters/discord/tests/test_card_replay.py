@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, edit_recovered_card
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 
 
@@ -98,3 +98,39 @@ def test_replay_rejects_terminal_overtaking_progress() -> None:
     )
     assert result.returncode != 0
     assert "terminal dispatched while progress is on wire" in result.stderr
+
+
+async def test_recovered_answer_trace_is_accepted_by_model_replay() -> None:
+    card = types.SimpleNamespace(id=1234)
+    turn_id = uuid.uuid4()
+
+    async def edit(ref: Any, **kwargs: Any) -> Any:
+        assert ref is card
+        return card
+
+    log = structlog.get_logger()
+    with structlog.testing.capture_logs() as entries:
+        log.info(
+            "turn.card_orphan_retirement_issued",
+            turn_id=str(turn_id),
+            message_id=str(card.id),
+        )
+        assert await edit_recovered_card(
+            card, turn_id=turn_id, edit=edit, content="Recovered answer", embed=None, view=None
+        )
+        log.info(
+            "turn.card_orphan_retirement_completed",
+            turn_id=str(turn_id),
+            message_id=str(card.id),
+            recovered_answer=True,
+        )
+    model_replay = Path(__file__).resolve().parents[4] / "formal/discord_card_lifecycle/replay.py"
+    result = subprocess.run(
+        [sys.executable, str(model_replay), "-"],
+        input="\n".join(json.dumps(item, default=str) for item in entries),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "accepted 1/1 replayable traces" in result.stdout

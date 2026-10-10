@@ -314,6 +314,22 @@ async def test_recovery_edits_webhook_card_via_transport(
     assert edit.await_args.kwargs["_allow_replacement"] is False
 
 
+async def test_recovery_edit_uses_terminal_card_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    message = _fetched_message(123, _TURN_ID)
+    monkeypatch.setattr(discord.Message, "edit", AsyncMock(return_value=message))
+    with capture_logs() as entries:
+        assert await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+            message, intent_id=_TURN_ID
+        )
+    events = [entry["event"] for entry in entries]
+    assert events.index("turn.card_write_issued") < events.index("turn.card_write_dispatched")
+    assert events.index("turn.card_write_dispatched") < events.index("turn.card_write_completed")
+    assert "turn.card_terminal_applied" in events
+    assert "turn.card_orphan_retirement_completed" in events
+
+
 async def test_periodic_recovery_uses_stopped_card_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -799,7 +815,12 @@ async def test_boot_recovery_needs_two_complete_misses_before_retiring_null_id(
         "the second complete absence read must occur after 60 monotonic seconds"
     )
     assert retired == [
-        {"intent_id": _TURN_ID, "expected_message_id": None, "allow_prepared_without_message": True}
+        {
+            "intent_id": _TURN_ID,
+            "expected_message_id": None,
+            "allow_prepared_without_message": True,
+            "requeue_unposted_messages": True,
+        }
     ], "the recovery policy may retire only the still-NULL prepared intent"
 
 
@@ -1046,3 +1067,89 @@ async def test_card_deleted_between_fetch_and_interrupt_is_already_reconciled(mo
     monkeypatch.setattr(discord.Message, "edit", edit)
     assert await turn_card_recovery._mark_card_interrupted(message, intent_id=_TURN_ID)
     edit.assert_awaited_once()
+
+
+async def test_no_card_crash_returns_the_linked_message_to_replay_atomically(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.discord_message_admissions import (
+        claim_message,
+        finish_messages,
+        has_released_messages,
+        unposted_thread_for_message,
+    )
+
+    tenant = await make_tenant(db_session)
+    assert await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=11
+    )
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="200",
+        turn_token=uuid4(),
+        owner_key=11,
+    )
+    await finish_messages(
+        db_session, tenant_id=tenant.id, message_ids=("200",), intent_id=intent.id
+    )
+    await db_session.commit()
+    assert not await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=22
+    )
+    await db_session.commit()
+    # This permission is granted by reconcile_turn_card_intent only after two
+    # complete no-match history reads at least sixty monotonic seconds apart.
+    assert await retire_terminal_turn_card(
+        db_session_factory,
+        intent_id=intent.id,
+        expected_message_id=None,
+        allow_prepared_without_message=True,
+        requeue_unposted_messages=True,
+    )
+    assert await has_released_messages(db_session, intent_ids=(intent.id,))
+    assert (
+        await unposted_thread_for_message(db_session, tenant_id=tenant.id, message_id="200")
+        == "200"
+    )
+    assert await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=22
+    )
+    await db_session.commit()
+
+
+async def test_a_recorded_card_never_releases_its_input_for_another_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.discord_message_admissions import (
+        claim_message,
+        finish_messages,
+        has_released_messages,
+    )
+
+    tenant = await make_tenant(db_session)
+    assert await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=11
+    )
+    intent = await create_turn_card_intent(
+        db_session, tenant_id=tenant.id, platform="discord", thread_id="200", turn_token=uuid4()
+    )
+    await finish_messages(
+        db_session, tenant_id=tenant.id, message_ids=("200",), intent_id=intent.id
+    )
+    await record_turn_card_message(db_session, id=intent.id, message_id="300")
+    await db_session.commit()
+    assert not await retire_terminal_turn_card(
+        db_session_factory,
+        intent_id=intent.id,
+        expected_message_id=None,
+        allow_prepared_without_message=True,
+        requeue_unposted_messages=True,
+    )
+    assert not await has_released_messages(db_session, intent_ids=(intent.id,))
+    assert not await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=22
+    )

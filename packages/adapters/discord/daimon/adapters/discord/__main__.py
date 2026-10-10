@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import signal
 import sys
 from typing import cast
@@ -16,12 +17,25 @@ from daimon.core.health import start_liveness_responder
 from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
 from daimon.core.runtime_health import runtime_health
+from daimon.core.stores.worker_ownership import OWNER_HARD_EXIT_S
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import discord
 
 log = structlog.get_logger()
+
+
+async def drain_on_owner_loss(bot: DaimonBot) -> None:
+    await bot.runtime.ownership_lost.wait()
+    deadline = asyncio.get_running_loop().call_later(OWNER_HARD_EXIT_S, os._exit, 1)
+    try:
+        await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]  # entrypoint owns shutdown
+    finally:
+        # Cancellation cleanup can leave a task running after close(). The
+        # heartbeat grace includes this hard exit deadline.
+        deadline.cancel()
+        os._exit(1)
 
 
 async def main() -> None:
@@ -53,6 +67,7 @@ async def main() -> None:
         # the property that a hung loop fails the probe and Fly restarts us).
         health_server = await start_liveness_responder(settings.discord.health_port)
         log.info("starting_discord_bot")
+        owner_drain = asyncio.create_task(drain_on_owner_loss(bot), name="discord.owner_loss_drain")
         try:
             async with runtime_health(
                 "discord",
@@ -62,6 +77,9 @@ async def main() -> None:
             ):
                 await bot.start(settings.discord.bot_token.get_secret_value())
         finally:
+            owner_drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await owner_drain
             health_server.close()
             await health_server.wait_closed()
 
