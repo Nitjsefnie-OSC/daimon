@@ -36,7 +36,6 @@ import httpx
 from anthropic import AsyncAnthropic
 from pydantic import JsonValue
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -53,7 +52,6 @@ _GUILD_ID = 700000000000000027
 _REQUESTER = "7000000000000000270"
 _MA_AGENT_ID = "agent_qa_headless_new27"
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)\}")
-_OWNED_DATABASE = "DAIMON_DATABASE__TEST_URL"
 
 
 class BindingRefused(ValueError):
@@ -110,40 +108,27 @@ def _refuse_all(request: httpx.Request) -> httpx.Response:
     return httpx.Response(500, json={"error": {"message": "not served offline"}})
 
 
-def _owned_database_identity(database_url: str) -> tuple[object, ...]:
-    """The QA host's disposable-DB policy, then this run's own test DB only."""
-    from daimon.testing.qa_mcp_host import QaHostError, check_database
+def check_owned_sessionmaker(sessionmaker: object) -> None:
+    """Refuse, before any connection, a factory whose bind or any routed bind is not owned.
+
+    The shared policy (`daimon.testing.db.require_owned_sessionmaker`) reads
+    only the factory's configuration: no session is opened, no engine connects.
+    """
+    from daimon.testing.db import require_owned_sessionmaker
 
     try:
-        check_database(database_url)
-    except QaHostError as err:
+        require_owned_sessionmaker(sessionmaker)
+    except ValueError as err:
         raise BindingRefused(str(err)) from None
-    owned = os.environ.get(_OWNED_DATABASE)
-    if not owned:
-        raise BindingRefused(f"{_OWNED_DATABASE} names no owned test database")
-    url, mine = make_url(database_url), make_url(owned)
-    identity = (url.host, url.port or 5432, url.database, url.username)
-    if identity != (mine.host, mine.port or 5432, mine.database, mine.username):
-        raise BindingRefused(f"database {url.database!r} is not this run's test database")
-    return identity
 
 
-def check_owned_sessionmaker(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
-    """Refuse, before any connection, a factory not explicitly bound to the owned test DB.
-
-    Only the factory's configuration is read; no session is opened and the
-    engine never connects.
-    """
-    if sessionmaker.kw.get("binds"):
-        raise BindingRefused("per-entity binds are refused; bind one engine explicitly")
+def _database_url(sessionmaker: async_sessionmaker[AsyncSession]) -> str:
+    """The owned factory's database URL, for an app that builds its own engine."""
     bind = sessionmaker.kw.get("bind")
-    if isinstance(bind, AsyncConnection):
-        engine = bind.engine
-    elif isinstance(bind, AsyncEngine):
-        engine = bind
-    else:
+    engine = bind.engine if isinstance(bind, AsyncConnection) else bind
+    if not isinstance(engine, AsyncEngine):
         raise BindingRefused("the session factory needs an explicit AsyncEngine bind")
-    _owned_database_identity(engine.url.render_as_string(hide_password=False))
+    return engine.url.render_as_string(hide_password=False)
 
 
 def _owned_url(url: str, origins: frozenset[str]) -> str:
@@ -475,7 +460,9 @@ def http_check_holds(assertion: Mapping[str, JsonValue], receipt: HttpReceipt) -
 
 
 @asynccontextmanager
-async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[dict[str, str]]:
+async def serve_catalog_hosts(
+    sessionmaker: async_sessionmaker[AsyncSession], root: Path
+) -> AsyncIterator[dict[str, str]]:
     """Serve the real MCP, notebook and report apps on loopback for `http_check`.
 
     Yields the catalog's `{env.*}` origins. Each app is built by its production
@@ -492,8 +479,9 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
     from report_host import config as report_config
     from report_host import main as report_main
 
-    _owned_database_identity(database_url)
+    check_owned_sessionmaker(sessionmaker)
     refuse_ambient_anthropic()
+    database_url = _database_url(sessionmaker)
     admin = [SecretStr(secrets.token_urlsafe(32))]
     with scrubbed_environment():
         settings = Settings(

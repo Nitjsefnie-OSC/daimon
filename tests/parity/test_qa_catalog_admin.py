@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -81,28 +82,25 @@ async def test_new27_runs_through_the_admin_callback(
     ],
 )
 async def test_an_unbindable_source_stays_typed_pending_with_no_effect(
-    step: dict[str, Any], values: dict[str, str], code: str
+    step: dict[str, Any], values: dict[str, str], code: str, owned: _Owned
 ) -> None:
-    class _NeverOpened(async_sessionmaker[AsyncSession]):
-        def __call__(self, **local_kw: object) -> AsyncSession:  # type: ignore[override]
-            raise AssertionError("a pending admin source opened a session")
-
     def no_egress(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"egress attempted: {request.url}")
 
-    admin = CatalogAdmin("openai", _NeverOpened(), mcp_transport=httpx.MockTransport(no_egress))
+    admin = CatalogAdmin("openai", owned.factory, mcp_transport=httpx.MockTransport(no_egress))
     receipt = await admin(step, values)
     assert receipt.status == "pending"
     assert receipt.code is not None and code in receipt.code
 
 
-async def test_every_other_source_goes_to_the_product_admin_bindings() -> None:
+async def test_every_other_source_goes_to_the_product_admin_bindings(owned: _Owned) -> None:
     seen: list[tuple[Mapping[str, Any], Mapping[str, str]]] = []
 
     from daimon.testing.headless_bindings import isolated_anthropic
 
     class _Product:
         anthropic = isolated_anthropic(lambda request: httpx.Response(500))
+        sessions = owned.factory
 
         async def execute(
             self, source: Mapping[str, Any], values: Mapping[str, str]
@@ -110,11 +108,7 @@ async def test_every_other_source_goes_to_the_product_admin_bindings() -> None:
             seen.append((source, values))
             return AdminReceipt(status="pending", backend="openai", operation="channel_skills_add")
 
-    admin = CatalogAdmin(
-        "openai",
-        cast(async_sessionmaker[AsyncSession], None),
-        product=cast(AdminBindings, _Product()),
-    )
+    admin = CatalogAdmin("openai", owned.factory, product=cast(AdminBindings, _Product()))
     receipt = await admin(D7_STEP, ENV)
     assert seen == [(D7_STEP, ENV)]
     assert receipt.operation == "channel_skills_add"
@@ -125,25 +119,32 @@ async def test_every_other_source_goes_to_the_product_admin_bindings() -> None:
 AMBIENT = ("ANTHROPIC_WEBHOOK_SIGNING_KEY", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BASE_URL")
 
 
-def _owned_never_opened(connects: list[object]) -> async_sessionmaker[AsyncSession]:
-    """Bound to this run's own test DB (so the DB guard passes), but never opened."""
+class _NeverOpened(async_sessionmaker[AsyncSession]):
+    def __call__(self, **local_kw: object) -> AsyncSession:  # type: ignore[override]
+        raise AssertionError("a refused or pending binding opened a session")
+
+
+@dataclass
+class _Owned:
+    factory: async_sessionmaker[AsyncSession]
+    connects: list[object]
+
+
+@pytest.fixture
+def owned(db_session_factory: async_sessionmaker[AsyncSession]) -> _Owned:
+    """This run's own (lane or registered CI) bind, so the shared guard passes; never opened."""
     from sqlalchemy import event
-    from sqlalchemy.ext.asyncio import create_async_engine
 
-    engine = create_async_engine(os.environ["DAIMON_DATABASE__TEST_URL"])
-    event.listen(engine.sync_engine, "connect", lambda *_: connects.append(1))
-
-    class _NeverOpened(async_sessionmaker[AsyncSession]):
-        def __call__(self, **local_kw: object) -> AsyncSession:  # type: ignore[override]
-            raise AssertionError("a refused binding opened a session")
-
-    return _NeverOpened(bind=engine)
+    bind = db_session_factory.kw["bind"]
+    connects: list[object] = []
+    event.listen(bind.engine.sync_engine, "connect", lambda *_: connects.append(1))
+    return _Owned(_NeverOpened(bind=bind), connects)
 
 
 @pytest.mark.parametrize("name", AMBIENT)
 @pytest.mark.parametrize("value", ["", "https://ambient.invalid\nX-Ambient: 1"])
 async def test_an_ambient_anthropic_setting_is_refused_before_any_effect(
-    name: str, value: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    name: str, value: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, owned: _Owned
 ) -> None:
     from daimon.testing.headless_bindings import (
         BindingRefused,
@@ -155,17 +156,18 @@ async def test_an_ambient_anthropic_setting_is_refused_before_any_effect(
         raise AssertionError(f"egress attempted: {request.url}")
 
     class _Product:
+        sessions = owned.factory
+
         async def execute(self, *_: object) -> AdminReceipt:
             raise AssertionError("the product binding ran under an ambient override")
 
     monkeypatch.setenv(name, value)
-    connects: list[object] = []
-    sessions = _owned_never_opened(connects)
+    sessions = owned.factory
     transport = httpx.MockTransport(no_egress)
     with pytest.raises(BindingRefused, match=name):
         await submit_mcp_token(sessions, mcp_transport=transport, token="t")
     with pytest.raises(BindingRefused, match=name):
-        async with serve_catalog_hosts(os.environ["DAIMON_DATABASE__TEST_URL"], tmp_path):
+        async with serve_catalog_hosts(sessions, tmp_path):
             pass
     admin = CatalogAdmin(
         "openai", sessions, mcp_transport=transport, product=cast(AdminBindings, _Product())
@@ -173,7 +175,7 @@ async def test_an_ambient_anthropic_setting_is_refused_before_any_effect(
     for step in (NEW27_STEP, D7_STEP):
         with pytest.raises(BindingRefused, match=name):
             await admin(step, ENV)
-    assert connects == []
+    assert owned.connects == []
 
 
 async def test_the_isolated_client_takes_nothing_from_the_environment(
@@ -209,7 +211,7 @@ async def test_the_isolated_client_takes_nothing_from_the_environment(
     ],
 )
 async def test_a_product_client_that_retained_ambient_settings_is_refused(
-    kwargs: dict[str, Any],
+    kwargs: dict[str, Any], owned: _Owned
 ) -> None:
     from anthropic import AsyncAnthropic
     from daimon.testing.headless_bindings import BindingRefused
@@ -221,14 +223,46 @@ async def test_a_product_client_that_retained_ambient_settings_is_refused(
             webhook_key=kwargs.get("webhook_key", ""),
             default_headers=kwargs.get("default_headers"),
         )
+        sessions = owned.factory
 
         async def execute(self, *_: object) -> AdminReceipt:
             raise AssertionError("ran with a client that retained ambient settings")
 
-    admin = CatalogAdmin(
-        "openai",
-        cast(async_sessionmaker[AsyncSession], None),
-        product=cast(AdminBindings, _Product()),
-    )
+    admin = CatalogAdmin("openai", owned.factory, product=cast(AdminBindings, _Product()))
     with pytest.raises(BindingRefused, match="retained"):
         await admin(D7_STEP, ENV)
+
+
+@pytest.mark.parametrize("where", ["callback", "product"])
+async def test_a_remote_per_model_bind_is_refused_before_any_forwarding(
+    where: str, owned: _Owned
+) -> None:
+    """One routed bind on either factory points elsewhere: refused, nothing connects."""
+    from daimon.core._models import CredentialRequest  # pyright: ignore[reportPrivateUsage]
+    from daimon.testing.headless_bindings import BindingRefused, isolated_anthropic
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    remote = create_async_engine(
+        "postgresql+asyncpg://daimon:daimon@db.example.com:5432/daimon_test_nc_n2"
+    )
+    remote_connects: list[object] = []
+    event.listen(remote.sync_engine, "connect", lambda *_: remote_connects.append(1))
+    routed = _NeverOpened(bind=owned.factory.kw["bind"], binds={CredentialRequest: remote})
+
+    class _Product:
+        anthropic = isolated_anthropic(lambda request: httpx.Response(500))
+        sessions = routed if where == "product" else owned.factory
+
+        async def execute(self, *_: object) -> AdminReceipt:
+            raise AssertionError("forwarded with an unowned routed bind")
+
+    admin = CatalogAdmin(
+        "openai",
+        routed if where == "callback" else owned.factory,
+        product=cast(AdminBindings, _Product()),
+    )
+    for step in (NEW27_STEP, D7_STEP):
+        with pytest.raises(BindingRefused):
+            await admin(step, ENV)
+    assert owned.connects == remote_connects == []
