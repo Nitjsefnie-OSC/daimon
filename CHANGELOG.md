@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an explicitly imported Discord C01 conformance probe through normal ingress, tenant-slot admission, per-thread queues and caller batching, with owner-controlled root barriers, production release and mutation-sensitive raw platform evidence.
 - Add explicitly imported Slack and Teams C01 platform conformance hooks that retain actual orchestration, caller batching, file metadata and queue cleanup without changing application defaults.
 - Add an explicit Gemini MockTransport SDK conformance component for cancellation and usage revisions, retaining typed next-turn mutation/vault limits and the standard offline matrix.
+- Inspect configured provider runtime mappings without recursive length hints or constructing credentials; the prepared turn retains its optional runtime while keeping usage recorders private.
 
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Verify explicitly selected OpenAI native session spend caps before host input,
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-admit Gemini session intent against owned agent/environment resources on every send; removed inline artifacts/skills and pre-explicit-tools saved requests require preparation again in this opt-in backend.
 
 - Add opt-in scoped single-server HTTPS MCP authentication to the Gemini driver, with closed native intent/policies, fresh SDK-dispatch resolution, secret-free persistence and DEBUG logs, and fail-closed replay/continuation admission.
+- Refuse ambient OpenAI custom headers before configured client construction so process headers cannot replace channel credentials or project routing.
 
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.
 - Gemini explicitly sends configured tools (or an empty list) on every interaction, preventing implicit provider web-tool defaults, including continuations and fallback sends.
@@ -43,12 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add explicit scoped OpenAI host resource edges for skill-preserving channel copies and Add-skill, retaining checked bundles before attachment and publishing immutable native agents under local catalog CAS; preserve Anthropic request bytes.
 
 - Retain scoped OpenAI/Gemini agent revisions, checked skill bundles and upload ownership in an additive host catalog.
+- Construct OpenAI turn runtimes for explicitly configured channels from scoped operator deployment plans, with deferred credential access and durable journal/usage state.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.
 - Capture QA headless invocation returns with monotonic receipts, retaining exact host truncation and distinguishing empty completion from visible output.
 - Allow opt-in OpenAI Agents MCP bearer authentication through a scoped host resolver; persist references only and attach fresh credentials to session requests while preserving model and delegation controls.
 - Allow 40 MiB files in Gemini workspace snapshots within the existing 64 MiB archive budget, using bounded member reads and preserving the 16 MiB ordinary upload limit.
+- Resolve explicitly configured provider turn runtimes per admitted channel and carry their scoped dependencies into execution, without constructing a runtime for default Anthropic channels.
 
 - Enforce the frozen TARGET-53 digest when building and replaying QA catalog matrices, refusing re-scored extras.
 

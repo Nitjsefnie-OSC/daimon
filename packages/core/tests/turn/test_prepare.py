@@ -588,7 +588,9 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "continuity",
         "backend",
         "session_ref",
+        "runtime",
     }, "PreparedTurn must expose exactly the documented public fields"
+    assert next(f for f in dataclasses.fields(PreparedTurn) if f.name == "runtime").default is None
 
 
 async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vault(
