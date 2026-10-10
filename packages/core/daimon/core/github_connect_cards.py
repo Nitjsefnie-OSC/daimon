@@ -71,7 +71,7 @@ def build_connect_card(
         description="Nothing is connected yet.\n\n"
         + (
             f"Tap the button. On the page, click Add repos, tick {requested_repo}, "
-            "click Add repos again, then Save changes."
+            "click Add 1 repo, then Save changes."
             if requested_repo
             else f"Tap the button and tick the repos {shown or 'this agent'} can use."
             if agent_name

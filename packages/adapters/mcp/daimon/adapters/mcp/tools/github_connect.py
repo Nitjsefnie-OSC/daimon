@@ -402,17 +402,13 @@ async def _github_connect_impl(
             status="delivery_failed",
             message="I couldn't show the GitHub connection button. Try again.",
         )
-    say = (
-        f"I can't see {repo_name.strip()} yet. Tap Connect GitHub, then click Add repos, "
-        f"tick {repo_name.strip()}, click Add repos again and Save changes."
-        if repo_name
-        else "Tap Connect GitHub to choose the repos I can use."
-    )
+    say = f"I can't see {repo_name.strip()} yet." if repo_name else "Use the button below."
     return ConnectResult(
         status="sent",
         message=(
-            "The Connect GitHub button is posted. Nothing is connected yet: the person "
-            f"still has to tick repos and save on the page. Reply with only this line: "
+            "The Connect GitHub button is posted below your reply. The card already says "
+            "nothing is connected yet and lists the page steps, so don't repeat them. "
+            f"Reply with at most this line, or nothing if connecting was all they asked for: "
             f"{say} Never say done, connected, pending or a tool name."
         ),
     )
@@ -447,8 +443,8 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
-        After it posts, nothing is connected until the person saves on the page:
-        reply only with the line the result gives; never say done or connected.
+        After it posts, nothing is connected until the person saves on the page.
+        The card carries the steps: never repeat them, and never say done or connected.
         """
         return await _github_connect_impl(
             runtime,
