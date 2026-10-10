@@ -130,7 +130,8 @@ async def execute_openai_turns(
         or fixture.model != "gpt-6-luna"
     ):
         raise ValueError("OpenAI fixture is not a complete pinned headless recipe")
-    if any(name in os.environ for name in OFFLINE_SDK_ENV):
+    present_names = frozenset(os.environ)
+    if any(name in present_names for name in OFFLINE_SDK_ENV):
         raise ValueError("offline OpenAI replay refuses ambient SDK options")
     fixture = BackendFixture.model_validate_json(fixture.model_dump_json())
     fixture.codec_source.verify(repository_root)

@@ -153,7 +153,8 @@ async def execute_gemini_turns(
         or fixture.model != "gemini-3.8-flash"
     ):
         raise ValueError("Gemini fixture is not a complete pinned headless recipe")
-    if any(name in os.environ for name in OFFLINE_SDK_ENV):
+    present_names = frozenset(os.environ)
+    if any(name in present_names for name in OFFLINE_SDK_ENV):
         raise ValueError("offline Gemini replay refuses ambient SDK options")
     fixture = BackendFixture.model_validate_json(fixture.model_dump_json())
     fixture.codec_source.verify(repository_root)
