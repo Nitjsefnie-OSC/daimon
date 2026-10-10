@@ -594,6 +594,10 @@ class DaimonBot(commands.Bot):
         )
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
+        # Separate guard for unjoined-guild refreshes, so a rejoin during one
+        # still runs its own seed and flips the tenant back to ready. The
+        # reconcile's per-tenant advisory lock serializes the two.
+        self._unjoined_reconciling: set[uuid.UUID] = set()
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
         # Gateway lifecycle callbacks run as separate tasks. Serialize only the
         # tenant provision/archive transitions so an earlier remove cannot
@@ -1130,9 +1134,9 @@ class DaimonBot(commands.Bot):
 
     async def _reconcile_unjoined_tenant_defaults(self, tenant_id: uuid.UUID) -> None:
         """Refresh defaults for a registered tenant without changing its install state."""
-        if tenant_id in self._seeding:
+        if tenant_id in self._unjoined_reconciling:
             return
-        self._seeding.add(tenant_id)
+        self._unjoined_reconciling.add(tenant_id)
         public_url = (
             str(self.runtime.settings.mcp.public_url)
             if self.runtime.settings.mcp.public_url is not None
@@ -1156,7 +1160,7 @@ class DaimonBot(commands.Bot):
         except Exception:
             log.exception("unjoined_guild_reconcile_failed", tenant_id=str(tenant_id))
         finally:
-            self._seeding.discard(tenant_id)
+            self._unjoined_reconciling.discard(tenant_id)
 
     def _guild_lifecycle_lock_for(self, guild_id: int) -> asyncio.Lock:
         """Return the process-local lifecycle lock for one Discord guild."""
