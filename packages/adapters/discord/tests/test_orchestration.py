@@ -2527,6 +2527,7 @@ class TestSessionReuse:
                 thread_id="5555",  # matches _make_thread_message default thread_id
                 account_id=principal.account_id,
                 ma_session_id=existing_session_id,
+                budget_channel_id="789",
                 watermark_message_id=watermark_msg_id,
                 effective_config=snapshot,
                 identity_fingerprint=fingerprint_identity(snapshot),
@@ -2689,6 +2690,7 @@ class TestSessionReuse:
                 thread_id="5557",
                 account_id=principal.account_id,
                 ma_session_id=old_session_id,
+                budget_channel_id="789",
                 watermark_message_id="100",
                 effective_config=snapshot,
                 identity_fingerprint=fingerprint_identity(snapshot),

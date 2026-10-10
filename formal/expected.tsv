@@ -95,6 +95,13 @@ discord_install	DiscordInstall	DiscordInstallSafe	clean	16	-	per-guild lock seri
 discord_install	DiscordInstall	DiscordBootUnsafe	violates:BootRecoveryLive	3	-	pre-fix: on_ready skips a known archived guild still present in cache
 discord_install	DiscordInstall	DiscordBootSafe	clean	16	-	startup recovers a cached archived tenant without replaying install effects
 # ---- billing ----
+metering	BudgetChannelRecovery	BudgetChannelRecoverySafe	clean	6	-	changed channel replaces; checkpoint and recovered turn use their stamped sessions
+metering	BudgetChannelRecovery	BudgetChannelRecoveryUnsafe	violates:CorrectDebit	6	-	pre-fix reuse lets the sweep debit the session's old channel
+metering	BudgetChannelRecovery	BudgetChannelLegacySafe	clean	6	-	legacy stamp read from MA avoids replacement for unchanged channel
+metering	BudgetChannelRecovery	BudgetChannelLegacyChanged	clean	6	-	legacy stamp read from MA causes one replacement for changed channel
+metering	BudgetChannelRecovery	BudgetChannelLegacyUnsafe	violates:NoSpuriousReplacement	3	-	pre-fix unknown stamp replaces an unchanged legacy session
+metering	BudgetChannelRecovery	BudgetChannelCheckpointUnsafe	violates:CheckpointDebit	6	-	pre-fix checkpoint live debit uses new channel while recovery uses old stamp
+metering	BudgetChannelRecovery	BudgetChannelReadFailure	clean	6	-	transient MA stamp read failure leaves legacy mapping unknown and reusable
 billing	Clawback	ClawbackUnlocked	violates:NeverOverClawback	11	-	pre-lock: concurrent clawbacks both read zero and over-debit
 billing	Clawback	ClawbackLocked	clean	13	-	credit-row lock serializes clawbacks
 billing	OutOfOrder	OutOfOrderUnlocked	violates:NoOrphanPending	12	-	pre-lock: refund before credit leaves an orphan pending event

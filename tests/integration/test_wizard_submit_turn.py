@@ -90,6 +90,7 @@ def _build_router(
     *,
     sent_events: list[dict[str, Any]],
     stream_hits: list[str],
+    session_retrieve_error: bool = False,
 ) -> MARouter:
     """The shared turn router (agent/environment resolution plus a turn SSE
     stream whose `span.model_request_end` the billing chokepoint metering
@@ -109,6 +110,11 @@ def _build_router(
     )
 
     def _handle_session_retrieve(_request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        if session_retrieve_error:
+            return httpx.Response(
+                400,
+                json={"type": "error", "error": {"type": "api_error", "message": "unavailable"}},
+            )
         # A mapping row written before sessions recorded their configuration
         # makes the bind read the session once, to learn what it is running.
         session = ma_session(
@@ -239,8 +245,11 @@ async def _seed_review_row(
 # --- session reuse -----------------------------------------------------------
 
 
+@pytest.mark.parametrize("legacy_read_error", [False, True], ids=["stamped", "legacy-unreadable"])
 async def test_submitting_a_form_resumes_the_threads_existing_session(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    legacy_read_error: bool,
 ) -> None:
     tenant = await _seed_funded_tenant(db_session, workspace_id="800001001")
     row = await _seed_review_row(db_session_factory, tenant=tenant)
@@ -261,11 +270,22 @@ async def test_submitting_a_form_resumes_the_threads_existing_session(
             thread_id=str(channel.id),
             ma_session_id=existing_session_id,
             ma_agent_id=_AGENT_ID,
+            budget_channel_id=str(channel.parent_id),
         )
+        if legacy_read_error:
+            await session.execute(
+                sql_text("UPDATE thread_sessions SET budget_channel_id = '' WHERE id = :id"),
+                {"id": existing.id},
+            )
 
     sent_events: list[dict[str, Any]] = []
     stream_hits: list[str] = []
-    router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
+    router = _build_router(
+        str(tenant.id),
+        sent_events=sent_events,
+        stream_hits=stream_hits,
+        session_retrieve_error=legacy_read_error,
+    )
     runtime = _make_runtime(db_session_factory, router)
     bot = _make_bot(runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
