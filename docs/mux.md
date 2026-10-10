@@ -1461,3 +1461,6 @@ On explicitly selected OpenAI and Gemini channels, authoritative root outcomes
 outcome as `upstream` and `session_terminated`, respectively. Display compatibility
 records do not replace that provider truth. Preview, gap and child-frame metadata
 cannot promote a root failure. Anthropic's existing outcome behavior is unchanged.
+Gemini native `incomplete` is `session_terminated`, including when its real stream
+or restart replay refuses the failed root before display delivery. That refusal
+remains nonretryable and does not permit billing success or a recovery send.

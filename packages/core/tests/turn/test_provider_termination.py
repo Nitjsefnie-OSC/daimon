@@ -13,7 +13,11 @@ from daimon.core.turn.gemini import GeminiTurnIO
 from daimon.core.turn.io import TurnEvent
 from daimon.core.turn.openai_codec import display_event
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.termination import (
+    ProviderTerminalFailure,
+    TerminationReason,
+    termination_reason,
+)
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
@@ -21,6 +25,7 @@ from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef, Scope
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from . import test_gemini_codec as gemini_native
 from .conftest import make_agent_message, make_status_idle
 from .test_provider_dispatch import ACCOUNT, TENANT
 
@@ -151,6 +156,104 @@ async def outcome_row(host, native_session, run):
     row = matches[0]
     assert row.account_id == ACCOUNT and row.session_id == native_session.id
     return state, row
+
+
+@pytest.fixture
+async def native_gemini(monkeypatch):
+    # Use the actual driver setup with the same authorized DB tenant/account.
+    monkeypatch.setattr(gemini_native, "SCOPE", SCOPE)
+    channel = gemini_native.CHANNEL.model_copy(update={"tenant_id": SCOPE.tenant_id})
+    monkeypatch.setattr(
+        gemini_native, "THREAD", gemini_native.THREAD.model_copy(update={"channel": channel})
+    )
+    return await gemini_native.harness.__wrapped__()
+
+
+@pytest.mark.parametrize(
+    "native_status,expected",
+    [
+        ("completed", TerminationReason.COMPLETED),
+        ("cancelled", TerminationReason.INTERRUPTED),
+        ("failed", TerminationReason.UPSTREAM),
+        ("incomplete", TerminationReason.SESSION_TERMINATED),
+    ],
+)
+async def test_actual_gemini_stream_terminal_reason_is_committed(
+    host, monkeypatch, native_gemini, native_status, expected
+):
+    native_gemini.transport.responses.append(
+        gemini_native.interaction("actual-" + native_status, status=native_status)
+    )
+    io = GeminiTurnIO(native_gemini.backend, SCOPE, native_gemini.session)
+    monkeypatch.setattr(driver, "turn_io", lambda *args, **kwargs: io)
+    lifecycle = RecordingLifecycle()
+    ancillary = ScriptedTransport()
+
+    async def run():
+        async with ancillary.client() as client:
+            return await driver.run_turn(
+                anthropic=client,
+                session_id=native_gemini.session.id,
+                user_message="offline",
+                lifecycle=lifecycle,
+                cancel=asyncio.Event(),
+                billing=BillingExempt(reason="headless-unrecorded"),
+                path="mux",
+                scope=SCOPE,
+                render_interval_s=3600,
+            )
+
+    state, row = await outcome_row(host, native_gemini.session, run)
+    assert state.termination == row.reason == expected
+    assert (state.error is not None) == expected.is_failure
+    assert row.error_class == ("TurnError" if expected.is_failure else None)
+    assert lifecycle.terminal_failures == ([(state, state.error)] if expected.is_failure else [])
+    assert lifecycle.terminal_success == ([] if expected.is_failure else [state])
+    assert len(native_gemini.transport.requests) == 1
+    assert not ancillary.requests
+
+
+@pytest.mark.parametrize(
+    "native_status,expected",
+    [("failed", TerminationReason.UPSTREAM), ("incomplete", TerminationReason.SESSION_TERMINATED)],
+)
+async def test_actual_gemini_restart_replay_remains_a_typed_failure(
+    native_gemini, native_status, expected
+):
+    native_gemini.transport.responses.append(
+        gemini_native.interaction("saved-failure", status=native_status)
+    )
+    original = GeminiTurnIO(native_gemini.backend, SCOPE, native_gemini.session)
+    await original.send(
+        [{"type": "user.message", "content": [{"type": "text", "text": "offline"}]}]
+    )
+    restarted = GeminiTurnIO(native_gemini.backend, SCOPE, native_gemini.session)
+    with pytest.raises(ProviderTerminalFailure) as caught:
+        await restarted.replay()
+    assert caught.value.reason == termination_reason(caught.value) == expected
+    assert caught.value.category == "upstream" and caught.value.retryable is False
+    assert caught.value.native_code == "host_root_failed"
+    assert len(native_gemini.transport.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"authority": "preview"},
+        {"authority": "gap"},
+        {"thread_id": "child"},
+        {"turn_id": "foreign"},
+        {"session_id": "foreign"},
+        {"native": NativeProvenance(provider="openai", api_revision="offline")},
+    ],
+)
+async def test_gemini_failure_boundary_requires_accepted_own_root(native_gemini, fields):
+    io = GeminiTurnIO(native_gemini.backend, SCOPE, native_gemini.session)
+    io.root = "root"
+    event = terminal("gemini", "terminated").model_copy(
+        update={"session_id": native_gemini.session.id, **fields}
+    )
+    io.check_terminal(event)
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
