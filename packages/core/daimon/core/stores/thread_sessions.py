@@ -330,6 +330,17 @@ async def create_thread_session(
     return ThreadSessionRow.model_validate(orm)
 
 
+async def set_budget_channel_stamp(
+    session: AsyncSession, *, id: _uuid.UUID, budget_channel_id: str | None
+) -> None:
+    """Backfill the immutable MA stamp on a legacy mapping after reading MA."""
+    await session.execute(
+        update(ThreadSession)
+        .where(ThreadSession.id == id, ThreadSession.budget_channel_id == "")
+        .values(budget_channel_id=budget_channel_id)
+    )
+
+
 async def update_watermark(
     session: AsyncSession,
     *,

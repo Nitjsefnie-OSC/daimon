@@ -568,6 +568,168 @@ async def test_missed_usage_after_budget_channel_change_is_recovered_to_current_
     assert debit.channel_id == "channel-b"
 
 
+@pytest.mark.parametrize(
+    "source,admitted,replace_session",
+    [(None, None, False), ("channel-a", "channel-a", False), ("channel-a", "channel-b", True)],
+)
+async def test_legacy_budget_stamp_uses_ma_before_deciding_replacement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    source: str | None,
+    admitted: str | None,
+    replace_session: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id=source),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
+    async with db_session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE thread_sessions SET budget_channel_id = '' WHERE id = :id"),
+            {"id": first.mapping_id},
+        )
+
+    second = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id=admitted),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(second, PreparedTurn)
+    assert (second.ma_session_id != first.ma_session_id) is replace_session
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None and row.budget_channel_id == admitted
+    async with db_session_factory() as session:
+        predecessor = await get_thread_session_by_id(session, id=first.mapping_id)
+    assert predecessor is not None and predecessor.budget_channel_id == source
+    third = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id=admitted),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(third, PreparedTurn) and third.ma_session_id == second.ma_session_id
+
+
+async def test_legacy_budget_stamp_read_failure_keeps_mapping_unknown(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-a"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
+    async with db_session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE thread_sessions SET budget_channel_id = '' WHERE id = :id"),
+            {"id": first.mapping_id},
+        )
+    transport.retrieve_error = 400
+    second = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-b"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None and row.budget_channel_id == ""
+
+
+async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.workspace_transfer import WorkspaceTransferRunner, _bind_checkpoint_recorder
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-a"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn)
+
+    async def checkpoint(self: WorkspaceTransferRunner, **kwargs: Any) -> PreparedReplacement:
+        old_session_id = kwargs["old_session_id"]
+        snapshot = kwargs["old_snapshot"]
+        event = BetaManagedAgentsSpanModelRequestEndEvent(
+            id="evt_checkpoint_live",
+            is_error=False,
+            model_request_start_id="start_live",
+            model_usage=ma_model_usage(input_tokens=1000, output_tokens=100),
+            processed_at=_NOW,
+            type="span.model_request_end",
+        )
+        recorder = _bind_checkpoint_recorder(
+            self.sessionmaker,
+            tenant_id=self.tenant_id,
+            external_user_id=self.external_user_id,
+            ma_session_id=old_session_id,
+            model_id=snapshot.model_id,
+            markup=self.markup,
+            channel_id=self.channel_id,
+        )
+        await recorder(event=event)
+        missed = event.model_copy(update={"id": "evt_checkpoint_missed"})
+        transport.state.events[old_session_id].append(missed.model_dump(mode="json"))
+        return PreparedReplacement(
+            extra_resources=(), transfer_file_id=None, transfer_kind="history", user_prefix=""
+        )
+
+    monkeypatch.setattr(WorkspaceTransferRunner, "__call__", checkpoint)
+    runner = WorkspaceTransferRunner(
+        anthropic=deps.anthropic,
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        markup=Decimal("1"),
+        channel_id="channel-b",
+    )
+    second = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-b"),
+        tenant=tenant,
+        account=account,
+        transfer=runner,
+    )
+    assert isinstance(second, PreparedTurn) and second.ma_session_id != first.ma_session_id
+    # The fake list endpoint excludes archived sessions by default. Expose the
+    # predecessor to exercise the sweep's attribution when its log is listed.
+    old = transport.state.sessions[first.ma_session_id]
+    transport.state.sessions[first.ma_session_id] = old.model_copy(update={"archived_at": None})
+    assert await sweep_headless_usage(deps.anthropic, db_session_factory, markup=Decimal("1")) == 1
+    async with db_session_factory() as session:
+        rows = (await session.scalars(select(UsageEvent).order_by(UsageEvent.id))).all()
+        debits = (await session.scalars(select(TenantLedger).order_by(TenantLedger.id))).all()
+    assert len(rows) == len(debits) == 2
+    assert {row.channel_id for row in rows} == {"channel-a"}
+    assert {row.channel_id for row in debits} == {"channel-a"}
+
+
 async def test_budget_channel_change_waits_for_active_session_before_replacement(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

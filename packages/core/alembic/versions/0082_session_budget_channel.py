@@ -18,6 +18,7 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    op.get_bind().execute(sa.text("SET LOCAL lock_timeout = '5s'"))
     op.add_column(
         "thread_sessions",
         sa.Column("budget_channel_id", sa.Text(), nullable=True, server_default=""),
@@ -26,4 +27,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.get_bind().execute(sa.text("SET LOCAL lock_timeout = '5s'"))
     op.drop_column("thread_sessions", "budget_channel_id")

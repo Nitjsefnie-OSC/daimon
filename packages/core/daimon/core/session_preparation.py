@@ -36,12 +36,13 @@ import datetime as dt
 import hashlib
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.authz import build_agent_ref
+from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_compat import (
@@ -92,7 +93,11 @@ from daimon.core.stores.thread_session_lineage import (
     mark_retired,
     mark_superseded,
 )
-from daimon.core.stores.thread_sessions import get_thread_session_by_id, update_mutable_fingerprint
+from daimon.core.stores.thread_sessions import (
+    get_thread_session_by_id,
+    set_budget_channel_stamp,
+    update_mutable_fingerprint,
+)
 from daimon.core.thread_handoff import destination_may_read
 from daimon.core.turn.admission import (
     Admission,
@@ -387,6 +392,12 @@ async def _run_replacement(
         if transfer is not None and recorded is not None and not fresh_start:
             stage = "checkpoint"
             await _advance(deps, preparation.id, "checkpointed", now)
+            # A checkpoint executes the predecessor, whose MA stamp is also
+            # what recovery uses if the live recorder misses an event.
+            from daimon.core.workspace_transfer import WorkspaceTransferRunner
+
+            if isinstance(transfer, WorkspaceTransferRunner):
+                transfer = replace(transfer, channel_id=row.budget_channel_id)
             replacement = await transfer(
                 old_session_id=row.ma_session_id,
                 old_snapshot=recorded,
@@ -657,14 +668,31 @@ async def _prepare_session_for_turn_locked(
             recorded = row.effective_config
         else:
             source_exists = identity.session_exists
+            observed = identity.observed
+            if row.budget_channel_id == "" and source_exists:
+                if observed is None:
+                    try:
+                        observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+                    except anthropic_pkg.APIError as error:
+                        # A transient read must not replace every legacy session.
+                        # Keep the unknown marker so the next bind can retry.
+                        log.warning(
+                            "session_preparation.budget_stamp_unreadable",
+                            session_id=row.ma_session_id,
+                            error=type(error).__name__,
+                        )
+                if observed is not None:
+                    stamp = observed.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
+                    await set_budget_channel_stamp(db, id=row.id, budget_channel_id=stamp)
+                    row = row.model_copy(update={"budget_channel_id": stamp})
             if identity.session_exists:
                 recorded = await recorded_snapshot(
-                    deps.anthropic, deps.sessionmaker, existing=row, observed=identity.observed
+                    deps.anthropic, deps.sessionmaker, existing=row, observed=observed
                 )
             if (
                 recorded is None
                 and not admission.memory_read_only
-                and row.budget_channel_id == admission.budget_channel_id
+                and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
                 # No readable configuration to compare: the session is gone or
                 # unreadable, which the turn's own recovery handles. Bind it as
@@ -710,7 +738,7 @@ async def _prepare_session_for_turn_locked(
         fresh_start = row.fresh_start_requested_at is not None
         if handed_over:
             decision = ReplaceSession(reasons=("agent_identity",))
-        elif row.budget_channel_id != admission.budget_channel_id:
+        elif row.budget_channel_id not in ("", admission.budget_channel_id):
             # The sweep attributes missed events from the immutable MA session
             # stamp. A new budget channel needs a new stamped session.
             decision = ReplaceSession(reasons=("budget_channel",))
