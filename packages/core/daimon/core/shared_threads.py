@@ -119,6 +119,10 @@ async def resolve_shared_thread(
             except_account=owner,
         ):
             return None
+        # The backend must share in this release, like a pinned revision below:
+        # a host that runs per caller only is refused here, before dispatch,
+        # never handed a shared owner it would have to reject itself.
+        check_backend(revision)
         return SharedThread(slot=slot, owner=owner, revision=revision, binding=None)
     pinned = await mux_state.get_config_revision(
         session, slot.thread.channel, binding.config_revision

@@ -1,29 +1,29 @@
-"""M1 across backends: an opt-in shared thread on an explicit OpenAI or Gemini channel.
+"""M1 across backends: opt-in shared threads with explicit OpenAI or Gemini channels.
 
-Offline. The provider side is a registered stand-in preparer per profile, the
-same seam the OpenAI (G1) and Gemini (G2) host codecs register on
-(`daimon.core.turn.prepare.register_turn_preparation` plus `RUNNABLE_PROFILES`).
-What is proven is Daimon's side: admission carries the explicit revision, every
-caller's turn reaches the provider as the thread's shared owner and lands on
-one native session, the binding records the provider and revision, a later
-switch of the channel to the other provider leaves the thread where it was
-(C14), the identity survives a restart, the journal takes only the shared
-slot's lease, and an unconfigured channel never reaches any of it.
+Offline. In this release neither alternate host shares a thread: G1 (#689) and
+G2 admit OpenAI and Gemini per caller only. So the real evidence here is a
+typed refusal: a shared OpenAI or Gemini channel is refused as
+`backend_unsupported` at admission and again before dispatch, so the real
+host preparer never sees a shared owner, with no native I/O, binding or
+session row (`test_g1_refuses_a_shared_thread_visibly`,
+`test_g2_refuses_a_shared_thread_visibly`,
+`test_a_backend_that_does_not_share_never_sees_a_shared_owner`).
 
-Sharing is proven on Gemini, whose real host (G2) is still pending, through
-its stand-in. The real G1 OpenAI host (#689) does not share in this release:
-`test_g1_refuses_a_shared_thread_visibly` proves a shared OpenAI channel is
-refused at admission and again by the real preparer, before any native I/O.
-OpenAI appears as the per-caller side B of the C14 provider switch. `test_the_real_codec_receives_the_shared_owner`
-checks the hand-over against each real registered preparer; Gemini skips as
-`PENDING[G2]` until G2 merges.
+The seam a future sharing host would use is proven with stand-in preparers
+under an isolated stand-in admission policy (the `providers` fixture admits
+only the stand-in revisions): each caller reaches the preparer as the
+thread's shared owner on one native session, the binding records the
+provider and pinned revision, a channel switch leaves the thread on its
+first provider (C14), the identity survives a restart, the journal takes
+only the shared slot's lease, and an unconfigured channel reaches none of it.
+These are seam contracts, not certification: foreign shared execution,
+credentials, caller billing and C01/C14 on a real foreign host stay PENDING.
 """
 
 from __future__ import annotations
 
 import contextlib
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -32,7 +32,7 @@ from typing import Any
 
 import httpx
 import pytest
-from daimon.core import channel_backend
+from daimon.core import shared_threads
 from daimon.core._models import AgentGitHubMode
 from daimon.core.channel_backend import (
     BackendUnsupported,
@@ -73,12 +73,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 OPENAI = "openai.persistent_workspace"
 GEMINI = "gemini.inline_reuse"
+# Models no real host admits for sharing: these revisions exist only for the stand-ins.
+STAND_INS = frozenset({(OPENAI, "gpt-stand-in"), (GEMINI, "gemini-stand-in")})
 CONFIGS = {
     OPENAI: BackendConfig(
-        backend="openai", profile=OPENAI, model="gpt-6-luna", thread_mode="shared"
+        backend="openai", profile=OPENAI, model="gpt-stand-in", thread_mode="shared"
     ),
     GEMINI: BackendConfig(
-        backend="gemini", profile=GEMINI, model="gemini-3-pro", thread_mode="shared"
+        backend="gemini", profile=GEMINI, model="gemini-stand-in", thread_mode="shared"
     ),
 }
 
@@ -134,11 +136,17 @@ def providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _Provider]:
     registered = {profile: _Provider(profile) for profile in CONFIGS}
     for profile, provider in registered.items():
         monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, provider)  # pyright: ignore[reportPrivateUsage]
-    monkeypatch.setattr(
-        channel_backend,
-        "RUNNABLE_PROFILES",
-        channel_backend.RUNNABLE_PROFILES | frozenset(CONFIGS),
-    )
+    # The stand-ins' own admission policy, isolated from the real hosts' release
+    # policy (which admits OpenAI and Gemini per caller only): exactly the
+    # stand-in revisions are admitted, everything else goes to the real check.
+    real_check = shared_threads.check_backend
+
+    def stand_in_policy(revision: ConfigRevision) -> object:
+        if (revision.profile, revision.model) in STAND_INS:
+            return None
+        return real_check(revision)
+
+    monkeypatch.setattr(shared_threads, "check_backend", stand_in_policy)
     return registered
 
 
@@ -387,40 +395,46 @@ async def test_an_unconfigured_channel_never_reaches_a_provider_or_the_shared_sl
         assert await mux_state.get_binding(s, _slot(world)) is None
 
 
-# PENDING until G1 (OpenAI) / G2 (Gemini) host codecs merge and register.
+# The real release policy: neither alternate host shares, so a shared revision is
+# refused before dispatch and the registered host preparer never sees a shared owner.
+
+RELEASED = {
+    OPENAI: BackendConfig(
+        backend="openai", profile=OPENAI, model="gpt-6-luna", thread_mode="shared"
+    ),
+    GEMINI: BackendConfig(
+        backend="gemini", profile=GEMINI, model="gemini-3.8-flash", thread_mode="shared"
+    ),
+}
 
 
-@pytest.mark.parametrize(("profile", "branch"), [(OPENAI, "G1"), (GEMINI, "G2")])
-async def test_the_real_codec_receives_the_shared_owner(
+@pytest.mark.parametrize("profile", [OPENAI, GEMINI])
+async def test_a_backend_that_does_not_share_never_sees_a_shared_owner(
     profile: str,
-    branch: str,
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    if profile == OPENAI:
-        openai_host.register_host()
-    registered: Callable[..., Any] | None = preparation._PROVIDER_PREPARATIONS.get(profile)  # pyright: ignore[reportPrivateUsage]
-    if registered is None or profile not in channel_backend.RUNNABLE_PROFILES:
-        pytest.skip(f"PENDING[{branch}]: no host preparation registered/runnable for {profile}")
-    seen: list[uuid.UUID] = []
-
-    class _Stop(Exception):
-        pass
+    openai_host.register_host()
+    assert profile in preparation._PROVIDER_PREPARATIONS  # pyright: ignore[reportPrivateUsage]
+    seen: list[ProviderPreparationRequest] = []
 
     async def spy(request: ProviderPreparationRequest) -> PreparedTurn:
-        seen.append(request.session_account_id)
-        raise _Stop  # stop before any native I/O: only the identity handed over is checked
+        seen.append(request)
+        raise AssertionError("a refused shared thread reached the host preparer")
 
     monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, spy)  # pyright: ignore[reportPrivateUsage]
     world = await _world(db_session)
     revision = await set_channel_backend(
-        db_session, channel_ref(world.tenant.id, "slack", "chan-x"), CONFIGS[profile]
+        db_session, channel_ref(world.tenant.id, "slack", "chan-x"), RELEASED[profile]
     )
     await db_session.commit()
-    with pytest.raises(_Stop):
+    with pytest.raises(AdmissionDenied) as raised:
         await _bind(_deps(db_session_factory), world, world.alice, revision, user="alice")
-    assert seen == [shared_owner(_slot(world))]
+    assert raised.value.reason == "backend_unsupported"
+    assert seen == []
+    async with db_session_factory() as s:
+        assert await mux_state.get_binding(s, _slot(world)) is None
 
 
 # G1 (#689) for real: the OpenAI host refuses a shared thread before any native I/O.
@@ -475,6 +489,60 @@ async def test_g1_refuses_a_shared_thread_visibly(
     # A production admission refuses it even earlier, at channel resolution.
     with pytest.raises(BackendUnsupported):
         check_backend(revision)
+    async with db_session_factory() as s:
+        assert await mux_state.get_binding(s, _slot(world)) is None
+        for account in (world.alice, world.bob, shared_owner(_slot(world))):
+            assert (
+                await get_live_thread_session(
+                    s,
+                    tenant_id=world.tenant.id,
+                    platform="slack",
+                    thread_id="thread-1",
+                    account_id=account,
+                )
+                is None
+            )
+
+
+# G2 for real: the registered Gemini host is refused a shared thread before it runs.
+
+
+async def test_g2_refuses_a_shared_thread_visibly(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    real = preparation._PROVIDER_PREPARATIONS[GEMINI]  # pyright: ignore[reportPrivateUsage]
+    reached: list[ProviderPreparationRequest] = []
+
+    async def counted(request: ProviderPreparationRequest) -> PreparedTurn:
+        reached.append(request)
+        return await real(request)
+
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, GEMINI, counted)  # pyright: ignore[reportPrivateUsage]
+    world = await _world(db_session)
+    revision = await set_channel_backend(
+        db_session, channel_ref(world.tenant.id, "slack", "chan-x"), RELEASED[GEMINI]
+    )
+    await db_session.commit()
+    # No Gemini runtime is wired: any native I/O would need one, so none can happen.
+    deps = _deps(db_session_factory)
+    for account, user in ((world.alice, "alice"), (world.bob, "bob")):
+        with pytest.raises(AdmissionDenied) as raised:
+            await _bind(deps, world, account, revision, user=user)
+        assert raised.value.reason == "backend_unsupported"
+
+    assert reached == []
+    # A production admission refuses it even earlier, at channel resolution, while
+    # the released per-caller Gemini configuration stays admitted.
+    with pytest.raises(BackendUnsupported):
+        check_backend(revision)
+    per_caller = await set_channel_backend(
+        db_session,
+        channel_ref(world.tenant.id, "slack", "chan-y"),
+        RELEASED[GEMINI].model_copy(update={"thread_mode": "per_caller"}),
+    )
+    check_backend(per_caller)
     async with db_session_factory() as s:
         assert await mux_state.get_binding(s, _slot(world)) is None
         for account in (world.alice, world.bob, shared_owner(_slot(world))):

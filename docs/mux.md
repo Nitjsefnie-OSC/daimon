@@ -106,7 +106,9 @@ configured has no revision and admits exactly as before. A configured
 channel is checked after the config cascade and before any provider call:
 its profile must meet the configuration (`admit` above), and this release
 must be able to run it, which today means `anthropic.managed_agents` with
-the agent's own model, per caller or shared (below). Anything else is refused as
+the agent's own model, per caller or shared (below), or, per caller only,
+`openai.persistent_workspace` with `gpt-6-luna` or `gemini.inline_reuse`
+with `gemini-3.8-flash`. Anything else is refused as
 `backend_unsupported`, recorded as `admission_denied` in the turn outcome,
 never run on Anthropic in its place.
 
@@ -142,10 +144,12 @@ credentials only; the binding records that provider and profile. A shared
 thread runs under the revision it was bound with, so after the channel moves
 to another provider the thread's turns still dispatch to the first one, and
 only new threads use the second.
-The OpenAI host does not share in this release: a channel configured for
-OpenAI with `thread_mode="shared"` is refused as `backend_unsupported` at
-admission, and its preparation refuses a shared turn too, before any OpenAI
-request.
+Neither the OpenAI nor the Gemini host shares in this release: a channel
+configured for either with `thread_mode="shared"` is refused as
+`backend_unsupported` at admission, and again when its thread would be
+bound, before any host preparation runs, so no shared owner, binding or
+session row is created for it. Each host's preparation also refuses a
+shared turn itself, before any provider request.
 
 ## Ports
 
