@@ -48,6 +48,11 @@ async def test_two_startup_workers_admit_a_missed_message_once(
         finally:
             await owner_a.execute(text("SELECT pg_advisory_unlock(11)"))
             await owner_b.execute(text("SELECT pg_advisory_unlock(22)"))
+    # The gateway may redeliver the same message to either worker after the
+    # startup scans. Both observations must still be refused. This is the
+    # ReplayNoAdmission counterexample against the real ledger.
+    assert not await worker(11)
+    assert not await worker(22)
     assert not await worker(33), "a later replay must not start another turn"
 
 

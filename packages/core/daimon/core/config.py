@@ -379,7 +379,7 @@ class DiscordSettings(BaseModel):
         description="Discord bot token. Required to run the Discord adapter.",
     )
     startup_replay_minutes: int = Field(
-        default=15,
+        default=0,
         ge=0,
         le=60,
         description=(

@@ -37,6 +37,7 @@ def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() 
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
     defaults = DiscordSettings(bot_token=SecretStr("test"))
+    assert defaults.startup_replay_minutes == 0
     assert defaults.turn_card_unrecoverable_after_s == 86400
     assert defaults.turn_card_unrecoverable_after_attempts == 3
     with pytest.raises(ValidationError):

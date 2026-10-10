@@ -13,10 +13,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, edit_recovered_card
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.stores.discord_message_admissions import finish_messages, release_unposted_messages
 from daimon.core.stores.domain import TurnCardIntentRow
@@ -51,6 +52,7 @@ def is_definite_recovery_failure(err: BaseException) -> bool:
     if isinstance(err, discord.ClientException) and str(err) in (
         "own webhook token unavailable",
         "own webhook no longer exists",
+        "webhook channel unavailable",
     ):
         return True
     return err.__cause__ is not None and is_definite_recovery_failure(err.__cause__)
@@ -551,13 +553,18 @@ async def _mark_card_interrupted(
             )
             if transport._destination() is None:  # pyright: ignore[reportPrivateUsage]
                 return False
-            replacement = await transport.edit(
-                message, embed=embed, view=None, _allow_replacement=False
-            )
-            if isinstance(replacement, discord.Message) and replacement.id != message.id:
-                return False
+
+            async def edit_card(card: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
+                return await transport.edit(card, **kwargs, _allow_replacement=False)
         else:
-            await message.edit(embed=embed, view=None)
+
+            async def edit_card(card: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
+                return await card.edit(**kwargs)
+
+        if not await edit_recovered_card(
+            message, turn_id=intent_id, edit=edit_card, embed=embed, view=None
+        ):
+            return False
         log.info(
             "turn.card_orphan_retirement_completed",
             turn_id=str(intent_id),

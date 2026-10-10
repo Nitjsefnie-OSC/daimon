@@ -419,7 +419,7 @@ Discord bot token. Required to run the Discord adapter.
 
 ### `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES`
 
-`int` · optional · default `15`
+`int` · optional · default `0`
 
 Recent Discord activity window in minutes scanned on startup for missed mentions and
 replies. Set 0 to disable catch-up.

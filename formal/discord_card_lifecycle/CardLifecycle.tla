@@ -111,6 +111,14 @@ RetireOrphan == /\ phase = "dead"
                 /\ UNCHANGED <<extra, progress, terminal, outcome, ended, repair,
                                 replacement, owner, restart, oldWire>>
 
+\* A completed provider result replaces the orphan card with its answer.
+ResumeOrphan == /\ phase = "dead"
+                /\ card' = "answer"
+                /\ sealed' = TRUE
+                /\ phase' = "retired"
+                /\ UNCHANGED <<extra, progress, terminal, outcome, ended, repair,
+                                replacement, owner, restart, oldWire>>
+
 DropOrphan == /\ phase = "dead"
               /\ phase' = "retired"
               /\ UNCHANGED <<card, extra, progress, terminal, outcome, ended,
@@ -119,7 +127,7 @@ DropOrphan == /\ phase = "dead"
 Next == IssueProgress \/ (\E k \in {"answer", "failure"} : EndTurn(k))
         \/ IssueQueuedTerminal \/ ApplyTerminal
         \/ ApplyProgress \/ Repair \/ Handover \/ DeleteCard
-        \/ StartReplacement \/ FinishReplacement \/ Crash \/ RetireOrphan \/ DropOrphan
+        \/ StartReplacement \/ FinishReplacement \/ Crash \/ RetireOrphan \/ ResumeOrphan \/ DropOrphan
 Spec == Init /\ [][Next]_vars
 
 \* Once a terminal render is applied, no later write may change its card.

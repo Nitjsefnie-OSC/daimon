@@ -314,6 +314,22 @@ async def test_recovery_edits_webhook_card_via_transport(
     assert edit.await_args.kwargs["_allow_replacement"] is False
 
 
+async def test_recovery_edit_uses_terminal_card_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    message = _fetched_message(123, _TURN_ID)
+    monkeypatch.setattr(discord.Message, "edit", AsyncMock(return_value=message))
+    with capture_logs() as entries:
+        assert await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+            message, intent_id=_TURN_ID
+        )
+    events = [entry["event"] for entry in entries]
+    assert events.index("turn.card_write_issued") < events.index("turn.card_write_dispatched")
+    assert events.index("turn.card_write_dispatched") < events.index("turn.card_write_completed")
+    assert "turn.card_terminal_applied" in events
+    assert "turn.card_orphan_retirement_completed" in events
+
+
 async def test_periodic_recovery_uses_stopped_card_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

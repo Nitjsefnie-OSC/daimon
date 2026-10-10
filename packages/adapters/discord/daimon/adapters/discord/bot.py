@@ -41,7 +41,11 @@ from daimon.adapters.discord.gating import (
     is_unmentioned_reply_hint_candidate,
     should_process_message,
 )
-from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, drain_retained_card_tasks
+from daimon.adapters.discord.lifecycle import (
+    DiscordTurnLifecycle,
+    drain_retained_card_tasks,
+    edit_recovered_card,
+)
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
@@ -1282,6 +1286,14 @@ class DaimonBot(commands.Bot):
                 if locked is None or locked.active_turn_message_id is None:
                     return
                 delivered = False
+                orphan_turn_id = next(
+                    (
+                        intent.id
+                        for intent in self._boot_turn_card_intents or ()
+                        if intent.message_id == locked.active_turn_message_id
+                    ),
+                    None,
+                )
                 try:
                     async with asyncio.timeout(30):
                         channel = self.get_channel(
@@ -1341,11 +1353,44 @@ class DaimonBot(commands.Bot):
                                         )
                                     ]
                             if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
-                                await transport.edit(message, **kwargs, _allow_replacement=False)
+
+                                async def edit_card(
+                                    card: discord.Message,
+                                    **edit_kwargs: Any,  # noqa: ANN401
+                                ) -> discord.Message | None:
+                                    return await transport.edit(
+                                        card, **edit_kwargs, _allow_replacement=False
+                                    )
                             elif not isinstance(message.webhook_id, int):
-                                await message.edit(**kwargs)
+
+                                async def edit_card(
+                                    card: discord.Message,
+                                    **edit_kwargs: Any,  # noqa: ANN401
+                                ) -> discord.Message | None:
+                                    return await card.edit(**edit_kwargs)
                             else:
                                 raise discord.ClientException("webhook channel unavailable")
+                            log.info(
+                                "turn.card_orphan_retirement_issued",
+                                turn_id=str(orphan_turn_id) if orphan_turn_id else None,
+                                session_id=str(locked.id),
+                                message_id=locked.active_turn_message_id,
+                            )
+                            edited = await edit_recovered_card(
+                                message,
+                                turn_id=orphan_turn_id or locked.id,
+                                edit=edit_card,
+                                **kwargs,
+                            )
+                            if not edited:
+                                raise discord.ClientException("recovery card edit was not applied")
+                            log.info(
+                                "turn.card_orphan_retirement_completed",
+                                turn_id=str(orphan_turn_id) if orphan_turn_id else None,
+                                session_id=str(locked.id),
+                                message_id=locked.active_turn_message_id,
+                                recovered_answer=bool(result),
+                            )
                             delivered = bool(result)
                             log.info(
                                 "turn.orphan_resumed" if delivered else "turn.orphan_retired",
@@ -1365,6 +1410,21 @@ class DaimonBot(commands.Bot):
                 ) as err:
                     log.warning(
                         "turn.orphan_retire_failed", thread_id=locked.thread_id, error=str(err)
+                    )
+                    reason = (
+                        "message_missing"
+                        if isinstance(err, discord.HTTPException) and err.code == 10008
+                        else "webhook_path_unavailable"
+                        if isinstance(err, discord.ClientException)
+                        and str(err) == "webhook channel unavailable"
+                        else "edit_failed"
+                    )
+                    log.warning(
+                        "turn.card_orphan_retirement_dropped",
+                        turn_id=str(orphan_turn_id) if orphan_turn_id else None,
+                        session_id=str(locked.id),
+                        message_id=locked.active_turn_message_id,
+                        reason=reason,
                     )
                     if not (
                         isinstance(err, (discord.NotFound, discord.Forbidden, ValueError))

@@ -252,8 +252,9 @@ lookup and edit as already resolved. Other edit failures still propagate.
 
 On gateway readiness, Discord scans recently active channels and threads for
 missed addressed messages. The window and per-guild/channel limits are
-configurable (`discord.startup_replay_*`). Replayed messages use the same
-protection, mention/reply, provisioning and admission gates as live events.
+configurable (`discord.startup_replay_*`). Replay defaults to off
+(`discord.startup_replay_minutes=0`). Replayed messages use the same protection,
+mention/reply, provisioning and admission gates as live events.
 The `discord_message_admissions` ledger deduplicates each tenant/message ID;
 queued follow-ups remain pending until a card intent is committed or the
 request reaches a visible terminal outcome. A PostgreSQL session advisory
@@ -299,7 +300,9 @@ provider text is delivered by editing the existing card, with a text attachment
 for replies over Discord's message length limit. It verifies the provider's
 latest user message belongs to the interrupted turn before recovering its
 answer. Other orphaned turns edit that card to explain the restart and invite
-a retry, then interrupt the old session. Provider result reads are bounded to
+a retry, then interrupt the old session. Both recovery edits use the same
+terminal card write sequencer as live turns, with no replacement post. Provider
+result reads are bounded to
 five seconds and card fetch/edit work to thirty seconds per row. Recovery
 serializes edits across workers and conditionally clears the original marker;
 a newer turn keeps its marker and its running session. Cards that are already

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import suppress
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Literal
@@ -17,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.config import BillingSettings, McpSettings, ThreadNamingSettings
+from daimon.core.config import BillingSettings, DiscordSettings, McpSettings, ThreadNamingSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -25,6 +26,7 @@ from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent, ma_environment, ma_session
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -2438,6 +2440,20 @@ async def test_orchestrate_boundary_persists_one_terminal_outcome(
     assert len(rows) == 1
     assert rows[0].reason == TerminationReason.COMPLETED
     assert rows[0].platform == "discord" and rows[0].channel_id == "123"
+
+
+async def test_startup_replay_is_off_without_configuration(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.discord = DiscordSettings(bot_token=SecretStr("test"))
+    runtime = replace(
+        runtime,
+        sessionmaker=MagicMock(side_effect=AssertionError("replay must not query history")),
+    )
+    bot = make_bot(runtime)
+    await bot._replay_missed_messages()  # pyright: ignore[reportPrivateUsage]
+    runtime.sessionmaker.assert_not_called()
 
 
 async def test_live_message_then_startup_replay_admit_one_turn(

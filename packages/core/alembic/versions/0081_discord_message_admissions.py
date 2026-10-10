@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision: str = "0077_discord_message_admissions"
-down_revision: str | None = "0076_github_connect_followup"
+revision: str = "0081_discord_message_admissions"
+down_revision: str | None = "0080_github_grant_proposals"
 branch_labels: str | None = None
 depends_on: str | None = None
 
