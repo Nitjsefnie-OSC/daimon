@@ -10,9 +10,13 @@ switch of the channel to the other provider leaves the thread where it was
 (C14), the identity survives a restart, the journal takes only the shared
 slot's lease, and an unconfigured channel never reaches any of it.
 
-The tests marked `PENDING[G1]` / `PENDING[G2]` run against the real codecs once
-those branches merge and register their preparers; until then they skip with
-that typed reason.
+Sharing is proven on Gemini, whose real host (G2) is still pending, through
+its stand-in. The real G1 OpenAI host (#689) does not share in this release:
+`test_g1_refuses_a_shared_thread_visibly` proves a shared OpenAI channel is
+refused at admission and again by the real preparer, before any native I/O.
+OpenAI appears as the per-caller side B of the C14 provider switch. `test_the_real_codec_receives_the_shared_owner`
+checks the hand-over against each real registered preparer; Gemini skips as
+`PENDING[G2]` until G2 merges.
 """
 
 from __future__ import annotations
@@ -26,10 +30,16 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from daimon.core import channel_backend
 from daimon.core._models import AgentGitHubMode
-from daimon.core.channel_backend import channel_ref, set_channel_backend
+from daimon.core.channel_backend import (
+    BackendUnsupported,
+    channel_ref,
+    check_backend,
+    set_channel_backend,
+)
 from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -37,9 +47,14 @@ from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.shared_threads import shared_owner, shared_slot
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.turn import openai_host
 from daimon.core.turn import prepare as preparation
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.openai_host import OpenAIHostRuntime
+from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic
@@ -47,9 +62,13 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef
+from mux.contracts.resources import SessionSpec
+from mux.drivers.openai.session_controls import SessionControls
+from mux.drivers.openai.transport import SDKTransport
 from mux.errors import ScopeViolation
 from mux.state.journal import JournalEntry
 from mux.state.lease import Slot
+from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 OPENAI = "openai.persistent_workspace"
@@ -109,6 +128,9 @@ class _Provider:
 @pytest.fixture
 def providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _Provider]:
     """Both profiles registered and runnable, as G1/G2's registration lines make them."""
+    # The real OpenAI host registers lazily; register it first so the stand-in
+    # replaces it for this test instead of colliding with a later registration.
+    openai_host.register_host()
     registered = {profile: _Provider(profile) for profile in CONFIGS}
     for profile, provider in registered.items():
         monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, provider)  # pyright: ignore[reportPrivateUsage]
@@ -205,7 +227,7 @@ def _slot(world: _World, thread_id: str = "thread-1") -> Slot:
     return shared_slot(world.tenant.id, "slack", "chan-x", thread_id)
 
 
-@pytest.mark.parametrize("profile", [OPENAI, GEMINI])
+@pytest.mark.parametrize("profile", [GEMINI])
 async def test_a_shared_thread_on_an_explicit_backend_keeps_one_identity(
     profile: str,
     providers: dict[str, _Provider],
@@ -237,7 +259,7 @@ async def test_a_shared_thread_on_an_explicit_backend_keeps_one_identity(
     assert binding.native_refs["session"] == first.ma_session_id
     assert (binding.generation, binding.config_revision) == (1, revision.local)
     assert binding.id == str(owner) and binding.legacy_account_id is None
-    assert providers[OPENAI if profile == GEMINI else GEMINI].calls == []
+    assert providers[OPENAI].calls == []
 
 
 async def test_c14_a_provider_switch_moves_new_threads_only(
@@ -245,29 +267,36 @@ async def test_c14_a_provider_switch_moves_new_threads_only(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A: Gemini, shared. B: OpenAI, per caller (OpenAI does not share yet)."""
     world = await _world(db_session)
     channel = channel_ref(world.tenant.id, "slack", "chan-x")
-    on_openai = await set_channel_backend(db_session, channel, CONFIGS[OPENAI])
-    await db_session.commit()
-    deps = _deps(db_session_factory)
-    t1 = await _bind(deps, world, world.alice, on_openai, user="alice")
-
     on_gemini = await set_channel_backend(db_session, channel, CONFIGS[GEMINI])
     await db_session.commit()
-    t1_again = await _bind(deps, world, world.bob, on_gemini, user="bob")
-    t2 = await _bind(deps, world, world.alice, on_gemini, user="alice", thread_id="thread-2")
+    deps = _deps(db_session_factory)
+    t1 = await _bind(deps, world, world.alice, on_gemini, user="alice")
 
-    # T1 stays on A (OpenAI, its pinned revision); T2 runs on B (Gemini).
+    on_openai = await set_channel_backend(
+        db_session, channel, BackendConfig(backend="openai", profile=OPENAI, model="gpt-6-luna")
+    )
+    await db_session.commit()
+    t1_again = await _bind(deps, world, world.bob, on_openai, user="bob", ever_shared=True)
+    t2 = await _bind(
+        deps, world, world.alice, on_openai, user="alice", thread_id="thread-2", ever_shared=True
+    )
+
+    # T1 stays on A (Gemini, shared, its pinned revision); T2 runs on B (OpenAI, per caller).
     assert t1_again.ma_session_id == t1.ma_session_id
-    assert t1_again.admission.backend_revision == on_openai
-    assert [c.thread_id for c in providers[OPENAI].calls] == ["thread-1", "thread-1"]
-    assert [c.thread_id for c in providers[GEMINI].calls] == ["thread-2"]
+    assert t1_again.admission.backend_revision == on_gemini
+    assert t1_again.session_account_id == shared_owner(_slot(world))
+    assert [c.thread_id for c in providers[GEMINI].calls] == ["thread-1", "thread-1"]
+    (openai_call,) = providers[OPENAI].calls
+    assert (openai_call.thread_id, openai_call.session_account_id) == ("thread-2", world.alice)
+    assert t2.admission.backend_revision == on_openai and t2.admission.shared_owner is None
     async with db_session_factory() as s:
         b1 = await mux_state.get_binding(s, _slot(world))
         b2 = await mux_state.get_binding(s, _slot(world, "thread-2"))
-    assert b1 is not None and (b1.provider, b1.config_revision) == ("openai", on_openai.local)
-    assert b2 is not None and (b2.provider, b2.config_revision) == ("gemini", on_gemini.local)
-    assert t2.ma_session_id != t1.ma_session_id
+    assert b1 is not None and (b1.provider, b1.config_revision) == ("gemini", on_gemini.local)
+    assert b2 is None  # a per-caller thread has no shared binding
 
 
 async def test_the_identity_survives_a_restart_and_owns_the_journal(
@@ -277,7 +306,7 @@ async def test_the_identity_survives_a_restart_and_owns_the_journal(
 ) -> None:
     world = await _world(db_session)
     revision = await set_channel_backend(
-        db_session, channel_ref(world.tenant.id, "slack", "chan-x"), CONFIGS[OPENAI]
+        db_session, channel_ref(world.tenant.id, "slack", "chan-x"), CONFIGS[GEMINI]
     )
     await db_session.commit()
     first = await _bind(_deps(db_session_factory), world, world.alice, revision, user="alice")
@@ -300,10 +329,10 @@ async def test_the_identity_survives_a_restart_and_owns_the_journal(
         observed_at=now,
         authority="record",
         payload={"item_id": "item_1", "content": []},
-        native=NativeProvenance(provider="openai", api_revision="offline"),
+        native=NativeProvenance(provider="gemini", api_revision="offline"),
     )
     session_ref = ResourceRef(
-        id=first.ma_session_id, kind="session", provider="openai", account_scope_id="openai-project"
+        id=first.ma_session_id, kind="session", provider="gemini", account_scope_id="gemini-project"
     )
     appended = await store.append_events(
         session_ref,
@@ -369,6 +398,8 @@ async def test_the_real_codec_receives_the_shared_owner(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    if profile == OPENAI:
+        openai_host.register_host()
     registered: Callable[..., Any] | None = preparation._PROVIDER_PREPARATIONS.get(profile)  # pyright: ignore[reportPrivateUsage]
     if registered is None or profile not in channel_backend.RUNNABLE_PROFILES:
         pytest.skip(f"PENDING[{branch}]: no host preparation registered/runnable for {profile}")
@@ -390,3 +421,70 @@ async def test_the_real_codec_receives_the_shared_owner(
     with pytest.raises(_Stop):
         await _bind(_deps(db_session_factory), world, world.alice, revision, user="alice")
     assert seen == [shared_owner(_slot(world))]
+
+
+# G1 (#689) for real: the OpenAI host refuses a shared thread before any native I/O.
+
+
+async def test_g1_refuses_a_shared_thread_visibly(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    openai_host.register_host()
+    requests: list[str] = []
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        raise AssertionError(f"native OpenAI I/O for a refused shared thread: {request.url.path}")
+
+    async def plan(_request: object) -> SessionSpec:
+        raise AssertionError("a refused shared thread must not plan a session")
+
+    world = await _world(db_session)
+    revision = await set_channel_backend(
+        db_session,
+        channel_ref(world.tenant.id, "slack", "chan-x"),
+        BackendConfig(backend="openai", profile=OPENAI, model="gpt-6-luna", thread_mode="shared"),
+    )
+    await db_session.commit()
+    async with AsyncOpenAI(
+        api_key="offline",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(refuse)),
+    ) as sdk:
+        runtime = OpenAIHostRuntime(
+            lambda _revision, _scope: SDKTransport(sdk),
+            OpenAIRecoveryJournal(),
+            OpenAIUsageRevisions(),
+            account_scope_id="project",
+            session_plan=plan,
+            authorization=lambda _scope, _kind, _id: True,
+            controls=SessionControls(
+                model="gpt-6-luna",
+                multi_agent_enabled=False,
+                container_size="small",
+                spend_limit_usd_cents=4,
+            ),
+        )
+        deps = replace(_deps(db_session_factory), turn_runtimes={OPENAI: runtime})
+        for account, user in ((world.alice, "alice"), (world.bob, "bob")):
+            with pytest.raises(AdmissionDenied) as raised:
+                await _bind(deps, world, account, revision, user=user)
+            assert raised.value.reason == "backend_unsupported"
+
+    assert requests == []
+    # A production admission refuses it even earlier, at channel resolution.
+    with pytest.raises(BackendUnsupported):
+        check_backend(revision)
+    async with db_session_factory() as s:
+        assert await mux_state.get_binding(s, _slot(world)) is None
+        for account in (world.alice, world.bob, shared_owner(_slot(world))):
+            assert (
+                await get_live_thread_session(
+                    s,
+                    tenant_id=world.tenant.id,
+                    platform="slack",
+                    thread_id="thread-1",
+                    account_id=account,
+                )
+                is None
+            )
