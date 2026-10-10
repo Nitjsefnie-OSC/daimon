@@ -22,16 +22,19 @@ from mux.conformance.runner import (
     Scenario,
     SendEvidence,
 )
-from mux.contracts.ids import ResourceRef, Revision, Scope
-from mux.contracts.resources import SessionSpec, SkillUpload
+from mux.contracts.ids import ChannelRef, ResourceRef, Revision, Scope, ThreadRef
+from mux.contracts.receipts import SendReceipt
+from mux.contracts.resources import ProviderBinding, SessionSpec, SkillUpload
 from mux.drivers.openai import OpenAIDriver
+from mux.drivers.openai._common import Context
+from mux.drivers.openai.conformance_state import OpenAIConformanceEvents
 from mux.drivers.openai.transport import Object, SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
-from mux.state.memory import CrashPoint
+from mux.state.memory import CrashPoint, MemoryStateStore
 from mux.state.store import StateStore
 
-SCRIPTED_FIXTURES = frozenset({"C05", "C06", "C09", "C10", "C15", "C16"})
+SCRIPTED_FIXTURES = frozenset({"C04", "C05", "C06", "C09", "C10", "C15", "C16"})
 
 PENDING: Mapping[str, PendingReason] = MappingProxyType(
     {
@@ -46,10 +49,6 @@ PENDING: Mapping[str, PendingReason] = MappingProxyType(
         "C03": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
             "host intent, atomic send claiming and restart receipt recovery not injected",
-        ),
-        "C04": PendingReason(
-            PendingKind.ADAPTER_DEPENDENCY,
-            "host lease/fencing and transactional journal crash-recovery adapter are not injected",
         ),
         "C07": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
@@ -171,6 +170,10 @@ class OpenAIScriptedTransport:
         self.recovering = False
         self.driver: OpenAIDriver | None = None
         self._sdk: AsyncOpenAI | None = None
+        self.store = MemoryStateStore()
+        self.binding: ProviderBinding | None = None
+        self.accepted_inputs: list[Object] = []
+        self._sends: list[SendEvidence] = []
 
     def attach(self, driver: OpenAIDriver, sdk: AsyncOpenAI) -> None:
         self.driver, self._sdk = driver, sdk
@@ -292,6 +295,11 @@ class OpenAIScriptedTransport:
         if path == "/agents/sessions/session/turns/root" and request.method == "GET":
             return httpx.Response(200, json=native_turn(self._status()))
         if path == "/agents/sessions/session/items" and request.method == "GET":
+            if self.fixture == "C04":
+                return httpx.Response(
+                    200,
+                    json={"data": self.accepted_inputs, "has_more": False, "last_id": None},
+                )
             if self.fixture == "C05":
                 after = request.url.params.get("after")
                 values = [native_message(), native_result()] if after else [native_message()]
@@ -306,6 +314,28 @@ class OpenAIScriptedTransport:
             return httpx.Response(200, json={"data": [], "has_more": False, "last_id": None})
         if path == "/agents/sessions/session/events" and request.method == "POST":
             body = json.loads(request.content)
+            if self.fixture == "C04":
+                key = request.headers["Idempotency-Key"]
+                for event in body["events"]:
+                    if event["type"] != "agent.session.input.message":
+                        raise ValueError("C04 expects actual native message input")
+                    for message in event["input"]:
+                        self.accepted_inputs.append(
+                            {
+                                "id": "input-" + str(len(self.accepted_inputs)),
+                                "turn_id": "root",
+                                "status": "completed",
+                                "type": "message",
+                                **message,
+                            }
+                        )
+                self._sends.append(
+                    SendEvidence(key, SendReceipt(operation_id=key, status="queued", input_ids=()))
+                )
+                if "timeout_after_accept" in self.faults:
+                    self.faults.remove("timeout_after_accept")
+                    raise httpx.ReadTimeout("scripted accepted response loss", request=request)
+                return httpx.Response(202)
             if (
                 body != {"events": [{"type": "agent.session.input.cancel"}]}
                 or request.headers.get("Idempotency-Key") != "cancel"
@@ -320,7 +350,39 @@ class OpenAIScriptedTransport:
         self.fixture = fixture_id
         if self.driver is None:
             raise RuntimeError("driver not attached")
+        if fixture_id == "C04":
+            self.binding = ProviderBinding(
+                id="fixture-binding",
+                thread=ThreadRef(
+                    channel=ChannelRef(
+                        tenant_id="tenant", platform="offline", channel_id="channel"
+                    ),
+                    thread_id="thread",
+                ),
+                provider="openai",
+                profile=self.driver.capabilities().profile_id,
+                native_refs={"session": "session", "agent": "agent", "environment": "environment"},
+                generation=1,
+                config_revision=1,
+                legacy_account_id=SCOPE.account_id,
+            )
         session = await self.driver.sessions.retrieve(SCOPE, REF)
+        if fixture_id == "C04":
+            await self.store.put_binding(session.binding, expected_generation=0)
+            if self._sdk is None:
+                raise RuntimeError("SDK not attached")
+            self.driver.events = OpenAIConformanceEvents(
+                Context(
+                    SDKTransport(self._sdk),
+                    "project",
+                    self.driver.capabilities().profile_id,
+                    lambda scope, kind, id_: scope == SCOPE,
+                ),
+                self.driver.sessions,
+                MemoryRecoveryJournal(),
+                store=lambda: self.store,
+                binding=lambda: session.binding,
+            )
         return Scenario(
             scope=SCOPE,
             foreign_scope=SCOPE.model_copy(update={"tenant_id": "foreign"}),
@@ -341,6 +403,7 @@ class OpenAIScriptedTransport:
             "admission_unknown",
             "admission_unsupported",
             "download_interrupted",
+            "timeout_after_accept",
         ):
             raise ValueError("fault is not scripted by this core adapter")
         # Admission uses a fixed, evidence-backed profile. These two fixture
@@ -370,7 +433,7 @@ class OpenAIScriptedTransport:
 
     @property
     def upstream_sends(self) -> tuple[SendEvidence, ...]:
-        return ()
+        return tuple(self._sends)
 
     @property
     def reconciled_sends(self) -> tuple[SendEvidence, ...]:
@@ -379,7 +442,10 @@ class OpenAIScriptedTransport:
     def restart_store(
         self, store: StateStore, *, crash: Mapping[str, CrashPoint] | None = None
     ) -> StateStore:
-        raise RuntimeError("host store bridge not implemented")
+        if self.fixture != "C04" or not isinstance(store, MemoryStateStore):
+            raise RuntimeError("restart requires the C04 offline memory store")
+        self.store = store.restart(crash=crash)
+        return self.store
 
 
 def factory() -> Adapter:
@@ -395,9 +461,12 @@ def factory() -> Adapter:
         journal=MemoryRecoveryJournal(),
         usage_revisions=MemoryUsageRevisions(),
         authorization=lambda scope, kind, id_: scope == SCOPE,
+        binding_lookup=lambda scope, id_: (
+            script.binding if scope == SCOPE and id_ == REF.id else None
+        ),
     )
     script.attach(driver, sdk)
-    return Adapter(driver=driver, store=None, transport=script, pending=PENDING)
+    return Adapter(driver=driver, store=script.store, transport=script, pending=PENDING)
 
 
 class OpenAIOfflineFactory:

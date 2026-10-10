@@ -342,7 +342,7 @@ diagnostics, including under optimized Python.
 | C01 | PENDING | Host attribution, batching and workspace binding adapter |
 | C02 | PENDING | Verified native expiry classification and host session preparation |
 | C03 | PENDING | Host intent, atomic claiming and receipt recovery |
-| C04 | PENDING | Host lease/fencing and transactional journal crash recovery |
+| C04 | PASS | Actual native acceptance across fenced intent/ack crashes, restart, atomic journal and takeover; uncorrelated input remains unknown without another POST |
 | C05 | PASS | Child-first completion, preview authority, EOF occupancy, saved-page overlap, explicit gap and one root outcome |
 | C06 | PASS | Cancel acceptance holds occupancy until an observed interrupted root |
 | C07 | PENDING | Shared usage revision/outbox StateStore scenario adapter |
@@ -360,7 +360,18 @@ diagnostics, including under optimized Python.
 
 Every pending entry has a typed reason and prevents certification. Supplying a
 standalone memory StateStore would not prove that host send/recovery ports use
-it. C07 also expects a full correction sequence in one reconcile call; OpenAI
+it. C04 explicitly injects `OpenAIConformanceEvents`: the restartable store owns
+intent, immutable input digest, scoped principal, lease and claim; the inherited
+real driver sends the native POST. The mock server independently retains accepted
+inputs even when the response or subsequent local commit is lost. Recovery reads
+the exact owned session and at most five asc item pages under an eight-second
+deadline. A 202 has no input IDs, and saved messages have no documented input-key
+lookup: matching text or a completed current root never promotes an uncertain
+operation to processed. No recovery POST or idempotent redelivery is performed.
+This conservative result satisfies the unchanged shared fixture; it does not
+prove the production host persistence or live crash behavior. The native
+[session guide](https://developers.openai.com/api/docs/guides/agents-api/sessions)
+and 2026-10-10 hashed Agents reference are the protocol sources. C07 also expects a full correction sequence in one reconcile call; OpenAI
 returns current native snapshots and its revision allocator is exercised across
 separate reads in the driver tests. No live behavior, production persistence,
 pricing or complete C01–C18 certificate is claimed.

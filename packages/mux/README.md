@@ -645,3 +645,13 @@ callback remains None. Anonymous MCP also requires a clean HTTPS destination;
 userinfo, query/fragment carriers and invalid server names refuse at compilation
 and the SDK edge before I/O or logging. See [the driver contract](../../docs/mux.md#gemini-scoped-mcp-authentication)
 for admission, DEBUG redaction, continuation and offline proof limits.
+OpenAI explicit session spend limits use integer USD cents and require the
+configured cap to appear unchanged in native session responses before host
+input. Omitted caps preserve existing behavior. Control failures retain scoped
+acknowledged resource references for exact cleanup, without automatic creation
+retry or an exact-spend claim.
+
+The opt-in OpenAI offline adapter now exercises C04 through actual SDK delivery
+and a restartable fenced StateStore bridge. Ambiguous accepted input remains
+unknown without another POST or a guessed native input identity. Its seven
+offline passes do not certify live crash recovery or production host storage.
