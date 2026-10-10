@@ -74,3 +74,7 @@ and `CI=true`, plus `build_test_engine` provenance for a current-process
 options and engine clones do not establish that provenance. Unbound factories,
 foreign or synchronous binds, URL overrides and malformed routing maps fail
 before I/O. Ordinary fixtures retain their existing behavior.
+
+Guard adopters refuse plain local `daimon_test` by design. Their real-database
+policy tests skip that documented contributor setup outside GitHub Actions CI;
+use an owned lane database to exercise those tests locally.
