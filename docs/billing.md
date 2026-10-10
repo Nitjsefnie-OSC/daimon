@@ -204,9 +204,11 @@ Two boundaries of the design worth stating plainly:
   `max_concurrent_turns_per_tenant`, default 3, or the tenant's `turn-cap`
   override) times one turn's cost. A turn over that cap waits in the turn
   queue after `admit()`; it runs the balance gate again once it holds a slot,
-  so queued turns do not widen the bound. An MCP `start_turn` session is
-  worse. Its spend
-  reaches the ledger only when the scheduler's usage sweep next reads the
+  so queued turns do not widen the bound. Follow-up turns read the tenant's
+  current turn cap before taking a new queue ticket. Once the adapter observes
+  a lower cap, running turns finish, but new turns wait until enough slots are
+  free. An MCP `start_turn` session is worse. Its spend reaches the ledger only
+  when the scheduler's usage sweep next reads the
   session: up to two sweep passes plus one tick interval later, and not at
   all while the sweep is switched off (its default, see "The sweep" below).
   Until then the gate reads a balance that leaves out earlier headless turns,

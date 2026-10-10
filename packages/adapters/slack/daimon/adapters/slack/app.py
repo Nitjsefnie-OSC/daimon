@@ -2291,8 +2291,12 @@ class SlackApp:
             # Over the cap the turn waits here, behind its ordinary card: the
             # queue is never shown. Before the ceiling clock starts, so the
             # wait does not eat the turn's budget.
+            assert self.runtime.settings.slack is not None
             slot = await wait_for_slot(
-                cancel_event, sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id
+                cancel_event,
+                sessionmaker=self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                default_cap=self.runtime.settings.slack.max_concurrent_turns_per_tenant,
             )
             if slot != "started":
                 await lifecycle.end_unstarted(
