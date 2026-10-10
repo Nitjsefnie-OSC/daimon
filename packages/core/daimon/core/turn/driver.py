@@ -107,6 +107,7 @@ from daimon.core.turn.provider_actions import ProviderActionApproval
 from daimon.core.turn.reducers import apply, apply_usage_observation
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import (
+    ProviderTerminalFailure,
     TerminationReason,
     normalized_stop_reason,
     normalized_termination_reason,
@@ -1911,7 +1912,9 @@ async def _finalize_upstream(
         stop_reason=None,  # Clear stale stop_reason -- prevents infinite loops in callers
         rate_limit_until=rate_limit_until or state_cell[0].rate_limit_until,
         termination=(
-            TerminationReason.RATE_LIMITED
+            err.reason
+            if isinstance(err, ProviderTerminalFailure)
+            else TerminationReason.RATE_LIMITED
             if isinstance(err, _anthropic.RateLimitError)
             or (isinstance(err, ProviderError) and err.category == "rate_limited")
             else TerminationReason.UPSTREAM
