@@ -7,6 +7,7 @@ remain typed pending before mutation; commands are parsed, never run in a shell.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import uuid
@@ -25,6 +26,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import accounts, channel_admins, channel_budgets, routines, tenants
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.testing.db import WORKER_SCHEMA_PATTERN, isolated_test_schema
 from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ChannelRef, Provider, Scope
@@ -43,6 +45,37 @@ MODELS: dict[Provider, str | None] = {
     "gemini": "gemini-3.8-flash",
 }
 PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*(?:\.[a-z0-9_]+|:[A-Za-z0-9_]+)*)\}")
+
+
+def _require_owned_database(sessions: async_sessionmaker[AsyncSession]) -> None:
+    """Validate effective destination and isolated CI provenance before I/O."""
+    bind = sessions.kw.get("bind")
+    if isinstance(bind, AsyncConnection):
+        engine = bind.engine
+    elif isinstance(bind, AsyncEngine):
+        engine = bind
+    else:
+        raise ValueError("admin bindings require an explicit test DB engine")
+    url = engine.url
+    schema = isolated_test_schema(engine)
+    schema_match = WORKER_SCHEMA_PATTERN.fullmatch(schema) if schema is not None else None
+    isolated_ci = (
+        url.database == "daimon_test"
+        and os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("CI") == "true"
+        and schema_match is not None
+        and int(schema_match[1]) == os.getpid()
+    )
+    if (
+        url.get_backend_name() != "postgresql"
+        or url.host not in ("localhost", "127.0.0.1")
+        or url.query
+        or not (
+            re.fullmatch(r"daimon_test_nc_[A-Za-z0-9][A-Za-z0-9_]{0,47}", url.database or "")
+            or isolated_ci
+        )
+    ):
+        raise ValueError("admin bindings refuse non-lane test databases or unsafe destinations")
 
 
 class AdminReceipt(BaseModel):
@@ -213,15 +246,7 @@ class AdminBindings:
         await self.anthropic.close()
 
     async def _authorize(self, command: AdminCommand | None = None) -> None:
-        bind = self.sessions.kw.get("bind")
-        if isinstance(bind, AsyncConnection):
-            database = bind.engine.url.database
-        elif isinstance(bind, AsyncEngine):
-            database = bind.url.database
-        else:
-            raise ValueError("admin bindings require an explicit test DB engine")
-        if database is None or not database.startswith("daimon_test_nc_"):
-            raise ValueError("admin bindings refuse non-lane test databases")
+        _require_owned_database(self.sessions)
         if (
             self.scope.is_platform
             or self.scope.is_legacy_host_authorized
@@ -447,16 +472,7 @@ async def provision_admin_run(
     trace: ScriptedTransport,
 ) -> AdminBindings:
     """Actual product provisioning; no ORM/model/fabricated state insertion."""
-    bind = sessions.kw.get("bind")
-    database = (
-        bind.engine.url.database
-        if isinstance(bind, AsyncConnection)
-        else bind.url.database
-        if isinstance(bind, AsyncEngine)
-        else None
-    )
-    if database is None or not database.startswith("daimon_test_nc_"):
-        raise ValueError("admin provisioning refuses non-lane test databases")
+    _require_owned_database(sessions)
     provisioned = await provision_tenant(sessions, platform="discord", workspace_id=workspace_id)
     return AdminBindings(
         sessions=sessions,

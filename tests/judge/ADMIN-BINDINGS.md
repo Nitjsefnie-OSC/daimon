@@ -8,8 +8,14 @@ product APIs. Separate DB sessions read the resulting state. Provider selection
 is persisted by `configure_channel`, and the common operations run identically
 for Anthropic, OpenAI and Gemini. The owned Anthropic SDK uses only
 `ScriptedTransport` through `httpx.MockTransport` with an offline fixture key.
-Non-lane database names, mismatched tenant/accounts and foreign destinations
-refuse before writes. The runner must supply an explicit manifest of its owned
+Database guards require PostgreSQL on localhost/127.0.0.1 with no URL query
+overrides and an exact `daimon_test_nc_*` lane name. The sole `daimon_test`
+exception requires both `GITHUB_ACTIONS` and `CI` exactly `true`, plus
+`build_test_engine` registration for a current-process worker/fresh schema
+verified by `isolated_test_schema()`. Local shared/operator databases, plain
+engines, forged execution-option metadata and foreign-process schemas refuse
+before connection. Mismatched tenant/accounts and foreign destinations refuse
+before writes. The runner must supply an explicit manifest of its owned
 parent channels; this module does not infer platform channel creation or remap
 threads.
 

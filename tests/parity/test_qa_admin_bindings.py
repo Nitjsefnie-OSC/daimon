@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -24,10 +25,18 @@ from daimon.testing.admin_bindings import (
     parse_admin,
     provision_admin_run,
 )
+from daimon.testing.db import build_test_engine, isolated_test_schema
 from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.ids import ChannelRef, Provider, Scope
 from mux.errors import ScopeViolation
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 pytest_plugins = ["daimon.testing.db"]
 
@@ -464,3 +473,192 @@ async def test_non_lane_database_refuses_before_any_connection() -> None:
             )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize("bind_kind", ["engine", "connection"])
+@pytest.mark.parametrize(
+    "database,host,query,schema_kind,registered,github_actions,ci",
+    [
+        ("daimon_test", "localhost", "", "worker", True, None, "true"),
+        ("daimon_test", "localhost", "", "worker", True, "true", None),
+        ("daimon_test", "localhost", "", "worker", True, "false", "true"),
+        ("daimon_test", "localhost", "", "worker", True, "true", "false"),
+        ("daimon_test", "localhost", "", "worker", True, "True", "true"),
+        ("daimon_test", "localhost", "", "worker", True, "true", "TRUE"),
+        ("daimon_test", "localhost", "", "worker", False, "true", "true"),
+        ("daimon_test", "localhost", "", "public", True, "true", "true"),
+        ("daimon_test", "localhost", "", "custom", True, "true", "true"),
+        ("daimon_test", "localhost", "", "foreign", True, "true", "true"),
+        ("daimon_test", "localhost", "", "bad_nonce", True, "true", "true"),
+        ("operator_database", "localhost", "", "worker", True, "true", "true"),
+        ("daimon_test_nc_", "localhost", "", "worker", True, "true", "true"),
+        ("daimon_test_nc_n6-other", "localhost", "", "worker", True, "true", "true"),
+        ("daimon_test_nc_n6", "remote.invalid", "", "worker", True, "true", "true"),
+        ("daimon_test", "remote.invalid", "", "worker", True, "true", "true"),
+        ("daimon_test_nc_n6", "localhost", "?host=remote.invalid", "worker", True, "true", "true"),
+        (
+            "daimon_test_nc_n6",
+            "localhost",
+            "?database=operator_database",
+            "worker",
+            True,
+            "true",
+            "true",
+        ),
+        ("daimon_test", "localhost", "?host=remote.invalid", "worker", True, "true", "true"),
+        ("daimon_test", "localhost", "?database=operator_database", "worker", True, "true", "true"),
+    ],
+)
+async def test_database_guards_refuse_both_admin_apis_before_io(
+    monkeypatch: pytest.MonkeyPatch,
+    bind_kind: str,
+    database: str,
+    host: str,
+    query: str,
+    schema_kind: str,
+    registered: bool,
+    github_actions: str | None,
+    ci: str | None,
+) -> None:
+    schemas = {
+        "worker": f"test_w{os.getpid()}_1234abcd",
+        "public": "public",
+        "custom": "qa_custom",
+        "foreign": f"test_w{os.getpid() + 1000000}_1234abcd",
+        "bad_nonce": f"test_w{os.getpid()}_abc",
+    }
+    for flag, value in (("GITHUB_ACTIONS", github_actions), ("CI", ci)):
+        if value is None:
+            monkeypatch.delenv(flag, raising=False)
+        else:
+            monkeypatch.setenv(flag, value)
+    url = f"postgresql+asyncpg://offline:fixture@{host}/{database}{query}"
+    engine = (
+        build_test_engine(url, schemas[schema_kind])
+        if registered
+        else create_async_engine(
+            url, execution_options={"isolated_test_schema": schemas[schema_kind]}
+        )
+    )
+    connections: list[None] = []
+
+    def forbid_connection(*_args: object, **_kwargs: object) -> None:
+        connections.append(None)
+        raise AssertionError("database guard attempted a connection")
+
+    event.listen(engine.sync_engine, "do_connect", forbid_connection)
+    bind = engine if bind_kind == "engine" else AsyncConnection(engine)
+    sessions = async_sessionmaker(bind, expire_on_commit=False)
+    bound = AdminBindings(
+        sessions=sessions,
+        scope=Scope.platform(reason="must refuse DB before checking scope"),
+        backend="anthropic",
+        platform="discord",
+        workspace_id="123",
+        channels=frozenset({"456"}),
+        trace=ScriptedTransport(),
+    )
+    try:
+        with pytest.raises(ValueError, match="non-lane test databases"):
+            await provision_admin_run(
+                sessions,
+                workspace_id="123",
+                backend="anthropic",
+                channels=frozenset({"456"}),
+                trace=bound.trace,
+            )
+        with pytest.raises(ValueError, match="non-lane test databases"):
+            await bound.configure_channel("456")
+        assert connections == [] and bound.trace.requests == []
+    finally:
+        await bound.close()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("schema_kind", ["w", "f"])
+@pytest.mark.parametrize("bind_kind", ["engine", "connection"])
+async def test_registered_ci_schema_passes_db_guard_but_retains_scope_refusal(
+    monkeypatch: pytest.MonkeyPatch, schema_kind: str, bind_kind: str
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("CI", "true")
+    engine = build_test_engine(
+        "postgresql+asyncpg://offline:fixture@localhost/daimon_test",
+        f"test_{schema_kind}{os.getpid()}_1234abcd",
+    )
+    connections: list[None] = []
+
+    def forbid_connection(*_args: object, **_kwargs: object) -> None:
+        connections.append(None)
+        raise AssertionError("scope refusal attempted a connection")
+
+    event.listen(engine.sync_engine, "do_connect", forbid_connection)
+    bound = AdminBindings(
+        sessions=async_sessionmaker(
+            engine if bind_kind == "engine" else AsyncConnection(engine), expire_on_commit=False
+        ),
+        scope=Scope.platform(reason="CI must still reject platform authorization"),
+        backend="anthropic",
+        platform="discord",
+        workspace_id="123",
+        channels=frozenset({"456"}),
+        trace=ScriptedTransport(),
+    )
+    try:
+        with pytest.raises(ScopeViolation, match="explicit tenant authorization required"):
+            await bound.configure_channel("456")
+        assert connections == [] and bound.trace.requests == []
+    finally:
+        await bound.close()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("bind_kind", ["engine", "connection"])
+async def test_isolated_ci_real_product_provisioning_and_readback(
+    binding: AdminBindings,
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    bind_kind: str,
+) -> None:
+    # Only displayed URL metadata changes. The original builder's pool/startup
+    # settings keep the original test DB and schema (the lane DB locally).
+    actual_database = db_engine.url.database
+    actual_schema = isolated_test_schema(db_engine)
+    assert actual_schema is not None and str(os.getpid()) in actual_schema
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setattr(db_engine.sync_engine, "url", db_engine.url.set(database="daimon_test"))
+    sessions = (
+        binding.sessions
+        if bind_kind == "connection"
+        else async_sessionmaker(db_engine, expire_on_commit=False)
+    )
+    bound = await provision_admin_run(
+        sessions,
+        workspace_id=binding.workspace_id,
+        backend=binding.backend,
+        channels=binding.channels,
+        trace=binding.trace,
+    )
+    try:
+        assert bound.scope.tenant_id == binding.scope.tenant_id
+        assert bound.scope.account_id == binding.scope.account_id
+        receipt = await bound.configure_channel(min(bound.channels))
+        assert receipt.status == "executed" and receipt.backend == binding.backend
+        async with sessions() as session:
+            database, schema = (
+                await session.execute(text("SELECT current_database(), current_schema()"))
+            ).one()
+            stored = await current_backend(
+                session,
+                ChannelRef(
+                    tenant_id=bound.scope.tenant_id,
+                    platform=bound.platform,
+                    channel_id=min(bound.channels),
+                ),
+            )
+        assert database == actual_database and schema == actual_schema
+        assert stored is not None and stored.backend == bound.backend
+        assert not bound.trace.requests
+    finally:
+        await bound.close()
