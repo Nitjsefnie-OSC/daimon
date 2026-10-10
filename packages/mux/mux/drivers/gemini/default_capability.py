@@ -15,7 +15,7 @@ from mux.state.memory import MemoryStateStore
 
 PENDING = PendingReason(
     PendingKind.ADAPTER_DEPENDENCY,
-    "Full default skill bundles need binary deployment beyond the text-only 2 MiB limit; "
+    "Full default skill bundles need an authorized full-byte GCS bundle publisher; "
     "authenticated daimon-mcp needs a credential resolver; inline sessions need a "
     "binding/thread scenario seam. Native remote MCP is supported, but these driver "
     "and scenario adapters are absent; see mux/drivers/gemini/DEFAULT-CAPABILITY.md.",

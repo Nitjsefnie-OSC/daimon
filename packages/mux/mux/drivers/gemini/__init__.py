@@ -18,6 +18,7 @@ from mux.drivers.gemini.core import (
 )
 from mux.drivers.gemini.mcp_auth import MCPSecretResolver
 from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
+from mux.drivers.gemini.skill_deployment import SkillBundlePublisher
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import UnsupportedCapability
@@ -58,6 +59,7 @@ class GeminiManagedAgents:
         account_scope_id: str,
         model_for_interaction: Callable[[str], ModelRef | None] | None = None,
         mcp_secrets: MCPSecretResolver | None = None,
+        skill_bundle_publisher: SkillBundlePublisher | None = None,
     ) -> None:
         self.agents = GeminiAgents(transport, storage, account_scope_id, mcp_secrets=mcp_secrets)
         self.environments = GeminiEnvironments(transport, storage, account_scope_id)
@@ -74,7 +76,9 @@ class GeminiManagedAgents:
         )
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)
-        self.skills = GeminiSkills(transport, storage, account_scope_id)
+        self.skills = GeminiSkills(
+            transport, storage, account_scope_id, publisher=skill_bundle_publisher
+        )
 
     @property
     def models(self) -> Models:
