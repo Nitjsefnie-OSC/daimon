@@ -30,7 +30,6 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 from daimon.adapters.discord.embed import (
     EmbedData,
     EmbedEvent,
-    EmbedState,
     TurnPhase,
     format_termination_notice,
     to_embed_data,
@@ -39,6 +38,7 @@ from daimon.adapters.discord.embed import (
 )
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.output_delivery import AnswerMessage
+from daimon.adapters.discord.provider_events import ProviderDraft
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
@@ -47,6 +47,7 @@ from daimon.core.channel_budget import balance_footer
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -57,6 +58,8 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.usage_totals import ProviderUsageTotals
+from mux.contracts.events import Event
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -188,6 +191,7 @@ class DiscordTurnLifecycle:
         self._fallback_active = fallback_active
         self._name_prefix_sent = False
         self._model_id = model_id
+        self._provider_draft: ProviderDraft | None = None
         self._markup = markup
         self._clock = clock
         self._state = EmbedState(
@@ -273,10 +277,26 @@ class DiscordTurnLifecycle:
         # call only. The embed flush (chat-API I/O) rides the render tick
         # instead, where a slow or rate-limited edit only delays the
         # render task, never the consume loop.
+        if self._provider_draft is not None:
+            return
         embed_event = _map_sse_event(event)
         if embed_event is None:
             return
         self._state = update(self._state, embed_event)
+
+    async def on_provider_event(self, event: Event) -> None:
+        """Cheap local tap; only on_render may send the provider's draft."""
+        if event.native.provider == "anthropic" or self._terminal:
+            return
+        if self._provider_draft is None:
+            self._provider_draft = ProviderDraft()
+        text = self._provider_draft.text(event)
+        if text is not None:
+            self._state = (
+                update(self._state, EmbedEvent(kind="message", label=text))
+                if text
+                else dataclasses.replace(self._state, text_preview=None)
+            )
 
     async def _send_message(self, **kwargs: Any) -> discord.Message:  # noqa: ANN401
         """Send through the injected callable, silencing unprompted turns.
@@ -354,6 +374,11 @@ class DiscordTurnLifecycle:
         the cost.
         """
         t = state.usage_totals
+        if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
+            # Provider observations are priced by host billing. Until a public
+            # display tariff is supplied, omit cost rather than synthesize MA usage.
+            self._state = dataclasses.replace(self._state, cost_str=None)
+            return
         usage = BetaManagedAgentsSpanModelUsage(
             input_tokens=t.input_tokens,
             cache_creation_input_tokens=t.cache_creation_input_tokens,

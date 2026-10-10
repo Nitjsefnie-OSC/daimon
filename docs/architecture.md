@@ -125,6 +125,13 @@ Discord, Slack and Teams run the same two-stage chokepoint in `daimon.core.turn`
 The staging is deliberate — neither stage returns a boolean, both raise typed
 errors, so an adapter cannot forget a gate.
 
+Discord displays non-Anthropic message snapshots and preview fragments through
+the optional `on_provider_event` lifecycle tap. It updates local draft state;
+the render task posts progress and the existing terminal callbacks retire the
+card and deliver the final answer. Anthropic keeps its native event tap.
+Alternate-provider usage does not become an Anthropic meter; an unverified
+display cost is omitted.
+
 **Stage one, `admit()` — `packages/core/daimon/core/turn/admission.py`.** One
 call does identity resolution, config resolution, and every pre-turn gate, and
 returns a frozen `Admission` (account id, MA agent, MA environment, resolved
@@ -1819,3 +1826,7 @@ The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
 slash command carries recent channel messages. Run `/dm` again to reset or select
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
+
+Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.
+
+Teams consumes neutral snapshots and draft fragments through the optional lifecycle tap for alternate providers. Terminal callbacks retire the progress card and deliver authoritative answers; unprompted drafts remain silent. Unknown alternate-provider cost stays absent from the summary instead of becoming an Anthropic usage meter.

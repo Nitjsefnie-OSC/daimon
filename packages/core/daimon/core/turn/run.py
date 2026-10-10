@@ -83,6 +83,7 @@ from daimon.core.turn.provider_actions import (
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
+from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.errors import ScopeViolation
@@ -261,6 +262,11 @@ class _DeferredFailureLifecycle:
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         await self.inner.on_sse_event(event)
+
+    async def on_provider_event(self, event: Event) -> None:
+        hook = getattr(self.inner, "on_provider_event", None)
+        if hook is not None:
+            await cast(Callable[[Event], Awaitable[None]], hook)(event)
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         await self.inner.on_reconnect(reason)
