@@ -67,6 +67,7 @@ from daimon.testing.ma import (
 )
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ROOM = "111111111111111111"
@@ -1242,6 +1243,7 @@ async def test_with_cards_off_a_yes_as_the_next_message_confirms_once(
     preview = await _add_from(world, auth, origin)
     content_hash = preview.preview.content_hash
     assert f"content_hash='{content_hash}'" in preview.summary
+    assert "'notes' for agent 'helper'" in preview.summary
     assert "`yes`" in preview.summary and "/agent-setup" not in preview.summary
 
     async with _reply(world, auth, text) as reply:
@@ -1320,8 +1322,9 @@ async def test_with_cards_off_only_the_latest_preview_can_be_confirmed(
     second = await _add_from(world, auth, origin, skill_md=other_md)
 
     async with _reply(world, auth, "yes") as reply:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="a newer preview replaced it") as failure:
             await _add_from(world, auth, reply, content_hash=first.preview.content_hash)
+        assert "preview it again" in str(failure.value)
         assert world.created == []
         added = await _add_from(
             world, auth, reply, skill_md=other_md, content_hash=second.preview.content_hash
@@ -1392,6 +1395,144 @@ async def test_with_cards_off_concurrent_previews_leave_one_to_confirm(
         assert await consume("hash-a") is False, "the replaced preview is not confirmable"
         outcomes = await asyncio.gather(consume("hash-b"), consume("hash-b"))
     assert sorted(outcomes) == [False, True], "the newer preview is consumed exactly once"
+
+
+async def test_cards_off_one_yes_does_not_approve_two_agents(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin_id = await _cards_off_turn(world)
+    async with world.runtime.session_factory() as session:
+        origin = await get_active_origin(
+            session,
+            origin_id=uuid.UUID(origin_id),
+            tenant_id=world.tenant_id,
+            account_id=auth.account_id,
+            platform="discord",
+            now=datetime.now(UTC),
+        )
+    assert origin is not None
+    async with world.runtime.session_factory.begin() as session:
+        await record_pending_skill_add(
+            session,
+            origin=origin,
+            ma_agent_id="agent_a",
+            content_hash="hash-a",
+            now=datetime.now(UTC),
+        )
+        await record_pending_skill_add(
+            session,
+            origin=origin,
+            ma_agent_id="agent_b",
+            content_hash="hash-b",
+            now=datetime.now(UTC),
+        )
+
+    async with _reply(world, auth, "yes") as reply_id:
+        async with world.runtime.session_factory() as session:
+            reply = await get_active_origin(
+                session,
+                origin_id=uuid.UUID(reply_id),
+                tenant_id=world.tenant_id,
+                account_id=auth.account_id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert reply is not None
+        async with world.runtime.session_factory.begin() as session:
+            first = await consume_pending_skill_add(
+                session,
+                origin=reply,
+                ma_agent_id="agent_a",
+                content_hash="hash-a",
+                now=datetime.now(UTC),
+            )
+            second = await consume_pending_skill_add(
+                session,
+                origin=reply,
+                ma_agent_id="agent_b",
+                content_hash="hash-b",
+                now=datetime.now(UTC),
+            )
+    assert first is False, "the older agent's preview must be superseded"
+    assert second is True, "one yes authorizes only the active agent's preview"
+
+
+async def test_cards_off_concurrent_previews_for_two_agents_leave_one_open(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin_id = await _cards_off_turn(world)
+    async with world.runtime.session_factory() as session:
+        origin = await get_active_origin(
+            session,
+            origin_id=uuid.UUID(origin_id),
+            tenant_id=world.tenant_id,
+            account_id=auth.account_id,
+            platform="discord",
+            now=datetime.now(UTC),
+        )
+    assert origin is not None
+
+    async def preview(agent_id: str, content_hash: str) -> None:
+        async with world.runtime.session_factory.begin() as session:
+            await record_pending_skill_add(
+                session,
+                origin=origin,
+                ma_agent_id=agent_id,
+                content_hash=content_hash,
+                now=datetime.now(UTC),
+            )
+
+    async with world.runtime.session_factory.begin() as first:
+        await record_pending_skill_add(
+            first,
+            origin=origin,
+            ma_agent_id="agent_a",
+            content_hash="hash-a",
+            now=datetime.now(UTC),
+        )
+        second = asyncio.create_task(preview("agent_b", "hash-b"))
+        await asyncio.sleep(0.3)
+    await second
+
+    async with world.runtime.session_factory() as session:
+        open_count = await session.scalar(
+            text(
+                "SELECT count(*) FROM pending_skill_adds WHERE tenant_id = :tenant_id "
+                "AND account_id = :account_id AND platform = 'discord' "
+                "AND thread_id = :thread_id AND consumed_at IS NULL"
+            ),
+            {"tenant_id": world.tenant_id, "account_id": auth.account_id, "thread_id": CHAT_THREAD},
+        )
+    assert open_count == 1
+
+    async with _reply(world, auth, "yes") as reply_id:
+        async with world.runtime.session_factory() as session:
+            reply = await get_active_origin(
+                session,
+                origin_id=uuid.UUID(reply_id),
+                tenant_id=world.tenant_id,
+                account_id=auth.account_id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert reply is not None
+        async with world.runtime.session_factory.begin() as session:
+            assert not await consume_pending_skill_add(
+                session,
+                origin=reply,
+                ma_agent_id="agent_a",
+                content_hash="hash-a",
+                now=datetime.now(UTC),
+            )
+            assert await consume_pending_skill_add(
+                session,
+                origin=reply,
+                ma_agent_id="agent_b",
+                content_hash="hash-b",
+                now=datetime.now(UTC),
+            )
 
 
 async def test_with_cards_off_a_changed_skill_needs_a_fresh_preview(
