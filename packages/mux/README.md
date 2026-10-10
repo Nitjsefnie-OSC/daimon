@@ -569,3 +569,23 @@ Host adapters may consume normalized Events through an optional local lifecycle 
 Slack folds normalized message Events into local progress drafts through the optional lifecycle tap. The existing host terminal state owns answer delivery and control retirement; ProviderUsageTotals are never turned into Anthropic display meters.
 
 Teams also uses the optional neutral lifecycle tap for local drafts. Child and stale previews cannot replace the active draft, and terminal callbacks close the existing card. Alternate-provider observations or a known provider turn with no observation never become Anthropic display meters.
+
+### Offline Anthropic default-capability composition
+
+`tests/parity/test_f2_anthropic_default_capability.py` reuses the Anthropic F1
+scenario and its strict SDK script for all eleven authored skill uploads,
+immutable pins, default builtin routes and one completed root. The existing
+vault port resolves a host credential reference, and the native session
+extension mounts that vault. The scripted managed-agents provider reads the
+serialized credential, mounted vault and agent MCP destination before calling
+the disposable loopback gate's real `describe_agent` and `list_my_sessions`
+tools. Their actual synthetic owned results enter the native stream, then a
+normalized-only tape is audited and replayed through a fresh driver.
+
+Revoked or incorrect bearers fail the scenario. Foreign scopes refuse before
+secret resolution or a native credential write; manifest-owned cleanup revokes
+the bearer and removes the isolated schema. Run with a lane-owned local
+`DAIMON_DATABASE__TEST_URL`. Inference, skill execution and file operations are
+scripted, and MCP backing data is synthetic: this is offline composition
+evidence, not live F2 certification. It opens no tunnel and reads no provider
+key. Live Anthropic F2 still needs a disposable key and separate lead GO.
