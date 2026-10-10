@@ -309,9 +309,10 @@ async def test_driver_and_recovery_wrapper_optional_neutral_tap_preserve_native_
         assert lifecycle.provider_events == ([] if provider == "anthropic" else [delta, normalized])
 
 
+@pytest.mark.parametrize("with_usage", [True, False])
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
 async def test_actual_driver_to_discord_surface_finalizes_without_synthetic_meter(
-    monkeypatch: pytest.MonkeyPatch, provider: Provider
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, with_usage: bool
 ) -> None:
     def no_sdk_meter(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError("provider observation is not an Anthropic meter")
@@ -332,7 +333,12 @@ async def test_actual_driver_to_discord_surface_finalizes_without_synthetic_mete
         observed_at=NOW,
     )
     codec = Codec(
-        [TurnEvent(text, message(provider, "Actual answer"), observation), TurnEvent(done)]
+        [
+            TurnEvent(
+                text, message(provider, "Actual answer"), observation if with_usage else None
+            ),
+            TurnEvent(done),
+        ]
     )
 
     def factory(*args: object, **kwargs: object) -> Codec:
@@ -351,8 +357,11 @@ async def test_actual_driver_to_discord_surface_finalizes_without_synthetic_mete
         render_interval_s=0.001,
         now=lambda: NOW,
     )
-    assert isinstance(final.usage_totals, ProviderUsageTotals)
-    assert final.usage_totals.observations == (observation,)
+    if with_usage:
+        assert isinstance(final.usage_totals, ProviderUsageTotals)
+        assert final.usage_totals.observations == (observation,)
+    else:
+        assert not isinstance(final.usage_totals, ProviderUsageTotals)
     assert lifecycle._provider_draft is not None
     assert lifecycle._terminal and lifecycle._state.cost_str is None
     assert posts.edited[-1]["view"] is None

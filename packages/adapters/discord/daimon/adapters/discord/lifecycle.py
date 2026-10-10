@@ -374,7 +374,7 @@ class DiscordTurnLifecycle:
         the cost.
         """
         t = state.usage_totals
-        if isinstance(t, ProviderUsageTotals):
+        if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
             # Provider observations are priced by host billing. Until a public
             # display tariff is supplied, omit cost rather than synthesize MA usage.
             self._state = dataclasses.replace(self._state, cost_str=None)
