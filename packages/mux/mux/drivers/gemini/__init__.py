@@ -16,6 +16,7 @@ from mux.drivers.gemini.core import (
     GeminiSessions,
     page_values,
 )
+from mux.drivers.gemini.mcp_auth import MCPSecretResolver
 from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
@@ -56,16 +57,20 @@ class GeminiManagedAgents:
         state_store: StateStore,
         account_scope_id: str,
         model_for_interaction: Callable[[str], ModelRef | None] | None = None,
+        mcp_secrets: MCPSecretResolver | None = None,
     ) -> None:
-        self.agents = GeminiAgents(transport, storage, account_scope_id)
+        self.agents = GeminiAgents(transport, storage, account_scope_id, mcp_secrets=mcp_secrets)
         self.environments = GeminiEnvironments(transport, storage, account_scope_id)
-        self.sessions = GeminiSessions(transport, storage, account_scope_id)
+        self.sessions = GeminiSessions(
+            transport, storage, account_scope_id, mcp_secrets=mcp_secrets
+        )
         self.events = GeminiEvents(
             transport,
             storage,
             account_scope_id,
             state_store=state_store,
             model_for_interaction=model_for_interaction,
+            mcp_secrets=mcp_secrets,
         )
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)
@@ -87,4 +92,4 @@ class GeminiManagedAgents:
         raise UnsupportedCapability((namespace,), PROFILE.profile_id)
 
 
-__all__ = ["GeminiManagedAgents"]
+__all__ = ["GeminiManagedAgents", "MCPSecretResolver"]

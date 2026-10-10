@@ -634,3 +634,14 @@ These helpers require the explicit persistent-workspace OpenAI profile and
 catalog provisioning. Default Anthropic calls use their existing edge and native
 bytes. Gemini host resource operations remain pending G2; live host/runtime
 resolver wiring and model execution are separate from these offline SDK proofs.
+
+
+Gemini authenticated MCP is opt-in through the scoped `mcp_secrets` callback.
+It admits one HTTPS server with a closed `allowed_tools` policy, stores only
+credential references, and resolves fresh credentials before each actual SDK
+create (including existing Flash fallbacks). Unknown native authentication
+carriers and unsupported policies refuse before provider I/O. The default
+callback remains None. Anonymous MCP also requires a clean HTTPS destination;
+userinfo, query/fragment carriers and invalid server names refuse at compilation
+and the SDK edge before I/O or logging. See [the driver contract](../../docs/mux.md#gemini-scoped-mcp-authentication)
+for admission, DEBUG redaction, continuation and offline proof limits.
