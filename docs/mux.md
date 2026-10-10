@@ -1215,3 +1215,48 @@ Discord consumes neutral message snapshots and ordered previews through an optio
 Slack also consumes root neutral snapshots and ordered previews through the optional local tap. Authoritative snapshots replace draft fragments; terminal output comes from host state. Existing status-card replacement, Cancel routing, generic confirmation controls, and Anthropic pricing remain unchanged. An unverified alternate-provider cost is omitted.
 
 Teams renders root neutral snapshots and ordered previews locally, retaining its debounce, unprompted silence and existing terminal card retirement. Host state owns final answers. Alternate-provider observations and missing observations bypass Anthropic display meters, so unknown cost is omitted; the native Anthropic path is unchanged.
+
+## Gemini scoped MCP authentication
+
+An opted-in `GeminiManagedAgents(..., mcp_secrets=resolver)` can prepare one
+credential-referenced HTTPS MCP connection. The callback receives the complete
+`Scope`, credential reference and exact destination and must authorize that
+tuple. Its default is None; credential-referenced intent then refuses before
+provider I/O. Ordinary no-MCP agents retain explicit `tools=[]`, and the
+existing credential-free anonymous MCP shape remains supported.
+
+Authenticated policies accept exactly `allowed_tools`, a nonempty distinct list
+of tool names. The native Interactions shape is
+`allowed_tools=[{"mode":"auto","tools":[...]}]`; `required`, unknown policy
+fields, wildcards, mixed anonymous/authenticated connections and multiple bound
+servers refuse. Authentication cannot be supplied by saved native headers,
+unknown tool types/spelling variants, undeclared tool fields or top-level
+request credential carriers. Bound destinations reject userinfo, queries,
+fragments, ambiguous authorities and non-HTTPS URLs.
+
+Only references and credential-free native intent persist in driver storage.
+Each new send checks the complete request against the owned agent/environment
+before resolution and before a history GET or delivery claim. A restored
+acknowledgement also rechecks admission before its history read without another
+POST. A preflight resolution admits the send; each actual SDK create resolves
+again, including each existing Flash fallback. A revoked callback therefore
+refuses before native dispatch. Model selection, fallback triggers, accounting
+and continuity rules retain their existing owners' behavior.
+
+The bearer appears once, in the sole server's native
+`headers.Authorization`, as a request-memory value with a redacted DEBUG
+representation. JSON serialization carries the actual value to that destination;
+a JSON-roundtripped header is not a resolver binding and is refused on reuse.
+The marker binds the full owned payload, allowing only the existing wrappers
+to select the model and positive max_total_tokens. Changed input, environment,
+instructions or nested credential carriers refuse before resolution.
+Duplicating the resolved value elsewhere in the request also refuses. Resolver
+failures return a sanitized permission error and do not log private details.
+
+Offline proof uses the actual installed SDK against scripted HTTPS request
+capture and an explicitly mapped disposable N2 loopback host for
+`describe_agent`/`list_my_sessions`, with invalid/missing/revoked bearer and
+cleanup controls. That mapping is a test bridge, not a public HTTPS tunnel,
+provider-side remote execution, production resolver wiring or F2 live
+certification. Runtime injection remains the host owner's follow-up; no operator
+keys or live calls are involved.

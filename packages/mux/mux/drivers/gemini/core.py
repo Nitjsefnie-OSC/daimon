@@ -41,6 +41,12 @@ from mux.contracts.resources import (
     UpdatePlan,
 )
 from mux.drivers.gemini.bundles import inline_files, skill_sources, target_path, validate_targets
+from mux.drivers.gemini.mcp_auth import (
+    MCPSecretResolver,
+    authenticated_template,
+    compile_mcp,
+    validate_intent,
+)
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
 from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner
 from mux.drivers.gemini.transport import (
@@ -92,8 +98,46 @@ def page_values[T](values: Sequence[T], page: PageRequest) -> Page[T]:
 
 
 class Base:
-    def __init__(self, transport: Transport, storage: Storage, account_scope_id: str) -> None:
+    def __init__(
+        self,
+        transport: Transport,
+        storage: Storage,
+        account_scope_id: str,
+        *,
+        mcp_secrets: MCPSecretResolver | None = None,
+    ) -> None:
         self._transport, self._storage, self._account = transport, storage, account_scope_id
+        self._mcp_secrets = mcp_secrets
+
+    def _mcp_request(self, records: Records, scope: Scope, spec: SessionSpec) -> Object:
+        """Rebuild owned intent before authentication; never trust a saved tool list."""
+        self._check(scope, spec.agent, "agent")
+        agent = records.agents.get(spec.agent.id)
+        if agent is None or agent.ref != spec.agent:
+            raise ScopeViolation(spec.agent.id, "no owned inline agent")
+        if agent.revision != spec.agent_revision:
+            raise ProviderError("conflict", retryable=False)
+        request = compile_agent(agent.spec, authenticated_mcp=self._mcp_secrets is not None)
+        environment: JsonValue = {"type": "remote"}
+        if spec.environment is not None:
+            self._check(scope, spec.environment, "environment")
+            env = records.environments.get(spec.environment.id)
+            if env is None or env.ref != spec.environment:
+                raise ScopeViolation(spec.environment.id, "no owned inline environment")
+            environment = compile_environment(
+                env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
+            )
+        mounted = skill_sources(records, scope, self._account, agent.spec.skills)
+        if mounted:
+            configuration = object_value(environment)
+            sources = configuration.get("sources", [])
+            if not isinstance(sources, list):
+                raise ValueError("expected inline environment sources")
+            validate_targets([*sources, *mounted])
+            configuration["sources"] = [*sources, *mounted]
+            environment = configuration
+        request["environment"] = environment
+        return request
 
     def _ref(self, scope: Scope, id_: str, kind: str) -> ResourceRef:
         return ResourceRef(
@@ -264,7 +308,7 @@ class Base:
 
 class GeminiAgents(Base):
     async def create(self, scope: Scope, spec: AgentSpec, *, key: str) -> Agent:
-        compile_agent(spec)
+        compile_agent(spec, authenticated_mcp=self._mcp_secrets is not None)
         digest = request_digest(
             {
                 "kind": "agent",
@@ -326,7 +370,7 @@ class GeminiAgents(Base):
         refuse("agent_delete")
 
 
-def compile_agent(spec: AgentSpec) -> Object:
+def compile_agent(spec: AgentSpec, *, authenticated_mcp: bool = False) -> Object:
     if spec.model.provider != "gemini" or not spec.model.id or spec.model.options:
         refuse("model")
     if spec.extensions:
@@ -361,10 +405,7 @@ def compile_agent(spec: AgentSpec) -> Object:
                 )
             else:
                 refuse("tool")
-        for server in spec.mcp_servers or ():
-            if server.transport != "streamable_http" or server.credential_ref or server.tool_policy:
-                refuse("mcp_credentials_or_policy")
-            tools.append({"type": "mcp_server", "name": server.name, "url": server.url})
+        tools.extend(compile_mcp(spec.mcp_servers or (), enabled=authenticated_mcp))
         result["tools"] = tools
     return result
 
@@ -496,26 +537,7 @@ class GeminiSessions(Base):
                 raise ScopeViolation(spec.agent.id, "no owned inline agent")
             if agent.revision != spec.agent_revision:
                 raise ProviderError("conflict", retryable=False)
-            request = compile_agent(agent.spec)
-            environment: JsonValue = {"type": "remote"}
-            if spec.environment is not None:
-                self._check(scope, spec.environment, "environment")
-                env = records.environments.get(spec.environment.id)
-                if env is None or env.ref != spec.environment:
-                    raise ScopeViolation(spec.environment.id, "no owned inline environment")
-                environment = compile_environment(
-                    env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
-                )
-            mounted = skill_sources(records, scope, self._account, agent.spec.skills)
-            if mounted:
-                configuration = object_value(environment)
-                sources = configuration.get("sources", [])
-                if not isinstance(sources, list):
-                    raise ValueError("expected inline environment sources")
-                validate_targets([*sources, *mounted])
-                configuration["sources"] = [*sources, *mounted]
-                environment = configuration
-            request["environment"] = environment
+            request = self._mcp_request(records, scope, spec)
             id_ = str(uuid4())
             session = Session(
                 ref=self._ref(scope, id_, "session"),
@@ -632,8 +654,9 @@ class GeminiEvents(Base):
         *,
         state_store: StateStore,
         model_for_interaction: Callable[[str], ModelRef | None] | None = None,
+        mcp_secrets: MCPSecretResolver | None = None,
     ) -> None:
-        super().__init__(transport, storage, account_scope_id)
+        super().__init__(transport, storage, account_scope_id, mcp_secrets=mcp_secrets)
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction
 
@@ -694,6 +717,12 @@ class GeminiEvents(Base):
         )
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
+            expected = self._mcp_request(records, scope, record.spec)
+            agent = records.agents[record.spec.agent.id]
+            connections = agent.spec.mcp_servers or ()
+            validate_intent(
+                record.request, expected, connections, enabled=self._mcp_secrets is not None
+            )
             prior = records.sends.get((*owner(scope), key))
             if prior is not None:
                 if prior[0] != scope.principal_id:
@@ -716,6 +745,16 @@ class GeminiEvents(Base):
                             raise ProviderError(
                                 "upstream", retryable=False, native_code="invalid_acknowledgement"
                             )
+                        # A restored acknowledgement still reads native history.
+                        # Recheck scoped admission before that I/O, without a POST.
+                        await authenticated_template(
+                            scope,
+                            record.request,
+                            expected,
+                            connections,
+                            self._mcp_secrets,
+                            overrides={},
+                        )
                         raw = await self._get(record, receipt.input_ids[0])
                         self._accept(record, raw, receipt.turn_id, events)
                         record.unknown_delivery = False
@@ -726,7 +765,7 @@ class GeminiEvents(Base):
                 refuse("unreconciled_delivery")
             if expected_turn is not None and expected_turn != record.session.active_root_turn:
                 raise ProviderError("conflict", retryable=False)
-            request = dict(record.request)
+            overrides: Object = {}
             inputs: list[JsonValue] = []
             is_result = all(isinstance(e, UserToolResult) for e in events)
             if record.session.state == "running":
@@ -757,17 +796,29 @@ class GeminiEvents(Base):
                     if not isinstance(input_, UserMessage) or input_.mode != "new_turn":
                         refuse("native_input_or_confirmation_or_steer")
                     inputs.append({"type": "text", "text": _text(input_.content)})
-            request.update({"input": inputs, "background": True, "store": True})
+            overrides.update({"input": inputs, "background": True, "store": True})
+            authenticated = any(c.credential_ref is not None for c in connections)
             if record.current is not None:
-                # Confirm history still exists before issuing another mutation.
-                await self._get(record, record.current)
+                if not authenticated:
+                    await self._get(record, record.current)
                 if record.environment_id is None:
                     raise ContinuityLost(
                         record.session.binding.id,
                         ("Gemini did not provide a reusable environment ID.",),
                     )
-                request["previous_interaction_id"] = record.current
-                request["environment"] = record.environment_id
+                overrides["previous_interaction_id"] = record.current
+                overrides["environment"] = record.environment_id
+            request = await authenticated_template(
+                scope,
+                record.request,
+                expected,
+                connections,
+                self._mcp_secrets,
+                overrides=overrides,
+            )
+            if record.current is not None and authenticated:
+                # Admission/authentication precedes this native history read.
+                await self._get(record, record.current)
             root = record.root if is_result else str(uuid4())
             if root is None:
                 refuse("unknown_function_action")

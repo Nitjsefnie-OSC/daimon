@@ -589,3 +589,11 @@ the bearer and removes the isolated schema. Run with a lane-owned local
 scripted, and MCP backing data is synthetic: this is offline composition
 evidence, not live F2 certification. It opens no tunnel and reads no provider
 key. Live Anthropic F2 still needs a disposable key and separate lead GO.
+
+Gemini authenticated MCP is opt-in through the scoped `mcp_secrets` callback.
+It admits one HTTPS server with a closed `allowed_tools` policy, stores only
+credential references, and resolves fresh credentials before each actual SDK
+create (including existing Flash fallbacks). Unknown native authentication
+carriers and unsupported policies refuse before provider I/O. The default
+callback remains None. See [the driver contract](../../docs/mux.md#gemini-scoped-mcp-authentication)
+for admission, DEBUG redaction, continuation and offline proof limits.
