@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from secrets import randbits
 from uuid import uuid4
 
 from daimon.core.stores.discord_message_admissions import (
@@ -21,11 +22,12 @@ async def test_two_startup_workers_admit_a_missed_message_once(
     db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session)
     await db_session.commit()
+    owner_key = randbits(30)
 
     # Simulate two newly started processes with distinct live owner locks.
     async with db_session_factory() as owner_a, db_session_factory() as owner_b:
-        await owner_a.execute(text("SELECT pg_advisory_lock(11)"))
-        await owner_b.execute(text("SELECT pg_advisory_lock(22)"))
+        await owner_a.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key})
+        await owner_b.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key + 1})
         try:
 
             async def worker(owner: int) -> bool:
@@ -42,18 +44,21 @@ async def test_two_startup_workers_admit_a_missed_message_once(
                     await session.commit()
                     return result
 
-            assert sorted(await asyncio.gather(worker(11), worker(22))) == [False, True]
+            assert sorted(await asyncio.gather(worker(owner_key), worker(owner_key + 1))) == [
+                False,
+                True,
+            ]
             await finish_messages(db_session, tenant_id=tenant.id, message_ids=("2",))
             await db_session.commit()
         finally:
-            await owner_a.execute(text("SELECT pg_advisory_unlock(11)"))
-            await owner_b.execute(text("SELECT pg_advisory_unlock(22)"))
+            await owner_a.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key})
+            await owner_b.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key + 1})
     # The gateway may redeliver the same message to either worker after the
     # startup scans. Both observations must still be refused. This is the
     # ReplayNoAdmission counterexample against the real ledger.
-    assert not await worker(11)
-    assert not await worker(22)
-    assert not await worker(33), "a later replay must not start another turn"
+    assert not await worker(owner_key)
+    assert not await worker(owner_key + 1)
+    assert not await worker(owner_key + 2), "a later replay must not start another turn"
 
 
 async def test_pending_followup_is_reclaimed_only_after_its_process_exits(
@@ -62,27 +67,36 @@ async def test_pending_followup_is_reclaimed_only_after_its_process_exits(
     db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session)
     await db_session.commit()
+    owner_key = randbits(30)
     async with db_session_factory() as owner:
-        await owner.execute(text("SELECT pg_advisory_lock(421123)"))
+        await owner.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key})
         try:
             async with db_session_factory() as session:
                 assert await claim_message(
-                    session, tenant_id=tenant.id, channel_id="1", message_id="2", owner_key=421123
+                    session,
+                    tenant_id=tenant.id,
+                    channel_id="1",
+                    message_id="2",
+                    owner_key=owner_key,
                 )
                 await session.commit()
             assert not await claim_message(
-                db_session, tenant_id=tenant.id, channel_id="1", message_id="2", owner_key=421124
+                db_session,
+                tenant_id=tenant.id,
+                channel_id="1",
+                message_id="2",
+                owner_key=owner_key + 1,
             )
             await db_session.commit()
         finally:
-            await owner.execute(text("SELECT pg_advisory_unlock(421123)"))
+            await owner.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key})
     assert await claim_message(
-        db_session, tenant_id=tenant.id, channel_id="1", message_id="2", owner_key=421124
+        db_session, tenant_id=tenant.id, channel_id="1", message_id="2", owner_key=owner_key + 1
     )
     await finish_messages(db_session, tenant_id=tenant.id, message_ids=("2",))
     await db_session.commit()
     assert not await claim_message(
-        db_session, tenant_id=tenant.id, channel_id="1", message_id="2", owner_key=421125
+        db_session, tenant_id=tenant.id, channel_id="1", message_id="2", owner_key=owner_key + 2
     )
 
 
@@ -192,14 +206,15 @@ async def test_retention_preserves_channel_boundary_recent_receipts_and_live_pen
     tenant = await make_tenant(db_session)
     await db_session.commit()
     now = datetime.now(UTC)
+    owner_key = randbits(30)
     async with db_nullpool_engine.connect() as owner:
-        await owner.execute(text("SELECT pg_advisory_lock(718213)"))
+        await owner.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key})
         try:
-            for message_id, age, handled, owner_key in [
+            for message_id, age, handled, message_owner_key in [
                 ("1", 121, True, 1),  # channel anchor survives all sweeps
                 ("2", 120, True, 1),
                 ("3", 119, False, 1),  # dead pending input beyond the horizon
-                ("4", 118, False, 718213),  # live long-running queued input
+                ("4", 118, False, owner_key),  # live long-running queued input
                 ("5", 1, True, 1),
             ]:
                 assert await claim_message(
@@ -207,7 +222,7 @@ async def test_retention_preserves_channel_boundary_recent_receipts_and_live_pen
                     tenant_id=tenant.id,
                     channel_id="100",
                     message_id=message_id,
-                    owner_key=owner_key,
+                    owner_key=message_owner_key,
                 )
                 await db_session.execute(
                     update(DiscordMessageAdmission)
@@ -247,4 +262,4 @@ async def test_retention_preserves_channel_boundary_recent_receipts_and_live_pen
                 owner_key=2,
             )
         finally:
-            await owner.execute(text("SELECT pg_advisory_unlock(718213)"))
+            await owner.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key})

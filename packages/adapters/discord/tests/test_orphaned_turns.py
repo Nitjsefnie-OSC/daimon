@@ -14,6 +14,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from secrets import randbits
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -547,6 +548,10 @@ async def test_a_turn_started_before_on_ready_is_not_interrupted_by_the_boot_swe
     runtime = _make_runtime(tenant.id, db_session_factory)
     bot = make_bot(runtime)
     bot.get_channel = MagicMock(return_value=_reachable_thread())  # pyright: ignore[reportAttributeAccessIssue]
+    # The periodic card recovery is unrelated to this admission-barrier test.
+    # The pytest event loop is session-scoped, so letting it run would reuse
+    # this test's connection during later tests and their schema wipes.
+    bot._start_turn_card_recovery = MagicMock()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
     # What start_orphan_recovery (setup_hook) does, minus spawning the sweep:
     # the mention arrives before the spawned sweep has run, so the barrier in
     # the turn itself must run it (the test DB shares one connection, so the
@@ -1054,15 +1059,16 @@ async def test_recovery_leaves_another_workers_live_turn_and_card_alone(
 ) -> None:
     db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     mapping_id = await _make_orphan(db_session)
+    owner_key = randbits(30)
     owner_factory = _make_bot(db_session_factory).runtime.sessionmaker
     async with owner_factory() as owner:
-        await owner.execute(text("SELECT pg_advisory_lock(912341)"))
+        await owner.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key})
         try:
             await mark_turn_active(
                 db_session,
                 id=mapping_id,
                 active_turn_message_id="777",
-                owner_key=912341,
+                owner_key=owner_key,
                 now=datetime.now(UTC),
             )
             await create_turn_card_intent(
@@ -1071,7 +1077,7 @@ async def test_recovery_leaves_another_workers_live_turn_and_card_alone(
                 platform="discord",
                 thread_id="555",
                 turn_token=uuid.uuid4(),
-                owner_key=912341,
+                owner_key=owner_key,
             )
             await db_session.commit()
             bot = _make_bot(db_session_factory)
@@ -1082,7 +1088,7 @@ async def test_recovery_leaves_another_workers_live_turn_and_card_alone(
             assert len(await list_orphaned_turns(db_session, platform="discord")) == 1
             assert bot._boot_turn_card_intents == []
         finally:
-            await owner.execute(text("SELECT pg_advisory_unlock(912341)"))
+            await owner.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key})
 
 
 @pytest.mark.parametrize("age_s", [0.1, 600])

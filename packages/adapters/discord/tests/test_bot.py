@@ -2505,10 +2505,14 @@ async def test_cancelled_input_before_first_card_remains_replayable(
     message.webhook_id = None
     message.reference = None
     task = asyncio.create_task(bot.on_message(message))
-    await entered.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     restarted = make_bot(_make_runtime(db_session_factory))
     restarted._handle_mention = AsyncMock()
     await restarted.on_message(message, startup_replay=True)
