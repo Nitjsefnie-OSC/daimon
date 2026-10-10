@@ -597,3 +597,10 @@ looks up its runtime for an explicit admitted channel revision. It must return
 the provider's public runtime with authorized native resources and durable state;
 missing deployment constructors fail closed. `PreparedTurn.runtime` retains the
 resolved dependencies for execution. No mux driver discovers host credentials.
+
+Application deployment wiring can construct the public OpenAI runtime from an
+operator manifest selected by the admitted tenant/account/channel/configuration
+digest. Credential environment references are revealed only after preparation's
+policy recheck; SDK construction remains private to the OpenAI driver. Default
+channels do not inspect the manifest or provider credentials. Durable host
+journal/usage adapters are used; unknown accounting stays pending.
