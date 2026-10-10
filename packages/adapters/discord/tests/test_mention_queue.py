@@ -149,10 +149,13 @@ def test_compose_empty_list_returns_empty_string() -> None:
 @pytest_asyncio.fixture
 async def queued_bot(
     db_engine: AsyncEngine,
+    db_clean: None,
 ):
     """Bot with tenant provisioned. _handle_mention is left intact; tests
     install per-test stubs."""
-    # Parallel mentions need separate connections, as in production.
+    # Parallel mentions need separate connections, as in production. Keep
+    # db_clean from the former db_session_factory dependency: this engine and
+    # the next test share one xdist worker schema.
     db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Funded: a turn that queued re-checks the balance once it holds a slot.
     result = await provision_tenant(
@@ -160,7 +163,16 @@ async def queued_bot(
     )
 
     runtime = _make_runtime(result.tenant_id, db_session_factory)
-    return make_bot(runtime)
+    bot = make_bot(runtime)
+    try:
+        yield bot
+    finally:
+        tasks = tuple(bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=5)
+            assert not pending, "queued bot left background tasks running"
 
 
 @pytest.mark.asyncio
