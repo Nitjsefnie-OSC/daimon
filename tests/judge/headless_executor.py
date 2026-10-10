@@ -63,7 +63,11 @@ if __package__:
     from .gemini_catalog_replay import execute_gemini_turns
     from .headless_output import HeadlessOutput, capture_headless_return
     from .openai_catalog_replay import execute_openai_turns
-    from .platform_catalog_surface import CatalogLifecycle, bind_platform_text
+    from .platform_catalog_surface import (
+        CatalogLifecycle,
+        bind_platform_text,
+        evaluate_platform_catalog,
+    )
 else:
     from catalog_runner import (
         FROZEN_TARGET_SHA256,
@@ -80,7 +84,11 @@ else:
     from gemini_catalog_replay import execute_gemini_turns
     from headless_output import HeadlessOutput, capture_headless_return
     from openai_catalog_replay import execute_openai_turns
-    from platform_catalog_surface import CatalogLifecycle, bind_platform_text
+    from platform_catalog_surface import (
+        CatalogLifecycle,
+        bind_platform_text,
+        evaluate_platform_catalog,
+    )
 
 
 TABLE_SCENARIO = "QA-NEW37-MARKDOWN-TABLE-READABLE"
@@ -712,7 +720,7 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
         expected_failure=_expected_failure(plan),
         gaps=tuple(gaps),
         evidence=evidence,
-        catalog_outcome=evaluate(evidence, assertions),
+        catalog_outcome=evaluate_platform_catalog(evidence, assertions, tuple(platform_surfaces)),
         host_outcome=evaluate(evidence, _host_assertions(evidence)),
         request_count=requests,
         rendered_text=tuple(rendered),
@@ -790,7 +798,7 @@ async def execute_openai_cell(
         expected_failure=_expected_failure(plan),
         gaps=tuple(gaps),
         evidence=evidence,
-        catalog_outcome=evaluate(evidence, assertions),
+        catalog_outcome=evaluate_platform_catalog(evidence, assertions, tuple(platform_surfaces)),
         host_outcome=evaluate(evidence, _host_assertions(evidence)),
         request_count=requests,
         rendered_text=rendered,
@@ -868,7 +876,7 @@ async def execute_gemini_cell(
         expected_failure=_expected_failure(plan),
         gaps=tuple(gaps),
         evidence=evidence,
-        catalog_outcome=evaluate(evidence, assertions),
+        catalog_outcome=evaluate_platform_catalog(evidence, assertions, tuple(platform_surfaces)),
         host_outcome=evaluate(evidence, _host_assertions(evidence)),
         request_count=requests,
         rendered_text=rendered,

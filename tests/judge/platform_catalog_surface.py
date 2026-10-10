@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason, acknowledge
 from daimon.core.turn.state import TurnState
-from daimon.testing.outcome_oracle import TurnEvidence, VisibleText
+from daimon.testing.outcome_oracle import (
+    OutcomeReport,
+    RunEvidence,
+    TurnEvidence,
+    VisibleText,
+    evaluate,
+)
 from daimon.testing.platform_surface import PlatformMessageCapture, PlatformSurfaceCapture
 from daimon.testing.slack_surface import SlackSurfaceHarness
 from daimon.testing.teams_surface import TeamsSurfaceHarness
+from pydantic import JsonValue
 
 if __package__:
     from .discord_catalog_surface import CatalogLifecycle as DiscordCatalogLifecycle
@@ -116,6 +123,7 @@ def bind_platform_text(
     expected_platform: str,
     observed_s: float,
     accounting_required: bool = False,
+    include_history: bool = False,
 ) -> TurnEvidence:
     """Validate full post history and bind surviving text; never bind fallbacks.
 
@@ -167,10 +175,21 @@ def bind_platform_text(
     if capture.messages != tuple(survivors.values()):
         raise ValueError("platform surviving text differs from actual post history")
     texts: list[VisibleText] = []
-    # Historical drafts/retired controls remain diagnostic events, matching
-    # Discord's final surviving-post text domain. Observe the surviving snapshot
-    # at the window close, preserving message creation order across replacements.
-    for message in capture.messages:
+    # Positive predicates use the final surviving snapshot; negative predicates
+    # must also inspect text that was displayed and later replaced/deleted.
+    observations = (
+        [
+            (e.evidence_id, e.message, i, e.message.observed_s)
+            for i, e in enumerate(capture.events)
+            if e.operation != "delete"
+        ]
+        if include_history
+        else [
+            (f"{expected_id}:message:{m.message_id}", m, m.order, capture.observed_s)
+            for m in capture.messages
+        ]
+    )
+    for text_id, message, order, observed in observations:
         text = "\n".join(
             part
             for part in (*message.body_texts, *message.card_texts, *message.control_labels)
@@ -179,10 +198,10 @@ def bind_platform_text(
         if text.strip():
             texts.append(
                 VisibleText(
-                    evidence_id=f"{expected_id}:message:{message.message_id}",
+                    evidence_id=text_id,
                     message_id=message.message_id,
-                    order=message.order,
-                    observed_s=capture.observed_s,
+                    order=order,
+                    observed_s=observed,
                     text=text,
                 )
             )
@@ -194,4 +213,48 @@ def bind_platform_text(
             "texts": tuple(texts),
             "text_capture_complete": capture.text_capture_complete and not accounting_required,
         }
+    )
+
+
+def evaluate_platform_catalog(
+    evidence: RunEvidence,
+    assertions: Sequence[Mapping[str, JsonValue]],
+    captures: tuple[PlatformSurfaceCapture, ...],
+) -> OutcomeReport:
+    """Run unchanged predicates: final positives, complete history for negatives."""
+    final = evaluate(evidence, assertions)
+    if not captures:
+        return final
+    histories: dict[tuple[str, str], TurnEvidence] = {}
+    owned = {(t.session_id, t.root_turn_id): t for t in evidence.turns}
+    for capture in captures:
+        key = (capture.session_id, capture.root_turn_id)
+        if key not in owned or key in histories:
+            raise ValueError("platform history is foreign or duplicated")
+        turn = owned[key]
+        histories[key] = bind_platform_text(
+            turn,
+            capture,
+            expected_id=capture.evidence_id,
+            expected_platform=capture.platform,
+            observed_s=capture.observed_s,
+            accounting_required=not turn.text_capture_complete,
+            include_history=True,
+        )
+    history = RunEvidence.model_validate(
+        {
+            **evidence.model_dump(),
+            "turns": tuple(
+                histories.get((t.session_id, t.root_turn_id), t) for t in evidence.turns
+            ),
+        }
+    )
+    observed = evaluate(history, assertions)
+    return OutcomeReport(
+        scenario_id=final.scenario_id,
+        backend=final.backend,
+        checks=tuple(
+            h if f.kind in {"text_absent", "no_preamble"} else f
+            for f, h in zip(final.checks, observed.checks, strict=True)
+        ),
     )

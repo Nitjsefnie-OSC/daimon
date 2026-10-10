@@ -378,12 +378,17 @@ def test_platform_binding_refusals_survive_optimized_python() -> None:
 import asyncio, sys
 sys.path.insert(0, sys.argv[1])
 from judge.test_platform_catalog_surface import delivered, bound
+from judge.platform_catalog_surface import evaluate_platform_catalog
+from daimon.testing.outcome_oracle import RunEvidence
 async def check():
  for p in ('slack', 'teams'):
   c=await delivered(p)
   t=bound(c)
   if not t.text_capture_complete or 'ACTUAL' not in '\\n'.join(x.text for x in t.texts):
    raise RuntimeError('actual posts lost under -O')
+  r=evaluate_platform_catalog(RunEvidence(scenario_id='transient',backend='anthropic',turns=(t,)),
+    [dict(kind='text_present',turn=1,pattern='Working on it'),dict(kind='text_absent',turn=1,pattern='Working on it')],(c,))
+  if [x.status for x in r.checks] != ['FAIL','FAIL']: raise RuntimeError('retired text was ignored under -O')
   for field in ('session_id', 'root_turn_id', 'evidence_id'):
    try: bound(c.model_copy(update={field:'foreign'}))
    except ValueError: pass
@@ -422,3 +427,75 @@ async def test_frozen_manual_platform_cells_remain_pending_without_dispatch(
     assert result.reported_status == "PENDING" and result.status == "PENDING"
     assert result.request_count == 0 and not result.evidence.turns
     assert not result.platform_surfaces and not result.headless_outputs
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+async def test_retired_text_can_fail_forbidden_checks_but_cannot_satisfy_positive_checks(
+    platform: str,
+) -> None:
+    from .platform_catalog_surface import evaluate_platform_catalog
+
+    capture = await delivered(platform)
+    turn = bound(capture)
+    assert "Working on it" not in " ".join(t.text for t in turn.texts)
+    report = evaluate_platform_catalog(
+        RunEvidence(scenario_id="transient", backend="anthropic", turns=(turn,)),
+        [
+            {"kind": "text_present", "turn": 1, "pattern": "ACTUAL"},
+            {"kind": "text_present", "turn": 1, "pattern": "Working on it"},
+            {"kind": "text_absent", "turn": 1, "pattern": "Working on it"},
+            {"kind": "text_absent", "turn": 1, "pattern": "NEVER_FORBIDDEN"},
+        ],
+        (capture,),
+    )
+    assert [c.status for c in report.checks] == ["PASS", "FAIL", "FAIL", "PASS"]
+    assert capture.events[0].evidence_id in report.checks[2].evidence_ids
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+async def test_partial_or_billing_history_cannot_prove_forbidden_absence(platform: str) -> None:
+    from .platform_catalog_surface import evaluate_platform_catalog
+
+    for capture, accounting in [
+        (await delivered(platform, terminal=False), False),
+        (await delivered(platform), True),
+    ]:
+        turn = bound(capture, accounting_required=accounting)
+        report = evaluate_platform_catalog(
+            RunEvidence(scenario_id="partial", backend="anthropic", turns=(turn,)),
+            [{"kind": "text_absent", "turn": 1, "pattern": "NEVER_FORBIDDEN"}],
+            (capture,),
+        )
+        assert report.status == "PENDING"
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+async def test_history_evaluation_refuses_foreign_or_duplicate_receipts(platform: str) -> None:
+    from .platform_catalog_surface import evaluate_platform_catalog
+
+    capture = await delivered(platform)
+    evidence_ = RunEvidence(scenario_id="identity", backend="anthropic", turns=(bound(capture),))
+    for captures in ((capture, capture), (capture.model_copy(update={"root_turn_id": "foreign"}),)):
+        with pytest.raises(ValueError):
+            evaluate_platform_catalog(evidence_, [{"kind": "no_preamble", "turn": 1}], captures)
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+async def test_executor_forbidden_checks_bind_transient_adapter_posts(
+    tmp_path: Path, platform: str
+) -> None:
+    row = source()
+    row["surface"] = platform
+    row["assert"] = [
+        {"kind": "text_present", "turn": 1, "pattern": "KEPT"},
+        {"kind": "text_absent", "turn": 1, "pattern": "Working on it"},
+    ]
+    plan = planned(tmp_path, row)
+    result = await execute_cell(plan, scripted(plan))
+    assert result.status == "FAIL"
+    assert [c.status for c in result.catalog_outcome.checks] == ["PASS", "FAIL"]
+    assert "Working on it" not in " ".join(t.text for t in result.evidence.turns[0].texts)
+    assert (
+        result.platform_surfaces[0].events[0].evidence_id
+        in result.catalog_outcome.checks[1].evidence_ids
+    )

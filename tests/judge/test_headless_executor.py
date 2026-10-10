@@ -551,7 +551,8 @@ async def check():
             raise RuntimeError("platform posts were not captured under -O")
         if not r.evidence.turns[0].texts or not r.evidence.turns[0].text_capture_complete:
             raise RuntimeError("actual platform text evidence lost under -O")
-        actual = " ".join(t.text for t in r.evidence.turns[0].texts)
+        actual = " ".join(part for e in r.platform_surfaces[0].events if e.operation != "delete"
+                          for part in (*e.message.body_texts, *e.message.card_texts, *e.message.control_labels))
         wanted = "FAIL" if "HIDDEN" in actual else "PASS"
         if r.catalog_outcome.checks[0].status != wanted:
             raise RuntimeError("platform oracle ignored actual adapter posts under -O")

@@ -302,8 +302,9 @@ immutable SDK post receipts scoped to the independently acknowledged native
 session/root and host window. The binding validates the full send/edit/delete
 history and surviving snapshots before supplying body text, card text and
 control labels to the oracle. Text is observed at capture close in message
-creation order; historical drafts remain diagnostic, and notification-only
-fallbacks never supply visible text.
+creation order for positive predicates. Forbidden-text and no-preamble checks
+also inspect the validated transient post history, so later retirement cannot
+hide a visible violation. Notification-only fallbacks never supply visible text.
 
 One normal invocation and exactly one terminal adapter delivery close the
 post window. Delivery failures, unclosed runs and unknown visuals retain partial
