@@ -32,7 +32,12 @@ _HISTORY_MAX_PAGES = 20
 
 
 async def _latest_human_message_at(thread: discord.Thread, *, after: datetime) -> datetime | None:
-    """Newest human post after `after`; defer if history cannot be checked fully."""
+    """Newest human post after `after`; defer if the history read fails.
+
+    Reaching the page cap is not retried: the same scan would hit it again on
+    every retry. The work is treated as superseded instead, so a stale handoff
+    never runs and the row doesn't wait forever.
+    """
     before: discord.Message | None = None
     try:
         for _ in range(_HISTORY_MAX_PAGES):
@@ -49,7 +54,9 @@ async def _latest_human_message_at(thread: discord.Thread, *, after: datetime) -
             before = page[-1]
     except Exception as exc:
         raise ContinuationContextUnavailable("Discord history read failed") from exc
-    raise ContinuationContextUnavailable("Discord history scan reached its page cap")
+    assert before is not None
+    log.warning("continuation.history_cap_assumed_superseded", thread_id=thread.id)
+    return before.created_at
 
 
 async def dispatch_pending_continuations(
@@ -68,7 +75,12 @@ async def dispatch_pending_continuations(
     """Dispatch under the caller's existing thread guard."""
 
     async def context(row: TaskContinuationRow) -> tuple[datetime | None, bool]:
-        latest = await _latest_human_message_at(thread, after=row.created_at)
+        # A timer is never superseded by newer messages, so it needs no history.
+        latest = (
+            None
+            if row.reason == "timer"
+            else await _latest_human_message_at(thread, after=row.created_at)
+        )
         async with sessionmaker() as session:
             live = await get_live_thread_session(
                 session,
