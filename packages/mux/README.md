@@ -589,3 +589,11 @@ the bearer and removes the isolated schema. Run with a lane-owned local
 scripted, and MCP backing data is synthetic: this is offline composition
 evidence, not live F2 certification. It opens no tunnel and reads no provider
 key. Live Anthropic F2 still needs a disposable key and separate lead GO.
+
+The host can register a deployment constructor through
+`daimon.core.turn.runtimes.register_channel_runtime(profile, factory)`. The factory
+receives `ProviderPreparationRequest` only when the selected provider preparer
+looks up its runtime for an explicit admitted channel revision. It must return
+the provider's public runtime with authorized native resources and durable state;
+missing deployment constructors fail closed. `PreparedTurn.runtime` retains the
+resolved dependencies for execution. No mux driver discovers host credentials.

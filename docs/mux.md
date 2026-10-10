@@ -1225,3 +1225,10 @@ uses the canonical host budget guard plus bounded turn counts and whole-turn
 deadlines. Those host limits do not create a provider token ceiling or an exact
 bill: missing final usage/container evidence remains held and unverified. Explicit
 native spend controls remain available to driver callers with verified support.
+
+Explicit channel backend configuration resolves runtime dependencies separately
+for each admitted turn. Native preparation and execution use the same resolved
+runtime and authorized scope; runtime lookup does not cache one channel's native
+plan for another channel or configuration revision. Default Anthropic channels
+do not construct provider runtimes. An explicitly selected provider whose
+deployment constructor is absent is refused before provider transport access.
