@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2241,
+  "files_scanned": 2246,
   "parse_errors": [],
   "calls": [
     {
@@ -17272,7 +17272,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_provider_dispatch.py",
-      "line": 87,
+      "line": 88,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
