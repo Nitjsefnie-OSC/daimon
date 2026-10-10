@@ -148,12 +148,38 @@ test uses scripted SDK HTTP/SSE to verify that pre-tool narration, tool results
 and text beyond the host's 1000-character limit do not reach this boundary.
 The test also covers an actual tool-only empty return. It exercises the existing
 legacy headless host and driver; mux admission/session reuse are separate runner
-checks. Binding these receipts to the effects oracle is a following slice once
-that oracle lands on integration. This capture alone
-does not change any TARGET-53 score or claim platform parity.
+checks. The helper alone awards no TARGET-53 score; the executor binding below
+feeds these returned-output observations to the effects oracle. Neither
+boundary certifies platform parity.
 
 Focused verification: `uv run pytest tests/judge/test_headless_output.py`.
 Explicit `wait_done.timeout_s` is currently `PENDING / WAIT_DONE_TIMEOUT_UNBOUND`
 before any SDK dispatch, for valid and malformed values alike. A timeout-less
 `wait_done` joins the already awaited driver turn. The ten-second offline
 watchdog protects the fixture process; it does not certify a catalog wait deadline.
+
+The catalog executor now explicitly selects the `headless_return` output
+boundary. Its real mux driver invocation returns the final response after the
+last tool, with the same 1000-character limit as the production headless host.
+The executor receives that returned string through `capture_headless_return`
+and binds it to the acknowledged journal root/session, checking its minted
+evidence ID and monotonic capture window. It accepts no deserialized output
+receipt as an execution input. CLI replay rebuilds these observations from the
+source-pinned transport, rather than trusting a prior result report.
+
+`headless_outputs` retains the receipts; `rendered_text` is a compatibility view
+of their returned strings. A nonblank actual return contributes one `VisibleText`
+at the caller-receipt time. An empty return has complete text capture and no
+visible message. A host exception produces no output receipt or text coverage;
+a native failed root that the host actually returns from still retains its
+returned text and its independent failed root outcome. No pre-tool narration,
+tool result or transient render snapshot is promoted into visible evidence.
+The selected host delivers only its returned string, so that return closes its
+text window. Card/reaction/log/tool/approval coverage remains false; native
+completion and native tool records do not fill those domains.
+
+N3's effects oracle evaluates every original/global predicate against this
+headless view. Authored offline tapes can PASS deterministic returned-text
+predicates; they certify neither model instruction following nor Discord
+rendering, human actions or provider/platform parity. Missing execution steps,
+explicit wait deadlines and catalog capability gaps still remain PENDING.

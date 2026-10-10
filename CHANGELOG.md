@@ -69,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Refuse timeout-specific offline catalog credit until the explicit wait_done deadline is bound, keeping those cells PENDING before dispatch.
 - Add strict offline OpenAI/Gemini SDK replay transports and source-pinned TARGET-53 fixture bindings, retaining unsupported operations as explicit gaps for the outcome oracle.
+- Bind offline QA visible-text predicates to actual scoped headless returns, preserving failed roots and leaving platform/tool/card effects uncaptured.
+
 - Refuse timeout-specific offline catalog credit until the explicit wait_done deadline is bound, keeping those cells PENDING before dispatch.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.

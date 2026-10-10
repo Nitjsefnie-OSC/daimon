@@ -86,16 +86,35 @@ async def test_real_turn_captures_authoritative_roots_and_reuses_persisted_sessi
     assert len(result.host_outcome.checks) == 5
     assert result.host_outcome.status == "PASS"
     assert result.rendered_text == ("KEPT", "KEPT")
+    assert len(result.headless_outputs) == 2
+    for turn, output in zip(result.evidence.turns, result.headless_outputs, strict=True):
+        assert (
+            output.evidence_id
+            == f"QA-FIXTURE:anthropic:{turn.session_id}:{turn.root_turn_id}:headless_return"
+        )
+        assert turn.text_capture_complete and turn.texts[0].text == output.text
+        assert turn.texts[0].observed_s == output.returned_s
+        assert not (
+            turn.card_capture_complete
+            or turn.tool_capture_complete
+            or turn.approval_capture_complete
+        )
 
 
 async def test_original_and_global_assertions_remain_pending_not_dropped_for_credit(
     tmp_path: Path,
 ) -> None:
-    plan = planned(tmp_path, source())
+    row = source()
+    row["assert"].append({"kind": "card_finalized", "turn": 1})
+    plan = planned(tmp_path, row)
     result = await executor.execute_cell(plan, scripted(plan))
     assert result.status == "PENDING" and result.host_outcome.status == "PASS"
     assert len(result.catalog_outcome.checks) == len(plan.assertions) + len(plan.global_assertions)
-    assert all(c.status == "PENDING" for c in result.catalog_outcome.checks)
+    assert any(
+        c.kind == "text_present" and c.status == "PASS" for c in result.catalog_outcome.checks
+    )
+    assert any(c.status == "PENDING" for c in result.catalog_outcome.checks)
+    assert not any(c.status == "FAIL" for c in result.catalog_outcome.checks)
 
 
 @pytest.mark.parametrize("backend", ["openai", "gemini"])
@@ -197,6 +216,11 @@ async def test_native_failed_turn_is_a_real_oracle_failure(tmp_path: Path) -> No
     result = await executor.execute_cell(plan, replay)
     assert result.status == "FAIL"
     assert result.host_outcome.checks[0].code == "TURN_NOT_COMPLETED"
+    # The current host returns text on retries_exhausted when state.error is
+    # unset. Capture that real return without promoting the failed root.
+    assert result.evidence.turns[0].text_capture_complete
+    assert result.evidence.turns[0].terminals[0].outcome == "errored"
+    assert len(result.headless_outputs) == 2
 
 
 def test_admission_and_sse_refusals_survive_optimized_python(tmp_path: Path) -> None:
@@ -375,4 +399,149 @@ def test_wait_done_timeout_refusal_survives_optimized_python(tmp_path: Path) -> 
         timeout=30,
     )
     if result.returncode != 0:
+        raise AssertionError(result.stderr.decode())
+
+
+def with_tool_response(plan: ScenarioPlan, answer: str | None) -> executor.ScenarioReplay:
+    body = scripted(plan).model_dump(mode="json")
+    events = body["turns"][0]["events"]
+    before = dict(events[2], id="narration", content=[{"type": "text", "text": "HIDDEN_PRETOOL"}])
+    use = {
+        "id": "tool",
+        "type": "agent.tool_use",
+        "processed_at": "2026-10-10T00:00:00Z",
+        "name": "bash",
+        "input": {"command": "true"},
+    }
+    result = {
+        "id": "tool-result",
+        "type": "agent.tool_result",
+        "processed_at": "2026-10-10T00:00:00Z",
+        "tool_use_id": "tool",
+        "content": [{"type": "text", "text": "HIDDEN_TOOL_RESULT"}],
+        "is_error": False,
+    }
+    middle = [before, use, result]
+    if answer is not None:
+        middle.append(dict(events[2], content=[{"type": "text", "text": answer}]))
+    body["turns"][0]["events"] = [*events[:2], *middle, events[-1]]
+    return executor.ScenarioReplay.model_validate(body)
+
+
+async def test_mux_headless_return_binds_only_actual_final_text_to_oracle(tmp_path: Path) -> None:
+    row = source()
+    row["surface"] = "headless"
+    row["assert"] = [
+        {"kind": "text_present", "turn": 1, "pattern": "^FINAL"},
+        {"kind": "text_absent", "turn": 1, "pattern": "HIDDEN|TRUNCATED"},
+        {"kind": "no_preamble", "turn": 1},
+        {"kind": "card_finalized", "turn": 1},
+        {"kind": "tool_succeeded", "turn": 1, "tool_name": "bash"},
+    ]
+    plan = planned(tmp_path, row)
+    result = await executor.execute_cell(
+        plan, with_tool_response(plan, "FINAL" + "a" * 995 + "TRUNCATED")
+    )
+    assert result.status == "PENDING" and result.host_outcome.status == "PASS"
+    assert [c.status for c in result.catalog_outcome.checks] == [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PENDING",
+        "PENDING",
+    ]
+    first = result.evidence.turns[0]
+    assert first.text_capture_complete and len(first.texts) == 1
+    assert first.texts[0].text == "FINAL" + "a" * 995
+    assert first.texts[0].evidence_id == result.headless_outputs[0].evidence_id
+    assert first.texts[0].observed_s <= first.terminals[0].observed_s
+    assert not first.tools and not first.cards and not first.approvals
+
+
+async def test_tool_only_return_is_closed_text_capture_without_a_visible_message(
+    tmp_path: Path,
+) -> None:
+    row = source()
+    row["surface"] = "headless"
+    row["assert"] = [
+        {"kind": "text_absent", "turn": 1, "pattern": ".+"},
+        {"kind": "text_present", "turn": 1, "pattern": "answer"},
+        {"kind": "reply_within_s", "turn": 1, "max": 10.0},
+    ]
+    plan = planned(tmp_path, row)
+    result = await executor.execute_cell(plan, with_tool_response(plan, None))
+    assert result.evidence.turns[0].text_capture_complete
+    assert not result.evidence.turns[0].texts
+    assert result.headless_outputs[0].text == "" and not result.headless_outputs[0].has_visible_text
+    assert [c.status for c in result.catalog_outcome.checks] == ["PASS", "FAIL", "PENDING"]
+    assert result.catalog_outcome.checks[1].code == "EXPECTED_TEXT_MISSING"
+
+
+@pytest.mark.parametrize("mutation", ["identity", "early", "future", "missing"])
+async def test_foreign_or_missing_return_receipt_cannot_be_bound_to_a_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    plan = planned(tmp_path, source())
+    capture = executor.capture_headless_return
+
+    async def corrupt(*args: Any, **kwargs: Any) -> Any:
+        receipt = await capture(*args, **kwargs)
+        if mutation == "missing":
+            return None
+        update = (
+            {"evidence_id": "foreign"}
+            if mutation == "identity"
+            else {
+                "started_s" if mutation == "early" else "returned_s": 0.0
+                if mutation == "early"
+                else receipt.returned_s + 1000,
+            }
+        )
+        return receipt.model_copy(update=update)
+
+    monkeypatch.setattr(executor, "capture_headless_return", corrupt)
+    with pytest.raises(ValueError, match="return.*(?:capture window|receipt)"):
+        await executor.execute_cell(plan, scripted(plan))
+
+
+def test_headless_visible_oracle_binding_survives_optimized_python(tmp_path: Path) -> None:
+    row = source()
+    row["surface"] = "headless"
+    row["assert"] = [{"kind": "text_absent", "turn": 1, "pattern": "HIDDEN"}]
+    plan = planned(tmp_path, row)
+    inputs = tmp_path / "visible-inputs.json"
+    inputs.write_text(
+        json.dumps(
+            {
+                "plan": plan.model_dump(mode="json"),
+                "replay": with_tool_response(plan, "FINAL").model_dump(mode="json"),
+            }
+        )
+    )
+    script = """
+import asyncio, importlib, json, sys
+sys.path.insert(0, sys.argv[2])
+e = importlib.import_module("judge.headless_executor")
+c = importlib.import_module("judge.catalog_runner")
+x = json.load(open(sys.argv[1]))
+async def check():
+    r = await e.execute_cell(c.ScenarioPlan.model_validate(x["plan"]), e.ScenarioReplay.model_validate(x["replay"]))
+    if r.status != "PASS" or r.headless_outputs[0].text != "FINAL":
+        raise RuntimeError("headless return evidence lost under -O")
+    t = r.evidence.turns[0]
+    if not t.text_capture_complete or len(t.texts) != 1 or t.texts[0].text != "FINAL":
+        raise RuntimeError("native narration became visible evidence")
+    if t.tools or t.tool_capture_complete or t.cards or t.card_capture_complete:
+        raise RuntimeError("unbound native tool/card effect was certified")
+asyncio.run(check())
+"""
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", script, str(inputs), str(Path(__file__).parents[1])],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode:
         raise AssertionError(result.stderr.decode())

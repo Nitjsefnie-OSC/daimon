@@ -15,10 +15,13 @@ from typing import Any, Literal, cast
 
 import httpx
 from daimon.core.channel_backend import check_backend
+from daimon.core.errors import TurnError
+from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX
 from daimon.core.mux_backend import TurnBackendRequest, turn_backend
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.testing.ma import send_events_response
 from daimon.testing.ma_models import ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
@@ -29,6 +32,7 @@ from daimon.testing.outcome_oracle import (
     Status,
     TerminalEvidence,
     TurnEvidence,
+    VisibleText,
     evaluate,
 )
 from daimon.testing.turn_fakes import RecordingLifecycle
@@ -52,6 +56,7 @@ if __package__:
         expand_text,
         sha,
     )
+    from .headless_output import HeadlessOutput, capture_headless_return
 else:
     from catalog_runner import (
         FROZEN_TARGET_SHA256,
@@ -64,6 +69,7 @@ else:
         expand_text,
         sha,
     )
+    from headless_output import HeadlessOutput, capture_headless_return
 
 
 class ReplayTurn(Record):
@@ -122,8 +128,9 @@ class CellResult(Record):
     catalog_outcome: OutcomeReport
     host_outcome: OutcomeReport
     request_count: int = 0
-    # These are actual host lifecycle outputs, retained for the next oracle slice.
+    # Compatibility view of actual headless returns; never render snapshots.
     rendered_text: tuple[str, ...] = ()
+    headless_outputs: tuple[HeadlessOutput, ...] = ()
 
     @computed_field
     @property
@@ -235,7 +242,7 @@ async def _run_turn(
     store: MemoryStateStore,
     binding: ProviderBinding,
     scope: Scope,
-) -> tuple[TurnEvidence, int, str]:
+) -> tuple[TurnEvidence, int, str, HeadlessOutput | None]:
     """Capture journal authority and all selections in this owned host window."""
     if invocation.turn is None:
         raise ValueError("host invocation has no catalog turn")
@@ -286,6 +293,10 @@ async def _run_turn(
     )
     lifecycle = RecordingLifecycle()
     started = time.monotonic()
+    root = cast(str, tape.events[0]["id"])
+    output_id = f"{plan.scenario.id}:{plan.backend}:{session.id}:{root}:headless_return"
+    output: HeadlessOutput | None = None
+    states: list[TurnState] = []
     journal_before = len(await store.read_events(session.id))
     async with transport.client() as client:
         request = TurnBackendRequest(
@@ -308,24 +319,41 @@ async def _run_turn(
         if snapshot.native.get("id") != session.id or model_id != channel.agent_model:
             raise ValueError("prepared session differs from selected model/session")
         with persistence.activate():
-            state = await asyncio.wait_for(
-                run_turn(
-                    anthropic=client,
-                    session_id=session.id,
-                    user_message=tape.request_text,
-                    lifecycle=lifecycle,
-                    cancel=asyncio.Event(),
-                    billing=BillingExempt(reason="headless-unrecorded"),
-                    path="mux",
-                    scope=scope,
-                    session_ref=session,
-                    profile=channel.revision.profile,
-                    backend_request=request,
-                    stream_read_timeout_s=5.0,
-                    render_interval_s=3600,
-                ),
-                timeout=10.0,
-            )
+
+            async def invoke() -> str:
+                # This executor is the selected headless host. Like the real
+                # headless runner, its caller receives only the final response
+                # after the last tool, truncated by the host's published limit.
+                state = await asyncio.wait_for(
+                    run_turn(
+                        anthropic=client,
+                        session_id=session.id,
+                        user_message=tape.request_text,
+                        lifecycle=lifecycle,
+                        cancel=asyncio.Event(),
+                        billing=BillingExempt(reason="headless-unrecorded"),
+                        path="mux",
+                        scope=scope,
+                        session_ref=session,
+                        profile=channel.revision.profile,
+                        backend_request=request,
+                        stream_read_timeout_s=5.0,
+                        render_interval_s=3600,
+                    ),
+                    timeout=10.0,
+                )
+                states.append(state)
+                if state.error is not None:
+                    raise state.error
+                return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]
+
+            try:
+                output = await capture_headless_return(invoke, evidence_id=output_id)
+            except TurnError as error:
+                # A recorded native failure still belongs in the oracle. It
+                # does not produce a successful return receipt or text coverage.
+                if not states or states[-1].error is not error:
+                    raise
     observed = time.monotonic()
     # assert_consumed uses bare asserts; explicit guards must survive Python -O.
     if transport.violations or transport.replies:
@@ -335,9 +363,19 @@ async def _run_turn(
     ]:
         raise ValueError("scripted SSE capture did not consume every record")
     operation = await store.get_operation(scope, f"{key}:send:0")
-    root = cast(str, tape.events[0]["id"])
     if operation is None or not operation.result or (operation.result.get("input_ids") != [root]):
         raise ValueError("root is not the acknowledged submitted input")
+    if len(states) != 1:
+        raise ValueError("headless invocation did not produce exactly one host state")
+    state = states[0]
+    if state.error is None and output is None:
+        raise ValueError("successful headless invocation has no return receipt")
+    if output is not None and (
+        output.evidence_id != output_id
+        or output.started_s < started
+        or output.returned_s > observed
+    ):
+        raise ValueError("headless return differs from its owned capture window")
     journal = (await store.read_events(session.id))[journal_before:]
     if any(event.turn_id is not None and event.turn_id != root for event in journal):
         raise ValueError("journal record belongs to another root")
@@ -373,6 +411,18 @@ async def _run_turn(
         terminal_capture_complete=not any(event.authority == "gap" for event in journal),
         # Only this executor writes bindings; it never calls recovery or replacement hooks.
         session_capture_complete=True,
+        texts=(
+            VisibleText(
+                evidence_id=output.evidence_id,
+                message_id=output.evidence_id,
+                order=0,
+                observed_s=output.returned_s,
+                text=output.text,
+            ),
+        )
+        if output is not None and output.has_visible_text
+        else (),
+        text_capture_complete=output is not None,
     )
     # Preserve recorded native failures, but never let a host failure PASS.
     if (state.error is not None or lifecycle.terminal_failures) and (
@@ -382,7 +432,8 @@ async def _run_turn(
     return (
         evidence,
         len(transport.requests),
-        "\n".join(block.text for block in state.content if block.kind == "text"),
+        output.text if output is not None else "",
+        output,
     )
 
 
@@ -421,6 +472,7 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
                 raise ValueError("replay request differs from the planned text")
     turns: list[TurnEvidence] = []
     rendered: list[str] = []
+    outputs: list[HeadlessOutput] = []
     requests = 0
     if not gaps and replay is not None:
         store = MemoryStateStore()
@@ -452,12 +504,14 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
                 )
                 await store.put_binding(binding, expected_generation=0)
                 bindings[slot] = binding
-            turn, count, text = await _run_turn(
+            turn, count, text, output = await _run_turn(
                 plan, invocation, tapes[cast(int, invocation.turn)], store, bindings[slot], scope
             )
             turns.append(turn)
             requests += count
             rendered.append(text)
+            if output is not None:
+                outputs.append(output)
         evidence = RunEvidence(
             scenario_id=plan.scenario.id, backend=plan.backend, turns=tuple(turns)
         )
@@ -475,6 +529,7 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
         host_outcome=evaluate(evidence, _host_assertions(evidence)),
         request_count=requests,
         rendered_text=tuple(rendered),
+        headless_outputs=tuple(outputs),
     )
 
 
