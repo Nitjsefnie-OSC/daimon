@@ -1215,3 +1215,13 @@ Discord consumes neutral message snapshots and ordered previews through an optio
 Slack also consumes root neutral snapshots and ordered previews through the optional local tap. Authoritative snapshots replace draft fragments; terminal output comes from host state. Existing status-card replacement, Cancel routing, generic confirmation controls, and Anthropic pricing remain unchanged. An unverified alternate-provider cost is omitted.
 
 Teams renders root neutral snapshots and ordered previews locally, retaining its debounce, unprompted silence and existing terminal card retirement. Host state owns final answers. Alternate-provider observations and missing observations bypass Anthropic display meters, so unknown cost is omitted; the native Anthropic path is unchanged.
+
+
+OpenAI G1 no longer requires the optional native `spend_control` setting. The
+2026-10-10 Agents reference documents `spend_control.limit` as positive whole USD
+cents with no higher stated minimum, but our guarded project probe rejected the
+field with HTTP 400 and `param=spend_control`. G1 live tooling omits the field and
+uses the canonical host budget guard plus bounded turn counts and whole-turn
+deadlines. Those host limits do not create a provider token ceiling or an exact
+bill: missing final usage/container evidence remains held and unverified. Explicit
+native spend controls remain available to driver callers with verified support.
