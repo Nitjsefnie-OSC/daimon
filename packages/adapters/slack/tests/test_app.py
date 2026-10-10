@@ -1568,6 +1568,7 @@ async def test_orchestrate_continuation_when_live_session_exists_calls_build_del
             thread_id=thread_ts,
             account_id=cont_principal.account_id,
             ma_session_id="sess-cont-existing",
+            budget_channel_id=channel,
             ma_agent_id="agent_test_id",
             watermark_message_id=prior_watermark,
             effective_config=_cont_snapshot,
@@ -3895,6 +3896,7 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
             thread_id=thread_ts,
             account_id=principal.account_id,
             ma_session_id="sess-reused-over-balance",
+            budget_channel_id=channel,
             watermark_message_id="9000000030.000000",
         )
         await s.commit()
@@ -3991,6 +3993,7 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
             thread_id=thread_ts,
             account_id=principal.account_id,
             ma_session_id="sess-reused-over-cap",
+            budget_channel_id=channel,
             watermark_message_id="9000000031.000000",
         )
         await s.commit()
@@ -4096,6 +4099,7 @@ async def test_run_thread_turn_reused_session_unblocked_writes_usage_event_and_l
             thread_id=thread_ts,
             account_id=principal.account_id,
             ma_session_id=seeded_session_id,
+            budget_channel_id=channel,
             ma_agent_id="agent_test_id",
             watermark_message_id="9000000032.000000",
             effective_config=_billed_snapshot,

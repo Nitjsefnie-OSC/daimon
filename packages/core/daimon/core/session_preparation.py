@@ -724,9 +724,14 @@ async def _prepare_session_for_turn_locked(
             ):
                 observed = stamp_observation[1]
             if identity.session_exists:
-                recorded = await recorded_snapshot(
-                    deps.anthropic, deps.sessionmaker, existing=row, observed=observed
-                )
+                if row.budget_channel_id == "" and stamp_observation is None:
+                    # The pre-lock MA read failed. A second read of the same
+                    # legacy session must not prevent its turn from running.
+                    recorded = row.effective_config
+                else:
+                    recorded = await recorded_snapshot(
+                        deps.anthropic, deps.sessionmaker, existing=row, observed=observed
+                    )
             if (
                 recorded is None
                 and not admission.memory_read_only
