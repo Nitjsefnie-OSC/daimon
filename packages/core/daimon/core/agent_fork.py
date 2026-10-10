@@ -42,7 +42,6 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_NAME,
     build_metadata,
-    skill_owner_candidates,
     strip_tenant_prefix,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -52,6 +51,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_agent, retrieve_agent
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
+from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_skills
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
@@ -114,26 +114,40 @@ async def _split_scoped_skills(
         agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
         for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
     ]
-    split = _SkillSplit([], [], [])
+    attached: list[AttachedSkillOwnership] = []
     for skill in skills:
         skill_id = str(skill.get("skill_id"))
         body = body_by_id.get(skill_id)
         upload = upload_by_id.get(skill_id)
-        owners = skill_owner_candidates(
-            body or "",
-            stored_owner=upload.agent_name if upload is not None else None,
-            agent_names=agent_names,
+        pinned = skill.get("version")
+        attached.append(
+            AttachedSkillOwnership(
+                id=skill_id,
+                custom=skill.get("type") == "custom",
+                title=body,
+                version=str(pinned) if pinned else None,
+                upload_owner=upload.agent_name if upload is not None else None,
+            )
         )
-        if not owners:
-            split.kept.append(skill)
-        elif owners == frozenset({source_name}) and body is not None:
-            pinned = skill.get("version")
-            latest = rows[skill_id].latest_version
-            version = str(pinned) if pinned and pinned != "latest" else latest
-            split.own.append(_OwnSkill(skill_id, body, version, upload))
-        else:
-            split.dropped.append(body or skill_id)
-    return split
+    partition = partition_copy_skills(attached, source_name=source_name, agent_names=agent_names)
+    own: list[_OwnSkill] = []
+    for skill in partition.own:
+        # The old consumer read latest_version only for source-owned skills.
+        # Shared/catalog rows may be SDK-accepted partial records.
+        latest = rows[skill.id].latest_version
+        own.append(
+            _OwnSkill(
+                skill.id,
+                skill.title,
+                skill.version if skill.version is not None else latest,
+                upload_by_id.get(skill.id),
+            )
+        )
+    return _SkillSplit(
+        [skills[position] for position in partition.kept_positions],
+        own,
+        list(partition.dropped),
+    )
 
 
 async def _no_recheck(_agent: BetaManagedAgentsAgent) -> None:

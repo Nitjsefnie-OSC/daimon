@@ -591,3 +591,12 @@ evidence, not live F2 certification. It opens no tunnel and reads no provider
 key. Live Anthropic F2 still needs a disposable key and separate lead GO.
 
 The host may use `daimon.core.stores.neutral_catalog.PostgresNeutralCatalog` for durable alternate-backend agent revisions and retained skill bundles with upload ownership. Its local revision is separate from native revisions: drivers continue to refuse unsupported native mutation. Tenant/account/provider-workspace boundaries and immutable exact-version bundles are enforced in the store; host policy and native calls remain with the resource edge. No mux dependency on this host store is introduced.
+
+Host skill authoring decisions live in `daimon.core.skills.ownership` and
+`daimon.core.skills.service`. The service accepts a tenant-authorized host
+resource/ledger edge and opaque agent values; it has no SDK client or native
+storage columns. Refusals precede upload, and the host records the upload before
+attachment so a retry can reuse it. The default Anthropic edge preserves native
+requests. This extraction does not provide missing alternate-provider mutation,
+owned-bundle download or durable upload catalog support. Those capabilities
+remain required before channel fork/Add-skill availability can be claimed.
