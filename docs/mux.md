@@ -134,6 +134,15 @@ shares, or once did, reads the thread's binding, one indexed lookup. Two
 first turns racing in a new shared thread prepare the same session and
 record one binding.
 
+Sharing does not depend on the provider. On a channel configured for a
+runnable OpenAI or Gemini profile, the thread's provider preparation
+(`register_turn_preparation`) receives the shared owner as
+`session_account_id` and keys its native session by it, with host
+credentials only; the binding records that provider and profile. A shared
+thread runs under the revision it was bound with, so after the channel moves
+to another provider the thread's turns still dispatch to the first one, and
+only new threads use the second.
+
 ## Ports
 
 `ManagedAgents` groups the eight ports (`agents`, `environments`, `sessions`,

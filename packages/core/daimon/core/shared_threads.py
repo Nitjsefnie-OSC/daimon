@@ -145,7 +145,8 @@ async def record_shared_binding(
     binding = ProviderBinding(
         id=str(shared.owner),
         thread=shared.slot.thread,
-        provider="anthropic",
+        # The provider and profile of the revision the thread is pinned to.
+        provider=shared.revision.backend,
         profile=shared.revision.profile,
         native_refs={"session": ma_session_id},
         generation=(current.generation if current else 0) + 1,

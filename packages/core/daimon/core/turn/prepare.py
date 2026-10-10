@@ -586,15 +586,19 @@ async def bind_session(
     observation.agent_id = admission.agent.id
     try:
         with observation.activate():
-            shared = (
-                await _shared_thread(
-                    deps, admission, tenant_id=tenant_id, platform=platform, thread_id=thread_id
-                )
-                if _admitted_profile(admission) == "anthropic.managed_agents"
-                else None
+            # Any admitted profile may share a thread: a provider preparation
+            # receives the shared owner as `session_account_id` and keys its
+            # native session by it, with host credentials only.
+            shared = await _shared_thread(
+                deps, admission, tenant_id=tenant_id, platform=platform, thread_id=thread_id
             )
             if shared is not None:
-                admission = replace(admission, shared_owner=shared.owner)
+                # The thread runs under the revision it was bound with (checked
+                # runnable by `resolve_shared_thread`), so dispatch picks that
+                # provider even after the channel moved to another (C14).
+                admission = replace(
+                    admission, shared_owner=shared.owner, backend_revision=shared.revision
+                )
                 session_account_id = shared.owner
             result = await bind_session_impl(
                 deps,
