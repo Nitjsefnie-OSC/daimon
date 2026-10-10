@@ -13,11 +13,6 @@ from daimon.testing.db import db_session_factory as db_session_factory
 from daimon.testing.factories import make_tenant as make_tenant
 
 
-def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    if report.failed:
-        print(f"DISCORD TEST FAILURE: {report.nodeid} ({report.when})", flush=True)
-
-
 @pytest.fixture(autouse=True)
 def isolate_card_edits() -> Iterator[None]:
     """Card edits finish in the background; one test's stalled edit must not
