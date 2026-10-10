@@ -68,6 +68,7 @@ from daimon.adapters.teams.lifecycle import (
 from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.participation import TeamsParticipation
+from daimon.adapters.teams.provider_actions import TeamsProviderActions, provider_action_options
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
@@ -315,6 +316,7 @@ class TeamsApp:
         )
         # Tool-write confirmation cards awaiting a click.
         self.confirmations = TeamsConfirmationCards(self._sender)
+        self.provider_actions = TeamsProviderActions(self._sender)
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         # Per-tenant turn slots, with the queue a turn waits in at the cap.
@@ -1235,6 +1237,14 @@ class TeamsApp:
                     conversation_id=inbound.conversation_id,
                     service_url=inbound.service_url,
                     requester_display_name=inbound.user_name,
+                ),
+                **provider_action_options(
+                    prepared,
+                    lambda: self.provider_actions.hook(
+                        conversation_id=inbound.conversation_id,
+                        service_url=inbound.service_url,
+                        thread_id=inbound.thread_id,
+                    ),
                 ),
             )
         if outcome.mapping_id is not None:
