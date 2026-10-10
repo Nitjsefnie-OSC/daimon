@@ -594,6 +594,10 @@ class DaimonBot(commands.Bot):
         )
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
+        # Separate guard for unjoined-guild refreshes, so a rejoin during one
+        # still runs its own seed and flips the tenant back to ready. The
+        # reconcile's per-tenant advisory lock serializes the two.
+        self._unjoined_reconciling: set[uuid.UUID] = set()
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
         # Gateway lifecycle callbacks run as separate tasks. Serialize only the
         # tenant provision/archive transitions so an earlier remove cannot
@@ -1128,6 +1132,36 @@ class DaimonBot(commands.Bot):
         finally:
             self._seeding.discard(tenant_id)
 
+    async def _reconcile_unjoined_tenant_defaults(self, tenant_id: uuid.UUID) -> None:
+        """Refresh defaults for a registered tenant without changing its install state."""
+        if tenant_id in self._unjoined_reconciling:
+            return
+        self._unjoined_reconciling.add(tenant_id)
+        public_url = (
+            str(self.runtime.settings.mcp.public_url)
+            if self.runtime.settings.mcp.public_url is not None
+            else None
+        )
+        try:
+            async with self._seed_sem:
+                report = await reconcile_tenant_defaults(
+                    self.runtime.anthropic,
+                    self.runtime.sessionmaker,
+                    self.runtime.settings.defaults_root,
+                    tenant_id=tenant_id,
+                    public_url=public_url,
+                )
+            if report.is_failure():
+                log.warning(
+                    "unjoined_guild_reconcile_failed",
+                    tenant_id=str(tenant_id),
+                    reason=compose_failure_reason(report),
+                )
+        except Exception:
+            log.exception("unjoined_guild_reconcile_failed", tenant_id=str(tenant_id))
+        finally:
+            self._unjoined_reconciling.discard(tenant_id)
+
     def _guild_lifecycle_lock_for(self, guild_id: int) -> asyncio.Lock:
         """Return the process-local lifecycle lock for one Discord guild."""
         lock = self._guild_lifecycle_locks.get(guild_id)
@@ -1565,7 +1599,7 @@ class DaimonBot(commands.Bot):
                 self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False)
             )
 
-        # Reconcile every registered, joined tenant against the shipped defaults on
+        # Reconcile every registered, unarchived tenant against the shipped defaults on
         # every boot, not just the ones stuck in pending/failed. Because every
         # deploy restarts this process, this loop is how a defaults edit (a prompt
         # rewrite, a new skill) reaches an already-provisioned install without any
@@ -1577,6 +1611,8 @@ class DaimonBot(commands.Bot):
             guild = self.get_guild(int(tr.external_id))
             if guild is None:
                 log.warning("registered_guild_not_joined", external_id=tr.external_id)
+                if tr.archived_at is None:
+                    self._spawn(self._reconcile_unjoined_tenant_defaults(tr.id))
                 continue
             if tr.id not in recovered_tenant_ids:
                 self._spawn(
