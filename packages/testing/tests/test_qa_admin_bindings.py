@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import uuid
@@ -9,6 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -26,7 +28,7 @@ from daimon.testing.admin_bindings import (
     parse_admin,
     provision_admin_run,
 )
-from daimon.testing.db import build_test_engine, isolated_test_schema
+from daimon.testing.db import build_test_engine, isolated_test_schema, require_owned_sessionmaker
 from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.ids import ChannelRef, Provider, Scope
 from mux.errors import ScopeViolation
@@ -50,6 +52,22 @@ FIXTURE = (
 async def binding(
     request: pytest.FixtureRequest, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> AsyncIterator[AdminBindings]:
+    try:
+        require_owned_sessionmaker(db_session_factory)
+    except ValueError:
+        bound = db_session_factory.kw.get("bind")
+        engine = bound.engine if isinstance(bound, AsyncConnection) else bound
+        if (
+            isinstance(engine, AsyncEngine)
+            and engine.url.get_backend_name() == "postgresql"
+            and engine.url.host in ("localhost", "127.0.0.1")
+            and engine.url.database == "daimon_test"
+            and not engine.url.query
+            and not db_session_factory.kw.get("binds")
+            and not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("CI") == "true")
+        ):
+            pytest.skip("admin proofs require a lane database or registered isolated CI schema")
+        raise
     backend = cast(Provider, request.param)
     bound = await provision_admin_run(
         db_session_factory,
@@ -856,3 +874,82 @@ async def test_owned_model_routing_still_provisions_and_reads_product_state(
         assert (await bound.configure_channel(min(bound.channels))).status == "executed"
     finally:
         await bound.close()
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+@pytest.mark.parametrize("bind_kind", ["engine", "connection"])
+@pytest.mark.parametrize(
+    ("actions", "ci"),
+    [
+        (None, None),
+        ("true", None),
+        (None, "true"),
+        ("true", "false"),
+        ("false", "true"),
+        ("TRUE", "true"),
+        ("true", "true"),
+    ],
+)
+async def test_actual_binding_fixture_skips_plain_local_database_outside_exact_ci(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    bind_kind: str,
+    actions: str | None,
+    ci: str | None,
+) -> None:
+    for name, value in (("GITHUB_ACTIONS", actions), ("CI", ci)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    engine = create_async_engine("postgresql+asyncpg://offline:fixture@localhost/daimon_test")
+    connections: list[None] = []
+
+    def forbid_connection(*args: object, **kwargs: object) -> None:
+        connections.append(None)
+        raise AssertionError("contributor fixture attempted a database connection")
+
+    event.listen(engine.sync_engine, "do_connect", forbid_connection)
+    sessions = async_sessionmaker(
+        engine if bind_kind == "engine" else AsyncConnection(engine), expire_on_commit=False
+    )
+    fixture = inspect.unwrap(binding)
+    generator = fixture(SimpleNamespace(param=provider), sessions)
+    expected = ValueError if actions == ci == "true" else pytest.skip.Exception
+    try:
+        with pytest.raises(expected, match="owned local|lane database"):
+            await anext(generator)
+        assert not connections
+    finally:
+        await generator.aclose()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+async def test_actual_binding_fixture_does_not_skip_foreign_per_model_bind(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    shared = create_async_engine("postgresql+asyncpg://offline:fixture@localhost/daimon_test")
+    foreign = create_async_engine(
+        "postgresql+asyncpg://offline:fixture@localhost/operator_database"
+    )
+    connections: list[None] = []
+
+    def forbid_connection(*args: object, **kwargs: object) -> None:
+        connections.append(None)
+        raise AssertionError("foreign fixture attempted a database connection")
+
+    event.listen(shared.sync_engine, "do_connect", forbid_connection)
+    event.listen(foreign.sync_engine, "do_connect", forbid_connection)
+    sessions = async_sessionmaker(shared, binds={Tenant: foreign}, expire_on_commit=False)
+    generator = inspect.unwrap(binding)(SimpleNamespace(param=provider), sessions)
+    try:
+        with pytest.raises(ValueError, match="owned local"):
+            await anext(generator)
+        assert not connections
+    finally:
+        await generator.aclose()
+        await foreign.dispose()
+        await shared.dispose()

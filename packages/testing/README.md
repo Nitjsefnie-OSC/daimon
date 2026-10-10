@@ -135,3 +135,21 @@ The existing `build_fake_anthropic`, `build_stub_anthropic` and
 URL, SDK timeout and retry behavior are preserved: fake/stub use two retries;
 scripted defaults to zero and honors its explicit retry budget. The existing
 `build_no_retry_anthropic` remains a separate builder outside this change.
+
+## Owned database session factories
+
+Call `daimon.testing.db.require_owned_sessionmaker(factory_or_engine)` before
+opening a test-hook session. It validates the main bind and every routed
+`binds` value, including connection binds' engines, without connecting or
+changing the factory. Only local PostgreSQL `daimon_test_nc_*` lane databases
+are allowed. The `daimon_test` exception requires both `GITHUB_ACTIONS=true`
+and `CI=true`, plus `build_test_engine` provenance for a current-process
+`test_w<pid>_<8hex>` or `test_f<pid>_<8hex>` schema on every engine. Execution
+options and engine clones do not establish that provenance. Unbound factories,
+foreign or synchronous binds, URL overrides and malformed routing maps fail
+before I/O. Ordinary fixtures retain their existing behavior.
+
+Offline admin proof fixtures skip a contributor's plain local `daimon_test`
+outside exact GitHub Actions CI, with a clear lane-database/isolation reason.
+The shared admission guard remains strict: invalid CI provenance and routed
+foreign engines are errors, rather than skipped authorization failures.
