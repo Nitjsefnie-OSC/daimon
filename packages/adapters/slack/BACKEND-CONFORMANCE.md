@@ -9,7 +9,9 @@ drives `SlackApp._handle_app_mention`. Teams identity/authentication verificatio
 The callback forwards normal admission and binding calls unchanged and returns
 their actual `PreparedTurn` after normal execution. A normally rendered
 `AdmissionDenied` is re-raised as that same exception for the core collector.
-Missing/multiple calls, wrong identity, busy apps, overlapping probes and invalid
+Core may return an admission resolved to the retained revision; the callback
+checks its caller account without requiring object identity or the current
+revision. Missing/multiple calls, wrong identity, busy apps, overlapping probes and invalid
 timeouts fail closed. Observers are restored on every exit; unrelated tasks and
 runtimes forward unchanged. The running application never imports this module.
 

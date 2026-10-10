@@ -106,8 +106,15 @@ async def backend_selection_turn(envelope: BackendTurnEnvelope) -> PreparedTurn:
         validate(call, admission=False)
         if not admissions or call.arguments.get("admission") is not admissions[-1]:
             raise ValueError("C14 binding did not use the observed production admission")
-        if result.admission is not admissions[-1]:
-            raise ValueError("C14 binding returned a different admission")
+        # Core may resolve the retained revision into a new Admission object.
+        # It still belongs to the actual admitted caller; never pin it here.
+        account = admissions[-1].account_id
+        if (
+            call.arguments.get("session_account_id") != account
+            or result.session_account_id != account
+            or result.admission.account_id != account
+        ):
+            raise ValueError("C14 binding returned a different caller account")
         bindings.append(result)
 
     _probe_active = True
