@@ -12,6 +12,7 @@ from google.genai._interactions import APIConnectionError, APIError, APIStatusEr
 from pydantic import JsonValue
 
 from mux.contracts.errors import ProviderErrorCategory
+from mux.drivers.gemini.mcp_auth import refresh_bound_request
 from mux.errors import ProviderError
 
 API_REVISION = "2026-05-20"
@@ -133,6 +134,7 @@ class SDKTransport:
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="explicit_tools_required"
             )
+        bounded = await refresh_bound_request(bounded)
         response = await provider_call(
             self._interactions.create(
                 agent=string(request["agent"]),
