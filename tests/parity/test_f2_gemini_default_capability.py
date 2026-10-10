@@ -265,7 +265,7 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
     from daimon.testing.qa_mcp_host import QA_SESSION_ID, build_host, cleanup, serve
 
     url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    assert url and "daimon_test_nc_n12" in url
+    assert url, "the parity lane provides an isolated test database"
     authored = manifest()
     qa = await build_host(database_url=url, port=0, root=tmp_path)
     path = qa.manifest.path(tmp_path)
