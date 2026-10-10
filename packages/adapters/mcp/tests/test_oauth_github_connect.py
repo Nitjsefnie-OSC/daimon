@@ -227,7 +227,7 @@ async def test_cancel_after_oauth_revokes_user_token(
             "/oauth/github/confirm", params={"state": state, "cancel": "1"}
         )
         assert cancelled.status_code == 200
-        assert "Nothing was connected." in cancelled.text
+        assert "No changes saved." in cancelled.text
         assert ("GitHub connection token revocation failed" in caplog.text) == (
             revoke_failure_status is not None
         )
@@ -287,7 +287,7 @@ async def test_cancel_after_oauth_revokes_user_token(
             "/oauth/github/confirm", params={"state": state, "cancel": "1"}
         )
         assert repeated.status_code == 200
-        assert "Nothing was connected." in repeated.text
+        assert "No changes saved." in repeated.text
         if revoke_failure_status is not None:
             async with committing_sessionmaker() as session:
                 flow = await github_connect.cancel_flow(
@@ -441,7 +441,7 @@ async def test_connection_happy_path_and_rechecks(
             await browser.get("/oauth/github/callback", params={"state": "bad", "code": "code"})
         ).status_code == 400
         refused_oauth = await browser.get("/oauth/github/callback", params={"state": state})
-        assert "Nothing was connected." in refused_oauth.text
+        assert "No changes saved." in refused_oauth.text
         assert "You can close this tab." in refused_oauth.text
         assert "Back to Discord" in refused_oauth.text
         wrong_browser = httpx.AsyncClient(
@@ -495,7 +495,7 @@ async def test_connection_happy_path_and_rechecks(
         cancelled = await browser.get(
             "/oauth/github/confirm", params={"state": state, "cancel": "1"}
         )
-        assert "Nothing was connected." in cancelled.text
+        assert "No changes saved." in cancelled.text
         assert "You can close this tab." in cancelled.text
         assert (
             await browser.get("/oauth/github/confirm", params={"state": state})

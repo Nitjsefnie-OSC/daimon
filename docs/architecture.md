@@ -1395,10 +1395,11 @@ admission before any of this runs.
   repo in its filesystem. `set_working_repo` selects an existing grant or
   clears it with `none`; other grants provide token access for clones by name.
   The tool checks the live server or channel-admin permission for that agent.
-  A request to give an agent access to an already connected repo is confirmed
-  in the thread, then `github_connect` grants read access (write only when
-  requested) if the caller may grant it. Otherwise it posts the existing
-  Connect GitHub browser link for that repo.
+  A clear request in chat gives an agent access to an already connected repo:
+  `github_connect` grants read access (write only when requested) if the caller
+  may grant it. Otherwise it posts the Connect GitHub browser link for that repo.
+  Chat changes need no separate confirmation turn; the agent says what changed
+  and how to undo it. Browser edits apply only after **Save changes**.
   An operator-issued agent link may stage an update for an operator to finish
   with `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
   credentials and
@@ -1410,7 +1411,7 @@ admission before any of this runs.
   Discord `/github home` and Slack `/github`, plus agent setup on Discord,
   Slack, and Teams, show GitHub repositories without grant controls. Each agent's
   section lists one repo per line, names its working repo (or says there is none),
-  and directs changes to the setup conversation. Server-admin GitHub home screens
+  and directs changes to Connect GitHub or the setup conversation. Server-admin GitHub home screens
   list agents and repo counts without grant controls. The Connect GitHub browser
   link opens the browser editor. The setup conversation also supports
   `github_connect`, `remove_repo` and `set_working_repo`, with the same grant
@@ -1431,11 +1432,14 @@ admission before any of this runs.
   or unavailable status, including repos the signed-in GitHub account cannot
   edit. The person may add repos, remove repos, and select or clear the one
   working repo, then confirm with **Save changes**. **Add repos** opens a
-  centered dialog on desktop and a bottom sheet on mobile. Each addition has
+  centered dialog on desktop and a bottom sheet on mobile. Tick repos, select
+  **Add 1 repo** (or **Add N repos**) in the dialog, then **Save changes** on the
+  page. Each addition has
   its own access choice, defaulting to Read only. Added and removed rows stay
   visible as pending changes, and removals can be undone before saving.
   Working-repo actions live on the repo row. Adding permits at most ten repos
   per save and never lowers existing access.
+  Canceling shows **No changes saved** and leaves connected repos unchanged.
   A missing working or skill repo remains visible as a setup requirement.
   Repos that need more access can be confirmed again to finish setup.
   The invitation requester must still manage the agent when the page opens
