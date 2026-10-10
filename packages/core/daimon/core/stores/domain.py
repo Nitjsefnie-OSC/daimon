@@ -263,6 +263,7 @@ class ThreadSessionRow(BaseModel):
     ma_session_id: str
     ma_agent_id: str | None = None
     channel_id: str | None = None
+    budget_channel_id: str | None = None
     seal_ids: tuple[str, ...] | None = None
     watermark_message_id: str | None
     status: str

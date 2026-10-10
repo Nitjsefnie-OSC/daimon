@@ -36,6 +36,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools._ctx import _admission_recheck
 from daimon.adapters.mcp.tools.agent_chat import _continue_turn_impl
 from daimon.core import thread_handoff as switch
+from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.channel_admins import ChannelAdminCaller
@@ -66,6 +67,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
     mark_turn_active,
+    record_session_seals,
     set_pending_unsaved_work,
 )
 from daimon.core.tool_safety import ToolSafetyPolicy, has_confirmation_gate
@@ -79,6 +81,7 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_fresh_session,
 )
+from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     FakeMAState,
@@ -91,7 +94,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
-from sqlalchemy import event, text
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -518,6 +521,106 @@ async def test_a_compatible_session_is_reused_without_touching_ma(
     assert transport.calls[before:] == [], (
         "a compatible session must cost no MA call at all on the reuse path"
     )
+
+
+async def test_missed_usage_after_budget_channel_change_is_recovered_to_current_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    first = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-a"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn)
+    second = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-b"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(second, PreparedTurn)
+    assert not second.reused and second.ma_session_id != first.ma_session_id
+    assert second.continuity.applied == ("budget_channel",)
+
+    event = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_missed_after_channel_change",
+        is_error=False,
+        model_request_start_id="start_1",
+        model_usage=ma_model_usage(input_tokens=1000, output_tokens=100),
+        processed_at=_NOW,
+        type="span.model_request_end",
+    )
+    # The MA event exists, but the live recorder never saw it.
+    transport.state.events[second.ma_session_id].append(event.model_dump(mode="json"))
+    assert await sweep_headless_usage(deps.anthropic, db_session_factory, markup=Decimal("1")) == 1
+    async with db_session_factory() as session:
+        usage = (await session.scalars(select(UsageEvent))).one()
+        debit = (await session.scalars(select(TenantLedger))).one()
+    assert usage.channel_id == "channel-b"
+    assert debit.channel_id == "channel-b"
+
+
+async def test_budget_channel_change_waits_for_active_session_before_replacement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    first = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-a"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
+    async with db_session_factory() as session, session.begin():
+        await mark_turn_active(
+            session, id=first.mapping_id, active_turn_message_id="in-flight", now=_NOW
+        )
+
+    second = await _prepare(
+        deps,
+        replace(_admission(account=account), budget_channel_id="channel-b"),
+        tenant=tenant,
+        account=account,
+    )
+    assert isinstance(second, PreparationBusy)
+    assert second.pending_reasons == ("budget_channel",)
+
+
+async def test_seal_channel_backfill_does_not_change_the_budget_stamp(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    admission = _admission(account=account)
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    async with db_session_factory() as session, session.begin():
+        await record_session_seals(
+            session,
+            tenant_id=tenant.id,
+            ma_session_id=first.ma_session_id,
+            seals=frozenset(),
+            channel_id="origin-channel",
+        )
+
+    second = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(second, PreparedTurn)
+    assert second.reused and second.ma_session_id == first.ma_session_id
 
 
 async def test_compatible_bind_releases_connection_during_vault_io(

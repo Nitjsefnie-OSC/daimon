@@ -35,6 +35,7 @@ from daimon.core.session_snapshot import SessionSnapshot
 
 type ChangeReason = Literal[
     "agent_identity",
+    "budget_channel",
     "model",
     "system_prompt",
     "skills",

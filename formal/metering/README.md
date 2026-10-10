@@ -13,14 +13,40 @@ java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -config Metering.cfg Metering.tla
 java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -config BalanceGate.cfg BalanceGate.tla
 ```
 
-The directory holds two models:
+The directory holds three models:
 
 - `Metering.tla` covers who writes a model call's usage and ledger rows, how
   many times, and with which price and attribution.
 - `BalanceGate.tla` covers how far a tenant's balance can go below zero when
   the gate reads the balance once, before spend lands.
+- `BudgetChannelRecovery.tla` checks that a missed turn is debited to the
+  channel that admitted it after the channel changes on a reused thread.
 
 State counts below come from single-worker TLC 2.19 (tla2tools v1.7.4) runs.
+
+## `BudgetChannelRecovery.tla`
+
+The initial MA session carries `daimon_budget_channel=A`; policy then admits a
+new turn under B. `Prepare` maps to `prepare_session_for_turn`: it compares the
+stored `thread_sessions.budget_channel_id` with the new admission and replaces the
+session when they differ. `MissLiveEvent` represents an MA model event that
+the live recorder did not write. `Sweep` maps to `sweep_headless_usage`, which
+charges the session's metadata channel. `CorrectDebit` requires the recovered
+debit to match the admission.
+
+| Configuration | Verdict | Distinct states | Meaning |
+| --- | --- | ---: | --- |
+| `BudgetChannelRecoverySafe` | clean | 5 | Replacement stamps B before the missed event. |
+| `BudgetChannelRecoveryUnsafe` | violates `CorrectDebit` | 5 | Pre-fix reuse leaves A stamped and the sweep charges A. |
+
+The unsafe trace is replayed by
+`test_missed_usage_after_budget_channel_change_is_recovered_to_current_channel`
+against PostgreSQL and the stateful MA fake: before the fix, the test recorded
+one missed event on the reused session and read `usage.channel_id=channel-a`
+instead of `channel-b`; after the fix it passes. The model abstracts the
+replacement pipeline, active-turn wait, retries, idempotency and timing. The
+active-turn refusal has a separate executable test. It checks this one channel
+change within these bounds, not every production interleaving.
 
 ## `Metering.tla`
 

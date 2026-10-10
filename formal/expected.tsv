@@ -95,6 +95,8 @@ discord_install	DiscordInstall	DiscordInstallSafe	clean	16	-	per-guild lock seri
 discord_install	DiscordInstall	DiscordBootUnsafe	violates:BootRecoveryLive	3	-	pre-fix: on_ready skips a known archived guild still present in cache
 discord_install	DiscordInstall	DiscordBootSafe	clean	16	-	startup recovers a cached archived tenant without replaying install effects
 # ---- billing ----
+metering	BudgetChannelRecovery	BudgetChannelRecoverySafe	clean	5	-	replacing a session after its budget channel changes keeps recovered usage on the admitted channel
+metering	BudgetChannelRecovery	BudgetChannelRecoveryUnsafe	violates:CorrectDebit	5	-	pre-fix reuse lets the sweep debit the session's old channel
 billing	Clawback	ClawbackUnlocked	violates:NeverOverClawback	11	-	pre-lock: concurrent clawbacks both read zero and over-debit
 billing	Clawback	ClawbackLocked	clean	13	-	credit-row lock serializes clawbacks
 billing	OutOfOrder	OutOfOrderUnlocked	violates:NoOrphanPending	12	-	pre-lock: refund before credit leaves an orphan pending event

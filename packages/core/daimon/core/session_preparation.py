@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import hashlib
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -361,8 +362,16 @@ async def _run_replacement(
     answer governs exactly one replacement.
     """
     async with deps.sessionmaker() as session, session.begin():
+        # A failed replacement for B must not put a later C replacement on
+        # B's retry schedule when the frozen agent configuration is unchanged.
+        target_fingerprint = fingerprint_identity(desired)
+        if "budget_channel" in reasons:
+            target = f"{target_fingerprint}:{admission.budget_channel_id!r}"
+            target_fingerprint = hashlib.sha256(target.encode()).hexdigest()
         preparation = await upsert_preparation(
-            session, mapping_id=row.id, target_fingerprint=fingerprint_identity(desired)
+            session,
+            mapping_id=row.id,
+            target_fingerprint=target_fingerprint,
         )
 
     if preparation.stage == "failed":
@@ -652,7 +661,11 @@ async def _prepare_session_for_turn_locked(
                 recorded = await recorded_snapshot(
                     deps.anthropic, deps.sessionmaker, existing=row, observed=identity.observed
                 )
-            if recorded is None and not admission.memory_read_only:
+            if (
+                recorded is None
+                and not admission.memory_read_only
+                and row.budget_channel_id == admission.budget_channel_id
+            ):
                 # No readable configuration to compare: the session is gone or
                 # unreadable, which the turn's own recovery handles. Bind it as
                 # every pre-continuity turn did.
@@ -697,6 +710,10 @@ async def _prepare_session_for_turn_locked(
         fresh_start = row.fresh_start_requested_at is not None
         if handed_over:
             decision = ReplaceSession(reasons=("agent_identity",))
+        elif row.budget_channel_id != admission.budget_channel_id:
+            # The sweep attributes missed events from the immutable MA session
+            # stamp. A new budget channel needs a new stamped session.
+            decision = ReplaceSession(reasons=("budget_channel",))
         elif recorded is None:
             # A restricted turn must get a new read-only session when the
             # previous mount cannot be established, never reuse unknown access.
@@ -726,11 +743,15 @@ async def _prepare_session_for_turn_locked(
         )
         if (
             isinstance(decision, ReplaceSession)
-            and ("agent_identity" in decision.reasons or tightening_memory)
+            and (
+                "agent_identity" in decision.reasons
+                or "budget_channel" in decision.reasons
+                or tightening_memory
+            )
             and turn_is_active(row, now=moment)
         ):
-            # Neither a different responder nor stricter memory access may
-            # execute against the old session while replacement is deferred.
+            # A changed billing channel, responder, or memory restriction
+            # cannot run against the old session while replacement is deferred.
             log.info(
                 "session_preparation.busy",
                 mapping_id=str(row.id),

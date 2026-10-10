@@ -259,6 +259,12 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
   reads; it is kept apart from `daimon_channel`, where the conversation runs,
   so a DM counts toward its source channel without being placed in it.
+  If the channel charged by policy changes between turns, Daimon replaces the
+  session before the next turn. A running old session must finish first. This
+  keeps the sweep's session stamp aligned with that turn's admission even when
+  its live usage event was missed. The immutable stamp is also kept in
+  `thread_sessions.budget_channel_id`; older mappings with an unknown stamp
+  are replaced on their next bind.
 - **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
   or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
   budget with a `starts_at` gates nothing before it, and a fixed one nothing
