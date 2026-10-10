@@ -120,7 +120,10 @@ class ScriptedTransport:
         self._violate(f"Unscripted MA request {request.method} {request.url.path}")
 
     def client(self, *, max_retries: int = 0) -> AsyncAnthropic:
-        """Real SDK parsing; opt into the production retry budget when needed."""
+        """Isolated real SDK parsing; opt into production retries when needed.
+
+        Ambient provider configuration is refused before consuming any reply.
+        """
         client = build_fake_anthropic(self.dispatch)
         client.max_retries = max_retries
         return client
