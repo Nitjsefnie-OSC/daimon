@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2215,
+  "files_scanned": 2230,
   "parse_errors": [],
   "calls": [
     {
@@ -3643,6 +3643,135 @@
       ],
       "response_access": [
         "agent.id"
+      ]
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 102,
+      "end": 102,
+      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "sdk.beta.agents.retrieve(agent.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 103,
+      "end": 105,
+      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
+      "category": "test",
+      "resource": "skills.create",
+      "call": "sdk.beta.skills.create(display_title=title, files=[('SKILL.zip', bundle.zip_bytes, 'application/zip')])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 106,
+      "end": 106,
+      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "sdk.beta.agents.retrieve(agent.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 107,
+      "end": 107,
+      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
+      "category": "test",
+      "resource": "skills.list",
+      "call": "sdk.beta.skills.list(limit=1000)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 186,
+      "end": 186,
+      "scope": "test_fork_partition_preserves_sdk_trace_and_raw_shared_pins",
+      "category": "test",
+      "resource": "skills.list",
+      "call": "sdk.beta.skills.list(limit=1000)",
+      "request_keys": [],
+      "response_access": [
+        "page.data"
+      ]
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 262,
+      "end": 262,
+      "scope": "test_fork_create_preserves_pre_refactor_sdk_bytes_and_face_metadata",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "sdk.beta.agents.retrieve('source')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 263,
+      "end": 272,
+      "scope": "test_fork_create_preserves_pre_refactor_sdk_bytes_and_face_metadata",
+      "category": "test",
+      "resource": "agents.create",
+      "call": "sdk.beta.agents.create(name='copy', model=cast(Model, source.model.model_dump(mode='json')), description=None, system='Preserve this prompt.', metadata=metadata, tools=tools, mcp_servers=servers, skills=[{'type': 'anthropic', 'skill_id': 'pdf', 'version': 'latest'}])",
+      "request_keys": [
+        "skill_id",
+        "type",
+        "version"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 101,
+      "end": 101,
+      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
+      "category": "test",
+      "resource": "skills.list",
+      "call": "sdk.beta.skills.list(limit=1000)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 110,
+      "end": 110,
+      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "sdk.beta.agents.update(agent.id, skills=pins, version=agent.version)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 119,
+      "end": 119,
+      "scope": "test_add_skill_preserves_the_pre_refactor_sdk_request_bytes",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "sdk.beta.agents.update(agent.id, skills=pins, tools=[base], version=agent.version)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 189,
+      "end": 189,
+      "scope": "test_fork_partition_preserves_sdk_trace_and_raw_shared_pins",
+      "category": "test",
+      "resource": "agents.list",
+      "call": "sdk.beta.agents.list(include_archived=False)",
+      "request_keys": [],
+      "response_access": [
+        "row.latest_version"
       ]
     },
     {
@@ -12501,15 +12630,6 @@
       "category": "production"
     },
     {
-      "file": "packages/core/daimon/core/channel_rules.py",
-      "line": 27,
-      "module": "anthropic.types.beta",
-      "names": [
-        "BetaManagedAgentsAgent"
-      ],
-      "category": "production"
-    },
-    {
       "file": "packages/core/daimon/core/channel_skills.py",
       "line": 27,
       "module": "anthropic",
@@ -15315,6 +15435,27 @@
       "module": "anthropic.types.beta",
       "names": [
         "SkillListResponse"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 17,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent",
+        "BetaManagedAgentsSkillParams",
+        "BetaManagedAgentsURLMCPServerParams"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/skills/test_service_fidelity.py",
+      "line": 22,
+      "module": "anthropic.types.beta.agent_create_params",
+      "names": [
+        "Model",
+        "Tool"
       ],
       "category": "test"
     },
