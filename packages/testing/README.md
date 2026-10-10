@@ -130,8 +130,8 @@ shape. New factories default to one HTTP attempt, including Gemini models and
 interactions. Anthropic accepts an explicit `max_retries` and `timeout` for tests
 exercising retry behavior.
 
-The existing `build_fake_anthropic`, `build_stub_anthropic` and
-`ScriptedTransport.client` inherit the isolation guard. Their test key, provider
+The existing `build_fake_anthropic`, `build_stub_anthropic`,
+`build_no_retry_anthropic` and `ScriptedTransport.client` inherit the isolation guard. Their test key, provider
 URL, SDK timeout and retry behavior are preserved: fake/stub use two retries;
 scripted defaults to zero and honors its explicit retry budget. The existing
 `build_no_retry_anthropic` remains a separate builder outside this change.
@@ -216,3 +216,6 @@ Catalog lifecycle wrappers still need the separately owned normalized-event
 tap forwarding before native preview/draft completeness can be certified.
 Keep those dependent checks PENDING; final lifecycle posts and native-root
 completion receipts do not establish that additional coverage.
+scripted defaults to zero and honors its explicit retry budget. The no-retry
+builder accepts either a handler or `MARouter` and keeps zero retries, including
+409/429/5xx errors. Its SDK copies retain that budget and the isolation guard.

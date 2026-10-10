@@ -282,13 +282,17 @@ async def test_transient_response_is_not_automatically_retried(factory) -> None:
             await client.close()
 
 
-@pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted"])
+@pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted", "no_retry"])
 @pytest.mark.parametrize("name", SDK_ENV_VARS)
 @pytest.mark.parametrize("value", ["", "ambient-secret-do-not-log"])
 def test_shared_anthropic_builders_refuse_ambient_configuration(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, name: str, value: str
 ) -> None:
-    from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic
+    from daimon.testing.ma import (
+        build_fake_anthropic,
+        build_no_retry_anthropic,
+        build_stub_anthropic,
+    )
     from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 
     monkeypatch.setenv(name, value)
@@ -303,6 +307,8 @@ def test_shared_anthropic_builders_refuse_ambient_configuration(
             build_fake_anthropic(script.dispatch)
         elif entrypoint == "stub":
             build_stub_anthropic(script.dispatch)
+        elif entrypoint == "no_retry":
+            build_no_retry_anthropic(script.dispatch)
         else:
             script.client()
     asynchronous.assert_not_called()
@@ -348,6 +354,80 @@ async def test_shared_anthropic_builder_preserves_original_wire_and_sdk_defaults
     finally:
         await legacy.close()
         await isolated.close()
+
+
+async def test_no_retry_builder_preserves_original_wire_timeout_and_explicit_auth() -> None:
+    from anthropic import DEFAULT_TIMEOUT, AsyncAnthropic
+    from daimon.testing.ma import build_no_retry_anthropic
+
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"data": [], "has_more": False})
+
+    # Independent clean baseline: the pre-fix no-retry builder's exact body.
+    legacy = AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handle), base_url="https://api.anthropic.com"
+        ),
+        max_retries=0,
+    )
+    isolated = build_no_retry_anthropic(handle)
+    try:
+        assert isolated.max_retries == legacy.max_retries == 0
+        assert isolated.timeout == legacy.timeout == DEFAULT_TIMEOUT
+        assert isolated._client._trust_env is False
+        assert isolated.auth_token is isolated.credentials is isolated.webhook_key is None
+        assert isolated._custom_headers == {}
+        await legacy.models.list()
+        await isolated.models.list()
+        old, new = calls
+        assert (new.method, new.url, new.content, new.headers) == (
+            old.method,
+            old.url,
+            old.content,
+            old.headers,
+        )
+    finally:
+        await legacy.close()
+        await isolated.close()
+
+
+@pytest.mark.parametrize("status", [409, 429, 500, 503])
+@pytest.mark.parametrize("entrypoint", ["handler", "router"])
+async def test_no_retry_builder_never_consumes_the_next_scripted_response(
+    status: int, entrypoint: str
+) -> None:
+    from anthropic import APIStatusError
+    from daimon.testing.ma import MARouter, build_no_retry_anthropic
+    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+    script = ScriptedTransport()
+    script.queue(
+        ScriptedReply(
+            "GET",
+            "/v1/models",
+            httpx.Response(
+                status,
+                headers={"retry-after": "0"},
+                json={"type": "error", "error": {"type": "api_error", "message": "scripted"}},
+            ),
+        ),
+        ScriptedReply("GET", "/v1/models", httpx.Response(200, json={"data": []})),
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/models", lambda request, _match: script.dispatch(request))
+    async with build_no_retry_anthropic(
+        router if entrypoint == "router" else script.dispatch
+    ) as client:
+        with pytest.raises(APIStatusError) as error:
+            await client.models.list()
+        assert error.value.status_code == status
+        assert client.max_retries == 0
+    assert len(script.requests) == 1 and len(script.replies) == 1
+    assert not script.violations
 
 
 @pytest.mark.parametrize("max_retries", [0, 2, 8])
@@ -527,11 +607,16 @@ def test_real_environment_gemini_keys_refuse_before_value_lookup_or_sdk_construc
     asynchronous.assert_not_called()
 
 
-COPY_ENTRYPOINTS = ("openai", "anthropic", "fake", "stub", "scripted")
+COPY_ENTRYPOINTS = ("openai", "anthropic", "fake", "stub", "scripted", "no_retry")
 
 
 def _owned_copy_client(entrypoint: str, handler):
-    from daimon.testing.ma import MARouter, build_fake_anthropic, build_stub_anthropic
+    from daimon.testing.ma import (
+        MARouter,
+        build_fake_anthropic,
+        build_no_retry_anthropic,
+        build_stub_anthropic,
+    )
     from daimon.testing.ma_transport import ScriptedTransport
 
     if entrypoint == "openai":
@@ -542,6 +627,8 @@ def _owned_copy_client(entrypoint: str, handler):
         return build_fake_anthropic(handler)
     if entrypoint == "stub":
         return build_stub_anthropic(handler)
+    if entrypoint == "no_retry":
+        return build_no_retry_anthropic(handler)
     router = MARouter()
     router.add("GET", r"/v1/models", lambda request, _match: handler(request))
     return ScriptedTransport(router=router).client()
@@ -588,7 +675,7 @@ LATE_DRIVER_SETTINGS = (
     ("openai", "OPENAI_CUSTOM_HEADERS", "X-Poison: synthetic-header"),
     *(
         (entrypoint, name, value)
-        for entrypoint in ("anthropic", "fake", "stub", "scripted")
+        for entrypoint in ("anthropic", "fake", "stub", "scripted", "no_retry")
         for name, value in (
             ("ANTHROPIC_WEBHOOK_SIGNING_KEY", "synthetic-webhook"),
             ("ANTHROPIC_CUSTOM_HEADERS", "X-Poison: synthetic-header"),
@@ -705,18 +792,22 @@ async def test_clean_real_driver_copy_keeps_single_attempt_and_original_client(
         await client.close()
 
 
-@pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted"])
+@pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted", "no_retry"])
 @pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
 def test_shared_builder_preflight_never_fetches_environment_values(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, name: str
 ) -> None:
     # Import the shared entrypoints before the names-only environment is active.
-    from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic
+    from daimon.testing.ma import (
+        build_fake_anthropic,
+        build_no_retry_anthropic,
+        build_stub_anthropic,
+    )
     from daimon.testing.ma_transport import ScriptedTransport
 
     environment = _NamesOnlyEnvironment(name)
     with (
-        patch("anthropic.AsyncAnthropic.__init__") as parent,
+        patch("anthropic.AsyncAnthropic.__init__", return_value=None) as parent,
         patch("httpx.AsyncClient") as http_client,
         monkeypatch.context() as scoped,
     ):
@@ -726,6 +817,8 @@ def test_shared_builder_preflight_never_fetches_environment_values(
                 build_fake_anthropic(lambda _: httpx.Response(500))
             elif entrypoint == "stub":
                 build_stub_anthropic()
+            elif entrypoint == "no_retry":
+                build_no_retry_anthropic(lambda _: httpx.Response(500))
             else:
                 ScriptedTransport().client()
     if name in UNKNOWN_PROVIDER_NAMES:
