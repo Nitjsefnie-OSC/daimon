@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Document the existing per-tenant table-rendering opt-in for Anthropic, OpenAI and Gemini host turns, retaining plain-text defaults.
 - Add neutral output upload edges for Discord, Slack and Teams, preserving actual bytes and existing native delivery paths; keep provider event selection and host wiring as a separate slice.
+- Validate every Gemini MCP destination, including anonymous and unmarked native intent, before persistence or I/O; reject credential-bearing URLs and invalid server names, and prevent moving a scoped auth marker onto an adjacent function.
+- Re-admit Gemini session intent against owned agent/environment resources on every send; removed inline artifacts/skills and pre-explicit-tools saved requests require preparation again in this opt-in backend.
+
 - Add opt-in scoped single-server HTTPS MCP authentication to the Gemini driver, with closed native intent/policies, fresh SDK-dispatch resolution, secret-free persistence and DEBUG logs, and fail-closed replay/continuation admission.
 
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.

@@ -406,6 +406,79 @@ async def test_bound_destinations_refuse_before_any_provider_or_secret_io(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("resolver_enabled", (False, True))
+@pytest.mark.parametrize(
+    "url",
+    (
+        f"https://u:{LEAK}@foreign.invalid/mcp",
+        f"https://foreign.invalid/mcp?token={LEAK}",
+        f"https://foreign.invalid/mcp#{LEAK}",
+        "http://qa.invalid/mcp",
+        "https://q%61.invalid/mcp",
+        "https://qa.invalid\\foreign/mcp",
+        "https://qa.invalid/ mcp",
+    ),
+)
+async def test_anonymous_destinations_refuse_before_persistence_wire_and_debug(
+    sdk_wire: tuple[SDKTransport, Wire],
+    resolver_enabled: bool,
+    url: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sdk, wire = sdk_wire
+    resolver, storage = Resolver(), MemoryStorage()
+    driver = GeminiManagedAgents(
+        sdk,
+        storage=storage,
+        state_store=MemoryStateStore(),
+        account_scope_id="project",
+        mcp_secrets=resolver.resolve if resolver_enabled else None,
+    )
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(UnsupportedCapability) as caught:
+        await driver.agents.create(
+            SCOPE,
+            AgentSpec(
+                name="anonymous",
+                model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+                mcp_servers=(MCPConnection(name="public", url=url),),
+            ),
+            key="refuse",
+        )
+    assert caught.value.missing == ("https_mcp_destination",)
+    async with storage.transaction() as records:
+        assert records.agents == {}
+    assert wire.requests == [] and resolver.calls == []
+    assert LEAK not in caplog.text and LEAK not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolver_enabled", (False, True))
+async def test_clean_anonymous_https_retains_native_shape_without_resolution(
+    sdk_wire: tuple[SDKTransport, Wire],
+    resolver_enabled: bool,
+) -> None:
+    sdk, wire = sdk_wire
+    resolver = Resolver()
+    driver, _, _, session = await gemini_auth_session(
+        sdk,
+        resolver.resolve if resolver_enabled else None,
+        connection=MCPConnection(name="public", url=URL),
+    )
+    for key in ("one", "two"):
+        assert (
+            await driver.events.send(SCOPE, session.ref, (MESSAGE,), key=key)
+        ).status == "queued"
+    posts = [OBJECT.validate_json(r.content) for r in wire.requests if r.method == "POST"]
+    assert len(posts) == 2 and resolver.calls == []
+    assert all(
+        isinstance(tools := body["tools"], list)
+        and tools[-1] == {"type": "mcp_server", "name": "public", "url": URL}
+        for body in posts
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "policy",
     (
@@ -643,6 +716,7 @@ async def test_invalid_resolver_output_refuses_before_native_io(
         "move_marker",
         "top_headers",
         "duplicate_marker",
+        "move_to_existing_function",
         "environment_carrier",
         "configuration_carrier",
         "changed_input",
@@ -691,6 +765,9 @@ async def test_sdk_boundary_refuses_unbound_or_changed_auth_intent_before_resolv
         tools.insert(0, {"type": "google_search", "authorization": LEAK})
     elif fault == "variant":
         mcp["type"] = "MCP_SERVER"
+    elif fault == "move_to_existing_function":
+        function = next(t for t in tools if isinstance(t, dict) and t.get("type") == "function")
+        function["headers"] = mcp.pop("headers")
     elif fault == "move_marker":
         tools.insert(0, {"type": "code_execution", "headers": mcp.pop("headers")})
     elif fault == "top_headers":
@@ -889,6 +966,19 @@ async def test_real_loopback_read_pair_uses_only_the_owned_bound_bearer_and_clea
     "tool",
     (
         {"type": "mcp_server", "name": "unbound", "url": URL, "headers": {"Authorization": LEAK}},
+        {"type": "mcp_server", "name": "public", "url": f"https://u:{LEAK}@foreign.invalid/mcp"},
+        {
+            "type": "mcp_server",
+            "name": "public",
+            "url": f"https://foreign.invalid/mcp?token={LEAK}",
+        },
+        {"type": "mcp_server", "name": "public", "url": f"https://foreign.invalid/mcp#{LEAK}"},
+        {"type": "mcp_server", "name": "public", "url": "http://qa.invalid/mcp"},
+        {"type": "mcp_server", "name": "public", "url": "https://q%61.invalid/mcp"},
+        {"type": "mcp_server", "name": "public", "url": "https://qa.invalid\\foreign/mcp"},
+        {"type": "mcp_server", "name": "public", "url": "https://qa.invalid/ mcp"},
+        {"type": "mcp_server", "name": "with space", "url": URL},
+        {"type": "mcp_server", "name": 1, "url": URL},
         {"type": "MCP", "authorization": LEAK},
         {"type": "google_search", "authorization": LEAK},
         {"type": "function", "name": {"authorization": LEAK}, "description": "", "parameters": {}},

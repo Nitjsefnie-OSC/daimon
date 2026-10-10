@@ -79,8 +79,8 @@ def compile_mcp(connections: Sequence[MCPConnection], *, enabled: bool) -> list[
     for connection in connections:
         if (
             connection.transport != "streamable_http"
-            or (bound and not destination(connection.url))
-            or (bound and not _NAME.fullmatch(connection.name))
+            or not destination(connection.url)
+            or not _NAME.fullmatch(connection.name)
         ):
             refuse("https_mcp_destination")
         tool: Object = {"type": "mcp_server", "name": connection.name, "url": connection.url}
@@ -129,6 +129,12 @@ def validate_tools(value: JsonValue) -> None:
                 {"type", "name", "url", "allowed_tools"},
             ):
                 refuse("unbound_mcp_authentication")
+            if (
+                not destination(tool["url"])
+                or not isinstance(tool["name"], str)
+                or not _NAME.fullmatch(tool["name"])
+            ):
+                refuse("https_mcp_destination")
         else:
             refuse("mcp_adjacent_tool_type")
 
@@ -264,7 +270,12 @@ async def refresh_bound_request(request: Object) -> Object:
             del tool["headers"]
     validate_tools(fresh_tools)
     expected = cast(Object, json.loads(binding.request_json))
-    if stable_request(fresh) != stable_request(expected) or target is None:
+    if (
+        stable_request(fresh) != stable_request(expected)
+        or target is None
+        or target.get("type") != "mcp_server"
+        or target.get("url") != binding.connection.url
+    ):
         refuse("changed_mcp_request_intent")
     try:
         secret = credential(
