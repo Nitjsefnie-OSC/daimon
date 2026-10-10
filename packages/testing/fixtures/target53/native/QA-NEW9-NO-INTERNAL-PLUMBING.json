@@ -112,7 +112,7 @@
   "anthropic": {
     "pin": {
       "path": "tests/judge/fixtures/catalog_anthropic.json",
-      "sha256": "4975d67964aee0461d47c80fda3b4816789b95c3d9ea6a784aad5d18a74a1d96"
+      "sha256": "f35892ba2141e72cf0c074d5681d0e288f95ef58bfa28598b02a7e8ebe31f618"
     },
     "scenario_id": "QA-NEW9-NO-INTERNAL-PLUMBING",
     "source_kind": "catalog-authored"

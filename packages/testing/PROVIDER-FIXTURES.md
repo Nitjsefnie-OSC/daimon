@@ -95,3 +95,13 @@ The generator uses hand-authored recipes derived from user turns, never assertio
 patterns. It pins the current local G1/G2 branch commits and code hashes; run it
 only with those reviewed sources available. Review changed native blobs and
 source pins. It never touches `tests/golden/`, executes tools or calls providers.
+
+NEW37 uses the same authored Markdown response in all three backends: outer
+pipes, a separator, and four rows under Fruit/Colour/Price. Its Anthropic tape
+previously supplied a different internally pipe-delimited Taste table that
+evaded the catalog regex. The corrected tape and all five references to its
+file hash now agree. The frozen catalog, request and assertions are unchanged.
+With Discord table rendering at its default False, every matched response
+retains raw pipes and must be reported as the catalog's expected failure;
+incomplete adapter evidence remains PENDING. This is an offline input correction
+and confers no provider quality or live PASS credit.

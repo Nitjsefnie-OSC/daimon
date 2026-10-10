@@ -183,7 +183,7 @@
             "content": [
               {
                 "type": "text",
-                "text": "Fruit | Color | Taste\nApple | Red | Sweet\nPear | Green | Sweet\nLemon | Yellow | Sour\nGrape | Purple | Sweet"
+                "text": "| Fruit | Colour | Price |\n|---|---|---|\n| Apple | Red | $1 |\n| Banana | Yellow | $2 |\n| Orange | Orange | $3 |\n| Pear | Green | $4 |"
               }
             ]
           },

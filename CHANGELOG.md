@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain acknowledged session references for cleanup on control failure, and
   preserve optional cap omission and default provider behavior.
 - Report known offline Discord table baseline defects as EXPECTED-FAIL, and refuse score credit for non-equivalent Anthropic table controls.
+- Match the Anthropic NEW37 authored table to OpenAI/Gemini (Fruit/Colour/Price, separator and outer pipes), exposing the expected default-disabled Discord table-rendering failure rather than a non-equivalent spurious PASS.
+
+- Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
+- Pin offline MCP/tool recipes to approved single-server OpenAI authentication; verify nine admitted preparations and explicit NEW17 two-server refusal before resolution or native I/O, preserving authored inputs and outcome gaps.
 
 - Bind offline catalog Discord text to actual adapter posts across Anthropic, OpenAI and Gemini, retaining scoped surface receipts and honest partial coverage.
 
