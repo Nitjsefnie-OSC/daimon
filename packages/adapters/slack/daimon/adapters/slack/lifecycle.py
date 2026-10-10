@@ -55,7 +55,6 @@ from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.blockkit import (
     NOTICE_MAX_CHARS,
     EmbedEvent,
-    State,
     TurnPhase,
     format_termination_notice,
     to_blocks,
@@ -71,6 +70,7 @@ from daimon.adapters.slack.mrkdwn import (
     prose_mentions,
     seal_markdown_block,
 )
+from daimon.adapters.slack.provider_events import ProviderDraft
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
@@ -82,6 +82,7 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
@@ -93,6 +94,8 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.usage_totals import ProviderUsageTotals
+from mux.contracts.events import Event
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -211,6 +214,7 @@ class SlackTurnLifecycle:
         self._cancel = cancel
         self._author_id = author_id
         self._model_id = model_id
+        self._provider_draft: ProviderDraft | None = None
         self._markup = markup
         self._register = register
         self._deregister = deregister
@@ -344,10 +348,26 @@ class SlackTurnLifecycle:
         # call only. The Block Kit flush (chat-API I/O) rides the render
         # tick instead, where a slow or rate-limited chat.update only
         # delays the render task, never the consume loop.
+        if self._provider_draft is not None:
+            return
         embed_event = _map_sse_event(event)
         if embed_event is None:
             return
         self._state = update(self._state, embed_event)
+
+    async def on_provider_event(self, event: Event) -> None:
+        """Cheap local tap; only on_render may send the provider's draft."""
+        if event.native.provider == "anthropic" or self._terminal:
+            return
+        if self._provider_draft is None:
+            self._provider_draft = ProviderDraft()
+        text = self._provider_draft.text(event)
+        if text is not None:
+            self._state = (
+                update(self._state, EmbedEvent(kind="message", label=text))
+                if text
+                else dataclasses.replace(self._state, text_preview=None)
+            )
 
     async def _maybe_flush(self) -> None:
         """Post or update the status message, subject to debounce. No-op after terminal."""
@@ -413,6 +433,11 @@ class SlackTurnLifecycle:
         cost and the summary line omits it.
         """
         t = state.usage_totals
+        if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
+            # Provider observations are priced by host billing. Until a public
+            # display tariff is supplied, omit cost rather than synthesize MA usage.
+            self._state = dataclasses.replace(self._state, cost_str=None)
+            return
         usage = BetaManagedAgentsSpanModelUsage(
             input_tokens=t.input_tokens,
             cache_creation_input_tokens=t.cache_creation_input_tokens,

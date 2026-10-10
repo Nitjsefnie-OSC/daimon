@@ -1826,3 +1826,5 @@ The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
 slash command carries recent channel messages. Run `/dm` again to reset or select
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
+
+Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.

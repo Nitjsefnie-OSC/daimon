@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve failed and recovered-cancelled OpenAI roots in final host outcomes; refuse missing native runtime and restricted preparation with a typed host admission error before native I/O, and limit this host slice to verified delegation-disabled sessions.
 - Add the explicitly configured Gemini inline-reuse host codec with lazy owned streams, fenced replay/cancel and neutral interaction usage; keep live host certification and MCP authentication separate.
 - Preserve every Gemini interaction's messages, usage and required actions in reused-session journals; visibly refuse missing runtimes, non-primary models and unsupported host policies before dispatch.
+- Render neutral OpenAI/Gemini drafts on Slack progress cards and omit unverified provider costs while preserving Anthropic behavior.
+
 - Render neutral OpenAI/Gemini drafts on Discord progress cards while preserving Anthropic output and omitting unverified provider costs.
 
 - Add explicit OpenAI Agents hosted container-size and integer-cent session spend controls; refresh the driver contract audit against official documentation fetched on 2026-10-10.

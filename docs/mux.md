@@ -1211,3 +1211,5 @@ rendering or attachment failures preserve the original answer. See
 ## Provider turn displays
 
 Discord consumes neutral message snapshots and ordered previews through an optional local lifecycle tap. Previews affect the draft only; existing host terminal callbacks finalize the progress card and deliver the authoritative answer. Anthropic retains its native display path. Alternate-provider usage remains observation-based, and an unverified cost is omitted from the footer. Generic confirmation cards retain Approve/Deny and approved/denied/expired states.
+
+Slack also consumes root neutral snapshots and ordered previews through the optional local tap. Authoritative snapshots replace draft fragments; terminal output comes from host state. Existing status-card replacement, Cancel routing, generic confirmation controls, and Anthropic pricing remain unchanged. An unverified alternate-provider cost is omitted.
