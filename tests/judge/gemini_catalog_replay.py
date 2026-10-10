@@ -16,7 +16,14 @@ from daimon.core.turn.gemini import (
     gemini_backend,
 )
 from daimon.testing.ma_transport import ScriptedTransport
-from daimon.testing.provider_fixtures import BackendFixture, NativeTurn, ScenarioFixture, turn_tape
+from daimon.testing.outcome_oracle import TurnEvidence
+from daimon.testing.provider_fixtures import (
+    BackendFixture,
+    FixtureGap,
+    NativeTurn,
+    ScenarioFixture,
+    turn_tape,
+)
 from daimon.testing.provider_replay import ProviderTape, WireReply, provider_replay
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Scope, ThreadRef
@@ -27,10 +34,12 @@ from mux.drivers.gemini.transport import SDKTransport
 from mux.state.memory import MemoryStateStore
 
 if __package__:
-    from .catalog_runner import ScenarioPlan, expand_text
+    from .catalog_runner import Invocation, ScenarioPlan, expand_text
+    from .catalog_steps import ExecutionGap, StepReceipt, run_steps, validate_native_coverage
     from .gemini_catalog_host import GeminiTurnCapture, run_gemini_turn
 else:
-    from catalog_runner import ScenarioPlan, expand_text
+    from catalog_runner import Invocation, ScenarioPlan, expand_text
+    from catalog_steps import ExecutionGap, StepReceipt, run_steps, validate_native_coverage
     from gemini_catalog_host import GeminiTurnCapture, run_gemini_turn
 
 
@@ -68,6 +77,8 @@ class OfflineFlashAccounting:
 class GeminiCapture:
     turns: tuple[GeminiTurnCapture, ...]
     request_count: int
+    step_receipts: tuple[StepReceipt, ...] = ()
+    step_gaps: tuple[ExecutionGap, ...] = ()
 
 
 def host_tape(
@@ -130,7 +141,7 @@ async def execute_gemini_turns(
     source_root: Path,
     repository_root: Path,
 ) -> GeminiCapture:
-    """Caller refuses unbound actions/gates before opening any transport."""
+    """Validate all inputs, execute the owned prefix, retain later barriers."""
     if (
         plan.backend != "gemini"
         or fixture.backend != "gemini"
@@ -140,23 +151,23 @@ async def execute_gemini_turns(
         or scenario.source.path != f"scenarios/{plan.scenario.filename}"
         or fixture.profile != "gemini.inline_reuse"
         or fixture.model != "gemini-3.8-flash"
-        or fixture.gaps
-        or any(t.completion_gate for t in fixture.turns)
     ):
         raise ValueError("Gemini fixture is not a complete pinned headless recipe")
     if any(name in os.environ for name in OFFLINE_SDK_ENV):
         raise ValueError("offline Gemini replay refuses ambient SDK options")
+    fixture = BackendFixture.model_validate_json(fixture.model_dump_json())
     fixture.codec_source.verify(repository_root)
     scenario.projection.verify(source_root)
     invocations = [i for i in plan.invocations if i.operation == "host_turn"]
-    if {i.turn for i in invocations} != {t.turn for t in fixture.turns}:
-        raise ValueError("Gemini fixture must cover every planned host invocation exactly")
+    validate_native_coverage(plan, fixture)
     by_turn = {t.turn: t for t in fixture.turns}
     slots: dict[tuple[str, str], str] = {}
     for invocation in invocations:
         if invocation.turn is None or invocation.text is None:
             raise ValueError("Gemini invocation lacks its original turn/text")
-        native = by_turn[invocation.turn]
+        native = by_turn.get(invocation.turn)
+        if native is None:
+            continue
         if (
             native.location != invocation.location
             or native.channel != invocation.channel
@@ -171,17 +182,22 @@ async def execute_gemini_turns(
             raise ValueError("Gemini distinct host slots alias the same session")
         slots[slot] = native.session_id
     store = MemoryStateStore()
-    for channel in plan.bindings:
-        check_backend(channel.revision)
-        await store.put_config_revision(channel.revision)
     bindings: dict[tuple[str, str], ProviderBinding] = {}
     storage = MemoryStorage()
     history: dict[str, list[NativeTurn]] = {}
     captures: list[GeminiTurnCapture] = []
     requests = 0
     sentinel_wire = ScriptedTransport()
+
+    async def prepare_channel(invocation: Invocation) -> None:
+        channel = next(b for b in plan.bindings if b.ref == invocation.channel)
+        check_backend(channel.revision)
+        await store.put_config_revision(channel.revision)
+
     async with sentinel_wire.client() as sentinel:
-        for invocation in invocations:
+
+        async def invoke(invocation: Invocation, timeout_s: float) -> TurnEvidence:
+            nonlocal requests
             if invocation.turn is None:
                 raise ValueError("Gemini invocation lacks a turn")
             native = by_turn[invocation.turn]
@@ -300,6 +316,7 @@ async def execute_gemini_turns(
                         store=store,
                         binding=bindings[slot],
                         scope=scope,
+                        timeout_s=timeout_s,
                     )
                 )
                 if (
@@ -314,6 +331,23 @@ async def execute_gemini_turns(
                 replay.wire.assert_consumed()
                 requests += len(replay.wire.requests)
             prior.append(native)
+            return captures[-1].evidence
+
+        gate_gaps = tuple(
+            FixtureGap(
+                code="RUNNER_HOOK",
+                location=t.location,
+                reason="Completion gate needs an owned concurrency hook.",
+            )
+            for t in fixture.turns
+            if t.completion_gate
+        )
+        steps = await run_steps(
+            plan,
+            invoke=invoke,
+            prepare_channel=prepare_channel,
+            native_gaps=(*fixture.gaps, *gate_gaps),
+        )
     if sentinel_wire.requests or sentinel_wire.violations:
         raise ValueError("Gemini host attempted an Anthropic fallback")
-    return GeminiCapture(tuple(captures), requests)
+    return GeminiCapture(tuple(captures), requests, steps.receipts, steps.gaps)

@@ -362,10 +362,8 @@ async def test_explicit_channels_select_distinct_persisted_slots_without_fallbac
     assert not any(c.kind == "same_session" for c in result.host_outcome.checks)
 
 
-@pytest.mark.parametrize(
-    "timeout", [{}, 1e-9, 180, 0, -1, True, None, "10", float("inf"), float("nan")]
-)
-async def test_explicit_wait_done_timeout_is_unbound_before_any_dispatch(
+@pytest.mark.parametrize("timeout", [{}, 0, -1, True, None, "10", float("inf"), float("nan")])
+async def test_invalid_wait_done_timeout_is_unbound_before_any_dispatch(
     tmp_path: Path,
     timeout: Any,
 ) -> None:
@@ -398,7 +396,21 @@ def test_wait_done_timeout_refusal_survives_optimized_python(tmp_path: Path) -> 
             {"plan": plan.model_dump(mode="json"), "replay": scripted(plan).model_dump(mode="json")}
         )
     )
-    script = '\nimport asyncio, importlib, json, sys\nsys.path.insert(0, sys.argv[2])\ne = importlib.import_module("judge.headless_executor")\nc = importlib.import_module("judge.catalog_runner")\nx = json.load(open(sys.argv[1]))\nasync def check():\n    for value in ({}, 1e-9, 180):\n        x["plan"]["invocations"][2]["source"]["timeout_s"] = value\n        p = c.ScenarioPlan.model_validate(x["plan"])\n        r = await e.execute_cell(p, e.ScenarioReplay.model_validate(x["replay"]))\n        if r.status != "PENDING" or r.request_count or r.evidence.turns:\n            raise RuntimeError("unbound catalog timeout earned credit under -O")\n        if not any(g.code == "WAIT_DONE_TIMEOUT_UNBOUND" for g in r.gaps):\n            raise RuntimeError("timeout gap was lost under -O")\nasyncio.run(check())\n'
+    script = """
+import asyncio, importlib, json, sys
+sys.path.insert(0, sys.argv[2])
+e = importlib.import_module("judge.headless_executor")
+c = importlib.import_module("judge.catalog_runner")
+x = json.load(open(sys.argv[1]))
+async def check():
+    for value in ({}, 1e-9, 180):
+        x["plan"]["invocations"][2]["source"]["timeout_s"] = value
+        p = c.ScenarioPlan.model_validate(x["plan"])
+        try: await e.execute_cell(p, e.ScenarioReplay.model_validate(x["replay"]))
+        except ValueError: pass
+        else: raise RuntimeError("changed source timeout earned credit under -O")
+asyncio.run(check())
+"""
     result = subprocess.run(
         [sys.executable, "-O", "-c", script, str(inputs), str(Path(__file__).parents[1])],
         check=False,

@@ -38,7 +38,12 @@ from daimon.testing.outcome_oracle import (
     evaluate,
 )
 from daimon.testing.platform_surface import PlatformSurfaceCapture
-from daimon.testing.provider_fixtures import BackendFixture, ScenarioFixture, load_provider_fixtures
+from daimon.testing.provider_fixtures import (
+    BackendFixture,
+    FixtureGap,
+    ScenarioFixture,
+    load_provider_fixtures,
+)
 from mux.contracts.events import TurnEndedPayload
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -59,6 +64,7 @@ if __package__:
         expand_text,
         sha,
     )
+    from .catalog_steps import ExecutionGap, StepReceipt, run_steps, step_gaps
     from .discord_catalog_surface import bind_discord_text
     from .gemini_catalog_replay import execute_gemini_turns
     from .headless_output import HeadlessOutput, capture_headless_return
@@ -80,6 +86,7 @@ else:
         expand_text,
         sha,
     )
+    from catalog_steps import ExecutionGap, StepReceipt, run_steps, step_gaps
     from discord_catalog_surface import bind_discord_text
     from gemini_catalog_replay import execute_gemini_turns
     from headless_output import HeadlessOutput, capture_headless_return
@@ -203,11 +210,6 @@ class ScenarioReplay(Record):
         return self
 
 
-class ExecutionGap(Record):
-    code: str
-    location: str
-
-
 class CellResult(Record):
     scenario_id: str
     backend: Literal["anthropic", "openai", "gemini"]
@@ -225,6 +227,8 @@ class CellResult(Record):
     discord_surfaces: tuple[DiscordSurfaceCapture, ...] = ()
     expected_failure: ExpectedFailure | None = None
     platform_surfaces: tuple[PlatformSurfaceCapture, ...] = ()
+    step_receipts: tuple[StepReceipt, ...] = ()
+    input_provenance: str = "catalog-authored"
 
     @computed_field
     @property
@@ -333,31 +337,7 @@ def _host_assertions(evidence: RunEvidence) -> list[dict[str, JsonValue]]:
 
 
 def _unbound_steps(plan: ScenarioPlan) -> tuple[ExecutionGap, ...]:
-    gaps: list[ExecutionGap] = []
-    for invocation in plan.invocations:
-        if invocation.source.get("do") == "wait_done" and "timeout_s" in invocation.source:
-            # The offline watchdog is not a catalog wait deadline. Do not confer
-            # timeout-specific credit until the associated wait window is bound.
-            gaps.append(
-                ExecutionGap(code="WAIT_DONE_TIMEOUT_UNBOUND", location=invocation.location)
-            )
-        if invocation.operation not in {"new_channel", "host_turn", "wait_done"}:
-            gaps.append(ExecutionGap(code="STEP_BINDING_UNAVAILABLE", location=invocation.location))
-        if invocation.fixture is not None:
-            gaps.append(
-                ExecutionGap(code="ATTACHMENT_BINDING_UNAVAILABLE", location=invocation.location)
-            )
-        if invocation.operation == "host_turn" and (
-            invocation.source.get("do") not in {"mention", "thread_reply"}
-            or invocation.source.get("reply_to") is not None
-            or invocation.source.get("as", "user") != "user"
-        ):
-            gaps.append(
-                ExecutionGap(code="ROUTING_BINDING_UNAVAILABLE", location=invocation.location)
-            )
-    if not any(i.operation == "host_turn" for i in plan.invocations):
-        gaps.append(ExecutionGap(code="NO_SCRIPTABLE_HOST_TURN", location="scenario"))
-    return tuple(gaps)
+    return step_gaps(plan)
 
 
 async def _run_turn(
@@ -367,6 +347,7 @@ async def _run_turn(
     store: MemoryStateStore,
     binding: ProviderBinding,
     scope: Scope,
+    timeout_s: float = 10.0,
 ) -> tuple[
     TurnEvidence,
     int,
@@ -481,7 +462,7 @@ async def _run_turn(
                         stream_read_timeout_s=5.0,
                         render_interval_s=3600,
                     ),
-                    timeout=10.0,
+                    timeout=timeout_s,
                 )
                 states.append(state)
                 if state.error is not None:
@@ -609,7 +590,12 @@ async def _run_turn(
     )
 
 
-async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> CellResult:
+async def execute_cell(
+    plan: ScenarioPlan,
+    replay: ScenarioReplay | None,
+    *,
+    native_gaps: tuple[FixtureGap, ...] = (),
+) -> CellResult:
     gaps: list[ExecutionGap] = []
     evidence = RunEvidence(scenario_id=plan.scenario.id, backend=plan.backend, turns=())
     values = replay.values if replay is not None else {}
@@ -629,7 +615,8 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
             )
         )
     else:
-        gaps.extend(_unbound_steps(plan))
+        if replay is None:
+            gaps.extend(_unbound_steps(plan))
         if replay is None:
             gaps.append(ExecutionGap(code="REPLAY_FIXTURE_UNAVAILABLE", location="scenario"))
     if replay is not None and (
@@ -664,13 +651,20 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
     surfaces: list[DiscordSurfaceCapture] = []
     platform_surfaces: list[PlatformSurfaceCapture] = []
     requests = 0
-    if not gaps and replay is not None:
+    step_receipts: tuple[StepReceipt, ...] = ()
+    if replay is not None and not any(
+        g.code == "REPLAY_TABLE_CONTROL_NOT_EQUIVALENT" for g in gaps
+    ):
         store = MemoryStateStore()
         bindings: dict[tuple[str, str], ProviderBinding] = {}
-        for channel in plan.bindings:
+
+        async def prepare_channel(invocation: Invocation) -> None:
+            channel = next(b for b in plan.bindings if b.ref == invocation.channel)
             check_backend(channel.revision)
             await store.put_config_revision(channel.revision)
-        for invocation in host_invocations:
+
+        async def invoke(invocation: Invocation, timeout_s: float) -> TurnEvidence:
+            nonlocal requests
             channel = next(b for b in plan.bindings if b.ref == invocation.channel)
             scope = Scope(
                 tenant_id=channel.revision.channel.tenant_id,
@@ -695,7 +689,13 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
                 await store.put_binding(binding, expected_generation=0)
                 bindings[slot] = binding
             turn, count, text, output, surface, platform_surface = await _run_turn(
-                plan, invocation, tapes[cast(int, invocation.turn)], store, bindings[slot], scope
+                plan,
+                invocation,
+                tapes[cast(int, invocation.turn)],
+                store,
+                bindings[slot],
+                scope,
+                timeout_s,
             )
             if surface is not None:
                 surfaces.append(surface)
@@ -706,6 +706,13 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
             rendered.append(text)
             if output is not None:
                 outputs.append(output)
+            return turn
+
+        steps = await run_steps(
+            plan, invoke=invoke, prepare_channel=prepare_channel, native_gaps=native_gaps
+        )
+        gaps.extend(steps.gaps)
+        step_receipts = steps.receipts
         evidence = RunEvidence(
             scenario_id=plan.scenario.id, backend=plan.backend, turns=tuple(turns)
         )
@@ -727,6 +734,8 @@ async def execute_cell(plan: ScenarioPlan, replay: ScenarioReplay | None) -> Cel
         headless_outputs=tuple(outputs),
         discord_surfaces=tuple(surfaces),
         platform_surfaces=tuple(platform_surfaces),
+        step_receipts=step_receipts,
+        input_provenance="catalog-authored" if replay else "missing",
     )
 
 
@@ -751,15 +760,7 @@ async def execute_openai_cell(
         raise ValueError(
             "OpenAI executor requires the pinned scenario and explicit OpenAI selection"
         )
-    gaps = list(_unbound_steps(plan))
-    gaps.extend(
-        ExecutionGap(code="PROVIDER_" + gap.code, location=gap.location) for gap in fixture.gaps
-    )
-    gaps.extend(
-        ExecutionGap(code="COMPLETION_GATE_UNBOUND", location=turn.location)
-        for turn in fixture.turns
-        if turn.completion_gate
-    )
+    gaps: list[ExecutionGap] = []
     try:
         assertions = _assertions(plan, scenario.values)
     except ValueError:
@@ -771,22 +772,22 @@ async def execute_openai_cell(
     platform_surfaces: tuple[PlatformSurfaceCapture, ...] = ()
     rendered: tuple[str, ...] = ()
     requests = 0
-    if not gaps:
-        capture = await execute_openai_turns(
-            plan, scenario, fixture, source_root=source_root, repository_root=repository_root
-        )
-        evidence = RunEvidence(
-            scenario_id=plan.scenario.id,
-            backend="openai",
-            turns=tuple(t.evidence for t in capture.turns),
-        )
-        outputs = tuple(t.output for t in capture.turns if t.output is not None)
-        surfaces = tuple(t.surface for t in capture.turns if t.surface is not None)
-        platform_surfaces = tuple(
-            t.platform_surface for t in capture.turns if t.platform_surface is not None
-        )
-        rendered = tuple(t.output.text if t.output is not None else "" for t in capture.turns)
-        requests = capture.request_count
+    capture = await execute_openai_turns(
+        plan, scenario, fixture, source_root=source_root, repository_root=repository_root
+    )
+    evidence = RunEvidence(
+        scenario_id=plan.scenario.id,
+        backend="openai",
+        turns=tuple(t.evidence for t in capture.turns),
+    )
+    outputs = tuple(t.output for t in capture.turns if t.output is not None)
+    surfaces = tuple(t.surface for t in capture.turns if t.surface is not None)
+    platform_surfaces = tuple(
+        t.platform_surface for t in capture.turns if t.platform_surface is not None
+    )
+    rendered = tuple(t.output.text if t.output is not None else "" for t in capture.turns)
+    requests = capture.request_count
+    gaps.extend(capture.step_gaps)
     gaps.extend(
         ExecutionGap(code="CATALOG_CAPABILITY_PENDING", location=g.location) for g in plan.gaps
     )
@@ -805,6 +806,8 @@ async def execute_openai_cell(
         headless_outputs=outputs,
         discord_surfaces=surfaces,
         platform_surfaces=platform_surfaces,
+        step_receipts=capture.step_receipts,
+        input_provenance=fixture.provenance,
     )
 
 
@@ -829,15 +832,7 @@ async def execute_gemini_cell(
         raise ValueError(
             "Gemini executor requires the pinned scenario and explicit Gemini selection"
         )
-    gaps = list(_unbound_steps(plan))
-    gaps.extend(
-        ExecutionGap(code="PROVIDER_" + gap.code, location=gap.location) for gap in fixture.gaps
-    )
-    gaps.extend(
-        ExecutionGap(code="COMPLETION_GATE_UNBOUND", location=turn.location)
-        for turn in fixture.turns
-        if turn.completion_gate
-    )
+    gaps: list[ExecutionGap] = []
     try:
         assertions = _assertions(plan, scenario.values)
     except ValueError:
@@ -849,22 +844,22 @@ async def execute_gemini_cell(
     platform_surfaces: tuple[PlatformSurfaceCapture, ...] = ()
     rendered: tuple[str, ...] = ()
     requests = 0
-    if not gaps:
-        capture = await execute_gemini_turns(
-            plan, scenario, fixture, source_root=source_root, repository_root=repository_root
-        )
-        evidence = RunEvidence(
-            scenario_id=plan.scenario.id,
-            backend="gemini",
-            turns=tuple(t.evidence for t in capture.turns),
-        )
-        outputs = tuple(t.output for t in capture.turns if t.output is not None)
-        surfaces = tuple(t.surface for t in capture.turns if t.surface is not None)
-        platform_surfaces = tuple(
-            t.platform_surface for t in capture.turns if t.platform_surface is not None
-        )
-        rendered = tuple(t.output.text if t.output is not None else "" for t in capture.turns)
-        requests = capture.request_count
+    capture = await execute_gemini_turns(
+        plan, scenario, fixture, source_root=source_root, repository_root=repository_root
+    )
+    evidence = RunEvidence(
+        scenario_id=plan.scenario.id,
+        backend="gemini",
+        turns=tuple(t.evidence for t in capture.turns),
+    )
+    outputs = tuple(t.output for t in capture.turns if t.output is not None)
+    surfaces = tuple(t.surface for t in capture.turns if t.surface is not None)
+    platform_surfaces = tuple(
+        t.platform_surface for t in capture.turns if t.platform_surface is not None
+    )
+    rendered = tuple(t.output.text if t.output is not None else "" for t in capture.turns)
+    requests = capture.request_count
+    gaps.extend(capture.step_gaps)
     gaps.extend(
         ExecutionGap(code="CATALOG_CAPABILITY_PENDING", location=g.location) for g in plan.gaps
     )
@@ -883,6 +878,8 @@ async def execute_gemini_cell(
         headless_outputs=outputs,
         discord_surfaces=surfaces,
         platform_surfaces=platform_surfaces,
+        step_receipts=capture.step_receipts,
+        input_provenance=fixture.provenance,
     )
 
 
@@ -923,11 +920,8 @@ async def execute_catalog(
                     )
                 )
                 continue
-            cells.append(
-                await execute_cell(
-                    plan, by_id.get(plan.scenario.id) if plan.backend == "anthropic" else None
-                )
-            )
+            replay = by_id.get(plan.scenario.id) if plan.backend == "anthropic" else None
+            cells.append(await execute_cell(plan, replay))
     return ExecutionReport(
         integration_sha=matrix.integration_sha,
         target_sha256=matrix.target_sha256,

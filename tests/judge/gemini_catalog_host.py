@@ -63,6 +63,7 @@ async def run_gemini_turn(
     store: MemoryStateStore,
     binding: ProviderBinding,
     scope: Scope,
+    timeout_s: float = 10.0,
 ) -> GeminiTurnCapture:
     if (
         plan.backend != "gemini"
@@ -143,7 +144,7 @@ async def run_gemini_turn(
                     stream_read_timeout_s=5.0,
                     render_interval_s=3600,
                 ),
-                timeout=10.0,
+                timeout=timeout_s,
             )
             states.append(state)
             if state.error is not None:

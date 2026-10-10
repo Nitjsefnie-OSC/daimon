@@ -315,3 +315,20 @@ microcases exercise both platforms through Anthropic, OpenAI and Gemini, with
 follow-up isolation and the original global predicates retained. Frozen manual
 Slack/Teams rows still have no executable steps/assertions and remain PENDING;
 this binding does not rewrite them or add full-cell PASS credit.
+
+
+The ordered catalog step runner records every original operation in
+`CellResult.step_receipts`. It binds local channel revisions, real host turns,
+owned-root completion waits and actual delays up to 30 seconds. Explicit catalog
+deadlines bound the host task and drain cancellation; a shorter 10-second offline
+watchdog can refuse sooner. Malformed deadlines cannot authorize dispatch.
+Foreign or tentative terminal captures cannot complete a wait.
+
+Unsupported admin/context/routing/attachment/native-schema/concurrency operations
+stop dependent work. A completed earlier prefix can provide partial host evidence
+while the full cell stays PENDING. Remote tool/workspace effects retain their
+typed gap even when scripted native records are consumed. Preserved operation
+hooks clear only after an owned step actually runs; unknown hooks remain barriers.
+No catalog operation or assertion is removed, and all source mappings are
+validated for completeness and order before any channel/turn callback. Anthropic
+missing inputs remain PENDING; their pinned replay fixture handoff belongs to N3.
