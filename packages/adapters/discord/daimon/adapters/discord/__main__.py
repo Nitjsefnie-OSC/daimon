@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import signal
 import sys
 from typing import cast
@@ -26,7 +27,14 @@ log = structlog.get_logger()
 
 async def drain_on_owner_loss(bot: DaimonBot) -> None:
     await bot.runtime.ownership_lost.wait()
-    await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]  # entrypoint owns shutdown
+    deadline = asyncio.get_running_loop().call_later(100, os._exit, 1)
+    try:
+        await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]  # entrypoint owns shutdown
+    finally:
+        # Cancellation cleanup can leave a task running after close(). The
+        # heartbeat grace assumes this process stops all writes by 120 s.
+        deadline.cancel()
+        os._exit(1)
 
 
 async def main() -> None:

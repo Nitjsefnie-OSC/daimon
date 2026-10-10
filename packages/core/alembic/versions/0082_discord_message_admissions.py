@@ -7,13 +7,18 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision: str = "0081_discord_message_admissions"
-down_revision: str | None = "0080_github_grant_proposals"
+revision: str = "0082_discord_message_admissions"
+down_revision: str | None = "0081_skill_add_one_preview"
 branch_labels: str | None = None
 depends_on: str | None = None
 
 
 def upgrade() -> None:
+    op.create_table(
+        "discord_worker_heartbeats",
+        sa.Column("owner_key", sa.BigInteger(), primary_key=True),
+        sa.Column("seen_at", sa.DateTime(timezone=True), nullable=False),
+    )
     op.add_column("turn_card_intents", sa.Column("owner_key", sa.BigInteger()))
     op.add_column("thread_sessions", sa.Column("active_turn_owner_key", sa.BigInteger()))
     op.create_table(
@@ -48,6 +53,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_table("discord_worker_heartbeats")
     op.drop_column("turn_card_intents", "owner_key")
     op.drop_table("discord_message_admissions")
     op.drop_column("thread_sessions", "active_turn_owner_key")

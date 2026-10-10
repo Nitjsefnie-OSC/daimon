@@ -3243,3 +3243,11 @@ class DiscordMessageAdmission(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class DiscordWorkerHeartbeat(Base):
+    """Last confirmed lock ownership, retained across an abrupt connection loss."""
+
+    __tablename__ = "discord_worker_heartbeats"
+    owner_key: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

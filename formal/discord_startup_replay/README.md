@@ -1,30 +1,31 @@
-# Discord startup replay admission
+# Discord startup replay and owner connection loss
 
-Question: after a mention arrives during downtime, can two workers plus a gateway redelivery start two turns, or can replay leave it unanswered?
+Question: can another worker take a pending message or active card while its original worker can still execute after PostgreSQL drops only that worker's owner connection?
 
-The model has one message within the configured replay window, two workers, one worker crash, and one gateway redelivery. It explores the interleaving between a committed admission claim, owner exit, a replay scan, and starting a turn. A claimed input can be reclaimed only after its owner exits. The safe config checks `NoDuplicate` and `EventuallyAnswered` with weak fairness for worker restart, replay observation, and turn start. The liveness verdict assumes at least one replacement worker restarts, the channel is in the scan, and the message passes policy gates.
+The model has one message, two workers, one crash, one connection loss, and one gateway redelivery. `connected` models the PostgreSQL advisory lock separately from `live`, which models a worker still able to run turns. `ConnectionLoss` removes only the lock. With `GraceCheck = TRUE`, another worker cannot reclaim until the original worker has stopped and the heartbeat grace has elapsed. The real implementation uses a 120-second database-clock grace, not the model's logical `GraceElapsed` action.
 
 | Model action | Code source |
 | --- | --- |
-| `Init` (missed addressed message in the window) | `packages/adapters/discord/daimon/adapters/discord/bot.py:1722-1730`; `packages/core/daimon/core/config.py:381-389` |
-| `Restart` | `packages/adapters/discord/daimon/adapters/discord/bot.py:1518-1519`, `:1643`, `:1721-1729` |
-| `Claim`, `Replay`, `Gateway` | `packages/adapters/discord/daimon/adapters/discord/bot.py:2115-2130`, `:2267-2278`; `packages/core/daimon/core/stores/discord_message_admissions.py:14-72` |
-| `Start` | `packages/adapters/discord/daimon/adapters/discord/bot.py:2290-2350`, `:2447`; `packages/core/daimon/core/stores/discord_message_admissions.py:75-96` |
-| `Crash` (owner advisory lock disappears) | `packages/adapters/discord/daimon/adapters/discord/runtime.py:61-78`, `:92-137`; `packages/core/daimon/core/stores/worker_ownership.py:7-23`; `packages/core/daimon/core/stores/discord_message_admissions.py:67-71` |
+| `Restart`, `Replay`, `Gateway` | `packages/adapters/discord/daimon/adapters/discord/bot.py:1641-1643,1724-1763,2119-2280` |
+| `Claim` | `packages/core/daimon/core/stores/discord_message_admissions.py:14-72`; `packages/core/daimon/core/stores/worker_ownership.py:7-40` |
+| `Start` | `packages/adapters/discord/daimon/adapters/discord/bot.py:2395-2420`; `packages/core/daimon/core/stores/discord_message_admissions.py:75-96` |
+| `Crash` | `packages/adapters/discord/daimon/adapters/discord/runtime.py:55-75`; `packages/core/daimon/core/stores/worker_ownership.py:15-40` |
+| `ConnectionLoss` | `packages/adapters/discord/daimon/adapters/discord/runtime.py:95-120` (failed owner probe, lock already gone) |
+| `Stop` | `packages/adapters/discord/daimon/adapters/discord/__main__.py:27-29`; `packages/adapters/discord/daimon/adapters/discord/bot.py:793-843` |
+| `GraceElapsed` | `packages/core/daimon/core/stores/worker_ownership.py:7-40` (database clock and persisted heartbeat) |
 
-| Bound or constant | Value and source |
+| Bound or assumption | Value and source |
 | --- | --- |
-| Workers | Two, the minimum to expose competing admissions; production has no two-worker cap (`claim_message` uses a row lock and a process owner key). |
-| Message and gateway redelivery | One each, enough for a duplicate-turn witness; `bot.py:2116-2130` handles each gateway message. |
-| Worker crash | At most one, to bound recovery interleavings; `runtime.py:61-78,92-137` owns the lock and `worker_ownership.py:7-23` detects its release. |
-| Replay window | Enabled and covering the message in this model; code defaults to 0 minutes in `config.py:381-389` and the maximum is 60 minutes. |
-| Turn count | Capped at two: a second turn is already the safety failure. |
+| Workers | Two, minimum for takeover; production has no two-worker cap. |
+| Message and redelivery | One each; enough for duplicate execution. |
+| Crash and connection loss | At most one of each; `ConnectionLoss` does not imply `Stop`. |
+| Grace | Logical ordering in TLC. Production: heartbeat every 5 s; failed probe has a 5 s timeout; drain allows 60 s for turns, 10 s for notices, 5 s for cancellation cleanup and 5 s for card writes. A 120 s grace leaves scheduling and close margin. Assumes the event loop schedules the guard and drain within that margin and cancellation/close complete within their budgets. |
+| Replay | Enabled and covers the message; production default remains 0 minutes. |
 
-| Config | Verdict | States | What it shows |
+| Config | Verdict | States | Meaning |
 | --- | --- | ---: | --- |
-| `ReplaySafe` | clean | 118 | A covered message eventually starts one turn under the stated fairness, even if its first owner exits. |
-| `ReplayNoAdmission` | violates `NoDuplicate` | 50 | Removing the ledger check permits two turns after gateway redelivery. |
+| `ReplaySafe` | clean | 732 | Admission and grace prevent duplicate starts and live-worker takeover. |
+| `ReplayNoAdmission` | violates `NoDuplicate` | 78 | Redelivery starts a second turn without the ledger. |
+| `ReplayNoGrace` | violates `NoTakeoverOfLiveWorker` | 88 | A connection dies, its worker remains live, and a second worker reclaims its pending message. |
 
-Counterexample: (1) Worker 1 sees the replayed mention and starts a turn. (2) Discord redelivers the same mention. (3) Without the admission check, worker 1 claims it again and starts a second turn. `packages/core/tests/stores/test_discord_message_admissions.py::test_two_startup_workers_admit_a_missed_message_once` replays concurrent claims from two real PostgreSQL owner sessions, a pending duplicate, and redelivery after completion. The existing `test_pending_followup_is_reclaimed_only_after_its_process_exits` covers the crash and reclaim path. No staging Discord contract test or production trace was run, so the liveness result remains provisional.
-
-Unsupported upstream assumption: Discord returns the missed message in history when the replay window and channel limits cover it. The model excludes permission changes, protected channels, provisioning denial, transport failures, and a crash after thread creation but before card intent commit. It checks the stated bounds, not arbitrary production numbers.
+The `ReplayNoGrace` counterexample is replayed by `test_connection_loss_cannot_reclaim_live_pending_message` and `test_connection_loss_cannot_recover_live_card`, both against PostgreSQL using `pg_terminate_backend` on only the owner's backend. Both fail on `9e18f80dc` and pass with the heartbeat grace. No staging Discord contract test or production trace replay was run. The clean result is provisional within the listed bounds and timing assumption.

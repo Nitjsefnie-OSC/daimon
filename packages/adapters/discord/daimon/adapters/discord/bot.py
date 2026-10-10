@@ -1283,7 +1283,12 @@ class DaimonBot(commands.Bot):
         async def retire(row: ThreadSessionRow) -> None:
             async with self.runtime.sessionmaker() as session:
                 locked = await lock_orphaned_turn(session, row=row)
-                if locked is None or locked.active_turn_message_id is None:
+                if locked is None:
+                    # A disconnected owner may still be draining. Revisit the
+                    # snapshot after its heartbeat grace instead of losing it.
+                    self._orphan_retry_rows.append(row)
+                    return
+                if locked.active_turn_message_id is None:
                     return
                 delivered = False
                 orphan_turn_id = next(
@@ -1478,12 +1483,32 @@ class DaimonBot(commands.Bot):
             await asyncio.sleep(30)
             try:
                 await self._retire_orphaned_turns(retry=True)
+                await self._recover_stopped_worker_cards()
                 if asyncio.get_running_loop().time() >= next_aged_sweep:
                     await self._sweep_aged_turn_cards()
                     await self._prune_message_admissions()
                     next_aged_sweep = asyncio.get_running_loop().time() + 3600
             except Exception:
                 log.warning("turn.card_intent_periodic_sweep_failed", exc_info=True)
+
+    async def _recover_stopped_worker_cards(self) -> None:
+        """Pick up intents omitted from the boot snapshot during owner grace."""
+        async with self.runtime.sessionmaker() as session:
+            intents = await list_recoverable_turn_card_intents(
+                session, platform="discord", exclude_live_owners=True
+            )
+            active_card_ids = {
+                row.active_turn_message_id
+                for row in await list_orphaned_turns(session, platform="discord")
+            }
+        await self._reconcile_boot_turn_cards(
+            [
+                intent
+                for intent in intents
+                if intent.message_id not in active_card_ids
+                and intent.id not in self._live_turn_card_intent_ids
+            ]
+        )
 
     async def _prune_message_admissions(self) -> None:
         tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
@@ -2467,10 +2492,11 @@ class DaimonBot(commands.Bot):
                 await self._finish_admitted_messages(tenant_id, (str(message.id),))
 
     async def _finish_admitted_messages(
-        self, tenant_id: uuid.UUID, message_ids: tuple[str, ...]
+        self, tenant_id: uuid.UUID, message_ids: tuple[str, ...], *, discard_committed: bool = True
     ) -> None:
         committed = self._committed_message_ids.intersection(message_ids)
-        self._committed_message_ids.difference_update(message_ids)
+        if discard_committed:
+            self._committed_message_ids.difference_update(message_ids)
         pending = tuple(message_id for message_id in message_ids if message_id not in committed)
         if not pending:
             return
@@ -2667,7 +2693,9 @@ class DaimonBot(commands.Bot):
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc, surface=surface)
         finally:
             await self._finish_admitted_messages(
-                tenant_id, admitted_message_ids or (str(message.id),)
+                tenant_id,
+                admitted_message_ids or (str(message.id),),
+                discard_committed=bool(admitted_message_ids),
             )
             # One slot per turn: a follow-up drained after this re-enters
             # admission instead of keeping the slot (wait_for_slot).

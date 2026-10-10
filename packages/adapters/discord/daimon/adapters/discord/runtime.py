@@ -43,12 +43,9 @@ async def hold_worker_owner(
     owner_key: int,
     ownership_lost: asyncio.Event,
     probe_interval_s: float = 5,
-    recovery_window_s: float = 90,
-    retry_delay_s: float = 1,
 ) -> AsyncIterator[None]:
-    """Reconnect on transient failure; signal graceful drain only after 90 s."""
-    # asyncpg connection establishment can raise raw socket errors rather
-    # than SQLAlchemyError (for example ECONNREFUSED during a DB restart).
+    """Fail stop on a lost owner connection; other workers honor its grace."""
+    # asyncpg failures can surface as raw socket errors, not SQLAlchemyError.
     failures = (
         SQLAlchemyError,
         InterfaceError,
@@ -67,6 +64,13 @@ async def hold_worker_owner(
             await candidate.commit()
             if not owned:
                 raise SQLAlchemyError("worker owner key is still held")
+            await candidate.execute(
+                text("""INSERT INTO discord_worker_heartbeats (owner_key, seen_at)
+                     VALUES (:key, clock_timestamp())
+                     ON CONFLICT (owner_key) DO UPDATE SET seen_at = clock_timestamp()"""),
+                {"key": owner_key},
+            )
+            await candidate.commit()
             return candidate
         except BaseException:
             async with asyncio.timeout(5):
@@ -95,29 +99,18 @@ async def hold_worker_owner(
             try:
                 assert connection is not None
                 async with asyncio.timeout(5):
-                    await connection.execute(text("SELECT 1"))
+                    await connection.execute(
+                        text("""UPDATE discord_worker_heartbeats
+                             SET seen_at = clock_timestamp() WHERE owner_key = :key"""),
+                        {"key": owner_key},
+                    )
                     await connection.commit()
                 continue
-            except failures as err:
-                log.warning("discord.worker_owner_reconnecting", error_type=type(err).__name__)
-            deadline = asyncio.get_running_loop().time() + recovery_window_s
-            await discard()
-            delay = retry_delay_s
-            while (remaining := deadline - asyncio.get_running_loop().time()) > 0:
-                try:
-                    async with asyncio.timeout(min(5, remaining)):
-                        connection = await acquire()
-                    log.info("discord.worker_owner_recovered")
-                    break
-                except failures:
-                    await asyncio.sleep(
-                        min(delay, max(0, deadline - asyncio.get_running_loop().time()))
-                    )
-                    delay = min(10, delay * 2)
-            else:
-                log.error("discord.worker_owner_lost", recovery_window_s=recovery_window_s)
+            except Exception as err:
+                log.error("discord.worker_owner_lost", error_type=type(err).__name__)
                 ownership_lost.set()
-                return
+            await discard()
+            return
 
     guard_task = asyncio.create_task(guard(), name="discord.worker_owner_guard")
     try:
@@ -129,6 +122,10 @@ async def hold_worker_owner(
         if connection is not None:  # pyright: ignore[reportUnnecessaryComparison]  # guard can discard it
             try:
                 async with asyncio.timeout(5):
+                    await connection.execute(
+                        text("DELETE FROM discord_worker_heartbeats WHERE owner_key = :key"),
+                        {"key": owner_key},
+                    )
                     await connection.execute(
                         text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key}
                     )
