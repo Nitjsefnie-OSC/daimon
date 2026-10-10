@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2213,
+  "files_scanned": 2214,
   "parse_errors": [],
   "calls": [
     {
@@ -18898,6 +18898,15 @@
     {
       "file": "tests/parity/drivers/protocol.py",
       "line": 32,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/parity/test_f2_anthropic_default_capability.py",
+      "line": 21,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
