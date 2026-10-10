@@ -181,24 +181,25 @@ async def test_an_ambient_anthropic_setting_is_refused_before_any_effect(
 async def test_the_isolated_client_takes_nothing_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daimon.testing.headless_bindings import BindingRefused, isolated_anthropic
+    from daimon.testing.headless_bindings import isolated_anthropic
+    from daimon.testing.isolated_sdk import AmbientSDKConfigurationError
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"egress attempted: {request.url}")
 
     client = isolated_anthropic(handler)
-    assert client.webhook_key == ""
+    assert client.webhook_key is None
     assert client.base_url.host == "anthropic.invalid"
     assert client._custom_headers == {}  # pyright: ignore[reportPrivateUsage]
     # Set after construction: every copy path re-checks before the SDK re-reads it.
     for name in AMBIENT:
         monkeypatch.setenv(name, "late")
-        with pytest.raises(BindingRefused, match=name):
+        with pytest.raises(AmbientSDKConfigurationError, match=name):
             client.copy()
-        with pytest.raises(BindingRefused, match=name):
+        with pytest.raises(AmbientSDKConfigurationError, match=name):
             client.with_options(timeout=1)
         monkeypatch.delenv(name)
-    assert client.with_options(timeout=1).webhook_key == ""
+    assert client.with_options(timeout=1).webhook_key is None
     await client.close()
 
 

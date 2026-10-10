@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import secrets
 import uuid
@@ -29,7 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -56,49 +55,40 @@ class BindingRefused(ValueError):
     """A binding was pointed at something this run does not own; nothing was contacted."""
 
 
-# Read by the Anthropic SDK whenever a client is built or copied, whatever the
-# caller passes: a signing key, extra headers, or a different destination.
-AMBIENT_ANTHROPIC = (
-    "ANTHROPIC_WEBHOOK_SIGNING_KEY",
-    "ANTHROPIC_CUSTOM_HEADERS",
-    "ANTHROPIC_BASE_URL",
-)
 _OFFLINE_BASE_URL = "https://anthropic.invalid"
 
 
 def refuse_ambient_anthropic() -> None:
-    """Refuse, by name, any ambient Anthropic override present (even empty)."""
-    present = [name for name in AMBIENT_ANTHROPIC if name in os.environ]
-    if present:
-        raise BindingRefused(f"ambient Anthropic settings are refused: {', '.join(present)}")
+    """Refuse any ambient provider setting by name, never reading a value.
 
+    The shared check (`daimon.testing.isolated_sdk`) snapshots names by
+    iteration and refuses every known SDK setting and any other
+    ANTHROPIC_/OPENAI_/GOOGLE_/GEMINI_ name, present even empty.
+    """
+    from daimon.testing.isolated_sdk import (
+        AmbientSDKConfigurationError,
+        _require_clean_environment,  # pyright: ignore[reportPrivateUsage]
+    )
 
-class _IsolatedAnthropic(AsyncAnthropic):
-    """An SDK client whose copies re-check the environment before they are built."""
-
-    def copy(self, *args: Any, **kwargs: Any) -> Self:  # noqa: ANN401
-        refuse_ambient_anthropic()
-        return super().copy(*args, **kwargs)
-
-    with_options = copy  # pyright: ignore[reportAssignmentType, reportIncompatibleVariableOverride]
+    try:
+        _require_clean_environment()
+    except AmbientSDKConfigurationError as err:
+        raise BindingRefused(str(err)) from None
 
 
 def isolated_anthropic(handler: Callable[[httpx.Request], httpx.Response]) -> AsyncAnthropic:
-    """An offline SDK client built only from explicit values, never the environment.
+    """An offline SDK client from the shared isolated builder, over `handler`.
 
-    Every value the SDK would otherwise read from the environment is passed
-    explicitly, and the three it reads regardless are refused by name first.
+    The builder refuses ambient settings before construction and before every
+    copy, and passes every credential, routing and header value explicitly.
     """
+    from daimon.testing.isolated_sdk import build_async_anthropic
+
     refuse_ambient_anthropic()
-    return _IsolatedAnthropic(
+    return build_async_anthropic(
+        transport=httpx.MockTransport(handler),
         api_key="offline-fixture",
         base_url=_OFFLINE_BASE_URL,
-        webhook_key="",
-        default_headers={},
-        max_retries=0,
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), base_url=_OFFLINE_BASE_URL, trust_env=False
-        ),
     )
 
 

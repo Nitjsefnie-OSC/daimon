@@ -307,13 +307,12 @@ def _no_egress(request: httpx.Request) -> httpx.Response:
 async def test_http_check_refuses_any_final_url_off_the_served_origins(
     template: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daimon.testing import headless_bindings
     from daimon.testing.headless_bindings import BindingRefused
 
     def no_client(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("a client was built for a refused URL")
 
-    monkeypatch.setattr(headless_bindings.httpx, "AsyncClient", no_client)
+    monkeypatch.setattr(httpx, "AsyncClient", no_client)
     with pytest.raises(BindingRefused):
         await http_check(template, {"env.notebook_host": "http://127.0.0.1:9", "nonce": "abc"})
 
