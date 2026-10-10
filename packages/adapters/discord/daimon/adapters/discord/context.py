@@ -451,7 +451,10 @@ async def build_channel_context_xml(
                         break
                 if len(older_files) == CHANNEL_FILE_LIMIT:
                     break
-        except discord.HTTPException:
+        except Exception:
+            # The file list is optional: any failed or dropped read (an HTTP
+            # error, a timeout, a reset connection) keeps the conversation and
+            # leaves the section out. Cancellation still propagates.
             older_files = []
 
     messages = recent

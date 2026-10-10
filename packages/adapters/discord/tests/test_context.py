@@ -1282,17 +1282,39 @@ class TestBuildChannelContextXml:
         assert xml.count("<user_query") == 1
 
     @pytest.mark.asyncio
-    async def test_recent_file_history_failure_keeps_conversation(self) -> None:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            discord.HTTPException(MagicMock(status=403, reason="Forbidden"), "denied"),
+            TimeoutError(),
+            ConnectionResetError(),
+        ],
+    )
+    @pytest.mark.parametrize("during_iteration", [False, True])
+    async def test_recent_file_history_failure_keeps_conversation(
+        self, error: Exception, during_iteration: bool
+    ) -> None:
         trigger = _make_message(msg_id=27, content="help")
         messages = [*[_make_message(msg_id=i) for i in range(1, 27)], trigger]
         channel = _make_text_channel([])
         calls = 0
 
-        def failing_history(*, limit: int, before: discord.Object | None = None) -> _AsyncIter:
+        class _FailingIter:
+            def __aiter__(self) -> _FailingIter:
+                return self
+
+            async def __anext__(self) -> object:
+                raise error
+
+        def failing_history(
+            *, limit: int, before: discord.Object | None = None
+        ) -> _AsyncIter | _FailingIter:
             nonlocal calls
             calls += 1
             if calls == 2:
-                raise discord.HTTPException(MagicMock(status=403, reason="Forbidden"), "denied")
+                if during_iteration:
+                    return _FailingIter()
+                raise error
             eligible = [m for m in reversed(messages) if before is None or m.id < before.id]
             return _AsyncIter(eligible[:limit])
 
