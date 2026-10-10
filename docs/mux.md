@@ -1480,3 +1480,13 @@ separate from the native compatibility display ledger, so a revised media item
 can reach the tap without replaying the native display event. Missing hooks are
 a no-op. The recovery lifecycle wrapper forwards the optional tap; the
 Anthropic native callback keeps its existing order and payload.
+
+### Platform backend-selection callbacks
+
+The Discord, Slack and Teams adapters provide explicitly imported offline
+`backend_conformance` callbacks over their normal admission and binding paths.
+They return the actual prepared turn or the normally rendered admission refusal
+for host conformance collectors; they do not select revisions, inject bindings
+or change application startup. Use dedicated idle applications and scripted
+transports. Each adapter's `BACKEND-CONFORMANCE.md` describes its input boundary
+and the independent database and SDK mutation controls.
