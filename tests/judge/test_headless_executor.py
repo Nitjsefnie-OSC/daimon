@@ -329,3 +329,50 @@ async def test_explicit_channels_select_distinct_persisted_slots_without_fallbac
     assert len({t.slot_id for t in result.evidence.turns}) == 2
     assert result.host_outcome.status == "PASS" and result.request_count == 6
     assert not any(c.kind == "same_session" for c in result.host_outcome.checks)
+
+
+@pytest.mark.parametrize(
+    "timeout", [{}, 1e-9, 180, 0, -1, True, None, "10", float("inf"), float("nan")]
+)
+async def test_explicit_wait_done_timeout_is_unbound_before_any_dispatch(
+    tmp_path: Path,
+    timeout: Any,
+) -> None:
+    row = source()
+    row["surface"] = "headless"
+    row["steps"][2]["timeout_s"] = timeout
+    row["assert"] = [{"kind": "done_within_s", "turn": 1, "max": 10.0}]
+    plan = planned(tmp_path, row)
+    result = await executor.execute_cell(plan, scripted(plan))
+    assert result.status == "PENDING" and result.request_count == 0
+    assert not result.evidence.turns and not result.host_outcome.checks
+    if plan.scenario.load_error is not None:
+        # Non-finite JSON is refused by the catalog loader before step planning.
+        assert not plan.invocations
+        assert any(g.code == "CATALOG_CAPABILITY_PENDING" for g in result.gaps)
+        return
+    assert any(
+        g.code == "WAIT_DONE_TIMEOUT_UNBOUND" and g.location == "steps[2]" for g in result.gaps
+    )
+
+
+def test_wait_done_timeout_refusal_survives_optimized_python(tmp_path: Path) -> None:
+    row = source()
+    row["surface"] = "headless"
+    row["assert"] = [{"kind": "done_within_s", "turn": 1, "max": 10.0}]
+    plan = planned(tmp_path, row)
+    inputs = tmp_path / "timeout-inputs.json"
+    inputs.write_text(
+        json.dumps(
+            {"plan": plan.model_dump(mode="json"), "replay": scripted(plan).model_dump(mode="json")}
+        )
+    )
+    script = '\nimport asyncio, importlib, json, sys\nsys.path.insert(0, sys.argv[2])\ne = importlib.import_module("judge.headless_executor")\nc = importlib.import_module("judge.catalog_runner")\nx = json.load(open(sys.argv[1]))\nasync def check():\n    for value in ({}, 1e-9, 180):\n        x["plan"]["invocations"][2]["source"]["timeout_s"] = value\n        p = c.ScenarioPlan.model_validate(x["plan"])\n        r = await e.execute_cell(p, e.ScenarioReplay.model_validate(x["replay"]))\n        if r.status != "PENDING" or r.request_count or r.evidence.turns:\n            raise RuntimeError("unbound catalog timeout earned credit under -O")\n        if not any(g.code == "WAIT_DONE_TIMEOUT_UNBOUND" for g in r.gaps):\n            raise RuntimeError("timeout gap was lost under -O")\nasyncio.run(check())\n'
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", script, str(inputs), str(Path(__file__).parents[1])],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr.decode())

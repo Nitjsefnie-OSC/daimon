@@ -203,6 +203,12 @@ def _host_assertions(evidence: RunEvidence) -> list[dict[str, JsonValue]]:
 def _unbound_steps(plan: ScenarioPlan) -> tuple[ExecutionGap, ...]:
     gaps: list[ExecutionGap] = []
     for invocation in plan.invocations:
+        if invocation.source.get("do") == "wait_done" and "timeout_s" in invocation.source:
+            # The offline watchdog is not a catalog wait deadline. Do not confer
+            # timeout-specific credit until the associated wait window is bound.
+            gaps.append(
+                ExecutionGap(code="WAIT_DONE_TIMEOUT_UNBOUND", location=invocation.location)
+            )
         if invocation.operation not in {"new_channel", "host_turn", "wait_done"}:
             gaps.append(ExecutionGap(code="STEP_BINDING_UNAVAILABLE", location=invocation.location))
         if invocation.fixture is not None:

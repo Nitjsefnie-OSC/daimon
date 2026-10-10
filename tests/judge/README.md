@@ -153,3 +153,7 @@ that oracle lands on integration. This capture alone
 does not change any TARGET-53 score or claim platform parity.
 
 Focused verification: `uv run pytest tests/judge/test_headless_output.py`.
+Explicit `wait_done.timeout_s` is currently `PENDING / WAIT_DONE_TIMEOUT_UNBOUND`
+before any SDK dispatch, for valid and malformed values alike. A timeout-less
+`wait_done` joins the already awaited driver turn. The ten-second offline
+watchdog protects the fixture process; it does not certify a catalog wait deadline.
