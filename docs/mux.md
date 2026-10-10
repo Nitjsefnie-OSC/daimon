@@ -1355,4 +1355,4 @@ An explicitly imported Gemini SDK conformance component checks cancellation/EOF
 occupancy and usage revision replay on MockTransport. Tool/mount updates, native
 vaults and deletion keep their typed limits; live certificates and exact-spend
 settlement are separate. See
-[SDK conformance component](../packages/mux/mux/drivers/gemini/CONFORMANCE-SDK.md).
+`packages/mux/mux/drivers/gemini/CONFORMANCE-SDK.md`.
