@@ -439,3 +439,48 @@ A missing or enabled snapshot refuses; root-only accounting cannot certify
 delegated work. Child-usage accounting is a follow-up. Omitted controls preserve
 standalone driver request bodies. See the fetched 2026-10-10
 [multi-agent guide](https://developers.openai.com/api/docs/guides/agents-api/multi-agent).
+
+
+Explicit `SessionControls.spend_limit_usd_cents` uses integer USD cents
+(minimum 1, maximum 4,503,599,627,370,495). The selected limit must be echoed as
+an exact integer on every native session read; missing, null, malformed or
+changed limits refuse before host input. Omission remains supported and leaves
+the request unchanged. An acknowledged create with an unverified echo retains
+only scoped native session/agent references in `SessionSpendLimitUnverified`;
+host preparation durably records the session reference under the original
+creation claim for exact owned cleanup. It never treats this as a successful
+binding or retries the creation automatically.
+
+Small test sessions may explicitly select 20 cents; 70 cents belongs only to an
+explicitly selected medium session. These are operational policy choices, not
+claims about a service minimum. A prior project response rejected a 1-cent cap;
+its precise reason is unknown. The session cap does not establish exact spend,
+cover every infrastructure/tool charge, enforce token counters or replace the
+budget guard. `spend_control.consumed` is nullable and floored to whole cents;
+actual usage, dated pricing and container accounting remain separate. The
+2026-10-10 13:49:48Z
+[create reference](https://developers.openai.com/api/reference/resources/beta/subresources/agents/subresources/sessions/methods/create)
+snapshot SHA256 is
+`7ec0fd6edb8c21cbc57163e2dfe024fe9c7a4dfff88a9f3b2973c1bdb9c06b8c`.
+SDK request-shape tests load the retained compressed official snapshot, verify
+its full hash, and pin the native body, headers, units and strict echo;
+provider acceptance of 20/70 cents is not established by offline tests.
+
+### C11 provider preparation evidence
+
+`test_interaction_deployment.py` composes the actual Skills, Agents, Files,
+Sessions and Events ports through the installed SDK. A valid inline `SKILL.md`
+bundle is decoded independently from the transmitted multipart ZIP; its immutable
+version is bound to the retrieved agent and echoed by the hosted session. The
+same session binds a remote MCP connection and an exact uploaded input file
+before a native turn exposes a typed pending function result. EOF leaves that
+root occupied; neither unavailable execution nor a changed skill pin is success.
+
+The file is an uploaded archive, without a native git checkout claim. Separate
+skill display titles and repository workspace sources remain typed refusals
+before I/O. The unchanged canonical C11 fixture still requires those unsupported
+shapes, so C11 stays PENDING. This request-shape proof is offline evidence, not a
+live certificate or a change to host preparation. It follows the 2026-10-10
+hashed Agents hosted-skill reference, the
+[Skills guide](https://developers.openai.com/api/docs/guides/tools-skills), and the
+[Files guide](https://developers.openai.com/api/docs/guides/agents-api/environments/files).
