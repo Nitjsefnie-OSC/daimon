@@ -18110,7 +18110,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/isolated_sdk.py",
-      "line": 140,
+      "line": 157,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
