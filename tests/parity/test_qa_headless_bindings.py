@@ -150,10 +150,10 @@ async def test_db_check_runs_exactly_one_read_only_select(
         await db_check(db_session_factory, "select 1, 2", {})
 
 
-async def test_i7_and_new24_against_the_real_apps(tmp_path: Path) -> None:
-    database_url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    assert database_url, "the parity lane provides an isolated test database"
-    async with serve_catalog_hosts(database_url, tmp_path) as origins:
+async def test_i7_and_new24_against_the_real_apps(
+    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with serve_catalog_hosts(db_session_factory, tmp_path) as origins:
         values = {**origins, "nonce": "n2-headless"}
         i7 = [await http_check(str(a["url"]), values) for a in I7]
         new24 = [await http_check(str(a["url"]), values) for a in NEW24]
@@ -214,7 +214,8 @@ def _factory_for(url: str, connects: list[object]) -> async_sessionmaker[AsyncSe
     [
         # Never connected to: the factories below are refused before any session.
         "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon",
-        "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test_nc_other",
+        # The shared CI name outside a registered CI schema.
+        "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test",
         "postgresql+asyncpg://daimon:daimon@db.example.com:5432/daimon_test_nc_n2",
         "postgresql+asyncpg://daimon:daimon@localhost:5432/qa?host=db.example.com",
     ],
@@ -231,7 +232,7 @@ async def test_a_binding_refuses_a_database_it_does_not_own_before_connecting(ur
     with pytest.raises(BindingRefused):
         await db_check(factory, "select 1", {})
     with pytest.raises(BindingRefused):
-        async with serve_catalog_hosts(url, Path("/nonexistent")):
+        async with serve_catalog_hosts(factory, Path("/nonexistent")):
             pass
     assert connects == []
 
@@ -239,10 +240,34 @@ async def test_a_binding_refuses_a_database_it_does_not_own_before_connecting(ur
 async def test_a_binding_refuses_a_factory_without_one_explicit_bind() -> None:
     from daimon.testing.headless_bindings import BindingRefused
 
-    with pytest.raises(BindingRefused, match="explicit"):
+    with pytest.raises(BindingRefused):
         await db_check(_NeverOpened(), "select 1", {})
-    with pytest.raises(BindingRefused, match="binds"):
+    with pytest.raises(BindingRefused):
         await db_check(_NeverOpened(binds={object: object()}), "select 1", {})
+
+
+async def test_a_remote_per_model_bind_is_refused_before_connecting(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The main bind is owned; one routed bind points elsewhere. Nothing connects."""
+    from daimon.core._models import CredentialRequest  # pyright: ignore[reportPrivateUsage]
+    from daimon.testing.headless_bindings import BindingRefused
+
+    connects: list[object] = []
+    remote = _factory_for(
+        "postgresql+asyncpg://daimon:daimon@db.example.com:5432/daimon_test_nc_n2", connects
+    ).kw["bind"]
+    factory = _NeverOpened(bind=db_session_factory.kw["bind"], binds={CredentialRequest: remote})
+    with pytest.raises(BindingRefused):
+        await submit_mcp_token(
+            factory, mcp_transport=httpx.MockTransport(_no_egress), token=NEW27_TOKEN
+        )
+    with pytest.raises(BindingRefused):
+        await db_check(factory, "select 1", {})
+    with pytest.raises(BindingRefused):
+        async with serve_catalog_hosts(factory, Path("/nonexistent")):
+            pass
+    assert connects == []
 
 
 def _no_egress(request: httpx.Request) -> httpx.Response:

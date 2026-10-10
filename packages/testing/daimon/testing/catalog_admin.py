@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from daimon.testing.admin_bindings import AdminBindings, AdminReceipt
 from daimon.testing.headless_bindings import (
     BindingRefused,
+    check_owned_sessionmaker,
     refuse_ambient_anthropic,
     submit_mcp_token,
 )
@@ -60,8 +61,13 @@ class CatalogAdmin:
     product: AdminBindings | None = None
 
     async def __call__(self, source: Mapping[str, Any], values: Mapping[str, str]) -> AdminReceipt:
-        # Before any binding runs: no ambient Anthropic override may reach a client.
+        # Before any binding runs: no ambient Anthropic override may reach a client,
+        # and every database bind either path could use, routed binds included,
+        # must be owned.
         refuse_ambient_anthropic()
+        check_owned_sessionmaker(self.sessions)
+        if self.product is not None:
+            check_owned_sessionmaker(self.product.sessions)
         if source.get("do") == "admin" and source.get("tool") == "headless":
             return await self._headless(source, values)
         if self.product is None:
