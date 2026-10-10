@@ -40,6 +40,10 @@ from daimon.adapters.discord.post_transport import (
     clear_webhook_backoff,
     known_webhook_ids,
 )
+from daimon.adapters.discord.provider_actions import (
+    discord_provider_action_hook,
+    provider_action_options,
+)
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
@@ -2770,6 +2774,14 @@ class DaimonBot(commands.Bot):
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
+                    **provider_action_options(
+                        prepared,
+                        lambda: discord_provider_action_hook(
+                            thread,
+                            thread_id=row.thread_id,
+                            channel_id=thread.id,
+                        ),
+                    ),
                 )
                 archive_after = await self._archive_requested(origin.id)
         finally:
@@ -3694,6 +3706,14 @@ class DaimonBot(commands.Bot):
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
+                    **provider_action_options(
+                        prepared,
+                        lambda: discord_provider_action_hook(
+                            thread,
+                            thread_id=str(thread.id),
+                            channel_id=thread.id,
+                        ),
+                    ),
                 )
                 archive_after = await self._archive_requested(origin.id)
         finally:

@@ -1464,3 +1464,6 @@ cannot promote a root failure. Anthropic's existing outcome behavior is unchange
 Gemini native `incomplete` is `session_terminated`, including when its real stream
 or restart replay refuses the failed root before display delivery. That refusal
 remains nonretryable and does not permit billing success or a recovery send.
+### Typed provider-action cards
+
+Discord renders the scoped provider-action callback as separate browser-origin and authentication cards. It returns the exact offered response object after checking the requester and bound destination. Origin access offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when the provider supplies that response. Expiry and turn Stop retire the controls. Native action payloads and credentials never enter card components, and Anthropic prepared calls attach no provider-action callback.

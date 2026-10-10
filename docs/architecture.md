@@ -1838,3 +1838,4 @@ bytes through `deliver_provider_output`. The caller owns admitted tenant/session
 validation. Uploads reuse answer attachment edits, Slack's external upload flow,
 and Teams Graph or requester-bound consent with SharePoint PUT. These edges
 perform no provider selection, native payload parsing or artifact deletion.
+Discord attaches the typed provider-action callback only to prepared non-Anthropic sessions. Browser-origin cards return the supplied approve, deny or cancel response; authentication cards offer completion only when the provider supplies a verified response. Requester and destination checks precede selection, and expiry or Stop retires the controls without granting permission. Native action payloads stay out of cards.

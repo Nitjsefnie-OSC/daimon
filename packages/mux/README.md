@@ -697,3 +697,4 @@ fail. Explicit deployment/auth adapters are required; no live/CAS claim is made.
 The full-byte bundle and F2 SDK proofs use the shared isolated test factory with
 explicit fixture keys and owned sync/async transports; ambient provider settings
 refuse before construction. Product client construction is unchanged.
+Discord consumes the typed provider-action callback for prepared foreign sessions, returning an offered NativeActionResponse object unchanged. Its cards authorize the requester and destination, suppress duplicate selections, and retire on expiry or cancellation. Authentication remains distinct from origin permission; a missing completion response produces no completion button.
