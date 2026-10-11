@@ -290,6 +290,8 @@ aggregation uses decimal precision 80. Controlled rates and inventory evidence
 prove offline host arithmetic; they do not certify live invoices or supply a
 missing posted footer. `issues` explain incomplete results.
 
+
+
 ## Metered channel budget proofs
 
 `daimon.testing.channel_accounting.ChannelAccounting(sessions, scope, platform,
