@@ -155,7 +155,11 @@ skipped), diverged (something would change, and it names what), or
 unverifiable (a comparison failed). Installs that are not ready yet are
 counted separately as awaiting re-seed rather than reported as drift. It exits
 non-zero if anything diverged or could not be checked, which is how it is used
-as a deploy gate.
+as a deploy gate. Within each tenant, custom agent skill references are
+resolved against the complete strict skill-list snapshot already loaded for
+skill verification; if that list fails, verification remains unverifiable.
+Apply continues to resolve references from the live provider view so it can
+see skills created during that same apply.
 
 ## The seeded-skill fingerprint
 

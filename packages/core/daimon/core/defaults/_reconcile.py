@@ -211,6 +211,7 @@ async def _reconcile_core(
                     dry_run=dry_run,
                     account_id=account_id,
                     public_url=public_url,
+                    skills_view=skills_view if dry_run else None,
                 ),
                 kind="agent",
                 name=spec.name,

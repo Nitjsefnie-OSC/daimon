@@ -215,7 +215,13 @@ async def test_reconcile_agent_creates_with_custom_skills() -> None:
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
+    outcome = await reconcile_agent(
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        skills_view=[],  # Apply must ignore a stale dry-run snapshot.
+    )
     assert outcome.action is Action.CREATED
     assert created_payload["skills"] == [{"type": "custom", "skill_id": "sk_resolved"}], (
         "resolved MA skill id must be sent in the POST body"
