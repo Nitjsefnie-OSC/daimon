@@ -1,7 +1,8 @@
 """Opt-in A7 preparation: isolated SDK replay with real host persistence.
 
-No credential loader, live client, provider request or canonical ledger access
-exists here. The caller owns its migrated test DB, tenant and quiet-window GO.
+The explicit live mode delegates to the guarded one-attempt entry; other modes
+never read credentials or access a canonical ledger. The caller owns its
+migrated test DB, tenant and quiet-window GO.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ from mux.state.store import binding_slot
 from sqlalchemy import event as sql_event
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
-HAIKU = "claude-haiku-4-5-20251001"
+HAIKU = "claude-haiku-5-5"
 PathName = Literal["legacy", "mux"]
 OFFLINE_PROBES = (
     "packages/core/tests/turn/test_a7_anthropic.py",
@@ -487,7 +488,7 @@ def live_readiness() -> Mapping[str, object]:
             "Lead live GO, disposable scope, reviewed limits and cleanup ownership.",
             "N9 canonical BudgetGuard reservation before any key read or SDK allocation.",
             "N9/N6 native executable case callbacks; recipe BOUND is not callback availability.",
-            "Supported native limit and acknowledged remaining margin; do not invent extra_body.",
+            "Guard-only: no native cap; total300s and cumulative $.28 streamed stop.",
             "Actual normalized usage plus container/session time, uncertain reservations retained.",
             "Fresh offline replay of normalized receipts; all required cases executable.",
         ],
@@ -500,11 +501,17 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         default="offline-probes",
-        choices=("offline-probes", "quiet-benchmark", "live-plan"),
+        choices=("offline-probes", "quiet-benchmark", "live-plan", "live"),
     )
     parser.add_argument("--output", required=True, type=Path, help="fresh evidence directory")
     parser.add_argument("--quiet-window-go", action="store_true")
+    from daimon.testing.anthropic_live import add_live_arguments, live_command
+
+    add_live_arguments(parser)
     args = parser.parse_args()
+    if args.mode == "live":
+        live_command("A7", args)
+        return
     refuse_ambient()
     if args.output.exists():
         parser.error("evidence directory must be new; preserve earlier receipts")

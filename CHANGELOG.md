@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Isolate pooled Discord conformance test fixtures and control timeout expiry after real callback entry, avoiding shared-transaction setup hangs and deadline races.
+- Seal all guarded Anthropic live responses, latch late usage for reconciliation, protect cleanup against repeated cancellation, and preserve unknown-TTL monetary holds.
+
+- Quarantine cross-session native usage ID collisions in guarded Anthropic probes while preserving independently verified spend floors and limit latches.
+
+- Guard live Anthropic probes with SDK SSE decoding, monotone verified usage floors and quarantined late-create cleanup.
+
+- Add explicitly admitted, one-attempt Haiku 5.5 A7/F2 probe entries with shared deadlines and streamed-cost stops; no native budget field or default runtime change.
 
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
 - Explicit mux runtime configuration now refuses reserved provider-prefixed credential references before the first turn; deployment examples use host-scoped key names. Default settings and private SDK environment guards are unchanged.

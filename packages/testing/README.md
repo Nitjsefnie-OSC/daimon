@@ -358,3 +358,61 @@ section without consulting credentials or constructing settings. Missing product
 declarations refuse with `ProductProfileUnavailable`; the report remains PENDING.
 The default profile keeps all six disabled. An application receipt supplies no
 source, native-send, card, accounting or user-visible outcome evidence.
+
+The explicit `python -m daimon.testing.a7_anthropic --mode live` and
+`python -m daimon.testing.f2_anthropic --mode live` entries require exact signed
+financial authorization, a separate pinned lead GO, clean merged source,
+installed config/ledger receipts, reviewed recipe and authorized disposable
+bindings. Missing admission facts produce PENDING before credentials or a hold.
+A7 runs one legacy and one mux turn in two fresh sessions sequentially. F2
+uses the public default-capability flow with eleven authored skills, builtins
+and an explicitly bound provider-reachable MCP endpoint; loopback fixtures
+cannot supply live MCP evidence. Each session has one attempt, SDK retries zero,
+and an exclusive envelope marker prevents a second run at a different output.
+
+These are guard-only probes: the installed SDK has no native session budget
+field and none is sent. Token thresholds are observed facts, never provider
+caps. A7's total deadline is 300 seconds and streamed stop estimate $0.28; F2's
+are 600 seconds and $0.52. Fifteen seconds within that same deadline are
+reserved for interruption, archive and close. The stop uses the signed dated
+Haiku 5.5 price table, disjoint model spans and a separately labelled wall-time
+estimate. It cannot prevent unseen in-flight charges. Final missing runtime,
+TTL splits or counters retain the whole $0.35/$0.65 hold for owner reconciliation;
+no wall time or rounded native list cost is presented as exact billed spend.
+Only acknowledged created IDs enter cleanup. Normalized F2 recordings use the
+existing recorder; raw provider bodies and credentials are never exported.
+The default modes remain offline and do not load credentials or a ledger.
+
+The live monitor consumes the SDK's decoded SSE events before forwarding each
+frame, including fragmented CRLF/JSON and multiple events in a single chunk.
+Conflicting verified walks keep the maximum dated request floor and any earlier
+financial token-limit latch through the public settlement edges; they never
+certify complete actual usage. A create acknowledgement received after stopping
+or sealing is quarantined outside the accepted inventory. Its durable orphan
+receipt triggers scoped single-attempt retirement (session interrupt/archive),
+with no new session or second settlement. This bounded late cleanup is explicitly
+outside the expired run deadline and retains the hold for reconciliation.
+
+Live usage identities are keyed by the accepted session plus native request ID.
+Cross-session native ID collisions are quarantined and exported with both session
+provenances for reconciliation. Financial proof projections keep one original
+maximum-cost witness per collided native ID and independent maximum-token witnesses;
+they cannot count a collision twice, fabricate a native ID, or erase a verified
+floor or overrun latch. Actual usage and runtime remain incomplete and held.
+
+The live probe transport monitors every native stream endpoint through the SDK
+decoder regardless of Content-Type and fences every response after settlement.
+Opened streams are force-closed; delayed responses are closed and refused.
+An adversarial already-pending iterator that supplies usage after settlement
+creates a private 0600 `.n4-late-usage-*` sidecar beside the ledger. It preserves
+accepted session/request/model proof, the pinned conservative monetary floor,
+and the retained unknown hold, with admission-blocked and reconciliation flags.
+Both `admit` and `run_live` refuse A7 or F2 while any such ledger sidecar exists,
+before an attempt, reservation, credential read or client construction. N8 must
+reconcile and archive that evidence outside its blocking namespace before F2 GO;
+a caller boolean cannot clear it. There is no second settlement or ledger edit.
+Cleanup bookkeeping, interrupt/archive, retirement, SDK close and the single
+settlement are protected by a shielded finalizer within the original deadline.
+Repeated caller cancellations are absorbed until that finalizer finishes, then
+cancellation is re-raised. Financial witness ranking uses the exact pinned N8
+monetary bound; missing cache TTL never removes its conservative retained hold.
