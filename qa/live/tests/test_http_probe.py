@@ -6,6 +6,7 @@ import pytest
 
 from qa.live.config import Pricing
 from qa.live.cost import Ledger
+from qa.live.deploy_quiet import DeployNotQuiet
 from qa.live.http_probe import check_http
 from qa.live.runner import Executor
 from qa.live.schema import Assertion, Scenario
@@ -81,3 +82,66 @@ def test_http_only_headless_never_creates_discord_turn(
     result = Executor(backend, judge, ledger, pricing, "staging").run(scenario)
     assert result.status == "PASS"
     assert backend.events == [] and result.turns == [] and ledger._today() == 0
+
+
+def http_only(scenario: Scenario, url: str) -> Scenario:
+    scenario.tier = "full"
+    scenario.surface = "headless"
+    scenario.setup = []
+    scenario.steps = []
+    scenario.teardown = []
+    scenario.est_turns = 0
+    scenario.assertions = [Assertion(kind="http_check", url=url, expect_status=200)]
+    return scenario
+
+
+def test_http_only_retains_quiet_gate_evidence(
+    endpoint: str,
+    backend: FakeBackend,
+    judge: FakeJudge,
+    ledger: Ledger,
+    pricing: Pricing,
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = {"quiet": True, "busy": [], "age_s": 600.0, "last_completed": "x"}
+    monkeypatch.setattr(backend, "deployment_quiet", lambda: evidence)
+    result = Executor(backend, judge, ledger, pricing, "staging").run(
+        http_only(scenario, endpoint + "/ok")
+    )
+    assert result.status == "PASS"
+    assert result.deployment is not None and result.deployment.quiet == evidence
+    assert not result.deployment.interrupted
+
+
+@pytest.mark.parametrize(
+    "failure, interrupted",
+    [
+        (DeployNotQuiet("staging deploy did not become quiet within 15 minutes"), True),
+        (Pending("GitHub deployment evidence unavailable: authentication"), False),
+    ],
+)
+def test_http_only_gate_failure_is_pending_without_probe(
+    endpoint: str,
+    backend: FakeBackend,
+    judge: FakeJudge,
+    ledger: Ledger,
+    pricing: Pricing,
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Pending,
+    interrupted: bool,
+) -> None:
+    def gate() -> object:
+        raise failure
+
+    monkeypatch.setattr(backend, "deployment_quiet", gate)
+    # /missing returns 404, so an HTTP probe run despite the gate would FAIL.
+    result = Executor(backend, judge, ledger, pricing, "staging").run(
+        http_only(scenario, endpoint + "/missing")
+    )
+    assert result.status == "PENDING"
+    assert [(c.kind, c.status) for c in result.checks] == [("deployment_quiet", "PENDING")]
+    assert result.deployment is not None and result.deployment.interrupted is interrupted
+    assert result.deployment.quiet == {}
+    assert backend.events == [] and ledger._today() == 0
