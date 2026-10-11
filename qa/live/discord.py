@@ -485,7 +485,11 @@ class DiscordBackend:
                     self.thread_parents[turn.thread_id] = parent
             turn.verdicts = [self.classify(m) for m in messages]
             for message, verdict in zip(messages, turn.verdicts, strict=True):
-                if verdict == "working" and message.get("edited_timestamp"):
+                # Record positively classified working cards even before their
+                # first edit: a card later converted into an answer chunk needs
+                # proof it ran this turn. card_edits_min counts only entries
+                # carrying a real edit timestamp.
+                if verdict == "working":
                     edit: Message = {
                         "message_id": message.get("id"),
                         "edited_timestamp": message.get("edited_timestamp"),
