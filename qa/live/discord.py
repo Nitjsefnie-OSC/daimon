@@ -106,6 +106,7 @@ def fingerprint(message: Message) -> str:
                 "id",
                 "content",
                 "embeds",
+                "components",
                 "attachments",
                 "edited_timestamp",
             )
