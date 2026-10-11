@@ -54,3 +54,10 @@ oracle rejects both changed mappings. Production release also resumes deferred
 continuations, including on cancellation. They also reject invalid/busy inputs
 before callback side effects and check restoration/cleanup. No provider calls,
 SDK fields, usage rows, golden files or default behavior are fabricated.
+
+The pooled admission controls own a module-local worker schema and pool through
+the shared guarded DB fixtures. They do not reuse another test module's pooled
+transactions. Failure controls first observe entry into the real callback, then
+expire a real `asyncio.Timeout` or cancel the probe explicitly; callback failure
+keeps its original exception. A separate watchdog bounds the test, and every
+exit joins its tasks before checking handler restoration, queues and tenant slots.
