@@ -619,6 +619,9 @@ async def run_wizard_submit_turn_observed(
             tenant_id=row.tenant_id,
             thread_id=thread_id,
             make_lifecycle=_make_lifecycle,
+            # Owned like the marker, so a successor's card recovery leaves a
+            # live owner's card alone exactly as its orphan sweep does.
+            owner_key=bot.runtime.owner_key,
         )
         bot._track_live_turn_card(turn_card_intent.id)  # pyright: ignore[reportPrivateUsage]
 
@@ -763,6 +766,10 @@ async def run_wizard_submit_turn_observed(
                 render_interval_s=2.0,
                 deadline=turn_deadline_at,
                 confirm_write=discord_confirmation_hook(channel),
+                # A dead-session recovery moves this turn's marker to the replacement.
+                active_turn_message_id=marker_ids.get(prepared.mapping_id)
+                if prepared.mapping_id is not None
+                else None,
             )
         finally:
             if outcome is not None and outcome.mapping_id is not None:

@@ -43,6 +43,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
     mark_dead,
+    transfer_active_turn,
 )
 from daimon.core.tool_safety import trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
@@ -368,6 +369,7 @@ async def _replace_dead_session(
     thread_id: str,
     dead_session_id: str,
     dead_mapping_id: uuid.UUID,
+    active_turn_message_id: str | None = None,
 ) -> _Replacement:
     async def attempt():
         async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker, preparation=True):
@@ -379,6 +381,7 @@ async def _replace_dead_session(
                 thread_id=thread_id,
                 dead_session_id=dead_session_id,
                 dead_mapping_id=dead_mapping_id,
+                active_turn_message_id=active_turn_message_id,
             )
 
     return await retry_fences(attempt)
@@ -393,8 +396,14 @@ async def _replace_dead_session_locked(
     thread_id: str,
     dead_session_id: str,
     dead_mapping_id: uuid.UUID,
+    active_turn_message_id: str | None = None,
 ) -> _Replacement:
     """Mark the dead mapping dead and move onto one live replacement.
+
+    `active_turn_message_id` is the turn's own in-flight marker, when its
+    adapter wrote one: it moves onto the replacement in the same locked
+    transaction (`transfer_active_turn`), before the replacement's turn is
+    sent, so restart recovery watches the session that is actually running.
 
     Runs under the same per-(tenant, platform, thread, account) advisory lock
     as `prepare_session_for_turn`. Two turns can be running on one mapping
@@ -463,6 +472,13 @@ async def _replace_dead_session_locked(
                 await stamp_session_seal(
                     deps, live.ma_session_id, admission, now=lambda: datetime.now(UTC)
                 )
+                if active_turn_message_id is not None:
+                    await transfer_active_turn(
+                        db,
+                        from_id=dead_mapping_id,
+                        to_id=live.id,
+                        expected_message_id=active_turn_message_id,
+                    )
                 return _Replacement(
                     ma_session_id=live.ma_session_id,
                     mapping_id=live.id,
@@ -519,6 +535,13 @@ async def _replace_dead_session_locked(
             # would overwrite -- and gains only the pointer forward.
             await mark_dead(db, id=dead_mapping_id)
             await link_replacement(db, id=dead_mapping_id, replaced_by_id=fresh.mapping_id)
+            if active_turn_message_id is not None:
+                await transfer_active_turn(
+                    db,
+                    from_id=dead_mapping_id,
+                    to_id=fresh.mapping_id,
+                    expected_message_id=active_turn_message_id,
+                )
     except BaseException:
         # The locked transaction rolled back after the upstream session was
         # created (a ceiling, a cancel, a failed insert or commit). No row
@@ -558,6 +581,7 @@ async def run_prepared_turn(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     confirm_write: ConfirmationHook | None = None,
     attended: bool | None = None,
+    active_turn_message_id: str | None = None,
 ) -> RunOutcome:
     observation = (
         prepared.admission.observation
@@ -590,6 +614,7 @@ async def run_prepared_turn(
                 now=now,
                 confirm_write=confirm_write,
                 attended=attended,
+                active_turn_message_id=active_turn_message_id,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -619,6 +644,7 @@ async def run_prepared_turn_impl(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     confirm_write: ConfirmationHook | None = None,
     attended: bool | None = None,
+    active_turn_message_id: str | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -653,6 +679,11 @@ async def run_prepared_turn_impl(
     the unattended rules (`attended=False`). An adapter that passes no hook
     gets `no_confirmation_surface`, so its writes are refused, never run
     unseen. With the policy off the posture stays `RequireApproval`.
+
+    `active_turn_message_id` is the in-flight marker the adapter wrote on
+    `prepared.mapping_id` for this turn, if any. A recovery moves it onto the
+    replacement mapping before the re-run is sent, so a restart mid-recovery
+    leaves the marker on the session that is actually running.
 
     `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
     and the recovery re-run -- against the per-turn ceiling (D-08/D-09).
@@ -753,6 +784,7 @@ async def run_prepared_turn_impl(
                 thread_id=thread_id,
                 dead_session_id=ma_session_id,
                 dead_mapping_id=mapping_id,
+                active_turn_message_id=active_turn_message_id,
             )
             new_session_id = recovery.ma_session_id
             new_mapping_id = recovery.mapping_id

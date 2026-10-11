@@ -18,6 +18,7 @@ import pytest
 from daimon.adapters.discord.bot import GLOBAL_CAP_NOTICE, DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import direct_messages as core_direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.direct_messages import reply_to_dm, start_dm
@@ -32,10 +33,11 @@ from daimon.core.stores.direct_messages import (
     dm_enabled,
     finish_message,
     get_conversation,
+    holds_claim,
     set_dm_enabled,
 )
 from daimon.core.stores.domain import Role
-from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_queue import TurnQueue
@@ -1697,3 +1699,108 @@ async def test_dm_source_sealed_during_recovery_is_quarantined(
             )
             is None
         )
+
+
+async def _claimed_dm(db_session, db_session_factory, *, ma_session_id):
+    tenant, deps, admission, sent, *_ = await _setup(db_session, db_session_factory)
+    route = await _start(tenant, deps, admission)
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as session:
+        row = await claim_message(
+            session,
+            platform="discord",
+            route_key="dm-42",
+            external_user_id="42",
+            message_id="claim-1",
+            expected_scope_id=route.scope_id,
+            now=now,
+            active_until=now + timedelta(minutes=2),
+        )
+        await create_thread_session(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=route.scope_id,
+            account_id=admission.account_id,
+            ma_session_id=ma_session_id,
+        )
+    return tenant, deps, admission, sent, route, row
+
+
+@pytest.mark.parametrize("claim_state", ["current", "cleared", "newer", "changed_scope"])
+async def test_a_shutdown_settles_a_dm_only_while_its_claim_holds(
+    db_session, db_session_factory, claim_state
+):
+    """A stale DM delivery neither interrupts nor retires a later one's session."""
+    tenant, deps, admission, sent, route, row = await _claimed_dm(
+        db_session, db_session_factory, ma_session_id="sess_claim"
+    )
+    async with db_session_factory.begin() as session:
+        if claim_state == "cleared":
+            await session.execute(
+                sql_text("UPDATE direct_message_conversations SET active_until = NULL")
+            )
+        elif claim_state == "newer":
+            await session.execute(
+                sql_text(
+                    "UPDATE direct_message_conversations "
+                    "SET active_until = active_until + interval '1 minute'"
+                )
+            )
+        elif claim_state == "changed_scope":
+            await session.execute(
+                sql_text("UPDATE direct_message_conversations SET scope_id = 'dm:new'")
+            )
+    async with db_session_factory.begin() as session:
+        assert await holds_claim(session, conversation=row) == (claim_state == "current")
+
+    await core_direct_messages._settle_shutdown_cancelled_dm(deps, row)
+
+    events = [event["type"] for body in sent for event in body["events"]]
+    assert events == (["user.interrupt"] if claim_state == "current" else [])
+    async with db_session_factory() as session:
+        assert (
+            await get_live_thread_session(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id=route.scope_id,
+                account_id=admission.account_id,
+            )
+            is not None
+        )
+
+
+async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mapping(
+    db_session, db_session_factory
+):
+    tenant, deps, admission, _sent, route, row = await _claimed_dm(
+        db_session, db_session_factory, ma_session_id="sess_timeout"
+    )
+
+    async def stalled(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    with (
+        patch.object(deps.anthropic.beta.sessions.events, "send", stalled),
+        patch.object(core_direct_messages, "_SHUTDOWN_INTERRUPT_TIMEOUT_S", 0.05),
+    ):
+        await asyncio.wait_for(core_direct_messages._settle_shutdown_cancelled_dm(deps, row), 2)
+
+    async with db_session_factory() as session:
+        assert (
+            await get_live_thread_session(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id=route.scope_id,
+                account_id=admission.account_id,
+            )
+            is None
+        ), "an unconfirmed interrupt retires the mapping"
+        stored = await get_conversation(
+            session, platform="discord", route_key="dm-42", external_user_id="42"
+        )
+    assert stored is not None and stored.active_until == row.active_until, (
+        "settling leaves releasing the claim to finish_message"
+    )

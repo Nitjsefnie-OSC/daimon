@@ -350,11 +350,16 @@ operation, from the slot wait through cleanup. The drain logs
 out it stops granting turn slots, so cancelling one turn cannot start a queued
 one, then cancels everything still in progress and allows five seconds for
 cleanup. Cancelling the task ends this process's delivery, not the provider
-turn. A thread turn keeps its marker, still owned by this process. Once that
-owner's advisory lock and heartbeat grace have expired, the next process's
-orphan sweep delivers the answer if the session has finished, or edits the
-card to the restart notice and interrupts the session (above). Until then the
-session keeps running. A queued turn's card intent stays unresolved, so boot
+turn. A thread turn keeps its marker, still owned by this process. If a
+dead-session recovery moved the turn onto a replacement session, the marker
+moved with it, before the replacement's turn was sent. The move happens only
+while the marker still names this turn's card, and never over another turn's
+marker. Mention, continuation and wizard cards and markers carry the same
+owner key. While that owner's advisory lock or heartbeat grace protects the
+marker, boot card recovery leaves the card alone too. Once both have expired,
+the next process's orphan sweep delivers the answer if the session has
+finished, or edits the card to the restart notice and interrupts the session
+(above). Until then the session keeps running. A queued turn's card intent stays unresolved, so boot
 recovery shows the restart notice on it. A DM has no card or marker: its
 cleanup sends the session one interrupt, bounded to three seconds, while its
 delivery still holds the conversation's claim. If that interrupt is not

@@ -1532,8 +1532,20 @@ class DaimonBot(commands.Bot):
         ):
             return
         self._turn_card_recovery_started = True
+        # A card whose marker the sweep deferred (a live or not-yet-expired
+        # owner, or a retryable failure) belongs to marker recovery, which
+        # reads the provider result and interrupts the session. Retiring it
+        # here first would make that retry see a terminal card and skip both.
+        # Periodic recovery picks the intent up once its marker is gone.
+        deferred = {row.active_turn_message_id for row in self._orphan_retry_rows}
         self._boot_card_recovery_task = self._spawn(
-            self._reconcile_boot_turn_cards(self._boot_turn_card_intents)
+            self._reconcile_boot_turn_cards(
+                [
+                    intent
+                    for intent in self._boot_turn_card_intents
+                    if intent.message_id is None or intent.message_id not in deferred
+                ]
+            )
         )
         if not self._turn_card_periodic_started:
             self._turn_card_periodic_started = True
@@ -3338,7 +3350,9 @@ class DaimonBot(commands.Bot):
         )
         watch.session_id = prepared.ma_session_id
 
+        marked_message_id: str | None = None
         if prepared.mapping_id is not None and lifecycle.final_message_id is not None:
+            marked_message_id = lifecycle.final_message_id
             async with self.runtime.sessionmaker() as session:
                 await mark_turn_active(
                     session,
@@ -3499,6 +3513,7 @@ class DaimonBot(commands.Bot):
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
+                    active_turn_message_id=marked_message_id,
                 )
                 archive_after = await self._archive_requested(origin.id)
         finally:
@@ -4281,7 +4296,9 @@ class DaimonBot(commands.Bot):
         # if the container is recreated mid-turn the embed freezes forever while
         # MA completes and bills the answer server-side. Recording the embed's
         # id is what lets the next boot find it and say so.
+        marked_message_id: str | None = None
         if prepared.mapping_id is not None and lifecycle.final_message_id is not None:
+            marked_message_id = lifecycle.final_message_id
             async with self.runtime.sessionmaker() as _at_session:
                 await mark_turn_active(
                     _at_session,
@@ -4602,6 +4619,7 @@ class DaimonBot(commands.Bot):
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
+                    active_turn_message_id=marked_message_id,
                 )
                 # The run ended the card itself (answer, or red error card).
                 surface.end_card = None
@@ -4609,9 +4627,11 @@ class DaimonBot(commands.Bot):
         finally:
             # Runs on any exception, not just the happy path: whatever else
             # went wrong, the thread must not be left holding its active_turn
-            # marker. Both ids are cleared -- recovery moves the turn to a new
-            # mapping row and leaves the marker behind on the old one, which
-            # is still pointing at this same message. A ceiling breach is not
+            # marker -- except when the shutdown drain cancelled the turn, whose
+            # still-running session the next process's orphan sweep recovers
+            # through that marker. Both ids are cleared -- a dead-session
+            # recovery moves the marker onto its replacement mapping, which
+            # `outcome` names. A ceiling breach is not
             # a special case here: run_prepared_turn already marked the
             # active mapping dead and returns a normal RunOutcome, so it takes
             # this same path.
