@@ -68,6 +68,32 @@ def next_turn_fits(usages: list[Usage], next_estimate: float, budget: float) -> 
     return charged + Decimal(str(next_estimate)) <= Decimal(str(budget))
 
 
+def accounting(result: Result, minutes: float, budget_usd: float) -> dict[str, object]:
+    """Keep unknown provider usage distinct from a measured zero."""
+    inputs = [turn.usage.input_tokens for turn in result.turns]
+    outputs = [turn.usage.output_tokens for turn in result.turns]
+    return {
+        "run_id": result.run_id,
+        "status": result.status,
+        "environment": "staging",
+        "model": MODEL,
+        "minutes": minutes,
+        "budget_usd": budget_usd,
+        "application_input_tokens": None
+        if None in inputs
+        else sum(v for v in inputs if v is not None),
+        "application_output_tokens": None
+        if None in outputs
+        else sum(v for v in outputs if v is not None),
+        "controller_input_tokens": 0,
+        "controller_output_tokens": 0,
+        "judge_input_tokens": 0,
+        "judge_output_tokens": 0,
+        "checks": [{"kind": check.kind, "status": check.status} for check in result.checks],
+        "native_client": "PENDING",
+    }
+
+
 class CanaryExecutor(Executor):
     budget_usd: float = 0.0
 
@@ -170,15 +196,20 @@ def main() -> int:
         )
         executor.budget_usd = args.budget_usd
         result = executor.run(scenario())
+        minutes = (time.monotonic() - started) / 60
         result.notes.extend(
             [
-                f"elapsed_minutes={(time.monotonic() - started) / 60:.4f}",
+                f"elapsed_minutes={minutes:.4f}",
                 f"budget_usd={args.budget_usd}; model={MODEL}; maximum_turns=2",
                 "Native-client evidence PENDING; this run uses the bot transport.",
                 "No automatic repeat. Usage and conservative reservations use qa/live ledger.",
             ]
         )
         report(result, root / "canary-runs")
+        receipt = root / "canary-runs" / f"{result.run_id}-accounting.json"
+        receipt.write_text(
+            json.dumps(accounting(result, minutes, args.budget_usd), indent=2) + "\n"
+        )
     return 0 if result.status == "PASS" else 1
 
 

@@ -8,6 +8,7 @@ from qa.journeys.canary import (
     CanaryExecutor,
     Haiku55Only,
     NoJudge,
+    accounting,
     next_turn_fits,
     scenario,
     validate,
@@ -90,3 +91,13 @@ def test_executor_refuses_second_send_before_budget_is_exceeded(tmp_path, cost):
     result.turns.append(Turn(1, "message", "channel", datetime.now(UTC), thread_id="thread"))
     with pytest.raises(Pending, match="allowance"):
         executor.step(Step(do="thread_reply", text="next", mention=True), result, "channel")
+
+
+def test_accounting_does_not_turn_missing_tokens_into_zero():
+    result = Result("test", "QA-JOURNEY-CONTEXT", "staging")
+    assert accounting(result, 0.5, 0.25)["application_input_tokens"] == 0
+    result.turns.append(Turn(1, "message", "channel", datetime.now(UTC)))
+    receipt = accounting(result, 0.5, 0.25)
+    assert receipt["application_input_tokens"] is None
+    assert receipt["minutes"] == 0.5
+    assert receipt["controller_input_tokens"] == receipt["judge_input_tokens"] == 0
