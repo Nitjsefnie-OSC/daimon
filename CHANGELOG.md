@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add explicit offline Discord, Slack and Teams callbacks that expose actual
   admission and session binding for backend-selection conformance.
 - Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
+- Use the shared schema-aware database preflight for offline Discord ingress and Forbidden conformance fixtures, retaining connection-trap controls and contributor skips.
+
 - Keep shared database preflight admission separate for each resolved schema fixture when running multiple test packages together; document owned local databases and skipped shared fixtures on plain local `daimon_test`.
 
 - Add an opt-in, rate-limited Discord stop reaction for explicit mentions denied by a confirmed writers=none rule; default denial behavior stays silent.
@@ -59,10 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add opt-in Discord credential-form expiry with durable retirement, retryable verified edits of the original card, and no background job by default.
 - Report separate default and opt-in QA product profiles, with explicit per-cell profile results and an opt-in PASS tally that never changes default-profile totals.
 
-- Deliver neutral provider lifecycle records by their own event identity across reconnects, so media revisions sharing a compatibility display ID reach the optional tap once while native delivery stays unchanged.
-- Add explicit offline Discord, Slack and Teams callbacks that expose actual
-  admission and session binding for backend-selection conformance.
-- Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
 
 - Add optional accepted initial progress-card receipts for Discord, Slack and Teams, with offline SDK delivery controls and unchanged default rendering.
 - Capture offline Discord channel bursts and actual chunk-reply references through SDK admission, preserving distinct authored equal-text messages and complete fixture author payloads.

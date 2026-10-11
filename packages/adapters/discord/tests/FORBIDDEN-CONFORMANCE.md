@@ -78,10 +78,10 @@ old capture authorization. Negatives cover every reachable native/DB field,
 including the genuine default factory, captured-vs-unbound SDK clients and a
 real foreign PostgresStateStore with a connection trap.
 
-The test module imports the same session-autouse local preflight as C7. It uses
-the shared owned-engine/isolated-CI guard before any DB fixture can connect;
-plain contributor databases skip, foreign targets refuse. Two child-pytest
-controls trap `AsyncEngine.connect`/`begin` in the actual Forbidden fixture graph,
-so fixture-order errors cannot be hidden by a later runtime check. This local
-preflight is temporary until N8's shared preflight merges. No product error copy,
+The shared pytest11 `db_preflight` plugin uses the owned-engine/isolated-CI guard
+before any DB fixture can connect. Its cache key follows the requesting
+fixture's resolved schema; plain contributor databases skip and foreign targets
+refuse. Two child-pytest controls trap `AsyncEngine.connect`/`begin` in the actual
+Forbidden fixture graph, so fixture-order errors cannot be hidden by a later
+runtime check. The temporary local autouse guard is retired. No product error copy,
 thread naming request or NEW14 source predicate changes in this delta.

@@ -51,10 +51,6 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from packages.adapters.discord.tests.owned_db_preflight import (
-    offline_db_preflight as offline_db_preflight,
-)
-
 
 class InitOnlySettings(Settings):
     @classmethod

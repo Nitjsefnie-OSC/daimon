@@ -97,13 +97,14 @@ including the genuine default factory, an uncaptured SDK backend, and a real
 foreign PostgresStateStore with a connection trap.
 
 The fixture uses product-default thread naming and a neutral unused settings
-DSN; actual connections use its owned factory. A session-autouse local preflight
-runs before any DB engine/session/cleanup fixture and uses shared owned-engine
-admission, including registered isolated CI. It skips only a plain local
-contributor DB outside exact CI. Child pytest tests install connection traps
-before the actual ingress fixture graph, proving foreign refusal and contributor
-skip happen without connection. The temporary local preflight will be replaced
-by N8's shared fixture once merged. This hook certifies neither a live provider
+DSN; actual connections use its owned factory. The shared pytest11
+`db_preflight` plugin runs before DB engine/session/cleanup fixtures and uses
+shared owned-engine admission, including registered isolated CI. Its cache key
+tracks each requesting fixture's resolved `db_schema`. It skips only a plain
+local contributor DB outside exact CI. Child pytest tests install connection
+traps before the actual ingress fixture graph, proving foreign refusal and
+contributor skip happen without connection. No local autouse guard remains.
+This hook certifies neither a live provider
 nor a whole cell; A/O/G I6/NEW9 title facets retain their prior observations and
 whole-cell PENDING verdicts.
 

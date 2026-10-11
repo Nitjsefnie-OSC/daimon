@@ -21,9 +21,6 @@ from daimon.testing.discord_ingress import ConcurrentCheckpoint, DiscordConcurre
 from daimon.testing.discord_surface import DiscordPostEvent
 from mux.contracts.ids import Provider
 
-from packages.adapters.discord.tests.owned_db_preflight import (
-    offline_db_preflight as offline_db_preflight,
-)
 from packages.adapters.discord.tests.test_gateway_ingress import (
     BusyWire,
     OwnedIngress,

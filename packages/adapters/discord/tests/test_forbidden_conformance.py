@@ -65,9 +65,6 @@ from packages.adapters.discord.tests.forbidden_hook import (
     OverwriteReceipt,
     evaluate_new14,
 )
-from packages.adapters.discord.tests.owned_db_preflight import (
-    offline_db_preflight as offline_db_preflight,
-)
 
 if TYPE_CHECKING:
     from discord.types.channel import TextChannel as TextChannelPayload
