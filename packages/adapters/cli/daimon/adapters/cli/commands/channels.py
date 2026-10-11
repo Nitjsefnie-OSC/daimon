@@ -20,7 +20,6 @@ from daimon.adapters.cli.runtime import (
     FACE_WAIT_S,
     CliRuntime,
     ResourceHostMismatch,
-    authorized_openai_deployments,
     build_runtime,
     request_resource_host,
 )
@@ -499,6 +498,8 @@ async def _copy_resource_host(
     factory = rt.resource_hosts
     if factory is None:
         return None
+    from daimon.core.turn.openai_deployment import authorized_deployments
+
     async with rt.sessionmaker() as session:
         revision = await current_backend(session, channel_ref(tenant_id, platform, channel))
     if revision is None or revision.profile == _ANTHROPIC_PROFILE:
@@ -509,7 +510,7 @@ async def _copy_resource_host(
         )
     authorized = [
         deployment
-        for deployment in authorized_openai_deployments(tenant_id)
+        for deployment in authorized_deployments(str(tenant_id))
         if deployment.platform == platform
         and deployment.channel_id == channel
         and deployment.config_digest == revision.digest
