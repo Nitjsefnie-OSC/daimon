@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Report separate default and opt-in QA product profiles, with explicit per-cell profile results and an opt-in PASS tally that never changes default-profile totals.
 - Validate shared test database ownership before fixture setup, and bind metered channel proofs to the run's exact persisted usage identity.
+- Opt-in Gemini native credential target offers with scoped origin and independent agent readback, fresh policy checks and separate native MCP registration; existing credential handlers remain unchanged.
+### Fixed
+
+- Offline tool-only QA can verify every Discord post against its acknowledged root, including drafts that were later edited or deleted. Existing evidence serialization stays unchanged when post history is absent.
+- Keep Gemini offline outcome evidence on admitted database routes across callback reconfiguration, with shared fixture preflight.
+- Preserve Gemini's finalized rate-limit failure when its final usage fetch is also rate-limited; retain validated unknown usage for reconciliation. Completed and reconnected turns retain fail-closed final-meter fetches.
+- Add an explicit offline Gemini host-termination evidence hook; partial native and committed-outcome coverage remains PENDING.
 
 - Add an owned offline metered-turn seam with controlled prices and independent channel ledger/budget readback through the real host billing path.
 - Document the clean provider/TLS environment required by isolated SDK tests and the local `AmbientSDKConfigurationError` refusal.

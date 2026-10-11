@@ -892,3 +892,12 @@ the existing admission stop without changing the execution limits. Complete
 dated usage and measured infrastructure release the unused hold; incomplete
 evidence remains `estimated_unverified`. This accounting operation does not
 authorize a live run or impose native provider execution controls.
+Gemini's host termination and usage verification are separate facts. When a turn
+has already failed with a rate limit, a retryable rate limit on its final usage
+fetch preserves the original failure and session when retained root, model and
+session evidence validates. Missing or inconsistent retained evidence refuses
+reconciliation. Validated retained usage is recorded through the same accounting
+path. Unknown usage stays pending; known
+charges remain idempotent, and later verified revisions settle only their delta.
+An unavailable final meter does not establish zero cost or release an unverified
+reservation. Local storage, validation and accounting failures still propagate.

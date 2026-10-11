@@ -738,7 +738,16 @@ async def run_turn(
                 )
             raise
         final_cell = [final]
-        await _replay_usage(io, billing, final_cell, set())
+        await _replay_usage(
+            io,
+            billing,
+            final_cell,
+            set(),
+            finalized_rate_limit=(
+                final.termination == TerminationReason.RATE_LIMITED
+                and isinstance(final.error, TurnError)
+            ),
+        )
         return final_cell[0]
 
     # Native usage reconciliation remains inside the admitted binding lease.
@@ -1447,7 +1456,12 @@ async def _bill_replayed(
 
 
 async def _replay_usage(
-    io: TurnIO, billing: BillingPosture, state_cell: list[TurnState], billed_event_ids: set[str]
+    io: TurnIO,
+    billing: BillingPosture,
+    state_cell: list[TurnState],
+    billed_event_ids: set[str],
+    *,
+    finalized_rate_limit: bool = False,
 ) -> None:
     """Alternate codecs retain real usage beside their compatibility replay."""
     replay = getattr(io, "replay_usage", None)
@@ -1455,6 +1469,15 @@ async def _replay_usage(
         if isinstance(billing, ObservationBilled):
             raise ValueError("a billed provider codec must implement replay_usage")
         return
+    # Only the finalized Gemini failure can use retained usage after a native
+    # rate-limit fetch error. Ordinary success/reconnect reconciliation remains
+    # mandatory. The hook handles fetching only; accounting below still raises.
+    if (
+        finalized_rate_limit
+        and isinstance(session := getattr(io, "session", None), ResourceRef)
+        and session.provider == "gemini"
+    ):
+        replay = getattr(io, "replay_usage_after_rate_limit", replay)
     async with asyncio.timeout(USAGE_RECONCILIATION_TIMEOUT_S):
         values = await cast(Callable[[], Awaitable[Sequence[UsageObservation]]], replay)()
     for usage in values:

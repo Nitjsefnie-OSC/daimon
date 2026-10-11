@@ -10,7 +10,15 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 type Status = Literal["PASS", "FAIL", "PENDING"]
 type Authority = Literal["record", "reconciled", "preview", "gap"]
@@ -24,6 +32,7 @@ SUPPORTED_ASSERTION_KINDS = frozenset(
         "text_present",
         "text_absent",
         "no_preamble",
+        "no_blank_message",
         "card_finalized",
         "progress_seen",
         "tool_succeeded",
@@ -92,12 +101,77 @@ class LogObservation(HostEffect):
     fields: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
 
+class PostMessage(EvidenceModel):
+    message_id: str = Field(min_length=1)
+    channel_id: str = Field(min_length=1)
+    order: int = Field(ge=0)
+    observed_s: float = Field(ge=0)
+    content: str
+    embed_texts: tuple[str, ...]
+    component_labels: tuple[str, ...]
+    attachment_names: tuple[str, ...]
+    payload_json: str
+
+
+class PostEvent(EvidenceModel):
+    evidence_id: str = Field(min_length=1)
+    operation: Literal["send", "edit", "delete"]
+    message: PostMessage
+    request_json: str
+
+
+class PostInputAcknowledgement(EvidenceModel):
+    """An authoritative provider input record joined to the accepted send."""
+
+    evidence_id: str = Field(min_length=1)
+    input_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    root_turn_id: str = Field(min_length=1)
+    authority: Authority
+    submitted_text: str = Field(min_length=1)
+    observed_text: str = Field(min_length=1)
+
+
+class PostRootAcknowledgement(EvidenceModel):
+    evidence_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    root_turn_id: str = Field(min_length=1)
+    operation_id: str = Field(min_length=1)
+    status: Literal["queued", "processed", "outcome_unknown"]
+    input_ids: tuple[str, ...]
+    input_record: PostInputAcknowledgement | None = None
+
+
+class PostHistoryEvidence(EvidenceModel):
+    """Complete accepted post history and separately captured input receipt.
+
+    Mirrors the existing Discord capture without importing its optional SDK.
+    The binder supplies the original durable operation receipt after checking
+    its session, immutable input and acknowledgement, never a preview identity.
+    """
+
+    boundary: Literal["discord_adapter_posts"]
+    evidence_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    root_turn_id: str = Field(min_length=1)
+    started_s: float = Field(ge=0)
+    observed_s: float = Field(ge=0)
+    events: tuple[PostEvent, ...]
+    messages: tuple[PostMessage, ...]
+    post_capture_complete: bool
+    text_capture_complete: bool
+    acknowledgement: PostRootAcknowledgement | None = None
+
+
 class TurnEvidence(EvidenceModel):
     turn: int = Field(ge=1)
     slot_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
     root_turn_id: str = Field(min_length=1)
     started_s: float = Field(ge=0)
+    post_history: PostHistoryEvidence | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     terminals: tuple[TerminalEvidence, ...] = ()
     sessions: tuple[SessionUse, ...] = ()
     terminal_capture_complete: bool = False
@@ -240,6 +314,11 @@ class TextExpectation(EvidenceModel):
         return self
 
 
+class BlankMessageExpectation(EvidenceModel):
+    kind: Literal["no_blank_message"]
+    turn: int = Field(ge=1)
+
+
 class CardExpectation(EvidenceModel):
     kind: Literal["card_finalized", "progress_seen"]
     turn: int = Field(ge=1)
@@ -369,6 +448,158 @@ def text_check(turn: TurnEvidence, expectation: TextExpectation) -> CheckResult:
     return CheckResult(
         kind=expectation.kind, turn=turn.turn, status=status, code=code, evidence_ids=ids
     )
+
+
+def _post_has_body(payload: Mapping[str, JsonValue]) -> bool:
+    def visible(value: JsonValue) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return any(visible(item) for item in value)
+        if isinstance(value, dict):
+            # Visible embed/card/component content only; metadata, author IDs,
+            # colors, type tags and empty objects cannot certify a body.
+            return any(
+                visible(item)
+                for name, item in value.items()
+                if name
+                in (
+                    "title",
+                    "description",
+                    "text",
+                    "name",
+                    "value",
+                    "label",
+                    "content",
+                    "fields",
+                    "footer",
+                    "author",
+                    "image",
+                    "thumbnail",
+                    "url",
+                    "components",
+                    "emoji",
+                    "media",
+                )
+            )
+        return False
+
+    return visible(payload.get("content")) or any(
+        visible(payload.get(name)) for name in ("embeds", "components", "attachments")
+    )
+
+
+def no_blank_message_check(turn: TurnEvidence, expectation: BlankMessageExpectation) -> CheckResult:
+    """Inspect every accepted send/edit, including drafts later deleted.
+
+    An empty answer string is allowed; a completed card has a structural body.
+    Final surviving text alone cannot certify that no transient blank was sent.
+    """
+    history = turn.post_history
+
+    def result(status: Status, code: str, ids: tuple[str, ...] = ()) -> CheckResult:
+        return CheckResult(
+            kind=expectation.kind, turn=turn.turn, status=status, code=code, evidence_ids=ids
+        )
+
+    if history is None:
+        return result("PENDING", "POST_HISTORY_NOT_CAPTURED")
+    ack = history.acknowledgement
+    if (
+        ack is None
+        or ack.status == "outcome_unknown"
+        or not ack.input_ids
+        and ack.input_record is None
+    ):
+        return result("PENDING", "POST_ROOT_NOT_ACKNOWLEDGED")
+    if (
+        (history.session_id, history.root_turn_id) != (turn.session_id, turn.root_turn_id)
+        or (ack.session_id, ack.root_turn_id) != (turn.session_id, turn.root_turn_id)
+        or any(not item.strip() for item in ack.input_ids)
+    ):
+        return result("FAIL", "POST_ROOT_MISMATCH", (ack.evidence_id,))
+    input_record = ack.input_record
+    if input_record is not None and (
+        (input_record.session_id, input_record.root_turn_id) != (turn.session_id, turn.root_turn_id)
+        or input_record.authority not in ("record", "reconciled")
+        or not input_record.submitted_text.strip()
+        or input_record.submitted_text != input_record.observed_text
+    ):
+        return result("FAIL", "POST_INPUT_ACK_MISMATCH", (input_record.evidence_id,))
+    completion = completion_check(turn, Completion(kind="turn_completed", turn=turn.turn))
+    if completion.status != "PASS":
+        return result(completion.status, completion.code, completion.evidence_ids)
+    if not (
+        turn.started_s
+        <= history.started_s
+        <= history.observed_s
+        <= max(item.observed_s for item in turn.terminals)
+    ):
+        return result("FAIL", "POST_CAPTURE_WINDOW_MISMATCH")
+    ids = (
+        history.evidence_id,
+        ack.evidence_id,
+        *(item.evidence_id for item in history.events),
+        *((input_record.evidence_id,) if input_record is not None else ()),
+    )
+    if len(set((*turn.evidence_ids(), *ids))) != len((*turn.evidence_ids(), *ids)):
+        return result("FAIL", "POST_EVIDENCE_ID_REUSED", ids)
+    current: dict[str, PostMessage] = {}
+    seen: set[str] = set()
+    channels: set[str] = set()
+    previous_s = history.started_s
+    blanks: list[str] = []
+    for index, event in enumerate(history.events):
+        message = event.message
+        if (
+            event.evidence_id != f"{history.evidence_id}:post:{index}"
+            or not previous_s <= message.observed_s <= history.observed_s
+        ):
+            return result("FAIL", "POST_HISTORY_ORDER_MISMATCH", ids)
+        previous_s = message.observed_s
+        channels.add(message.channel_id)
+        try:
+            payload = TypeAdapter(dict[str, JsonValue]).validate_json(
+                message.payload_json, strict=True
+            )
+        except ValidationError:
+            return result("FAIL", "POST_PAYLOAD_INVALID", ids)
+        if (
+            payload.get("id") != message.message_id
+            or payload.get("channel_id") != message.channel_id
+            or payload.get("content", "") != message.content
+        ):
+            return result("FAIL", "POST_PAYLOAD_IDENTITY_MISMATCH", ids)
+        if event.operation == "send":
+            if message.message_id in seen:
+                return result("FAIL", "POST_LIFECYCLE_INVALID", ids)
+            seen.add(message.message_id)
+        elif message.message_id not in current:
+            return result("FAIL", "POST_LIFECYCLE_INVALID", ids)
+        if event.operation == "delete":
+            if message.model_dump(exclude={"observed_s"}) != current[message.message_id].model_dump(
+                exclude={"observed_s"}
+            ):
+                return result("FAIL", "POST_DELETE_SNAPSHOT_MISMATCH", ids)
+            del current[message.message_id]
+        else:
+            if not _post_has_body(payload):
+                blanks.append(event.evidence_id)
+            current[message.message_id] = message
+    if len(channels) > 1 or [item.message_id for item in history.messages] != list(current):
+        return result("FAIL", "POST_SURVIVORS_MISMATCH", ids)
+    for message in history.messages:
+        if not history.started_s <= message.observed_s <= history.observed_s or message.model_dump(
+            exclude={"observed_s"}
+        ) != current[message.message_id].model_dump(exclude={"observed_s"}):
+            return result("FAIL", "POST_SURVIVORS_MISMATCH", ids)
+    if blanks:
+        return result("FAIL", "BLANK_MESSAGE_POSTED", tuple(blanks))
+    if not history.post_capture_complete:
+        return result("PENDING", "POST_HISTORY_INCOMPLETE", ids)
+    if not history.events:
+        return result("FAIL", "POST_EVIDENCE_MISSING", ids)
+    return result("PASS", "NO_BLANK_MESSAGE", ids)
 
 
 def card_check(turn: TurnEvidence, expectation: CardExpectation) -> CheckResult:
@@ -577,6 +808,20 @@ def evaluate(
                 text = TextExpectation.model_validate(dict(assertion))
                 turn = turns.get(text.turn)
                 check = text_check(turn, text) if turn is not None else None
+            elif kind == "no_blank_message":
+                # Existing recordings opt in only by retaining post history.
+                # Without it, preserve their former serialized verdict exactly.
+                legacy_turn = turns.get(number) if number is not None else None
+                if legacy_turn is None or legacy_turn.post_history is None:
+                    checks.append(
+                        CheckResult(
+                            kind=label, turn=number, status="PENDING", code="UNSUPPORTED_KIND"
+                        )
+                    )
+                    continue
+                blank = BlankMessageExpectation.model_validate(dict(assertion))
+                turn = turns.get(blank.turn)
+                check = no_blank_message_check(turn, blank) if turn is not None else None
             elif kind in ("card_finalized", "progress_seen"):
                 card = CardExpectation.model_validate(dict(assertion))
                 turn = turns.get(card.turn)

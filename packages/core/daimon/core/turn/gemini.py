@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import uuid4
 
+import structlog
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
     BetaManagedAgentsSessionEvent,
@@ -64,6 +65,7 @@ from pydantic import JsonValue, TypeAdapter
 PROFILE = "gemini.inline_reuse"
 _DISPLAY = TypeAdapter[BetaManagedAgentsSessionEvent](BetaManagedAgentsSessionEvent)
 _INPUTS = TypeAdapter(list[dict[str, JsonValue]])
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -446,18 +448,68 @@ class GeminiTurnIO:
     async def replay_usage(self) -> Sequence[UsageObservation]:
         async with asyncio.timeout(REPLAY_TIMEOUT_S):
             await self.backend.usage.reconcile(self.scope, self.session)
-            if self.root is None:
-                records = await self._history()
-                self.root = next((e.turn_id for e in reversed(records) if e.turn_id), None)
-            observations = await self.usage_snapshots()
-            latest: dict[str, UsageObservation] = {}
-            for observation in observations.values():
-                if self.root is None or observation.turn_id != self.root:
-                    continue
-                prior = latest.get(observation.id)
-                if prior is None or observation.revision > prior.revision:
-                    latest[observation.id] = observation
-            return tuple(latest.values())
+            return await self._local_usage()
+
+    async def replay_usage_after_rate_limit(self) -> Sequence[UsageObservation]:
+        """Fetch-only exception policy for an already finalized host failure."""
+        async with asyncio.timeout(REPLAY_TIMEOUT_S):
+            try:
+                await self.backend.usage.reconcile(self.scope, self.session)
+            except ProviderError as error:
+                if error.category != "rate_limited" or not error.retryable:
+                    raise
+                log.warning(
+                    "turn.usage_reconciliation_failed",
+                    category=error.category,
+                    error_class=type(error).__name__,
+                )
+                # Local reads and validation are deliberately outside the
+                # native fetch handler. Their failures must still propagate.
+            else:
+                return await self._local_usage()
+            return await self.retained_usage()
+
+    async def retained_usage(self) -> Sequence[UsageObservation]:
+        """Bounded local proof; unknown is retained, absent proof is refused."""
+        async with asyncio.timeout(REPLAY_TIMEOUT_S):
+            records = await self._history()
+            root = self.root
+            if root is None or not any(
+                e.turn_id == root and e.type == "user.message" for e in records
+            ):
+                raise ProviderError("upstream", retryable=False, native_code="missing_usage_root")
+            values = await self._local_usage()
+            if not values:
+                raise ProviderError(
+                    "upstream", retryable=False, native_code="missing_retained_usage"
+                )
+            for usage in values:
+                if not any(
+                    e.turn_id == root
+                    and isinstance(payload := e.typed_payload(), UsageObservedPayload)
+                    and payload.observation_id == usage.id
+                    and payload.revision == usage.revision
+                    and usage.id == f"gemini:{e.native.ordering_domain}:usage"
+                    for e in records
+                ):
+                    raise ProviderError(
+                        "upstream", retryable=False, native_code="uncorrelated_retained_usage"
+                    )
+            return values
+
+    async def _local_usage(self) -> Sequence[UsageObservation]:
+        if self.root is None:
+            records = await self._history()
+            self.root = next((e.turn_id for e in reversed(records) if e.turn_id), None)
+        observations = await self.usage_snapshots()
+        latest: dict[str, UsageObservation] = {}
+        for observation in observations.values():
+            if self.root is None or observation.turn_id != self.root:
+                continue
+            prior = latest.get(observation.id)
+            if prior is None or observation.revision > prior.revision:
+                latest[observation.id] = observation
+        return tuple(latest.values())
 
     def forget_stream(self, stream: _LazyStream) -> None:
         if stream in self._streams:

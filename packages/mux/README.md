@@ -774,3 +774,45 @@ the tenant/account scope authorized by the mapping lookup. Its native snapshot
 keeps the SDK's partial metadata and exception behavior without projecting a
 generic session binding. The host still commits the stamp before preparation
 locks the mapping and leaves unreadable stamps for the next bind to retry.
+Gemini native credential offers have a separate, default-off operator adapter
+and MCP registration edge. They verify the authorized resource scope, durable
+caller/binding/catalog identity and native target readback before posting shared
+cards. Production native origin/registry wiring and timed expiry remain pending;
+see `mux/drivers/gemini/NATIVE-CREDENTIAL-TARGET.md`.
+
+### Tool-only post history checks
+
+The offline outcome oracle's `no_blank_message` predicate checks complete
+accepted Discord send/edit/delete history against an independently retained
+send receipt and authoritative host root. A finalized card is a message body
+even when the provider emits no answer text. A blank draft remains a failure
+after an edit or deletion. Missing capture or acknowledgement remains PENDING.
+`TurnEvidence.post_history` is optional and omitted from serialization when
+absent, preserving existing consumer bytes. Authored native replay proves
+host behavior only; it does not certify model behavior or remote execution.
+
+I3 native bindings are exercised by
+`packages/mux/tests/drivers/gemini/test_i3_native_replay.py`. Anthropic and
+OpenAI consume unchanged recorded fixture bytes; Gemini consumes an owned
+explicit `code_execution` tape. All three run the real host turn and Discord
+serializer. OpenAI's empty HTTP 202 receipt is retained unchanged and joined
+to the unique fresh authoritative native user item that echoes the accepted
+input. That item has a separate acknowledgement field; no native receipt ID
+is invented. The binder verifies the original scoped operation, immutable
+request digest, journal ownership and completed root before attaching posts.
+
+Gemini C18 host facts are available through the explicit offline
+`daimon.testing.gemini_termination` envelope (see the testing package's
+`GEMINI-TERMINATION.md`). Its independent reason inventory and exact committed
+outcome snapshots preserve PENDING when execution evidence is partial. Default
+Gemini registration and application runtime behavior remain unchanged.
+The Gemini evidence envelope snapshots admitted database routing before callbacks
+so queued outcome writes and readback retain owned binds. Its offline tests use
+the shared database preflight; partial execution remains PENDING.
+
+After an already-finalized Gemini host rate-limit failure, a retryable 429 from
+the final usage fetch preserves that original failure and session. Correlated
+retained interaction usage still passes through the existing recorder: unknown
+usage remains pending, while known revisions are charged once. Storage,
+validation and accounting errors propagate. Successful turns and reconnects
+retain mandatory native usage reconciliation.
