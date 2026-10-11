@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import time
@@ -217,12 +218,12 @@ def admit(
     approval = document.get("approval", document)
     signed = {
         "A7": "5dc7a801d7566e63e91fd9e30f2c667db613166ab27eedd1d629af616950b9a1",
-        "F2-Anthropic": "8eea963b8f3541d8a36d79b87e6e983c40cb9cbe1875086202270e505585fab3",
+        "F2-Anthropic": "6103a70419f4d1260c97eb0f3be60a3e238701cd9de7ae5ccd802f894b1b6a18",
     }
-    if digest_json(approval) != signed[package]:
-        raise LiveRefused("financial envelope is not the exact lead-signed replacement")
     if digest_json(go) != go_digest or go.get("live_go") is not True:
         raise LiveRefused("separate lead GO receipt is absent or changed")
+    if digest_json(approval) != signed[package]:
+        raise LiveRefused("financial envelope is not the exact lead-signed replacement")
     if go.get("approval_digest") != digest_json(approval):
         raise LiveRefused("financial authorization changed after signature")
     ancestry = subprocess.run(
@@ -245,9 +246,16 @@ def admit(
         "ledger_id": LEDGER_ID,
         "maximum_usd": ".35" if package == "A7" else ".65",
         "sessions": 2 if package == "A7" else 1,
-        "native_budget_sent": False,
-        "native_budget_must_be_acknowledged": False,
+        "native_budget_sent": package == "F2-Anthropic",
+        "native_budget_must_be_acknowledged": package == "F2-Anthropic",
     }
+    if package == "F2-Anthropic":
+        from daimon.testing.f2_native_bounds import native_budget, native_tools
+
+        # Both independently pinned financial and GO documents bind these
+        # exact native controls. Guard-only authorizations remain refused.
+        if go.get("native_budget") != native_budget() or go.get("native_tools") != native_tools():
+            raise LiveRefused("F2 GO lacks the exact native budget and tool allowlist")
     if any(approval.get(key) != value for key, value in expected.items()):
         raise LiveRefused("financial authorization does not match the admitted probe")
     if (
@@ -326,12 +334,14 @@ class LiveRequestMetadata(BaseModel):
         "/v1/vaults/{resource_id}/archive",
         "/v1/sessions/{resource_id}/events",
         "/v1/sessions/{resource_id}/events/stream",
+        "/v1/sessions/{resource_id}/threads/{thread_id}/stream",
         "/v1/vaults/{resource_id}/credentials",
         "/v1/skills/{resource_id}/versions",
         "/v1/skills/{resource_id}/versions/{version}/content",
     ]
     resource_id: str | None = None
     version: str | None = None
+    thread_id: str | None = None
 
 
 def request_metadata(
@@ -351,7 +361,7 @@ def request_metadata(
         ):
             raise RecordingError("unknown live request route; export refused")
         collection = parts[2]
-        resource_id = version = None
+        resource_id = version = thread_id = None
         route = f"/v1/{collection}"
         if len(parts) == 3:
             if method not in {"GET", "POST"}:
@@ -386,6 +396,16 @@ def request_metadata(
             )
             if (
                 len(tail) == 3
+                and tail[0] == "threads"
+                and tail[2] == "stream"
+                and collection == "sessions"
+                and method == "GET"
+            ):
+                thread_id = tail[1]
+                route += "/threads/{thread_id}/stream"
+                allowed = True
+            elif (
+                len(tail) == 3
                 and tail[0] == "versions"
                 and tail[2] == "content"
                 and collection == "skills"
@@ -399,9 +419,18 @@ def request_metadata(
             if not allowed:
                 raise RecordingError("unknown live request route; export refused")
         projected = LiveRequestMetadata.model_validate(
-            {"method": method, "route": route, "resource_id": resource_id, "version": version}
+            {
+                "method": method,
+                "route": route,
+                "resource_id": resource_id,
+                "version": version,
+                "thread_id": thread_id,
+            }
         )
-        result.append(projected.model_dump(mode="json"))
+        record = projected.model_dump(mode="json")
+        if thread_id is None:
+            record.pop("thread_id")
+        result.append(record)
     return result
 
 
@@ -452,6 +481,168 @@ def monitor_token_estimate(price: ModelPrice, tokens: TokenUsage, at: datetime) 
             + tokens.input_cache_write_tokens * price.cache_write_input
             + cast(int, tokens.output_tokens) * rate.output
         ) / Decimal(1000000)
+
+
+class LateUsageEvidenceAudit(Audit):
+    """Bounded per-run audit of the complete set of durable late records."""
+
+    def __init__(
+        self, secrets: tuple[str, ...], opaque_hashes: frozenset[str] = frozenset()
+    ) -> None:
+        super().__init__(secrets)
+        self.opaque_hashes = opaque_hashes
+
+    def canonical_text(self, value: str, depth: int = 0) -> str:
+        # These exact host-owned pins are opaque identities, never encoded text.
+        # Raw/literal scanning still includes them and every other durable field.
+        if value in (HOST_CONFIG_SHA256, LEDGER_ID) or value in self.opaque_hashes:
+            return value
+        return super().canonical_text(value, depth)
+
+
+def audit_late_usage_records(
+    records: list[JsonValue], secrets: tuple[str, ...], opaque_hashes: frozenset[str] = frozenset()
+) -> None:
+    """Audit full concatenation/field streams, not only the newest native meter."""
+    LateUsageEvidenceAudit(secrets, opaque_hashes).audit(records)
+
+
+@dataclass
+class DurableNativeIds:
+    """Private run-local mapping; raw native identities never leave this object.
+
+    Hash even shape-valid IDs: alphanumeric credential fragments can otherwise
+    masquerade as two distinct valid native IDs. Shape and duplicate flags remain
+    available to reconciliation without preserving the provider's text.
+    """
+
+    seen: set[str] = field(default_factory=set[str])
+    hashes: set[str] = field(default_factory=set[str])
+
+    def project(self, id_: str) -> dict[str, JsonValue]:
+        digest = hashlib.sha256(id_.encode()).hexdigest()
+        result: dict[str, JsonValue] = {
+            "sha256": digest,
+            "shape_rejected": re.fullmatch(r"(?:sevt|sesn)_[A-Za-z0-9]{20,40}", id_) is None,
+            "duplicate_rejected": id_ in self.seen,
+        }
+        self.seen.add(id_)
+        self.hashes.add(digest)
+        return result
+
+
+def durable_receipt(
+    facts: dict[str, object], identities: DurableNativeIds, secrets: tuple[str, ...]
+) -> dict[str, JsonValue]:
+    """Display projection only; never changes the guard's canonical settlement.
+
+    The runner owns receipt keys and status vocabulary. Provider IDs, result
+    text/evidence, and native-meter text are replaced with closed hash records.
+    """
+    raw: dict[str, JsonValue] = json.loads(json.dumps(facts))
+    # Preserve full-value credential refusals before closing the free-text slots.
+    # IDs are separately projected, so orphan cleanup can still retire a native
+    # resource whose returned identifier is malformed or credential-bearing.
+    Audit(secrets).audit(raw.get("result"))
+    Audit(secrets).audit(raw.get("observed_request_meters"))
+    flags: list[JsonValue] = []
+    result_fields = {
+        "status",
+        "reason",
+        "legs",
+        "path",
+        "termination",
+        "session_id",
+        "final_text",
+        "elapsed_ms",
+        "journal_records",
+        "quiet_host_latency_certificate",
+        "full_33_recipe_certificate",
+        "evidence",
+        "user_messages",
+        "model_tokens_requested",
+        "enforcement_tested",
+    }
+    meter_fields = {
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "cache_creation",
+        "ephemeral_5m_input_tokens",
+        "ephemeral_1h_input_tokens",
+        "speed",
+    }
+
+    def visit(value: JsonValue, path: tuple[str, ...] = ()) -> JsonValue:
+        if isinstance(value, dict):
+            closed: dict[str, JsonValue] = {}
+            for index, (key, item) in enumerate(value.items()):
+                fields = (
+                    result_fields
+                    if path and path[0] == "result"
+                    else (
+                        meter_fields
+                        if "native_meter" in path or "observed_request_meters" in path
+                        else None
+                    )
+                )
+                if fields is not None and key not in fields:
+                    safe_key = f"rejected_field_{index}"
+                    projected_key = identities.project(key)
+                    closed[safe_key] = {
+                        "key_sha256": projected_key["sha256"],
+                        "text_rejected": True,
+                        "value": visit(item, (*path, safe_key)),
+                    }
+                else:
+                    closed[key] = visit(item, (*path, key))
+            return closed
+        if isinstance(value, list):
+            return [visit(item, (*path, str(index))) for index, item in enumerate(value)]
+        if not isinstance(value, str):
+            return value
+        key = path[-1] if path else ""
+        native_id = key in {"id", "session_id", "resource_id", "thread_id", "native_request_id"}
+        native_id |= bool(
+            path
+            and path[0]
+            in {
+                "created_resources",
+                "orphan_resources",
+                "archived_sessions",
+                "conflicting_request_evidence",
+                "quarantined_native_request_ids",
+                "observed_token_threshold_crossings",
+            }
+            and key.isdecimal()
+            and not (path[0] in {"created_resources", "orphan_resources"} and key == "0")
+        )
+        native_id |= bool(path and path[0] == "requests" and key == "version")
+        if native_id:
+            projected = identities.project(value)
+            flags.append({"path": ".".join(path), **projected})
+            return projected["sha256"]
+        host_enum = (
+            key == "status"
+            and value in {"pass", "fail", "failed", "pending", "PENDING", "cancelled"}
+            or key == "path"
+            and value in {"legacy", "mux"}
+            or key == "termination"
+            and value in {"completed", "cancelled", "errored", "interrupted"}
+        )
+        free_text = bool(path and path[0] == "result" and not host_enum)
+        free_text |= "native_meter" in path or "observed_request_meters" in path
+        if free_text and value != "standard":
+            projected = identities.project(value)
+            return {"sha256": projected["sha256"], "text_rejected": True}
+        return value
+
+    projected = visit(raw)
+    assert isinstance(projected, dict)
+    projected["native_id_projection"] = flags
+    LateUsageEvidenceAudit(secrets, frozenset(identities.hashes)).audit(projected)
+    return projected
 
 
 @dataclass
@@ -622,6 +813,7 @@ class MonitoredStream(httpx.AsyncByteStream):
         source = httpx.Response(
             200, stream=_BoundedBytes(self.bounded_source(upstream.aiter_bytes()))
         )
+        received = False
         async for frame in AsyncStream.raw_events(source):
             self.pending_bytes = 0
             if frame.data and frame.event != "ping":
@@ -630,13 +822,21 @@ class MonitoredStream(httpx.AsyncByteStream):
                 except ValueError:
                     self.monitor.halt("native SSE payload is malformed")
                 if isinstance(event, dict):
+                    event = cast(dict[str, JsonValue], event)
                     if "type" not in event:
                         event["type"] = frame.event  # Same type injection as the SDK stream.
-                    self.monitor.observe(cast(dict[str, JsonValue], event), self.session_id)
+                    if not isinstance(event.get("type"), str):
+                        self.monitor.halt("native SSE frame has no typed event")
+                    received = True
+                    self.monitor.observe(event, self.session_id)
+                else:
+                    self.monitor.halt("native SSE payload is not a typed event")
             if self.closed:
                 raise LiveStopped("native stream sealed while response was in flight")
             # Forward one decoded frame, never a chunk containing later unchecked events.
             yield ("\n".join(frame.raw) + "\n\n").encode()
+        if not received:
+            self.monitor.halt("native stream contained no decodable events")
 
     async def aclose(self) -> None:
         self.closed = True
@@ -683,6 +883,7 @@ class LiveTransport(httpx.AsyncBaseTransport):
     ) -> None:
         self.upstream, self.authorization, self.monitor = upstream, authorization, monitor
         self.max_user_sends = max_user_sends
+        self.native_budget_sent = False
         self.session_attempts = self.user_sends = 0
         self.session_id: str | None = None
         self.session_ids: list[str] = []
@@ -713,6 +914,9 @@ class LiveTransport(httpx.AsyncBaseTransport):
             raise LiveStopped("native request escaped the accepted session inventory")
         self.requests.append((request.method, path))
         if request.method == "POST" and path == "/v1/sessions":
+            body = json.loads(await request.aread())
+            if "budget" in body:
+                self.native_budget_sent = True
             if self.stopping or self.monitor.stop_reason is not None:
                 raise LiveStopped("new session refused after a stop control")
             if self.session_ids and self.session_ids[-1] not in self.archived:
@@ -763,7 +967,13 @@ class LiveTransport(httpx.AsyncBaseTransport):
             self.pending_creates -= 1
         if response.is_success and path.endswith("/archive"):
             self.archived.add(path.split("/")[-2])
-        if path.endswith("/events/stream"):
+        if path.endswith("/stream") or (
+            response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            == "text/event-stream"
+        ):
+            if not path.startswith("/v1/sessions/") or path.split("/")[3] not in self.session_ids:
+                await response.aclose()
+                self.monitor.halt("native SSE response has no accepted session identity")
             wrapped = httpx.Response(
                 response.status_code,
                 headers={
@@ -1076,6 +1286,7 @@ async def run_live(
     receipt: SpendReceipt | None = None
     task: asyncio.Future[Mapping[str, object]] | None = None
     stop_task: asyncio.Task[bool] | None = None
+    durable_ids = DurableNativeIds()
     try:
         admission.output.mkdir(parents=True, exist_ok=False)
         path = Path(str(admission.approval["credential_file"]))
@@ -1131,12 +1342,12 @@ async def run_live(
             )
 
             def persist() -> None:
-                Audit((key,)).audit(json.loads(json.dumps(facts)))
+                safe_facts = durable_receipt(facts, durable_ids, context.redaction_secrets)
                 descriptor = os.open(
                     orphan_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
                 )
                 try:
-                    os.write(descriptor, (json.dumps(facts, indent=2) + "\n").encode())
+                    os.write(descriptor, (json.dumps(safe_facts, indent=2) + "\n").encode())
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
@@ -1201,7 +1412,12 @@ async def run_live(
 
         transport.on_orphan = orphan_cleanup
 
+        late_durable_records: list[JsonValue] = []
+        late_durable_bytes = 0
+        late_enrichment_refused = False
+
         def late_usage(raw: Mapping[str, JsonValue], session_id: str) -> None:
+            nonlocal late_durable_bytes, late_enrichment_refused
             observed_at = datetime.now(UTC)
             identity = hashlib.sha256(
                 (session_id + ":" + str(raw.get("id")) + ":" + observed_at.isoformat()).encode()
@@ -1225,11 +1441,92 @@ async def run_live(
                 "usage_complete": False,
                 "runtime": None,
             }
+            initial: JsonValue = json.loads(json.dumps(facts))
+            initial_encoded = (json.dumps(facts, indent=2) + "\n").encode()
+            tracked = (
+                not late_enrichment_refused
+                and len(late_durable_records) < 256
+                and late_durable_bytes + len(initial_encoded) <= 1024 * 1024
+            )
+            if not tracked:
+                late_enrichment_refused = True
+            else:
+                try:
+                    audit_late_usage_records(
+                        [*late_durable_records, initial],
+                        context.redaction_secrets,
+                        frozenset(durable_ids.hashes),
+                    )
+                except RecordingError:
+                    late_enrichment_refused = True
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             try:
                 # Latch first: malformed or secret-bearing extra proof cannot remove it.
-                os.write(descriptor, (json.dumps(facts, indent=2) + "\n").encode())
+                # Audit the combined durable set before even this write; a hit
+                # closes enrichment, never suppresses the trusted safety latch.
+                os.write(descriptor, initial_encoded)
                 os.fsync(descriptor)
+                if tracked:
+                    late_durable_records.append(initial)
+                    late_durable_bytes += len(initial_encoded)
+                # Keep the durable latch, but never enrich it with a registered
+                # API key or MCP credential echoed anywhere in a native meter.
+                Audit(context.redaction_secrets).audit(dict(raw))
+                native_id = raw.get("id")
+                if not isinstance(native_id, str):
+                    raise RecordingError("late usage lacks a native identity")
+                id_projection = durable_ids.project(native_id)
+                facts["native_id_projection"] = id_projection
+                if id_projection["shape_rejected"] or id_projection["duplicate_rejected"]:
+                    # A rejected identity leaves only its hash and trusted latch.
+                    # Never turn malformed/free-text IDs into a durable proof.
+                    safe: JsonValue = json.loads(json.dumps(facts))
+                    audit_late_usage_records(
+                        [*(late_durable_records[:-1] if tracked else late_durable_records), safe],
+                        context.redaction_secrets,
+                        frozenset(durable_ids.hashes),
+                    )
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    os.ftruncate(descriptor, 0)
+                    rejected_encoded = (json.dumps(facts, indent=2) + "\n").encode()
+                    os.write(descriptor, rejected_encoded)
+                    os.fsync(descriptor)
+                    if tracked:
+                        late_durable_records[-1] = safe
+                        late_durable_bytes += len(rejected_encoded) - len(initial_encoded)
+                    raise RecordingError("late native identity rejected; enrichment closed")
+                # Unknown provider metadata may contain only HALF of a known
+                # credential per frame. Refuse it before any proof write rather
+                # than persisting halves and trying to retract them later.
+                meter = raw.get("model_usage")
+                if not isinstance(meter, dict):
+                    raise RecordingError("late usage meter is not a closed numeric proof")
+                counts = {
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                }
+                if set(meter) - counts - {"cache_creation", "speed"}:
+                    raise RecordingError("late usage meter contains unreviewed metadata")
+                for name in counts:
+                    value = meter.get(name)
+                    if value is not None and (
+                        isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    ):
+                        raise RecordingError("late usage meter has a nonnumeric counter")
+                if meter.get("speed") not in (None, "standard"):
+                    raise RecordingError("late usage inference basis is unverified")
+                cache = meter.get("cache_creation")
+                if cache is not None:
+                    if not isinstance(cache, dict) or set(cache) - {
+                        "ephemeral_5m_input_tokens",
+                        "ephemeral_1h_input_tokens",
+                    }:
+                        raise RecordingError("late cache meter contains unreviewed metadata")
+                    for value in cache.values():
+                        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                            raise RecordingError("late cache meter has a nonnumeric counter")
                 verified = (
                     session_id in transport.session_ids
                     and monitor.verified_models.get(session_id) == MODEL
@@ -1243,17 +1540,50 @@ async def run_live(
                         model_id=MODEL,
                     )
                     usage_tokens(observation)
-                    facts["proof"] = observation.model_dump(mode="json")
+                    proof: dict[str, JsonValue] = observation.model_dump(mode="json")
+                    proof["id"] = id_projection["sha256"]
+                    session_projection = durable_ids.project(session_id)
+                    session_proof = proof["session"]
+                    if not isinstance(session_proof, dict):
+                        raise RecordingError("late usage lacks a session identity")
+                    session_proof["id"] = session_projection["sha256"]
+                    facts["session_id_projection"] = session_projection
+                    facts["proof"] = proof
                     facts["verified_monetary_hold_floor_usd"] = str(
                         monetary_bound(context, observation)
                     )
                     # Audit provider proof, not our trusted SHA pins (the tape
                     # scanner treats long opaque hex as ambiguous encoded text).
-                    Audit((key,)).audit(observation.model_dump(mode="json"))
+                    Audit(context.redaction_secrets).audit(observation.model_dump(mode="json"))
+                    candidate: JsonValue = json.loads(json.dumps(facts))
+                    encoded = (json.dumps(facts, indent=2) + "\n").encode()
+                    if (
+                        late_enrichment_refused
+                        or late_durable_bytes - len(initial_encoded) + len(encoded) > 1024 * 1024
+                    ):
+                        late_enrichment_refused = True
+                        raise RecordingError("late usage audit scope is closed")
+                    try:
+                        # Audit every durable field across every accepted late
+                        # frame before enrichment, including proof.id/session.
+                        audit_late_usage_records(
+                            [*late_durable_records[:-1], candidate],
+                            context.redaction_secrets,
+                            frozenset(durable_ids.hashes),
+                        )
+                    except RecordingError:
+                        late_enrichment_refused = True
+                        raise
                     os.lseek(descriptor, 0, os.SEEK_SET)
                     os.ftruncate(descriptor, 0)
-                    os.write(descriptor, (json.dumps(facts, indent=2) + "\n").encode())
+                    os.write(descriptor, encoded)
                     os.fsync(descriptor)
+                    late_durable_records[-1] = candidate
+                    late_durable_bytes += len(encoded) - len(initial_encoded)
+            except RecordingError:
+                # A per-frame refusal must close the same scope as a joined hit.
+                late_enrichment_refused = True
+                raise
             finally:
                 os.close(descriptor)
                 directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -1366,8 +1696,13 @@ async def run_live(
                         "source_head": admission.source_head,
                         "package": admission.package,
                         "model": MODEL,
-                        "native_control_mode": "guard-only",
-                        "native_budget_sent": False,
+                        "native_control_mode": (
+                            "native-budget-and-guard"
+                            if context is not None and context.transport.native_budget_sent
+                            else "guard-only"
+                        ),
+                        "native_budget_sent": context is not None
+                        and context.transport.native_budget_sent,
                         "provider_token_caps_enforced": False,
                         "observed_per_request_thresholds": [100000, 20000],
                         "wall_clock_deadline_seconds": admission.deadline_s,
@@ -1443,8 +1778,10 @@ async def run_live(
                                 | frozenset(context.transport.authorization.created)
                                 | frozenset(context.transport.orphans),
                             )
-                        Audit(context.redaction_secrets if context else ()).audit(
-                            json.loads(json.dumps(facts))
+                        facts = dict(
+                            durable_receipt(
+                                facts, durable_ids, context.redaction_secrets if context else ()
+                            )
                         )
                     except RecordingError:
                         facts = {
@@ -1453,7 +1790,8 @@ async def run_live(
                             "status": "failed",
                             "reason": "evidence export refused by credential audit",
                             "guard_settlement_persisted": True,
-                            "native_budget_sent": False,
+                            "native_budget_sent": context is not None
+                            and context.transport.native_budget_sent,
                         }
                     (admission.output / "receipt.json").write_text(
                         json.dumps(facts, indent=2) + "\n"

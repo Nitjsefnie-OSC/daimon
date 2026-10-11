@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Pin the separately signed F2-R2 workload and zero-message acceptance envelopes; reject rewritten financial approvals and retain merged A7 claim/output evidence.
+
 - Accept processed A7 send claims and preserve audited per-leg final output through later proof failures.
 - Pin the partial OpenAI CERT-M2 tape/receipt hashes and historical SDK/API revision; disclose recovered HTTP 409 cleanup in each live PASS row.
 - Route legacy session budget-stamp reads through the tenant-scoped native session port, preserving SDK requests, partial metadata and retry behavior.
@@ -15,9 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
 - Discord restart recovery reads its mapped session through tenant-scoped provider authorization, preserving native requests and completed-turn replay.
+- Close guarded live-probe native IDs and provider text with SHA256 projections, reject malformed or duplicate late identities, and preserve reconciliation latches and held unknown cost across interleaved credential fragments.
 
 - Keep guarded Anthropic live probes running on aggregate cache-write usage with unknown TTLs using a conservative monitor estimate; export closed request routes and separately audited resource IDs, and pin the signed A7 replacement envelope.
 - Isolate pooled Discord conformance test fixtures and control timeout expiry after real callback entry, avoiding shared-transaction setup hangs and deadline races.
+- Require an acknowledged native budget and effective tool allowlist for explicitly admitted F2 Anthropic probes; add a separate signed-only zero-message acceptance probe and protect late usage from registered credentials and thread-stream bypasses.
+
 - Seal all guarded Anthropic live responses, latch late usage for reconciliation, protect cleanup against repeated cancellation, and preserve unknown-TTL monetary holds.
 
 - Quarantine cross-session native usage ID collisions in guarded Anthropic probes while preserving independently verified spend floors and limit latches.

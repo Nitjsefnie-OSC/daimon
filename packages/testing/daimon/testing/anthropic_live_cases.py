@@ -20,6 +20,7 @@ from daimon.core.turn.state import extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.anthropic_live import MODEL, LiveContext, LiveRefused, explicit_secret
 from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.f2_native_bounds import install_f2_bounds, verify_tools
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.conformance.default_capability import (
     DEFAULT_SKILLS,
@@ -209,6 +210,7 @@ def default_manifest(root: Path, mcp_url: str) -> DefaultManifest:
 
 def agent_spec(raw: Mapping[str, object]) -> AgentSpec:
     """Independent upstream tool mapping, not the submitted neutral spec."""
+    verify_tools(raw)
     tools: list[ToolSpec] = []
     for tool in cast(list[dict[str, object]], raw["tools"]):
         if tool["type"] == "agent_toolset_20260401":
@@ -305,6 +307,7 @@ async def f2_default(context: LiveContext) -> Mapping[str, object]:
         raise LiveRefused("provider-reachable MCP binding is missing")
     bearer = explicit_secret(binding.mcp_bearer_file)
     context.redaction_secrets += (bearer,)
+    install_f2_bounds(context.client)
     root = Path(__file__).resolve().parents[4]
     manifest = default_manifest(root, binding.mcp_url)
     secret_ref = "host:f2-owned-mcp"

@@ -167,8 +167,8 @@ async def test_reservation_precedes_key_client_and_sessions_and_settles_once(tmp
     assert (
         receipt["native_budget_sent"] is False and receipt["provider_token_caps_enforced"] is False
     )
-    assert receipt["created_resources"] == [["session", "sess-1"]]
-    assert receipt["archived_sessions"] == ["sess-1"]
+    assert receipt["created_resources"] == [["session", hashlib.sha256(b"sess-1").hexdigest()]]
+    assert receipt["archived_sessions"] == [hashlib.sha256(b"sess-1").hexdigest()]
     assert "offline-explicit-key" not in (args.output / "receipt.json").read_text()
     with pytest.raises(live.LiveRefused, match="already has an attempt"):
         await live.run_live(
@@ -350,6 +350,25 @@ async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(tmp_p
     script_module.MODEL = ModelRef(provider="anthropic", id=live.MODEL)
     manifest = default_manifest(root, "https://mcp.owned.example/mcp")
     script = script_module.Script(manifest)
+    from collections import deque
+
+    from daimon.testing.f2_native_bounds import native_budget, native_tools
+
+    bounded_replies = []
+    bounded_agent = None
+    for reply in script.replies:
+        if reply.path.startswith("/v1/agents"):
+            payload = reply.response.json()
+            payload["tools"] = native_tools()
+            bounded_agent = payload
+            reply = replace(reply, response=httpx.Response(200, json=payload))
+        elif reply.path == "/v1/sessions":
+            payload = reply.response.json()
+            payload["agent"] = bounded_agent
+            payload["budget"] = native_budget()
+            reply = replace(reply, response=httpx.Response(200, json=payload))
+        bounded_replies.append(reply)
+    script.replies = deque(bounded_replies)
     args, guard, _ = admission(tmp_path, monkeypatch, "F2-Anthropic")
     bearer = tmp_path / "synthetic-bearer"
     bearer.write_text("offline-only-bearer")
@@ -407,7 +426,12 @@ async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(tmp_p
             return httpx.Response(200, json={})
         if request.method == "GET" and path == "/v1/sessions/sess_f1":
             return httpx.Response(
-                200, json=ma_session(id="sess_f1", model=live.MODEL).model_dump(mode="json")
+                200,
+                json={
+                    **ma_session(id="sess_f1", model=live.MODEL).model_dump(mode="json"),
+                    "agent": bounded_agent,
+                    "budget": native_budget(),
+                },
             )
         if request.method == "GET" and path == "/v1/sessions/sess_f1/events":
             return httpx.Response(200, json={"data": [], "next_page": None})
@@ -433,6 +457,63 @@ async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(tmp_p
     assert not script.replies and not script.violations
     assert guard.report()[0].actual_usd is None
     assert (args.output / "f2-normalized.json").exists()
+
+
+@pytest.mark.parametrize("acknowledged", [True, False])
+async def test_create_only_acceptance_callback_reserves_and_retires_without_model_work(
+    tmp_path, monkeypatch, acknowledged
+):
+    from dataclasses import fields
+
+    from daimon.testing.f2_budget_acceptance import AcceptanceAdmission, acceptance
+    from daimon.testing.f2_native_bounds import native_budget, native_tools
+    from daimon.testing.ma_models import ma_agent
+
+    base, guard, _ = admission(tmp_path, monkeypatch, "F2-Anthropic")
+    args = AcceptanceAdmission(**{item.name: getattr(base, item.name) for item in fields(base)})
+    calls = []
+    agent = ma_agent(id="agent-test", model=live.MODEL, tools=native_tools())
+    session = ma_session(id="sess-probe", agent=agent).model_dump(mode="json")
+    if acknowledged:
+        session["budget"] = native_budget()
+
+    async def wire(request):
+        assert len(guard.report()) == 1 and len(receipts(guard)) == 1
+        calls.append((request.method, request.url.path))
+        if calls[-1] == ("GET", "/v1/agents/agent-test"):
+            return httpx.Response(200, json=agent.model_dump(mode="json"))
+        if calls[-1] == ("POST", "/v1/sessions"):
+            assert json.loads(request.content)["budget"] == native_budget()
+            return httpx.Response(200, json=session)
+        if calls[-1] == ("GET", "/v1/sessions/sess-probe"):
+            return httpx.Response(200, json=session)
+        if calls[-1] == ("POST", "/v1/sessions/sess-probe/archive"):
+            return httpx.Response(200, json=session)
+        if calls[-1] == ("POST", "/v1/sessions/sess-probe/events"):
+            assert [event["type"] for event in json.loads(request.content)["events"]] == [
+                "user.interrupt"
+            ]
+            return send_events_response()
+        pytest.fail("create-only acceptance dispatched unexpected native work")
+
+    result = await live.run_live(
+        args,
+        acceptance,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(wire),
+    )
+    assert result["result"]["status"] == ("pass" if acknowledged else "failed")
+    assert calls.count(("POST", "/v1/sessions")) == 1
+    assert calls.count(("POST", "/v1/sessions/sess-probe/archive")) == 1
+    if acknowledged:
+        assert ("GET", "/v1/sessions/sess-probe") in calls
+    assert len(receipts(guard)) == 2
+    assert guard.report()[0].actual_usd is None
+    assert guard.report()[0].held_usd == Decimal(".02")
+    if acknowledged:
+        assert result["result"]["user_messages"] == 0
+        assert result["result"]["model_tokens_requested"] == 0
+        assert result["result"]["enforcement_tested"] is False
 
 
 async def test_sse_monitor_triggers_interrupt_archive_before_another_session(tmp_path, monkeypatch):
@@ -503,8 +584,11 @@ async def test_second_session_requires_first_archive_ack_and_third_is_refused(
 def test_missing_go_live_cli_pending_never_reads_key_or_reserves(tmp_path, monkeypatch, package):
     import argparse
 
+    from daimon.testing import anthropic_live_cases
+
     loader = Mock(side_effect=AssertionError("no key read"))
     monkeypatch.setattr(live, "explicit_secret", loader)
+    monkeypatch.setattr(anthropic_live_cases, "explicit_secret", loader)
     args = argparse.Namespace(
         live_binding=None,
         authorization=None,
@@ -649,7 +733,20 @@ async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
         assert json.loads(file.read_text()) == leg
         assert file.stat().st_mode & 0o777 == 0o600
     saved = json.loads((args.output / "receipt.json").read_text())
-    assert saved["result"]["legs"] == legs
+    saved_legs = saved["result"]["legs"]
+    assert len(saved_legs) == 2
+    for expected, projected in zip(legs, saved_legs, strict=True):
+        assert projected["path"] == expected["path"]
+        assert projected["termination"] == expected["termination"]
+        assert projected["journal_records"] == expected["journal_records"]
+        assert projected["elapsed_ms"] == expected["elapsed_ms"]
+        assert (
+            projected["session_id"] == hashlib.sha256(expected["session_id"].encode()).hexdigest()
+        )
+        assert projected["final_text"] == {
+            "sha256": hashlib.sha256(expected["final_text"].encode()).hexdigest(),
+            "text_rejected": True,
+        }
     if claim_status != "actual":
         assert result["result"]["failure_type"] == "LiveRefused"
     assert native.created == 2
@@ -689,7 +786,8 @@ async def test_completed_leg_refuses_credential_bearing_output_before_file_write
 
 @pytest.mark.parametrize("package", ["A7", "F2-Anthropic"])
 @pytest.mark.parametrize(
-    "corruption", [None, "go", "expiry", "source", "recipe", "config", "binding"]
+    "corruption",
+    [None, "go", "expiry", "source", "recipe", "config", "binding", "financial", "old_envelope"],
 )
 def test_exact_signed_admission_and_stale_pins(tmp_path, package, corruption):
     """Public signed metadata snapshots only; no canonical ledger/key access."""
@@ -697,8 +795,16 @@ def test_exact_signed_admission_and_stale_pins(tmp_path, package, corruption):
     from pathlib import Path
 
     fixtures = Path(__file__).parent / "fixtures/anthropic-live"
-    approval_path = fixtures / (package + ".json")
+    name = "F2-R2" if package == "F2-Anthropic" else package
+    approval_path = fixtures / (name + ".json")
     approval = json.loads(approval_path.read_text())
+    if corruption == "old_envelope":
+        approval_path = fixtures / "F2-Anthropic.json"
+        approval = json.loads(approval_path.read_text())
+    elif corruption == "financial":
+        approval["attempts_per_session"] = 2
+        approval_path = tmp_path / "rewritten-approval.json"
+        approval_path.write_text(json.dumps(approval))
     config = tmp_path / "config.json"
     config.write_bytes((fixtures / "host-config.json").read_bytes())
     binding = tmp_path / "binding.json"
@@ -731,6 +837,11 @@ def test_exact_signed_admission_and_stale_pins(tmp_path, package, corruption):
         "recipe_path": str(recipe),
         "recipe_sha256": hashlib.sha256(recipe.read_bytes()).hexdigest(),
     }
+    if package == "F2-Anthropic":
+        from daimon.testing.f2_native_bounds import native_budget, native_tools
+
+        go["native_budget"] = native_budget()
+        go["native_tools"] = native_tools()
     go_path = tmp_path / "go.json"
     go_path.write_text(json.dumps(go))
     now = datetime(2026, 10, 11, 13, tzinfo=UTC)
@@ -1116,7 +1227,9 @@ async def test_fragmented_stream_conflicting_walk_and_failed_fetch_keep_verified
     assert row.actual_evidence.requests[0].tokens.input_tokens == 1000000
     assert result["spend"]["actual_usd"] is None
     exported = json.loads((args.output / "receipt.json").read_text())
-    assert exported["conflicting_request_evidence"] == ["conflicting-proof"]
+    assert exported["conflicting_request_evidence"] == [
+        hashlib.sha256(b"conflicting-proof").hexdigest()
+    ]
 
 
 async def test_late_inflight_create_ack_is_quarantined_and_retired_without_another_settlement(
@@ -1322,10 +1435,11 @@ async def test_cross_session_native_id_collision_quarantines_provenance_and_keep
         assert row.actual_evidence.requests[0].tokens.input_tokens == 1000000
     context = contexts[0]
     exported = json.loads((args.output / "receipt.json").read_text())
-    assert exported["quarantined_native_request_ids"] == [id_]
+    assert exported["quarantined_native_request_ids"] == [hashlib.sha256(id_.encode()).hexdigest()]
     assert exported["reconciliation_required"] is True
     assert {tuple(item.values()) for item in exported["quarantined_request_provenance"]} == {
-        (session, id_) for session in context.transport.session_ids
+        (hashlib.sha256(session.encode()).hexdigest(), hashlib.sha256(id_.encode()).hexdigest())
+        for session in context.transport.session_ids
     }
     if collision_source == "stream":
         assert set(context.transport.monitor.observations) == {
@@ -1333,6 +1447,7 @@ async def test_cross_session_native_id_collision_quarantines_provenance_and_keep
         }
 
 
+@pytest.mark.parametrize("endpoint", ["events", "threads"])
 @pytest.mark.parametrize("package", ["A7", "F2-Anthropic"])
 @pytest.mark.parametrize(
     "content_type",
@@ -1345,13 +1460,13 @@ async def test_cross_session_native_id_collision_quarantines_provenance_and_keep
     ],
 )
 async def test_stream_endpoint_is_monitored_regardless_of_native_content_type(
-    tmp_path, monkeypatch, package, content_type
+    tmp_path, monkeypatch, package, content_type, endpoint
 ):
     args, guard, _ = admission(tmp_path, monkeypatch, package)
     native = Native()
 
     async def wire(request):
-        if request.url.path.endswith("/events/stream"):
+        if request.url.path.endswith("/stream"):
             headers = {} if content_type is None else {"content-type": content_type}
             return httpx.Response(
                 200,
@@ -1362,7 +1477,13 @@ async def test_stream_endpoint_is_monitored_regardless_of_native_content_type(
 
     async def invoke(context):
         session = await create(context)
-        stream = await context.driver.events.open_stream(SCOPE, session.ref)
+        if endpoint == "threads":
+            stream = await context.client.beta.sessions.threads.events.stream(
+                session_id=session.ref.id,
+                thread_id="root-owned",
+            )
+        else:
+            stream = await context.driver.events.open_stream(SCOPE, session.ref)
         async for _ in stream:
             pytest.fail("over-budget SDK event escaped monitoring")
         return {"status": "pass"}
@@ -1376,6 +1497,18 @@ async def test_stream_endpoint_is_monitored_regardless_of_native_content_type(
     row = guard.report()[0]
     assert row.actual_usd is None and row.held_usd >= Decimal("1") and row.admission_blocked
     assert result["result"]["status"] != "pass" and len(receipts(guard)) == 2
+    exported = json.loads((args.output / "receipt.json").read_text())
+    stream_requests = [item for item in exported["requests"] if item["route"].endswith("/stream")]
+    assert len(stream_requests) == 1
+    assert stream_requests[0]["resource_id"] == hashlib.sha256(b"sess-1").hexdigest()
+    if endpoint == "threads":
+        assert stream_requests[0]["route"] == (
+            "/v1/sessions/{resource_id}/threads/{thread_id}/stream"
+        )
+        assert stream_requests[0]["thread_id"] == hashlib.sha256(b"root-owned").hexdigest()
+    else:
+        assert stream_requests[0]["route"] == "/v1/sessions/{resource_id}/events/stream"
+        assert "thread_id" not in stream_requests[0]
 
 
 @pytest.mark.parametrize("case", ["open_stream_not_consumed", "late_stream_response"])
@@ -1401,7 +1534,7 @@ async def test_settlement_closes_open_or_inflight_sdk_response_and_refuses_late_
                 continue
 
     async def wire(request):
-        if request.url.path.endswith("/events/stream"):
+        if request.url.path.endswith("/stream"):
             if case == "late_stream_response":
                 opened.set()
                 await wait_resisting_cancel()
@@ -1457,7 +1590,7 @@ async def test_settlement_closes_open_or_inflight_sdk_response_and_refuses_late_
 @pytest.mark.parametrize("package", ["A7", "F2-Anthropic"])
 @pytest.mark.parametrize("arrival", ["after_settlement", "during_cleanup"])
 async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_entry_points(
-    tmp_path, monkeypatch, arrival, package
+    tmp_path, monkeypatch, arrival, package, credential=None, credential_format="plain"
 ):
     from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
     from daimon.testing.ma import sse_response
@@ -1469,13 +1602,26 @@ async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_ent
     contexts, native, late_errors = [], Native(), []
 
     def sdk_usage(id_, incoming):
-        return BetaManagedAgentsSpanModelRequestEndEvent(
+        if id_ == "late":
+            id_ = "sevt_" + "L" * 24
+        value = BetaManagedAgentsSpanModelRequestEndEvent(
             id=id_,
             type="span.model_request_end",
             model_request_start_id="start-" + id_,
             model_usage=ma_model_usage(input_tokens=incoming, output_tokens=1),
             processed_at=datetime.now(UTC),
         ).model_dump(mode="json")
+        if id_ == "sevt_" + "L" * 24 and credential:
+            import base64
+            from urllib.parse import quote
+
+            value["model_usage"]["provider_note"] = {
+                "plain": credential,
+                "base64": base64.b64encode(credential.encode()).decode(),
+                "percent": quote(credential, safe=""),
+                "half": credential[: len(credential) // 2],
+            }[credential_format]
+        return value
 
     class Source(httpx.AsyncByteStream):
         closed = False
@@ -1496,7 +1642,7 @@ async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_ent
     source = Source()
 
     async def wire(request):
-        if request.url.path.endswith("/events/stream"):
+        if request.url.path.endswith("/stream"):
             return httpx.Response(200, stream=source)
         if request.url.path.endswith("/events") and arrival == "during_cleanup":
             release.set()
@@ -1505,6 +1651,8 @@ async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_ent
 
     async def invoke(context):
         contexts.append(context)
+        if credential:
+            context.redaction_secrets += (credential,)
         sink = context.transport.monitor.on_late_usage
 
         def capture(raw, session_id):
@@ -1550,13 +1698,26 @@ async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_ent
             )
             assert set(contexts[0].transport.monitor.observations) == {
                 ("sess-1", "first"),
-                ("sess-1", "late"),
+                ("sess-1", "sevt_" + "L" * 24),
             }
             return
         assert not finished.is_set()
         assert len(receipts(guard)) == 2 and args.output.joinpath("receipt.json").exists()
         release.set()
         await asyncio.wait_for(finished.wait(), 3)
+        if credential:
+            assert len(late_errors) == 1 and isinstance(late_errors[0], live.RecordingError)
+            sidecars = list(
+                args.ledger_path.parent.glob(live.late_usage_prefix(args.ledger_path) + "*.json")
+            )
+            assert len(sidecars) == 1
+            persisted = sidecars[0].read_text()
+            assert credential not in persisted and "proof" not in json.loads(persisted)
+            assert json.loads(persisted)["admission_blocked"]
+            assert len(receipts(guard)) == 2
+            with pytest.raises(live.LiveRefused, match="unreconciled late usage"):
+                live.refuse_late_usage(args.ledger_path)
+            return
         assert not late_errors
         sidecars = list(
             args.ledger_path.parent.glob(live.late_usage_prefix(args.ledger_path) + "*.json")
@@ -1567,8 +1728,14 @@ async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_ent
             late["admission_blocked"] and late["reconciliation_required"] and late["hold_retained"]
         )
         assert Decimal(late["retained_hold_usd"]) == args.hold
-        assert late["served_model_verified"] and late["proof"]["session"]["id"] == "sess-1"
-        assert late["proof"]["id"] == "late" and late["proof"]["input_tokens"] == late_input
+        assert (
+            late["served_model_verified"]
+            and late["proof"]["session"]["id"] == hashlib.sha256(b"sess-1").hexdigest()
+        )
+        assert (
+            late["proof"]["id"] == hashlib.sha256(("sevt_" + "L" * 24).encode()).hexdigest()
+            and late["proof"]["input_tokens"] == late_input
+        )
         assert Decimal(late["verified_monetary_hold_floor_usd"]) >= (
             Decimal(".50") if package == "A7" else Decimal("1")
         )
@@ -1935,6 +2102,27 @@ def test_typed_receipt_resource_identity_never_exempts_credentials(id_):
         Audit(()).audit(projected)
 
 
+def test_thread_stream_receipt_audits_identity_and_requires_accepted_parent():
+    from mux.conformance.recording import Audit, RecordingError
+
+    id_ = "sesn_" + "A" * 26
+    thread_id = "thread_" + "B" * 26
+    path = f"/v1/sessions/{id_}/threads/{thread_id}/stream"
+    projected = live.request_metadata([("GET", path)], frozenset({("session", id_)}))
+    Audit(()).audit(projected)
+    assert projected[0]["thread_id"] == thread_id
+    assert projected[0]["resource_id"] == id_
+    with pytest.raises(RecordingError, match="unaccepted live request identity"):
+        live.request_metadata([("GET", path)], frozenset())
+    for secret in ("Bearer synthetic-only-secret", "sk-" + "x" * 40):
+        projected = live.request_metadata(
+            [("GET", f"/v1/sessions/{id_}/threads/{secret}/stream")],
+            frozenset({("session", id_)}),
+        )
+        with pytest.raises(RecordingError):
+            Audit(()).audit(projected)
+
+
 @pytest.mark.parametrize(
     "method,path,resources",
     [
@@ -2019,9 +2207,529 @@ async def test_real_length_native_session_and_unknown_write_ttl_export_without_c
     assert receipt["observed_request_meters"][0]["cache_creation_input_tokens"] == 642
     assert "cache_creation" not in receipt["observed_request_meters"][0]
     assert any(
-        item["route"] == "/v1/sessions/{resource_id}/events/stream" and item["resource_id"] == id_
+        item["route"] == "/v1/sessions/{resource_id}/events/stream"
+        and item["resource_id"] == hashlib.sha256(id_.encode()).hexdigest()
         for item in receipt["requests"]
     )
-    assert receipt["archived_sessions"] == [id_]
+    assert receipt["archived_sessions"] == [hashlib.sha256(id_.encode()).hexdigest()]
     assert len(receipts(guard)) == 2 and guard.report()[0].actual_usd is None
     assert guard.report()[0].held_usd == Decimal(".35")
+
+
+@pytest.mark.parametrize("credential_format", ["plain", "base64", "percent", "half"])
+async def test_f2_late_meter_never_persists_registered_mcp_credential(
+    tmp_path, monkeypatch, credential_format
+):
+    await test_late_active_stream_usage_is_durable_and_blocks_both_admission_entry_points(
+        tmp_path,
+        monkeypatch,
+        "after_settlement",
+        "F2-Anthropic",
+        credential="mcp-private:fixture+canary-638492",
+        credential_format=credential_format,
+    )
+
+
+async def test_budget_acceptance_probe_is_one_create_retrieve_archive_and_no_message(
+    tmp_path, monkeypatch
+):
+    from dataclasses import fields
+
+    from daimon.testing.f2_budget_acceptance import AcceptanceAdmission, acceptance
+    from daimon.testing.f2_native_bounds import native_budget, native_tools
+    from daimon.testing.ma_models import ma_agent
+
+    args, guard, _ = admission(tmp_path, monkeypatch, "F2-Anthropic")
+    args = AcceptanceAdmission(**{field.name: getattr(args, field.name) for field in fields(args)})
+    native = Native()
+    agent = ma_agent(id="agent-test", model=live.MODEL, tools=native_tools())
+
+    async def wire(request):
+        if request.method == "GET" and request.url.path == "/v1/agents/agent-test":
+            native.requests.append((request.method, request.url.path))
+            return httpx.Response(200, json=agent.model_dump(mode="json"))
+        if request.url.path == "/v1/sessions" and request.method == "POST":
+            assert json.loads(request.content)["budget"] == native_budget()
+        if request.method == "GET" and request.url.path == "/v1/sessions/sess-1":
+            native.requests.append((request.method, request.url.path))
+            return httpx.Response(
+                200,
+                json={
+                    **ma_session(id="sess-1", model=live.MODEL).model_dump(mode="json"),
+                    "agent": agent.model_dump(mode="json"),
+                    "budget": native_budget(),
+                },
+            )
+        response = await native.handle(request)
+        if (
+            request.url.path.startswith("/v1/sessions")
+            and request.method in {"POST", "GET"}
+            and not request.url.path.endswith("/archive")
+        ):
+            body = response.json()
+            body["budget"] = native_budget()
+            body["agent"] = agent.model_dump(mode="json")
+            return httpx.Response(200, json=body)
+        return response
+
+    result = await live.run_live(
+        args,
+        acceptance,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(wire),
+    )
+    assert result["result"]["status"] == "pass", result
+    assert result["result"]["user_messages"] == 0
+    assert result["result"]["model_tokens_requested"] == 0
+    assert result["result"]["enforcement_tested"] is False
+    assert native.requests == [
+        ("GET", "/v1/agents/agent-test"),
+        ("POST", "/v1/sessions"),
+        ("GET", "/v1/sessions/sess-1"),
+        ("POST", "/v1/sessions/sess-1/archive"),
+    ]
+    assert len(receipts(guard)) == 2 and guard.report()[0].held_usd == Decimal(".02")
+    assert guard.report()[0].actual_usd is None
+
+
+LATE_CREDENTIAL_ROLES = {
+    "api_key": ("current", "fixture.api:648219+alpha"),
+    "mcp_primary": ("current", "fixture.mcp:749321+bravo"),
+    "vault_static_bearer_alias": ("current-alias", "fixture.mcp:749321+bravo"),
+    "mcp_secondary": ("conditional", "fixture.mcp2:836472+charlie"),
+    "oauth_access_token": ("conditional", "fixture.access:927351+delta"),
+    "oauth_refresh_token": ("conditional", "fixture.refresh:138642+echo"),
+    "oauth_client_secret": ("conditional", "fixture.client:249753+foxtrot"),
+    "vault_environment_secret": ("conditional", "fixture.env:351864+golf"),
+    "skill_environment_secret": ("conditional", "fixture.skill:462975+hotel"),
+    "mcp_authorization_token": ("conditional", "fixture.auth:573186+india"),
+    "credential_file_secret": ("conditional", "fixture.file:684297+juliet"),
+}
+
+
+def late_credential_encoding(value, form):
+    import base64
+
+    if form == "base64":
+        return base64.b64encode(value.encode()).decode()
+    if form == "percent":
+        return "".join(f"%{byte:02X}" for byte in value.encode())
+    return value
+
+
+async def late_credential_probe(
+    tmp_path,
+    monkeypatch,
+    role,
+    form,
+    *,
+    id_fragments=False,
+    wrapped=False,
+    after_refusal=False,
+    native_ids=None,
+    valid_ids=False,
+):
+
+    from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
+    from daimon.testing.ma import sse_response
+    from daimon.testing.ma_models import ma_model_usage
+
+    classification, canary = LATE_CREDENTIAL_ROLES[role]
+    if id_fragments:
+        canary = "fixture_mcp_749321_bravo"
+    folder = tmp_path / f"{role}-{form}"
+    folder.mkdir(parents=True)
+    mp = monkeypatch
+    args, guard, _ = admission(folder, mp, "F2-Anthropic")
+    # Run fixture preflight without inheriting any ambient SDK auth/headers.
+    native, contexts, errors = Native(), [], []
+    count = (3 if after_refusal else 2) if form == "split_frames" else (2 if after_refusal else 1)
+    if native_ids is not None:
+        count = len(native_ids)
+    release = asyncio.Event()
+    waiting = [asyncio.Event() for _ in range(count)]
+    sources = []
+    payload = late_credential_encoding(canary, form)
+    parts = (
+        [payload[: len(payload) // 2], payload[len(payload) // 2 :]]
+        if form == "split_frames"
+        else [payload]
+    )
+
+    if wrapped:
+        parts = ["late-" + parts[0], parts[1] + "-extra"]
+    if after_refusal:
+        parts.append("safe-late-followup")
+    if native_ids is not None:
+        parts = native_ids
+
+    def event(id_, incoming, note=None):
+        raw = BetaManagedAgentsSpanModelRequestEndEvent(
+            id=id_,
+            type="span.model_request_end",
+            model_request_start_id="start-" + id_,
+            model_usage=ma_model_usage(input_tokens=incoming, output_tokens=1),
+            processed_at=datetime.now(UTC),
+        ).model_dump(mode="json")
+        if note is not None:
+            if id_fragments:
+                raw["id"] = note
+            else:
+                raw["model_usage"]["provider_note"] = note
+        return raw
+
+    class Source(httpx.AsyncByteStream):
+        def __init__(self, index):
+            self.index, self.closed = index, False
+
+        async def __aiter__(self):
+            yield sse_response([event(f"first-{self.index}", 10)]).content
+            waiting[self.index].set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+            frame = sse_response([event(f"late-{self.index}", 2000000, parts[self.index])]).content
+            if form == "split_http_chunks":
+                # Split inside the credential, not between two complete frames.
+                cut = frame.index(payload.encode()) + len(payload) // 2
+                yield frame[:cut]
+                yield frame[cut:]
+            else:
+                yield frame
+
+        async def aclose(self):
+            self.closed = True
+
+    async def wire(request):
+        if request.url.path.endswith("/events/stream"):
+            source = Source(len(sources))
+            sources.append(source)
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=source)
+        return await native.handle(request)
+
+    readers = []
+
+    async def invoke(context):
+        contexts.append(context)
+        context.redaction_secrets += tuple(
+            value for name, (_, value) in LATE_CREDENTIAL_ROLES.items() if name != "api_key"
+        )
+        context.redaction_secrets += (canary,)
+        sink = context.transport.monitor.on_late_usage
+
+        def capture(raw, session_id):
+            try:
+                sink(raw, session_id)
+            except BaseException as error:
+                errors.append(type(error).__name__)
+                raise
+
+        context.transport.monitor.on_late_usage = capture
+        session = await create(context)
+
+        async def read():
+            stream = await context.driver.events.open_stream(SCOPE, session.ref)
+            with suppress(Exception):
+                async for _ in stream:
+                    pass
+
+        readers.extend(asyncio.create_task(read()) for _ in range(count))
+        await asyncio.gather(*readers)
+        return {"status": "pass"}  # Synthetic fixture result, never QA certification.
+
+    runner = asyncio.create_task(
+        live.run_live(
+            args,
+            invoke,
+            secret_loader=lambda _: LATE_CREDENTIAL_ROLES["api_key"][1],
+            transport_factory=lambda: httpx.MockTransport(wire),
+        )
+    )
+    try:
+        await asyncio.wait_for(asyncio.gather(*(gate.wait() for gate in waiting)), 5)
+        runner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(runner, 5)
+        assert all(source.closed for source in sources)
+        assert len(receipts(guard)) == 2
+        assert not all(reader.done() for reader in readers)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*readers), 5)
+        paths = sorted(
+            args.ledger_path.parent.glob(live.late_usage_prefix(args.ledger_path) + "*.json")
+        )
+        sidecars = [json.loads(path.read_text()) for path in paths]
+        assert len(sidecars) == count
+        assert all(path.stat().st_mode & 0o777 == 0o600 for path in paths)
+        assert all(
+            row["admission_blocked"] and row["reconciliation_required"] and row["hold_retained"]
+            for row in sidecars
+        )
+        assert all(row["actual_usd"] is None and row["runtime"] is None for row in sidecars)
+        assert len(receipts(guard)) == 2
+        # Inspect only meter content, without hash/id fields confusing tape audit.
+        notes = sorted(
+            (
+                row["proof"]["id"],
+                row["proof"]["id"]
+                if id_fragments
+                else row["proof"]["native_meter"].get("provider_note"),
+            )
+            for row in sidecars
+            if "proof" in row
+        )
+        retained = [note for _, note in notes if note is not None]
+        oracle_rejects = False
+        try:
+            live.Audit((canary,)).fragments(parts)
+        except live.RecordingError:
+            oracle_rejects = True
+        if native_ids is None:
+            assert oracle_rejects, (
+                "probe payload must be credential-bearing under full-context audit"
+            )
+        # A refusal must leave no payload fragments in durable native meters.
+        # Rejected provider IDs cannot create a proof, even when the audit
+        # cannot reconstruct interleaved or reversed credential fragments.
+        if valid_ids:
+            serialized = json.dumps(sidecars)
+            assert all(part not in serialized for part in parts)
+            assert len(retained) == 1 and len(errors) == count - 1
+            assert all(not row["native_id_projection"]["shape_rejected"] for row in sidecars)
+            assert (
+                sum(row["native_id_projection"]["duplicate_rejected"] for row in sidecars)
+                == count - 1
+            )
+            verdict = "PASS"
+        else:
+            verdict = "PASS" if not retained else "FAIL"
+        if id_fragments and not after_refusal and not valid_ids:
+            assert len(errors) == count
+            for row in sidecars:
+                assert row["native_id_projection"]["shape_rejected"]
+            assert {row["native_id_projection"]["sha256"] for row in sidecars} == {
+                hashlib.sha256(part.encode()).hexdigest() for part in parts
+            }
+        assert guard.report()[0].actual_usd is None
+        assert guard.report()[0].held_usd == args.hold
+        assert all(Decimal(row["retained_hold_usd"]) == args.hold for row in sidecars)
+        calls_before = list(native.requests)
+        for package in ("A7", "F2-Anthropic"):
+            blocked = replace(
+                args, package=package, approval_digest="c" * 64, output=folder / package
+            )
+            with pytest.raises(live.LiveRefused, match="unreconciled late usage"):
+                await live.run_live(
+                    blocked,
+                    invoke,
+                    secret_loader=Mock(side_effect=AssertionError("key read")),
+                    transport_factory=Mock(side_effect=AssertionError("client construction")),
+                )
+            with pytest.raises(live.LiveRefused, match="unreconciled late usage"):
+                live.admit(
+                    package=package,
+                    approval_path=folder / "absent",
+                    go_path=folder / "absent",
+                    go_digest="d" * 64,
+                    config_path=args.config_path,
+                    ledger_path=args.ledger_path,
+                    binding_path=folder / "absent",
+                    output=folder / package,
+                    source_head=args.source_head,
+                    source_clean=True,
+                )
+        assert native.requests == calls_before and len(receipts(guard)) == 2
+        return {
+            "role": role,
+            "classification": classification,
+            "form": form,
+            "verdict": verdict,
+            "credential_sha256": hashlib.sha256(canary.encode()).hexdigest(),
+            "sidecars": len(sidecars),
+            "retained_meter_fragments": len(retained),
+            "late_errors": errors,
+            "full_context_payload_oracle": "REFUSE",
+            "ledger_rows": 2,
+            "A7_F2_readmission": "REFUSED_BEFORE_AUTH_OR_CLIENT",
+            "sidecar_mode": "0600",
+            "fake_sources_closed": True,
+        }
+    finally:
+        release.set()
+        if not runner.done():
+            runner.cancel()
+
+
+@pytest.mark.parametrize("role", list(LATE_CREDENTIAL_ROLES))
+@pytest.mark.parametrize(
+    "form", ["plain", "base64", "percent", "split_frames", "split_http_chunks"]
+)
+async def test_all_registered_late_meter_credential_forms_refuse(tmp_path, monkeypatch, role, form):
+    result = await late_credential_probe(tmp_path, monkeypatch, role, form)
+    assert result["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_two_late_native_ids_cannot_complete_a_registered_mcp_credential(
+    tmp_path, monkeypatch, wrapped
+):
+    result = await late_credential_probe(
+        tmp_path, monkeypatch, "mcp_primary", "split_frames", id_fragments=True, wrapped=wrapped
+    )
+    assert result["verdict"] == "PASS"
+
+
+def test_late_audit_includes_trusted_fields_but_does_not_decode_owned_sha_pins(monkeypatch):
+    pin = "f" * 64
+    monkeypatch.setattr(live, "HOST_CONFIG_SHA256", pin)
+    records = [
+        {
+            "config_sha256": pin,
+            "ledger_id": live.LEDGER_ID,
+            "proof": {"id": "safe", "input_tokens": 1},
+        }
+    ]
+    live.audit_late_usage_records(records, ("unrelated-fixture-credential",))
+    with pytest.raises(live.RecordingError):
+        live.audit_late_usage_records(records, (pin,))
+
+
+def test_late_audit_includes_cross_frame_fields_and_keys(monkeypatch):
+    # Both individual records are safe. Different durable slots assemble the
+    # credential in the all-fields stream even without a shared field path.
+    first = {"host": "left_", "proof": {"id": "middle_"}}
+    second = {"host": "right", "proof": {"id": "safe"}}
+    secret = "left_middle_right"
+    live.audit_late_usage_records([first], (secret,))
+    live.audit_late_usage_records([second], (secret,))
+    with pytest.raises(live.RecordingError):
+        live.audit_late_usage_records([first, second], (secret,))
+
+
+async def test_late_enrichment_stays_closed_after_a_split_credential_hit(tmp_path, monkeypatch):
+    result = await late_credential_probe(
+        tmp_path,
+        monkeypatch,
+        "mcp_primary",
+        "split_frames",
+        id_fragments=True,
+        wrapped=True,
+        after_refusal=True,
+    )
+    assert result["verdict"] == "PASS" and result["sidecars"] == 3
+
+
+async def test_late_enrichment_stays_closed_after_a_single_frame_credential_hit(
+    tmp_path, monkeypatch
+):
+    result = await late_credential_probe(
+        tmp_path,
+        monkeypatch,
+        "mcp_primary",
+        "plain",
+        id_fragments=True,
+        after_refusal=True,
+    )
+    assert result["verdict"] == "PASS" and result["sidecars"] == 2
+    assert result["late_errors"] == ["RecordingError"] * 2
+
+
+@pytest.mark.parametrize("variant", ["interleaved", "reverse", "base64_interleaved"])
+async def test_late_native_ids_close_the_three_interleaved_credential_channels(
+    tmp_path, monkeypatch, variant
+):
+    import base64
+
+    canary = "fixture_mcp_749321_bravo"
+    first, second = canary[:12], canary[12:]
+    cases = {
+        "interleaved": ["x" + first, "benignevent123", second + "y"],
+        "reverse": [second + "y", "x" + first],
+    }
+    encoded = base64.b64encode(canary.encode()).decode().rstrip("=")
+    cases["base64_interleaved"] = ["x" + encoded[:16], "benignevent123", encoded[16:] + "y"]
+    result = await late_credential_probe(
+        tmp_path,
+        monkeypatch,
+        "mcp_primary",
+        "split_frames",
+        id_fragments=True,
+        native_ids=cases[variant],
+    )
+    assert result["verdict"] == "PASS" and result["ledger_rows"] == 2
+    assert result["late_errors"] == ["RecordingError"] * len(cases[variant])
+
+
+def test_durable_native_identity_hashes_even_valid_shapes_and_flags_duplicates():
+    ids = live.DurableNativeIds()
+    native = "sevt_" + "A" * 24
+    first = ids.project(native)
+    assert first == {
+        "sha256": hashlib.sha256(native.encode()).hexdigest(),
+        "shape_rejected": False,
+        "duplicate_rejected": False,
+    }
+    assert ids.project(native)["duplicate_rejected"] is True
+    for invalid in [
+        "xcredentialhalf",
+        "benignevent123",
+        "sevt_" + "A" * 19,
+        "sevt_" + "A" * 41,
+        native + "\n",
+        "sesn_" + "A" * 24 + "_",
+    ]:
+        assert ids.project(invalid)["shape_rejected"] is True
+    assert ids.project("sesn_" + "B" * 24)["shape_rejected"] is False
+
+
+def test_receipt_projection_closes_native_identity_and_free_text_fields():
+    ids = live.DurableNativeIds()
+    native = "sevt_" + "A" * 24
+    session = "sesn_" + "B" * 24
+    text = "some-provider-controlled-text"
+    facts = {
+        "result": {"status": "pass", "evidence": [text], "unexpected_provider_key": text},
+        "created_resources": [["session", session]],
+        "archived_sessions": [session],
+        "requests": [{"resource_id": session, "thread_id": text, "version": text}],
+        "observed_request_threshold_status": [{"id": native, "session_id": session}],
+        "spend": {"actual_evidence": {"requests": [{"id": native}]}},
+        "observed_request_meters": [{"provider_note": text, "input_tokens": 3}],
+        "observed_token_threshold_crossings": [native],
+    }
+    projected = live.durable_receipt(facts, ids, ())
+    serialized = json.dumps(projected)
+    assert native not in serialized and session not in serialized and text not in serialized
+    assert "unexpected_provider_key" not in serialized and "provider_note" not in serialized
+    assert projected["result"]["status"] == "pass"
+    assert facts["created_resources"] == [["session", session]]  # Original guard input untouched.
+    assert hashlib.sha256(native.encode()).hexdigest() in serialized
+    assert any(row["duplicate_rejected"] for row in projected["native_id_projection"])
+
+
+def test_projected_hashes_remain_in_full_literal_credential_audit():
+    ids = live.DurableNativeIds()
+    native = "sevt_" + "A" * 24
+    secret = hashlib.sha256(native.encode()).hexdigest()
+    with pytest.raises(live.RecordingError):
+        live.durable_receipt({"id": native}, ids, (secret,))
+
+
+async def test_duplicate_shape_valid_late_identity_is_hashed_and_closes_enrichment(
+    tmp_path, monkeypatch
+):
+    native = "sevt_" + "A" * 24
+    result = await late_credential_probe(
+        tmp_path,
+        monkeypatch,
+        "mcp_primary",
+        "split_frames",
+        id_fragments=True,
+        native_ids=[native, native],
+        valid_ids=True,
+    )
+    assert result["verdict"] == "PASS" and result["sidecars"] == 2
+    assert result["late_errors"] == ["RecordingError"]
+    assert result["ledger_rows"] == 2
