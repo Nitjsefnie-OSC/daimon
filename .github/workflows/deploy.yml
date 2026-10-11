@@ -148,6 +148,16 @@ jobs:
             gcloud artifacts docker images describe "$image" --format=json >/dev/null
           done
 
+      - name: Start staging IAP SSH key registration
+        if: inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'
+        env:
+          REPO_NAME: ${{ vars.GCP_AR_REPO }}
+          IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
+        run: |
+          mkdir -p "$IAP_SSH_STATE"
+          scripts/ci/iap-ssh-key.sh run "$IAP_SSH_STATE" 180 "$REPO_NAME" "$ZONE" \
+            >"$IAP_SSH_STATE/launcher.log" 2>&1 < /dev/null &
+
       # Manual staging and production deploys still build from the pinned SHA.
       # Main CI passes prebuilt digests and skips these steps. No provenance or
       # SBOM attestations: they would turn the push into an image index, while
@@ -216,11 +226,19 @@ jobs:
             --format='value(status.url)')
           echo "url=$URL/mcp" >> "$GITHUB_OUTPUT"
 
+      - name: Wait for staging IAP SSH key registration
+        if: inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'
+        env:
+          IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
+        run: scripts/ci/iap-ssh-key.sh wait "$IAP_SSH_STATE" 190
+
       - name: Register the IAP SSH key
+        if: inputs.environment != 'staging' || steps.images.outputs.prebuilt != 'true'
         run: |
-          # The first `gcloud compute ssh` on a fresh runner generates a key
-          # and writes it to project metadata. Doing that once here keeps the
-          # two VM refreshes below, which run side by side, from racing on it.
+          # Keep this inline: rollback workflows check out the requested old
+          # SHA, which may not contain the helper script used by current main.
+          # The first SSH on a fresh runner generates a key and writes it to
+          # project metadata before either VM refresh below starts.
           gcloud compute ssh ${{ vars.GCP_AR_REPO }}-notebook --zone "$ZONE" \
             --tunnel-through-iap --command true
           # gcloud waits for a new key to reach only the VM it connects to, so

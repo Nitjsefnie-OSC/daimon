@@ -56,6 +56,7 @@ on:
       - "packages/adapters/slack/daimon/adapters/slack/boot_sweep.py"
       - "packages/adapters/slack/daimon/adapters/slack/__main__.py"
       - ".github/workflows/deploy.yml"
+      - "scripts/ci/iap-ssh-key.sh"
       - ".github/workflows/ci.yml"
       - ".github/workflows/promote.yml"
       - "packages/testing/daimon/testing/ci_shard.py"
@@ -184,6 +185,7 @@ on:
       - "packages/adapters/slack/daimon/adapters/slack/__main__.py"
       # the stop-before-start deploy that RollingOverlap assumes
       - ".github/workflows/deploy.yml"
+      - "scripts/ci/iap-ssh-key.sh"
       - ".github/workflows/ci.yml"
       - ".github/workflows/promote.yml"
       - "packages/testing/daimon/testing/ci_shard.py"

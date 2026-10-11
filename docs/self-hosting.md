@@ -866,6 +866,12 @@ the compose grace. The managed deploy fetches its worker compose asset from
 GCS; its source lives in `pymc-labs/daimon-infra` and an operator uploads changes
 with OpenTofu before the next app deployment.
 
+For staging deployments using prebuilt CI images, the managed workflow registers
+its SSH key while migrations and MCP deployment run. It requires successful key
+setup on the notebook VM and, when running, the workers VM before refreshing
+either VM. A failed or incomplete setup stops the deployment. Manual staging
+deployments and production promotes perform key setup serially.
+
 ### Discord overlap during deployment
 
 Recreating the Discord container stop-first leaves the gateway closed until the
