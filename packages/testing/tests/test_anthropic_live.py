@@ -524,8 +524,20 @@ def test_missing_go_live_cli_pending_never_reads_key_or_reserves(tmp_path, monke
     loader.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "native_ack,claim_status",
+    [
+        ("queued", "actual"),
+        ("processed", "actual"),
+        ("processed", "missing"),
+        ("processed", "pending"),
+        ("processed", "sent"),
+        ("processed", "outcome_unknown"),
+        ("processed", "failed"),
+    ],
+)
 async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
-    db_preflight, db_engine, db_clean, tmp_path, monkeypatch
+    db_preflight, db_engine, db_clean, tmp_path, monkeypatch, native_ack, claim_status
 ):
     import uuid
 
@@ -567,6 +579,19 @@ async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
         ),
     )
     monkeypatch.setattr(cases, "create_async_engine", lambda _: db_engine)
+    original_get_operation = cases.PostgresStateStore.get_operation
+
+    async def read_claim(store, scope, key):
+        operation = await original_get_operation(store, scope, key)
+        if operation is None or claim_status == "actual":
+            return operation
+        if claim_status == "missing":
+            return None
+        return operation.model_copy(
+            update={"operation": operation.operation.model_copy(update={"status": claim_status})}
+        )
+
+    monkeypatch.setattr(cases.PostgresStateStore, "get_operation", read_claim)
     native = Native()
 
     async def handler(request):
@@ -600,6 +625,10 @@ async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
                 200,
                 json=ma_session(id=path.split("/")[3], model=live.MODEL).model_dump(mode="json"),
             )
+        if request.method == "POST" and path.endswith("/events") and native_ack == "processed":
+            # Real SDK non-null data ACK translates to processed, not queued.
+            native.requests.append((request.method, path))
+            return send_events_response([])
         return await native.handle(request)
 
     result = await live.run_live(
@@ -608,16 +637,54 @@ async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
         secret_loader=lambda _: "offline-key",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert result["result"]["status"] == "pass", result
+    assert result["result"]["status"] == ("pass" if claim_status == "actual" else "failed"), result
     legs = result["result"]["legs"]
     assert [leg["path"] for leg in legs] == ["legacy", "mux"]
     assert legs[0]["session_id"] != legs[1]["session_id"]
     assert legs[0]["journal_records"] == 0 < legs[1]["journal_records"]
+    assert [leg["final_text"] for leg in legs] == ["a7-paired-probe-ok"] * 2
+    assert [leg["termination"] for leg in legs] == ["completed"] * 2
+    for leg in legs:
+        file = args.output / f"a7-{leg['path']}-leg.json"
+        assert json.loads(file.read_text()) == leg
+        assert file.stat().st_mode & 0o777 == 0o600
+    saved = json.loads((args.output / "receipt.json").read_text())
+    assert saved["result"]["legs"] == legs
+    if claim_status != "actual":
+        assert result["result"]["failure_type"] == "LiveRefused"
     assert native.created == 2
     assert native.requests.index(("POST", "/v1/sessions/sess-1/archive")) < native.requests.index(
         ("POST", "/v1/sessions"), 1
     )
     assert guard.report()[0].held_usd == Decimal(".35")
+    assert len(receipts(guard)) == 2
+
+
+async def test_completed_leg_refuses_credential_bearing_output_before_file_write(
+    tmp_path, monkeypatch
+):
+    args, guard, _ = admission(tmp_path, monkeypatch)
+
+    async def invoke(context):
+        with pytest.raises(live.RecordingError):
+            context.retain_completed_leg(
+                {"path": "legacy", "final_text": "offline-key", "termination": "completed"}
+            )
+        assert not context.completed_legs
+        assert not (args.output / "a7-legacy-leg.json").exists()
+        return {"status": "failed"}
+
+    result = await live.run_live(
+        args,
+        invoke,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(
+            lambda _: pytest.fail("credential proof made a native request")
+        ),
+    )
+    assert result["result"]["status"] == "failed"
+    assert "legs" not in result["result"]
+    assert len(receipts(guard)) == 2
 
 
 @pytest.mark.parametrize("package", ["A7", "F2-Anthropic"])

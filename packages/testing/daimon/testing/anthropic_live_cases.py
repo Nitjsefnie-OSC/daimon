@@ -86,7 +86,7 @@ async def a7_pair(context: LiveContext) -> Mapping[str, object]:
     sessions = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     require_owned_sessionmaker(sessions)
     store = PostgresStateStore(sessions)
-    outcomes: list[dict[str, object]] = []
+    outcomes = context.completed_legs
     try:
         agent = await context.driver.agents.retrieve(binding.scope, binding.agent)
         if (
@@ -148,18 +148,21 @@ async def a7_pair(context: LiveContext) -> Mapping[str, object]:
                     path=path,
                     render_interval_s=3600,
                 )
-            operation = await store.get_operation(binding.scope, f"a7:{ref.id}:send:0")
-            if path == "mux" and (operation is None or operation.operation.status != "accepted"):
-                raise LiveRefused("mux native send did not retain its accepted claim")
-            outcomes.append(
+            context.retain_completed_leg(
                 {
                     "path": path,
                     "session_id": ref.id,
                     "elapsed_ms": (time.perf_counter() - started) * 1000,
                     "termination": state.termination.value if state.termination else None,
+                    "final_text": extract_final_response(state.content),
                     "journal_records": len(await store.read_events(ref.id)),
                 }
             )
+            operation = await store.get_operation(binding.scope, f"a7:{ref.id}:send:0")
+            if path == "mux" and (
+                operation is None or operation.operation.status not in {"accepted", "processed"}
+            ):
+                raise LiveRefused("mux native send did not retain its accepted claim")
             await collect_usage(context, ref)
             # Finish the first leg before starting the second; no fresh retry on any failure.
             await context.driver.session_admin.archive(binding.scope, ref, key=f"a7-{path}-archive")
