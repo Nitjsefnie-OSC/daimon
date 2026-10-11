@@ -11,11 +11,11 @@ from typing import Protocol
 import structlog
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.routine_delivery import record_failure
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
-    record_result,
     skip_slots_during_fire,
 )
 from daimon.core.turn.outcomes import TurnObservation
@@ -95,7 +95,7 @@ async def _record_fire_error(
     """Record a fire failure on a FRESH session (never reuse fire's session)."""
     try:
         async with sm() as s, s.begin():
-            await record_result(s, routine_id, tail=None, error=msg)
+            await record_failure(s, routine_id, error=msg)
     except Exception:
         log.exception("record_result(error) failed", routine_id=str(routine_id))
 
@@ -166,7 +166,7 @@ async def run_one_tick(
             ).finish(reason=TerminationReason.ADMISSION_CAP_EXCEEDED)
             try:
                 async with sm() as s, s.begin():
-                    await record_result(s, row.id, tail=None, error="cap_exceeded")
+                    await record_failure(s, row.id, error="cap_exceeded")
             except Exception:
                 log.exception("record_result(cap-block) failed", routine_id=str(row.id))
             continue

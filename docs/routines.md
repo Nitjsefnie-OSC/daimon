@@ -231,8 +231,9 @@ Otherwise it is `pending`, with the complete reply copied into `delivery_payload
 Discord, Slack and Teams split long results across messages at word or line
 boundaries and preserve code fences. Creator fallback messages also keep the
 complete result. A
-failed fire leaves the outbox alone and records `last_error` as always, so a
-result still pending from an earlier successful fire stays pending.
+failed fire records `last_error` as always and leaves a result still pending
+from an earlier successful fire pending; otherwise the first failure in a row
+queues a failure notice ([When a run fails](#when-a-run-fails)).
 
 The scheduler has no chat client, so the post happens in the chat adapter for
 the tenant's platform: Discord, Slack and Teams each run `run_delivery_poller`
@@ -383,9 +384,37 @@ The next slot was already stamped at claim time, before the outcome was known,
 so a failing routine simply waits for its next slot and tries again, forever,
 staying enabled.
 
-Nothing is sent anywhere on failure. The scheduler imports no chat adapter;
-discovery is pull-only, through the `/routines` panel. The strings that land
-in `last_error` come from a small, closed set: `invoker_not_allowed` (the
+A routine with a destination tells it when it starts failing. The first
+failure after a success (or a routine's first run failing) queues a short
+notice in the same outbox a result uses (`record_failure` in
+`packages/core/daimon/core/routine_delivery.py`), so the chat adapter posts
+it with every check a result gets: creator first, the destination's access
+policy, the direct-message fallback. It reads, for example:
+
+```
+team-020-analyst's daily routine at 09:00 UTC failed, so there's no result this time.
+
+The request to the AI model failed.
+
+It will try again at its next scheduled time.
+```
+
+The middle line says what failed in plain words, never the raw error: a
+model request that failed for good (`TurnError: upstream…` or an SDK error),
+a run that took too long (`timeout: …` or a ceiling breach), a depleted
+balance, a used-up channel budget or monthly cap (each saying who can fix
+it), or otherwise "Something went wrong while it was running." The notice is
+queued only while `last_error` is still null, so a routine that keeps failing
+posts once and stays quiet until a run succeeds; the panels still show every
+failure. It never replaces a post that is pending or claimed, so an
+undelivered result wins. The outbox row carries `delivery_note =
+failure_notice` until it settles. Nothing is posted for `scheduler_shutdown`,
+a routine with no tenant or creator, any access-policy refusal
+(`invoker_not_allowed`, `access_policy_unreadable`, `runs_elsewhere`,
+`own_agents_only`), or a routine without a destination.
+
+The scheduler imports no chat adapter. The strings that land in `last_error`
+come from a small, closed set: `invoker_not_allowed` (the
 creator is no longer on the allowlist and not a stored admin),
 `access_policy_unreadable`, `balance_depleted`,
 `cap_exceeded`, `channel_budget_exceeded`, `routine has no created_by_user_id`, `routine tenant not
