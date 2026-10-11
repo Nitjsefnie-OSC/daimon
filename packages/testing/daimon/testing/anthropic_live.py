@@ -216,7 +216,7 @@ def admit(
     document = json.loads(approval_path.read_text())
     approval = document.get("approval", document)
     signed = {
-        "A7": "920af00a4ad7169eded2898a44d8688c983f318b24e355bc4fe8f12e096267e0",
+        "A7": "5dc7a801d7566e63e91fd9e30f2c667db613166ab27eedd1d629af616950b9a1",
         "F2-Anthropic": "8eea963b8f3541d8a36d79b87e6e983c40cb9cbe1875086202270e505585fab3",
     }
     if digest_json(approval) != signed[package]:
@@ -855,8 +855,32 @@ class LiveContext:
     transport: LiveTransport
     reservation: Reservation
     evidence: list[AnthropicSessionSpend] = field(default_factory=list[AnthropicSessionSpend])
+    completed_legs: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
     retire: Callable[[], Awaitable[None]] | None = None
     redaction_secrets: tuple[str, ...] = field(default=(), repr=False)
+
+    def retain_completed_leg(self, leg: dict[str, object]) -> None:
+        """Save audited final output before a later proof or cleanup can fail."""
+        path = leg.get("path")
+        if self.admission.package != "A7" or path not in ("legacy", "mux"):
+            raise LiveRefused("completed leg is outside the admitted A7 pair")
+        Audit(self.redaction_secrets).audit(json.loads(json.dumps([*self.completed_legs, leg])))
+        descriptor = os.open(
+            self.admission.output / f"a7-{path}-leg.json",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w") as output:
+            json.dump(leg, output, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        directory = os.open(self.admission.output, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        self.completed_legs.append(leg)
 
     def ref(self, id_: str, kind: str) -> ResourceRef:
         b = self.admission.binding
@@ -1335,6 +1359,8 @@ async def run_live(
                     )
                 if context is not None:
                     context.transport.monitor.settled = True
+                    if context.completed_legs:
+                        result = {**result, "legs": context.completed_legs}
                 if admission.output.is_dir():
                     facts: dict[str, object] = {
                         "source_head": admission.source_head,

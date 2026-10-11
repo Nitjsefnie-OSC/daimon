@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Accept processed A7 send claims and preserve audited per-leg final output through later proof failures.
+
 - Keep guarded Anthropic live probes running on aggregate cache-write usage with unknown TTLs using a conservative monitor estimate; export closed request routes and separately audited resource IDs, and pin the signed A7 replacement envelope.
 - Isolate pooled Discord conformance test fixtures and control timeout expiry after real callback entry, avoiding shared-transaction setup hangs and deadline races.
 - Seal all guarded Anthropic live responses, latch late usage for reconciliation, protect cleanup against repeated cancellation, and preserve unknown-TTL monetary holds.

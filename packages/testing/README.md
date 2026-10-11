@@ -418,7 +418,7 @@ cancellation is re-raised. Financial witness ranking uses the exact pinned N8
 monetary bound; missing cache TTL never removes its conservative retained hold.
 
 The A7 replacement entry pins financial authorization
-`920af00a4ad7169eded2898a44d8688c983f318b24e355bc4fe8f12e096267e0`;
+`5dc7a801d7566e63e91fd9e30f2c667db613166ab27eedd1d629af616950b9a1`;
 the original attempt marker and hold remain untouched. A separate source/binding
 GO is still required. Managed-agent spans normally expose aggregate cache writes
 without TTL splits. The stop monitor prices such writes conservatively at the
@@ -427,3 +427,10 @@ estimate neither invents TTL counters nor changes unknown actual usage or guard
 settlement. Receipt request metadata uses fixed route templates and separately
 audited authorized resource IDs. Unknown routes and credential-bearing identities
 refuse export; the shared recording audit is unchanged.
+
+A7 retains each audited completed leg in a private `a7-legacy-leg.json` or
+`a7-mux-leg.json` before checking its send claim or later usage/cleanup proof.
+The final receipt preserves these partial legs on failure. Successful claims
+include both accepted and processed; pending/uncertain/failed claims still refuse.
+This captures final text and outcome without certifying a failed run as PASS.
+R3 is a new signed attempt; prior markers, holds and receipts remain unchanged.
