@@ -4,18 +4,66 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from typing import IO, cast
+from typing import IO, Self, cast
 
-from openai import AsyncOpenAI
+import httpx
+from openai import DEFAULT_CONNECTION_LIMITS, DEFAULT_TIMEOUT, AsyncOpenAI
 
 from mux.drivers.openai.transport import Method, Object, SDKTransport, Transport
 
+_TLS_PROXY_ENV = frozenset(
+    {
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "SSLKEYLOGFILE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    }
+)
+
 
 def _check_environment() -> None:
-    # The SDK merges this variable into headers after its explicit auth/project.
-    # Refuse it without inspecting or exposing its possibly secret contents.
-    if "OPENAI_CUSTOM_HEADERS" in os.environ:
+    # Mapping membership reads values on os.environ. Inspect names only, including
+    # empty and future SDK settings; never include unknown names in diagnostics.
+    names = frozenset(os.environ)
+    if "OPENAI_CUSTOM_HEADERS" in names:
         raise ValueError("ambient OpenAI custom headers are unsupported")
+    if any(name.upper().startswith("OPENAI_") for name in names):
+        raise ValueError("ambient OpenAI configuration is unsupported")
+    if any(name.upper() in _TLS_PROXY_ENV for name in names):
+        raise ValueError("ambient OpenAI TLS/proxy configuration is unsupported")
+
+
+class _DeploymentAsyncOpenAI(AsyncOpenAI):
+    # SDK copy/with_options reconstruct self.__class__. Refuse late overrides
+    # before allocation and inherited initialization can consult their values.
+    def __new__(cls, *args: object, **kwargs: object) -> Self:  # pyright: ignore[reportInconsistentConstructor]
+        _check_environment()
+        return super().__new__(cls)
+
+    @property
+    def user_agent(self) -> str:
+        # Keep the original SDK wire header despite the guarded subclass.
+        return super().user_agent.replace(type(self).__name__, AsyncOpenAI.__name__, 1)
+
+
+def _http_transport() -> httpx.AsyncBaseTransport:
+    # Python's default TLS context also discovers SSLKEYLOGFILE, even when
+    # httpx trust_env=False. Refuse overrides before context construction.
+    _check_environment()
+    # Explicit TLS roots and no proxy discovery, including SSL_CERT_FILE/DIR.
+    # Preserve SDK connection limits, timeout and redirect policy below.
+    return httpx.AsyncHTTPTransport(
+        verify=httpx.create_ssl_context(trust_env=False),
+        trust_env=False,
+        proxy=None,
+        limits=DEFAULT_CONNECTION_LIMITS,
+        retries=0,
+    )
 
 
 class _OwnedStream[T](AsyncIterator[T]):
@@ -55,12 +103,27 @@ class _ConfiguredTransport:
         # Explicit origin/project/key override SDK environment discovery. The
         # credential is not a client-global singleton shared between callers.
         _check_environment()
-        return AsyncOpenAI(
+        return _DeploymentAsyncOpenAI(
             api_key=self._api_key,
+            admin_api_key=None,
+            workload_identity=None,
+            webhook_secret=None,
+            provider=None,
+            websocket_base_url=None,
+            default_headers={},
+            default_query={},
             project=self._project,
             organization="",
             base_url="https://api.openai.com/v1",
             max_retries=0,
+            timeout=DEFAULT_TIMEOUT,
+            http_client=httpx.AsyncClient(
+                transport=_http_transport(),
+                trust_env=False,
+                timeout=DEFAULT_TIMEOUT,
+                limits=DEFAULT_CONNECTION_LIMITS,
+                follow_redirects=True,
+            ),
         )
 
     async def request(

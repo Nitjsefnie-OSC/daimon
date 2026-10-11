@@ -354,30 +354,17 @@ async def test_real_application_prepares_and_runs_using_builtin_runtime(
             return httpx.Response(200, json=wire.session())
         return wire.handle(request)
 
-    def sdk(
-        *,
-        api_key: str,
-        project: str,
-        organization: str,
-        base_url: str,
-        max_retries: int,
-    ) -> AsyncOpenAI:
-        assert api_key == "offline-only" and project == "project"
-        assert organization == "" and base_url == "https://api.openai.com/v1" and max_retries == 0
-        client = AsyncOpenAI(
-            api_key=api_key,
-            project=project,
-            organization=organization,
-            base_url=base_url,
-            max_retries=max_retries,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
-        )
+    original = deployment._ConfiguredTransport._client  # pyright: ignore[reportPrivateUsage]
+
+    def sdk(self: deployment._ConfiguredTransport) -> AsyncOpenAI:  # pyright: ignore[reportPrivateUsage]
+        client = original(self)
         clients.append(client)
         return client
 
-    # Only SDK network construction is replaced; the deployment loader, public
-    # constructor, request-owned lifetimes, preparation and host turn are real.
-    monkeypatch.setattr(deployment, "AsyncOpenAI", sdk)
+    # Only the native network boundary is replaced. The actual product SDK,
+    # guard, HTTP ownership, deployment loader and host preparation remain real.
+    monkeypatch.setattr(deployment, "_http_transport", lambda: httpx.MockTransport(handle))
+    monkeypatch.setattr(deployment._ConfiguredTransport, "_client", sdk)  # pyright: ignore[reportPrivateUsage]
     assert clients == []
     async with application.deps.sessionmaker() as db, db.begin():
         await make_tenant(db, id=TENANT)

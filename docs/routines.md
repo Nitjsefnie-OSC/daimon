@@ -53,6 +53,13 @@ past the reference instant so it cannot land on it, and returns UTC.
 
 ## Creating one
 
+Operators can opt into requiring a destination for the MCP `create_routine`
+tool with `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`. A call without both
+destination fields then receives a warning that nothing was created, before
+agent lookup or saving a routine. The default is `false`, preserving
+record-only creation. Existing routines and `update_routine`, including
+clearing a destination, are unaffected.
+
 Five MCP tools — `create_routine`, `list_routines`, `get_routine`,
 `update_routine`, `delete_routine` — are registered by
 `packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py` and catalogued

@@ -745,3 +745,25 @@ write durations, pricing basis or runtime retain the hold; foreign, stale and
 overlapping evidence refuses. Known partial runtime still proves overrun floors.
 Runner controls and native budget acknowledgements remain separate. Ordinary
 guard admission and settlement use decimal precision 80 regardless of the caller.
+Gemini application deployment uses an explicitly admitted manifest plan with a
+required tools list (including `[]`), authorized native system/environment
+specs and a deferred key reference. The host supplies complete durable SQLite
+record transactions and separately committed attempt holds; the private driver
+owns configured request/stream clients without ambient routing. Unknown actual
+costs remain pending and holds stay reserved until reconciliation. No Gemini
+runtime, manifest or credential is discovered for an unconfigured channel.
+
+
+Explicit OpenAI deployment transports refuse ambient `OPENAI_*` overrides by
+name before SDK construction and copies. They retain the selected credential,
+project and origin, with request-owned HTTP clients using explicit TLS roots and
+no environment proxies; see [the driver policy](mux/drivers/openai/README.md).
+The private Gemini deployment constructor refuses ambient `GOOGLE_`/`GEMINI_`
+settings and TLS/proxy overrides by name before SDK or HTTP allocation. Its
+explicit key uses the Developer API with owned sync/async HTTP clients, an
+explicit TLS context and no proxy. Each native interaction gets one attempt;
+request and stream closure dispose both clients. This affects configured Gemini
+transport only.
+
+OpenAI also refuses ambient TLS/proxy settings before context creation, including
+`SSLKEYLOGFILE`, so configured channels cannot enable TLS session-key files.

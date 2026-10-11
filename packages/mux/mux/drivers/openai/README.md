@@ -484,3 +484,18 @@ live certificate or a change to host preparation. It follows the 2026-10-10
 hashed Agents hosted-skill reference, the
 [Skills guide](https://developers.openai.com/api/docs/guides/tools-skills), and the
 [Files guide](https://developers.openai.com/api/docs/guides/agents-api/environments/files).
+
+Configured deployment transports refuse every ambient `OPENAI_*` setting by
+name before SDK construction or copies, including empty and unknown settings.
+Credentials and project remain explicit host-selected arguments; organization
+remains empty and the origin remains `https://api.openai.com/v1`. SDK headers and
+query defaults are explicit. Each request owns its HTTP client with verified TLS
+using default certificate roots and no environment proxy or certificate lookup.
+SDK timeout, connection limits and redirect defaults are retained; retries remain
+zero. Request/stream completion, errors and cancellation retain owned cleanup.
+TLS/proxy environment overrides also refuse by name before TLS creation,
+including `SSLKEYLOGFILE`, certificate settings, proxy settings and CA-bundle
+settings (the same name set as Gemini). `trust_env=False` alone does not disable
+Python TLS key-log discovery. Clean contexts retain verified default roots and
+have `keylog_filename=None`; operator environment settings are never cleared.
+This policy applies to explicitly configured OpenAI channels only.

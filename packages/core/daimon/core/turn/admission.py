@@ -77,6 +77,7 @@ from daimon.core.permissions import (
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
+from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import (
     get_external,
@@ -100,6 +101,9 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import ConfigRevision
+from mux.contracts.ids import ThreadRef
+from mux.errors import ScopeViolation
+from mux.state.lease import Slot
 
 __all__ = [
     "Admission",
@@ -384,6 +388,45 @@ async def admit_impl(
             if deps.channel_backends
             else (None, False)
         )
+        if (
+            deps.channel_backends
+            and deps.turn_path == "mux"
+            and backend_revision is not None
+            and thread_id is not None
+            and not is_dm
+            and config.thread_binding_kind != "setup"
+        ):
+            thread = ThreadRef(channel=backend_revision.channel, thread_id=thread_id)
+            slots = [Slot(thread=thread, account_id=str(principal.account_id))]
+            if backend_ever_shared:
+                slots.insert(0, Slot(thread=thread))
+            for slot in slots:
+                binding = (
+                    await deps.state_store.get_binding(slot)
+                    if deps.state_store is not None
+                    else await mux_state.get_binding(session, slot)
+                )
+                if binding is None:
+                    continue
+                if binding.thread != slot.thread or binding.legacy_account_id != slot.account_id:
+                    raise ScopeViolation(
+                        binding.id, "selected binding differs from authorized thread"
+                    )
+                # Legacy unconfigured Anthropic bindings use revision zero.
+                if binding.config_revision == 0 and binding.provider == "anthropic":
+                    break
+                retained = await mux_state.get_config_revision(
+                    session, thread.channel, binding.config_revision
+                )
+                if retained is None or (
+                    retained.channel != thread.channel
+                    or retained.local != binding.config_revision
+                    or retained.backend != binding.provider
+                    or retained.profile != binding.profile
+                ):
+                    raise AdmissionDenied(reason="backend_unsupported")
+                backend_revision = retained
+                break
     mark("config")
 
     # --- An external caller is never answered in a setup conversation, even

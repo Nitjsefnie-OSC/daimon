@@ -327,3 +327,34 @@ proofs mock only the TurnIO boundary and use their real usage normalizers; this
 does not certify their native codecs. The API alone proves neither first-turn
 posted text nor the next admission refusal/no-send. Consumers retain those
 independent NEW15 checks and do not promote source cells from a helper PASS.
+## Host termination evidence
+
+`daimon.testing.turn_conformance` exports `TerminationCase`,
+`TerminationSnapshot`, `TerminationEvidence` and async `termination_evidence`.
+Pass an owned `async_sessionmaker`, authorized `scope`, `platform`, an independent
+`required_reasons` sequence and named `cases`. Each case declares `expected`,
+`session` (or None before native creation), an async normal host `run` callback,
+optional `expected_error_class` and `expected_recovered`. The callback returns
+the actual `RunOutcome` from `run_prepared_turn` or terminal lifecycle `TurnState`.
+For a raised recovery exception, retain the actual lifecycle state if testing
+that specific reason; a bare exception only supplies its generic mapper fact.
+
+The typed result contains the independent reason oracle and snapshots of actual
+state/exception and committed reason, error class, session, account, tenant,
+platform and recovery fields. The collector never seeds expected identity into
+its observation or adopts a matching old outcome row. Missing committed rows
+and unterminated states stay missing evidence. Every bind is checked with
+`require_owned_sessionmaker` before execution. Provider owners must review complete
+reachable-reason coverage and attach optional hooks explicitly. An absent hook
+is PENDING; partial collector controls never certify C18 or a live provider.
+
+## Opt-in product QA settings
+
+`QAProductProfile("opt-in-product").flags` declares exactly six settings: core
+`mcp.require_routine_destination`, `discord.credential_form_expiry`,
+`discord.writers_none_notice`, `turn.native_footer_cost`, and each notebook/report
+host's `html_link_errors`. Applying explicit copies combines settings in the same
+section without consulting credentials or constructing settings. Missing product
+declarations refuse with `ProductProfileUnavailable`; the report remains PENDING.
+The default profile keeps all six disabled. An application receipt supplies no
+source, native-send, card, accounting or user-visible outcome evidence.

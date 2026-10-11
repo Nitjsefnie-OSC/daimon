@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import json
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -37,6 +38,16 @@ from daimon.testing.outcome_oracle import (
     evaluate,
 )
 from daimon.testing.platform_surface import PlatformSurfaceCapture
+from daimon.testing.product_profiles import (
+    DEFAULT_PRODUCT_PROFILE,
+    OPT_IN_PASS,
+    OPT_IN_PRODUCT_PROFILE,
+    ProductProfileName,
+    ProductProfileUnavailable,
+    QAProductProfile,
+    applied_product_flags,
+    use_product_profile,
+)
 from daimon.testing.provider_fixtures import (
     BackendFixture,
     FixtureGap,
@@ -215,6 +226,8 @@ class CellResult(Record):
     backend: Literal["anthropic", "openai", "gemini"]
     scored: bool
     source_sha256: str
+    product_profile: ProductProfileName = "default"
+    profile_state: Literal["executed", "unavailable", "unbound"] = "executed"
     mode: Literal["offline_scripted"] = "offline_scripted"
     gaps: tuple[ExecutionGap, ...]
     evidence: RunEvidence
@@ -250,7 +263,11 @@ class CellResult(Record):
 
     @computed_field
     @property
-    def reported_status(self) -> Literal["PASS", "FAIL", "EXPECTED-FAIL", "PENDING"]:
+    def reported_status(
+        self,
+    ) -> Literal["PASS", "PASS under opt-in profile", "FAIL", "EXPECTED-FAIL", "PENDING"]:
+        if self.product_profile == "opt-in-product" and self.profile_state != "executed":
+            return "PENDING"
         failures = [
             i for i, check in enumerate(self.catalog_outcome.checks) if check.status == "FAIL"
         ]
@@ -268,6 +285,8 @@ class CellResult(Record):
             and self.discord_surfaces
         ):
             return "EXPECTED-FAIL"
+        if self.status == "PASS" and self.product_profile == "opt-in-product":
+            return OPT_IN_PASS
         return self.status
 
 
@@ -278,6 +297,9 @@ class ExecutionReport(Record):
     target_ids: tuple[str, ...]
     scored_denominator: Literal[159] = 159
     cells: tuple[CellResult, ...]
+    product_profile: ProductProfileName = "default"
+    profile_state: Literal["executed", "unavailable", "unbound"] = "executed"
+    applied_flags: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def frozen_cells(self) -> ExecutionReport:
@@ -291,8 +313,26 @@ class ExecutionReport(Record):
             or len(self.cells) != 159
             or pairs != expected
             or any(not cell.scored for cell in self.cells)
+            or any(cell.product_profile != self.product_profile for cell in self.cells)
+            or any(cell.profile_state != self.profile_state for cell in self.cells)
         ):
             raise ValueError("execution report must retain all 159 frozen scored cells")
+        if (
+            self.product_profile == "opt-in-product"
+            and self.profile_state == "executed"
+            and (
+                len(self.applied_flags) != len(OPT_IN_PRODUCT_PROFILE.flags)
+                or set(self.applied_flags) != set(OPT_IN_PRODUCT_PROFILE.flags)
+            )
+        ):
+            raise ValueError(
+                "executed opt-in profile requires all declared explicit flag applications"
+            )
+        if self.profile_state == "unavailable" and any(
+            c.reported_status != "PENDING" or c.request_count or c.evidence.turns
+            for c in self.cells
+        ):
+            raise ValueError("unavailable profile cannot claim executed evidence or a verdict")
         return self
 
     @computed_field
@@ -300,8 +340,88 @@ class ExecutionReport(Record):
     def scored_counts(self) -> dict[str, int]:
         return {
             status: sum(c.scored and c.reported_status == status for c in self.cells)
-            for status in ("PASS", "FAIL", "EXPECTED-FAIL", "PENDING")
+            for status in (
+                OPT_IN_PASS if self.product_profile == "opt-in-product" else "PASS",
+                "FAIL",
+                "EXPECTED-FAIL",
+                "PENDING",
+            )
         }
+
+
+class ProductProfileReport(Record):
+    """Two independent 159-cell boards; opt-in passes cannot increase default counts."""
+
+    version: Literal[1] = 1
+    default_board: ExecutionReport
+    opt_in_board: ExecutionReport
+
+    @model_validator(mode="after")
+    def same_frozen_matrix(self) -> ProductProfileReport:
+        a, b = self.default_board, self.opt_in_board
+        a.frozen_cells()
+        b.frozen_cells()
+        if (
+            a.product_profile != "default"
+            or b.product_profile != "opt-in-product"
+            or a.integration_sha != b.integration_sha
+            or a.target_ids != b.target_ids
+            or a.target_sha256 != b.target_sha256
+            or {(c.scenario_id, c.backend, c.source_sha256) for c in a.cells}
+            != {(c.scenario_id, c.backend, c.source_sha256) for c in b.cells}
+        ):
+            raise ValueError("product profile boards differ from the same frozen matrix")
+        return self
+
+    @computed_field
+    @property
+    def integration_sha(self) -> str:
+        return self.default_board.integration_sha
+
+    @computed_field
+    @property
+    def target_sha256(self) -> str:
+        return self.default_board.target_sha256
+
+    @computed_field
+    @property
+    def target_ids(self) -> tuple[str, ...]:
+        return self.default_board.target_ids
+
+    @computed_field
+    @property
+    def scored_denominator(self) -> Literal[159]:
+        return 159
+
+    @computed_field
+    @property
+    def profiles(self) -> dict[str, dict[str, bool]]:
+        return {p.name: p.flags for p in (DEFAULT_PRODUCT_PROFILE, OPT_IN_PRODUCT_PROFILE)}
+
+    @computed_field
+    @property
+    def scored_counts(self) -> dict[str, int]:
+        return self.default_board.scored_counts
+
+    @computed_field
+    @property
+    def opt_in_scored_counts(self) -> dict[str, int]:
+        return self.opt_in_board.scored_counts
+
+    @computed_field
+    @property
+    def cells(self) -> tuple[dict[str, Any], ...]:
+        other = {(c.scenario_id, c.backend): c for c in self.opt_in_board.cells}
+        return tuple(
+            {
+                **c.model_dump(mode="json"),
+                "profiles": {
+                    "default": c.model_dump(mode="json"),
+                    "opt-in-product": other[c.scenario_id, c.backend].model_dump(mode="json"),
+                },
+            }
+            for c in self.default_board.cells
+        )
 
 
 def _assertions(plan: ScenarioPlan, values: dict[str, str]) -> list[dict[str, JsonValue]]:
@@ -904,6 +1024,99 @@ async def execute_gemini_cell(
     )
 
 
+async def run_product_profiles(
+    execute_default: Callable[[], Awaitable[ExecutionReport]],
+    *,
+    execute_opt_in: Callable[[QAProductProfile], Awaitable[ExecutionReport]] | None = None,
+) -> ProductProfileReport:
+    """One job, two independent executions; an absent opt-in binding stays PENDING.
+
+    The explicit opt-in callback must apply the supplied profile to its actual
+    product fixture factories. Merely relabelling a default run is not a binding.
+    Neither profile changes any source assertion or earns a PASS from configuration.
+    """
+    with use_product_profile(DEFAULT_PRODUCT_PROFILE):
+        default = await execute_default()
+    if default.product_profile != "default":
+        raise ValueError("default executor returned another product profile")
+    try:
+        OPT_IN_PRODUCT_PROFILE.require_available()
+        if execute_opt_in is None:
+            raise ProductProfileUnavailable(("explicit-opt-in-fixture-binding",))
+    except ProductProfileUnavailable as error:
+        opt_in = ExecutionReport(
+            integration_sha=default.integration_sha,
+            target_sha256=default.target_sha256,
+            target_ids=default.target_ids,
+            product_profile="opt-in-product",
+            profile_state="unavailable",
+            cells=tuple(
+                CellResult(
+                    scenario_id=c.scenario_id,
+                    backend=c.backend,
+                    scored=c.scored,
+                    source_sha256=c.source_sha256,
+                    product_profile="opt-in-product",
+                    profile_state="unavailable",
+                    gaps=tuple(
+                        ExecutionGap(code="PRODUCT_PROFILE_UNAVAILABLE", location=missing)
+                        for missing in error.missing
+                    ),
+                    evidence=RunEvidence(scenario_id=c.scenario_id, backend=c.backend, turns=()),
+                    catalog_outcome=OutcomeReport(
+                        scenario_id=c.scenario_id,
+                        backend=c.backend,
+                        checks=tuple(
+                            check.model_copy(
+                                update={
+                                    "status": "PENDING",
+                                    "code": "PRODUCT_PROFILE_UNAVAILABLE",
+                                    "evidence_ids": (),
+                                }
+                            )
+                            for check in c.catalog_outcome.checks
+                        ),
+                    ),
+                    host_outcome=OutcomeReport(
+                        scenario_id=c.scenario_id, backend=c.backend, checks=()
+                    ),
+                )
+                for c in default.cells
+            ),
+        )
+    else:
+        with use_product_profile(OPT_IN_PRODUCT_PROFILE):
+            raw = await execute_opt_in(OPT_IN_PRODUCT_PROFILE)
+            applied = applied_product_flags()
+        missing = tuple(sorted(OPT_IN_PRODUCT_PROFILE.flags.keys() - applied))
+        state = "unbound" if missing else "executed"
+        opt_in = ExecutionReport(
+            integration_sha=raw.integration_sha,
+            target_sha256=raw.target_sha256,
+            target_ids=raw.target_ids,
+            product_profile="opt-in-product",
+            profile_state=state,
+            applied_flags=tuple(sorted(applied)),
+            cells=tuple(
+                c.model_copy(
+                    update={
+                        "product_profile": "opt-in-product",
+                        "profile_state": state,
+                        "gaps": (
+                            *c.gaps,
+                            *(
+                                ExecutionGap(code="PRODUCT_PROFILE_NOT_APPLIED", location=field)
+                                for field in missing
+                            ),
+                        ),
+                    }
+                )
+                for c in raw.cells
+            ),
+        )
+    return ProductProfileReport(default_board=default, opt_in_board=opt_in)
+
+
 async def execute_catalog(
     root: Path,
     *,
@@ -962,17 +1175,22 @@ def main() -> None:
     args = parser.parse_args()
     raw: list[object] = json.loads(args.replays.read_text())
     replays = tuple(ScenarioReplay.model_validate(item) for item in raw)
-    result = asyncio.run(
-        execute_catalog(
+
+    async def default_execution() -> ExecutionReport:
+        return await execute_catalog(
             args.catalog.resolve(),
             integration_sha=args.integration_sha,
             run_id=args.run_id,
             replays=replays,
             provider_fixtures=args.provider_fixtures.resolve() if args.provider_fixtures else None,
         )
+
+    result = asyncio.run(
+        run_product_profiles(default_execution, execute_opt_in=lambda _profile: default_execution())
     )
     args.output.write_text(result.model_dump_json(indent=2) + "\n")
-    print(f"Offline scored cells: {result.scored_counts}; no live calls.")
+    print(f"Default-profile scored cells: {result.scored_counts}; no live calls.")
+    print(f"Opt-in product profile: {result.opt_in_scored_counts}; separate 159-cell board.")
 
 
 if __name__ == "__main__":
