@@ -223,6 +223,12 @@ jobs:
         env:
           PGPASSWORD: daimon
         run: |
+          for file in "$RUNNER_TEMP"/discord-pytest-failure-*.txt; do
+            if [ -f "$file" ]; then
+              echo "Failure report in ${file##*/}:"
+              cat "$file"
+            fi
+          done
           for file in "$RUNNER_TEMP"/discord-pytest-current-*.txt; do
             if [ -f "$file" ]; then
               echo "Active test in ${file##*/}:"

@@ -19,6 +19,7 @@ on:
       - "packages/core/daimon/core/agent_identity.py"
       - "packages/testing/daimon/testing/db.py"
       - "packages/testing/tests/test_db.py"
+      - "packages/adapters/discord/tests/test_bot.py"
       - "packages/core/daimon/core/turn/driver.py"
       - "packages/core/daimon/core/turn/reducers.py"
       - "packages/core/daimon/core/turn/render.py"
@@ -139,6 +140,7 @@ on:
       - "packages/core/daimon/core/agent_identity.py"
       - "packages/testing/daimon/testing/db.py"
       - "packages/testing/tests/test_db.py"
+      - "packages/adapters/discord/tests/test_bot.py"
       # turn/
       - "packages/core/daimon/core/turn/driver.py"
       - "packages/core/daimon/core/turn/reducers.py"
