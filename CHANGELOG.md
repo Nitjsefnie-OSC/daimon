@@ -67,6 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an opt-in requirement for destinations on MCP routine creation, warning before agent lookup or saving while preserving record-only defaults.
 - Add opt-in Discord credential-form expiry with durable retirement, retryable verified edits of the original card, and no background job by default.
 - Report separate default and opt-in QA product profiles, with explicit per-cell profile results and an opt-in PASS tally that never changes default-profile totals.
+- Bind literal positive QA tenant credits through the product ledger with replay-safe CLI identities and independent readback; reject mismatched budget readback and preserve typed pending invalid depletion setup.
+- Bind offline Anthropic catalog forks and fixture edits to unchanged CLI/MCP paths with independent native revision readback, retaining actual failures and typed pending host assertions.
+- Add a default-off native attached-skill deletion refusal over scoped catalog history and channel references, with an offline admin binding and read-only Anthropic observation.
 
 
 - Add optional accepted initial progress-card receipts for Discord, Slack and Teams, with offline SDK delivery controls and unchanged default rendering.
@@ -77,14 +80,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prove OpenAI C04 offline with real SDK delivery, fenced intent/ack crashes and restart recovery that retains unknown input identity without resending.
 - Prove OpenAI interaction preparation offline across skill upload/pinning, MCP and input-file binding, retaining typed unavailable execution and the canonical C11 gaps.
 - Skip offline admin proof fixtures on a contributor's plain local database while retaining strict isolated CI and routed-bind checks.
+- Isolate resource admin fixture SDK clones and TLS/proxy construction with the shared factories; keep model routing coverage in the testing package.
 
 - Use the shared isolated SDK factory in offline admin bindings and move their ORM routing tests into the permitted testing package.
+- Refuse ambient SDK overrides and foreign per-model database routes in offline resource admin proofs.
 
 - Check every QA admin per-model database bind before provisioning or authorization.
 
 - Refuse ambient Anthropic SDK configuration in offline QA admin clients and copies before allocation or I/O; retain explicit fixture credentials and unchanged production clients.
 
 - Permit QA admin bindings on the CI test database only with registered current-process schema isolation; refuse remote destinations, URL overrides and local shared/operator databases before connection.
+- Added offline catalog resource admin callbacks with actual SDK fork/skill proofs and explicit unsupported cleanup boundaries.
 - Bind common QA catalog admin operations through product APIs on disposable lane databases, preserving scoped readback and typed pending resource/platform gaps across all three backends.
 
 - Refresh offline QA Gemini tapes for explicit interaction tools on current integration, retaining strict wire equality and separate expected-failure reporting.
@@ -162,6 +168,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
 
 - Reject unbound authentication on every native OpenAI MCP tool before credential resolution or session POST, including secondary and anonymous-only servers; verify secret-free actual SDK DEBUG logs.
+- Support explicit Gemini inline resource hosts for skill-preserving channel copies and Add-skill edits, retaining concrete inline versions and existing session pins while refusing binary inline sources and unsupported native deletion.
+
 - Retain alternate native agent identities on catalog publication failures, including same-key committed winners and historical pins; compare optional tool fields after native normalization without changing authored intent.
 
 - Add explicit scoped OpenAI host resource edges for skill-preserving channel copies and Add-skill, retaining checked bundles before attachment and publishing immutable native agents under local catalog CAS; preserve Anthropic request bytes.

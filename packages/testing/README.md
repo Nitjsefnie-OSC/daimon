@@ -507,3 +507,41 @@ Both require the exact native budget and effective tool allowlist. The old
 Each still needs its own separately signed source/binding GO and exclusive attempt
 marker. Financial signatures authorize neither execution nor a retry by themselves.
 No acceptance or workload is run by composing this entry.
+
+`AdminBindings` executes owned writers rules, budget set/clear, positive tenant
+credits and turn-cap overrides through real product APIs, with independent
+readback. Credits retain the CLI note/request-id identity and replay behavior;
+invalid frozen negative credit setup remains typed pending. Host admission and
+Discord permission-denial evidence are separate hooks. See
+`tests/judge/ADMIN-BINDINGS.md` for literal command shapes and the per-cell gaps.
+
+## Anthropic catalog admin observations (C6)
+
+Explicitly import `daimon.testing.anthropic_admin.AnthropicAdminBindings` and
+assign an instance to `AdminBindings.resource_edge`. Supply a `CliRuntime` sharing
+the binding's isolated SDK client, owned sessionmaker and deployment defaults,
+with Discord, Slack and public MCP integrations disabled. Creation accepts only
+an explicitly supplied `AgentFixture` manifest of files beneath `fixture_root`,
+with exact SHA256 hashes. No shell, environment discovery or backend conversion
+is involved. Other providers and unsupported shapes return typed pending receipts.
+
+The edge runs the existing Anthropic `agents create/get/archive` and
+`channels rule set ... --readers own --copy-from ...` CLI functions. Fork and
+archive receipts come from independent service/SDK reads. `readback_cli()` accepts
+the literal agent-get assertion command; `AgentReadback.cli_text` captures the default CLI table and
+`AgentReadback.cli_json` preserves its native JSON, including custom skill IDs. A copied own skill receives a new native
+ID; no names are substituted to satisfy source assertions. An intervening revision
+change between CLI listing and SDK retrieval refuses the observation.
+
+For D5, call `attempt_member_edit(MemberAgentEdit(member_scope, fixture_name))`
+with a real owned local platform member account and matching principal. It runs
+the actual MCP description update and server attachment with the native identity
+selected by independent readback. Receipts retain full before/after payloads,
+revisions and actual refusal errors. An error does not establish unchanged state.
+The current unbound-agent path allows both edits: revision 1 becomes 3 and the
+unchanged-agent predicate fails the offline probe. This binding reports that fact;
+it changes no product permissions and does not assert a completed model turn.
+
+Whole D14/D5 cells still require the original runner assertions and actual host
+turn/log/text evidence where authored. Omitted callbacks stay pending. A1 native
+create conversion remains unsupported by this Anthropic-only edge.

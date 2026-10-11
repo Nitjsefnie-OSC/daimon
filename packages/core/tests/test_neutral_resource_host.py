@@ -34,6 +34,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.neutral_catalog import CatalogConflict, PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec, MCPConnection, ToolSpec
@@ -53,10 +54,6 @@ type Setup = tuple[async_sessionmaker[AsyncSession], Scope, Scope]
 
 @pytest.fixture(autouse=True)
 def offline_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in tuple(os.environ):
-        if name.startswith("OPENAI_"):
-            monkeypatch.delenv(name)
-
     # No identity artwork/provider request may run from these offline copies.
     def no_artwork(*args: object, **kwargs: object) -> None:
         pass
@@ -183,11 +180,10 @@ class SDKCase:
             )
             return self.trace.dispatch(request)
 
-        return AsyncOpenAI(
+        return build_async_openai(
             api_key="offline-placeholder",
             base_url="https://openai.invalid/v1",
-            max_retries=0,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+            transport=httpx.MockTransport(handle),
         )
 
     def host(
@@ -988,3 +984,52 @@ async def test_channel_rule_refuses_mismatched_resource_scope_before_lookup(
                 resource_host=case.host(sdk),
             )
     assert not case.trace.requests and not legacy_trace.requests
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "OPENAI_ADMIN_KEY",
+        "OPENAI_CUSTOM_HEADERS",
+        "ANTHROPIC_WEBHOOK_SIGNING_KEY",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "OPENAI_FUTURE_TEST_SETTING",
+        "anthropic_future_test_setting",
+        "GOOGLE_FUTURE_TEST_SETTING",
+        "Gemini_future_test_setting",
+    ],
+)
+@pytest.mark.parametrize("value", ["", "ambient-test-value"])
+async def test_host_sdk_refuses_ambient_configuration_before_client_allocation(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    case = SDKCase(setup)
+    monkeypatch.setenv(name, value)
+    before = frozenset(os.environ)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("ambient configuration reached HTTP client allocation")
+
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden)
+    with pytest.raises(AmbientSDKConfigurationError):
+        case.sdk()
+    assert frozenset(os.environ) == before
+    assert not case.trace.requests
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["OPENAI_ADMIN_KEY", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "OPENAI_CUSTOM_HEADERS"],
+)
+@pytest.mark.parametrize("value", ["", "ambient-test-value"])
+async def test_product_transport_sdk_copy_refuses_late_ambient_configuration(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    case = SDKCase(setup)
+    async with case.sdk() as sdk:
+        monkeypatch.setenv(name, value)
+        before = frozenset(os.environ)
+        with pytest.raises(AmbientSDKConfigurationError):
+            SDKTransport(sdk)
+        assert frozenset(os.environ) == before
+    assert not case.trace.requests

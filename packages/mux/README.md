@@ -601,7 +601,7 @@ requests. This extraction does not provide missing alternate-provider mutation,
 owned-bundle download or storage itself; the explicit host composition below
 supplies retained bundles and immutable native replacement for OpenAI.
 
-Explicit OpenAI host resource operations now use
+Explicit OpenAI and Gemini host resource operations now use
 `daimon.core.neutral_resources.NeutralResourceHost` over the retained catalog.
 The caller injects an authorized driver, tenant/account Scope, project, database
 sessions and claimed operation key. `add_host_agent_skill` requires the caller's
@@ -621,6 +621,17 @@ Add-skill operation locates owned retained versions and reads the actual native
 latest version; it never guesses from version ordering or creates another upload
 after a known attachment failure. The caller owns operation claiming and unknown
 native-upload reconciliation; this helper adds no retry loop or operation journal.
+
+The `gemini.inline_reuse` edge retains UTF-8 skill files as exact concrete inline
+versions and creates a new host agent definition for each catalog edit. Existing
+sessions keep their earlier definition and pinned bytes. Updating an existing
+inline pin also updates its version digest; forks clone owned bundles under new
+skill ids and add `code_execution`. The real SDK receives retained files as
+interaction environment sources. Binary inline sources return
+`binary_inline_source`; native agent deletion returns `agent_delete` before a
+catalog tombstone. Failed channel-write cleanup keeps that identity and preserves
+the original write error. The host injects transactional Gemini Storage/StateStore;
+offline in-memory fixtures do not certify production process-restart durability.
 
 Forks preserve shared library pins, upload source-owned bundles under distinct
 ids for the copy, omit foreign-agent skills and report failed copies. Owned
