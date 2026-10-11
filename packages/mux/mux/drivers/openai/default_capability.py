@@ -31,6 +31,7 @@ from mux.contracts.resources import Agent, AgentSpec, SkillUpload, SkillUploadFi
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import objects
 from mux.drivers.openai.agents import agent_spec
+from mux.drivers.openai.offline_sdk import SDKFactory, build_offline_sdk, refuse_inherited_settings
 from mux.drivers.openai.skill_bindings import decode
 from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
@@ -220,20 +221,27 @@ class OpenAIDefaultCapabilityTransport:
 class OpenAIDefaultCapabilityFactory:
     """Fresh SDK/resources for each initial script and each normalized replay."""
 
-    def __init__(self, manifest: DefaultManifest, native_events: tuple[Object, ...] = ()) -> None:
+    def __init__(
+        self,
+        manifest: DefaultManifest,
+        native_events: tuple[Object, ...] = (),
+        *,
+        sdk_factory: SDKFactory = build_offline_sdk,
+    ) -> None:
         self.manifest, self.native_events = manifest, native_events
+        self._sdk_factory = sdk_factory
         self.scripts: list[OpenAIDefaultCapabilityTransport] = []
         self._clients: list[AsyncOpenAI] = []
 
     def __call__(self, replay: Replay | None = None) -> DefaultCapabilityAdapter:
+        refuse_inherited_settings()
         script = OpenAIDefaultCapabilityTransport(
             self.manifest, self.native_events, replay=replay is not None
         )
-        sdk = AsyncOpenAI(
+        sdk = self._sdk_factory(
             api_key="offline-fixture",
             base_url="https://openai.invalid/v1",
-            max_retries=0,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(script.handle)),
+            transport=httpx.MockTransport(script.handle),
         )
         driver = OpenAIDriver(
             SDKTransport(sdk),

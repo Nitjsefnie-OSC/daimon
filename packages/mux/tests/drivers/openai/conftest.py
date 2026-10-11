@@ -9,11 +9,20 @@ from dataclasses import dataclass, field
 from typing import IO
 
 import pytest
+from daimon.testing.isolated_sdk import SDK_ENV_VARS
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import Method, Object
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
+
+
+@pytest.fixture(autouse=True)
+def clean_test_sdk_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scope-clean expected-success fixtures; factories still refuse overrides."""
+    for name in SDK_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="grant")
 REF = ResourceRef(

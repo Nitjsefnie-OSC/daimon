@@ -6,6 +6,7 @@ import json
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.ids import Revision
@@ -16,7 +17,6 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import UnsupportedCapability
-from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from .conftest import REF, SCOPE, native_session
@@ -50,9 +50,10 @@ async def test_controls_use_native_fields_and_preserve_omitted_defaults(
         assert request.url.path == "/v1/agents/sessions"
         return httpx.Response(200, json=native_session())
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -104,9 +105,10 @@ async def test_conversation_only_supports_spend_limit_but_refuses_hosted_size(
         raw["environment"] = {"type": "none"}
         return httpx.Response(200, json=raw)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -152,8 +154,10 @@ async def test_explicit_session_model_override_is_verified(actual_model: str | N
         raw["agent"] = {"id": "a", "model": actual_model}
         return httpx.Response(200, json=raw)
 
-    async with AsyncOpenAI(
-        api_key="offline", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline",
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -203,10 +207,10 @@ async def test_session_override_disables_and_verifies_delegation(native_enabled)
         }
         return httpx.Response(200, json=raw)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -260,10 +264,10 @@ async def test_g1_session_shape_omits_optional_spending_control_per_current_refe
         raw["agent"] = {"id": "a", "model": "gpt-6-luna", "multi_agent": {"enabled": False}}
         return httpx.Response(200, json=raw)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),

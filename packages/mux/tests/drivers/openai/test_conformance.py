@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.conformance import Registry, run
 from mux.conformance.fixtures import FIXTURES
 from mux.conformance.runner import Adapter, ConformanceFailure, PendingKind, run_fixture
-from mux.contracts.actions import UserMessage
+from mux.contracts.actions import InputEvent, UserMessage
 from mux.contracts.admission import Admission
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ResolvedBackend
 from mux.contracts.events import TextPart
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope
 from mux.contracts.profile import Capability, Support
-from mux.contracts.receipts import CancelReceipt, StopObservation
+from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
 from mux.contracts.resources import Session
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.conformance import (
@@ -34,7 +35,7 @@ from mux.errors import ProviderError, UnsupportedCapability
 
 @pytest.fixture
 async def adapters() -> AsyncIterator[OpenAIOfflineFactory]:
-    async with OpenAIOfflineFactory() as factory:
+    async with OpenAIOfflineFactory(sdk_factory=build_async_openai) as factory:
         yield factory
 
 
@@ -65,7 +66,7 @@ async def test_real_driver_passes_shared_probe(
 @pytest.mark.asyncio
 async def test_matrix_pins_every_pass_and_typed_pending_reason() -> None:
     registry = Registry()
-    async with register(registry):
+    async with register(registry, sdk_factory=build_async_openai):
         assert registry.names == ("openai.offline",)
         results = await run(registry, "openai.offline")
         assert [r.fixture_id for r in results] == [f"C{i:02}" for i in range(1, 19)]
@@ -95,7 +96,7 @@ async def test_pending_is_explicit_and_precedes_native_io(
 @pytest.mark.asyncio
 async def test_registration_has_no_discovery_and_probes_are_fresh() -> None:
     registry = Registry()
-    async with register(registry):
+    async with register(registry, sdk_factory=build_async_openai):
         first, second = registry.create("openai.offline"), registry.create("openai.offline")
         assert first.driver is not second.driver and first.transport is not second.transport
         assert script(first).requests == script(second).requests == []
@@ -395,11 +396,17 @@ async def test_c04_recovery_invented_input_identity_mutant_is_killed(
     adapters: OpenAIOfflineFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from mux.contracts.receipts import SendReceipt
-
     original = OpenAIConformanceEvents.send
 
-    async def invent(self, scope, session, events, *, key, expected_turn=None):
+    async def invent(
+        self: OpenAIConformanceEvents,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None = None,
+    ) -> SendReceipt:
         result = await original(self, scope, session, events, key=key, expected_turn=expected_turn)
         if result.status == "outcome_unknown":
             return SendReceipt(
@@ -420,7 +427,15 @@ async def test_c04_blind_resend_mutant_is_killed(
 ) -> None:
     original = OpenAIConformanceEvents.send
 
-    async def resend(self, scope, session, events, *, key, expected_turn=None):
+    async def resend(
+        self: OpenAIConformanceEvents,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None = None,
+    ) -> SendReceipt:
         result = await original(self, scope, session, events, key=key, expected_turn=expected_turn)
         if result.status == "outcome_unknown":
             await OpenAIEvents.send(self, scope, session, events, key=key)

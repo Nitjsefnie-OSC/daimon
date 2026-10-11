@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.conformance.default_capability import (
     BASH_RESULT,
     FINAL_MESSAGE,
@@ -148,7 +149,9 @@ async def test_actual_default_sdk_provisioning_record_and_fresh_replay(
 ) -> None:
     recorder = Recorder()
     path = tmp_path / "F1.json"
-    async with OpenAIDefaultCapabilityFactory(manifest, native_events(manifest)) as factory:
+    async with OpenAIDefaultCapabilityFactory(
+        manifest, native_events(manifest), sdk_factory=build_async_openai
+    ) as factory:
         adapter = factory()
         result = await run_default_capability(manifest, adapter, recorder=recorder)
         assert result.status == "pass", result.evidence
@@ -195,7 +198,7 @@ async def test_actual_default_sdk_provisioning_record_and_fresh_replay(
 async def test_checked_in_scripted_tape_reprovisions_fresh_upstream(
     manifest: DefaultManifest,
 ) -> None:
-    async with OpenAIDefaultCapabilityFactory(manifest) as factory:
+    async with OpenAIDefaultCapabilityFactory(manifest, sdk_factory=build_async_openai) as factory:
         result = await replay_default_capability(TAPE, manifest, factory)
         assert result.status == "pass", result.evidence
         assert len(factory.scripts[0].skill_uploads) == 11
@@ -241,7 +244,9 @@ async def test_native_sdk_mutants_fail_f1(manifest: DefaultManifest, fault: str)
         else:
             item["turn_id"] = "other-root"
         events[index] = {**raw, "item": item}
-    async with OpenAIDefaultCapabilityFactory(manifest, tuple(events)) as factory:
+    async with OpenAIDefaultCapabilityFactory(
+        manifest, tuple(events), sdk_factory=build_async_openai
+    ) as factory:
         result = await run_default_capability(manifest, factory())
         assert result.status == "fail"
 
@@ -250,7 +255,7 @@ async def test_native_sdk_mutants_fail_f1(manifest: DefaultManifest, fault: str)
 async def test_missing_logical_mapping_is_typed_pending_before_any_sdk_io(
     manifest: DefaultManifest,
 ) -> None:
-    async with OpenAIDefaultCapabilityFactory(manifest) as factory:
+    async with OpenAIDefaultCapabilityFactory(manifest, sdk_factory=build_async_openai) as factory:
         adapter = replace(factory(), builtin_mapping={})
         result = await run_default_capability(manifest, adapter)
         assert result.status == "pending" and result.pending_reason is not None
@@ -320,7 +325,7 @@ async def test_normalized_replay_mutants_refuse_without_event_network(
         tape["batches"].append(tape["batches"][0])
     path = tmp_path / "mutated.json"
     path.write_text(json.dumps(tape))
-    async with OpenAIDefaultCapabilityFactory(manifest) as factory:
+    async with OpenAIDefaultCapabilityFactory(manifest, sdk_factory=build_async_openai) as factory:
         result = await replay_default_capability(path, manifest, factory)
         assert result.status == "fail"
         assert all(
@@ -349,7 +354,9 @@ async def test_upstream_upload_byte_loss_is_detected_independently(
         return original(bundle.model_copy(update={"files": files}))
 
     monkeypatch.setattr(skills, "bundle_zip", broken)
-    async with OpenAIDefaultCapabilityFactory(manifest, native_events(manifest)) as factory:
+    async with OpenAIDefaultCapabilityFactory(
+        manifest, native_events(manifest), sdk_factory=build_async_openai
+    ) as factory:
         result = await run_default_capability(manifest, factory())
         assert result.status == "fail" and "upstream skill bytes changed" in result.evidence[0]
         assert not any(request.url.path == "/v1/agents" for request in factory.scripts[0].requests)
@@ -376,7 +383,9 @@ async def test_upstream_remote_mcp_url_loss_fails_actual_deployment_evidence(
         return object_json({**body, "tools": tools})
 
     monkeypatch.setattr(agents, "agent_body", broken)
-    async with OpenAIDefaultCapabilityFactory(manifest, native_events(manifest)) as factory:
+    async with OpenAIDefaultCapabilityFactory(
+        manifest, native_events(manifest), sdk_factory=build_async_openai
+    ) as factory:
         result = await run_default_capability(manifest, factory())
         assert result.status == "fail" and "MCP attachment changed" in result.evidence[0]
         assert not any(

@@ -6,12 +6,12 @@ import asyncio
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.drivers.openai import OpenAIDriver, sessions
 from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, ScopeViolation
-from openai import AsyncOpenAI
 
 from .conftest import REF, SCOPE, native_session
 
@@ -43,11 +43,11 @@ async def test_delete_waits_for_idle_and_recovers_a_definite_conflict(
             return httpx.Response(409, json={"error": {"message": "sensitive"}})
         return httpx.Response(200, json={"id": "s", "deleted": True})
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        max_retries=5,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
-    ) as sdk:
+        base_url="https://openai.invalid/v1",
+    ).with_options(max_retries=5) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
             account_scope_id="project",
@@ -109,11 +109,11 @@ async def test_cleanup_is_bounded_and_never_replays_uncertain_or_unsafe_deletes(
             403 if case == "permission" else 409, json={"error": {"message": "sensitive"}}
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        max_retries=5,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
-    ) as sdk:
+        base_url="https://openai.invalid/v1",
+    ).with_options(max_retries=5) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
             account_scope_id="project",

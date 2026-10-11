@@ -11,6 +11,7 @@ from typing import cast
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolSpec
@@ -137,9 +138,10 @@ async def test_bearer_is_session_only_and_sdk_debug_logging_redacts_it(
 ) -> None:
     wire = Wire()
     caplog.set_level(logging.DEBUG, logger="openai")
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = wire.driver(sdk)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
@@ -194,9 +196,10 @@ async def test_bearer_is_session_only_and_sdk_debug_logging_redacts_it(
 )
 async def test_failed_or_foreign_binding_refuses_before_session_write(failure: str) -> None:
     wire = Wire()
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = wire.driver(sdk, resolver=failure != "no_resolver")
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
@@ -252,9 +255,10 @@ async def test_invalid_policy_or_destination_refuses_before_any_io(
     connection: MCPConnection,
 ) -> None:
     wire = Wire()
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         with pytest.raises(UnsupportedCapability):
             await wire.driver(sdk).agents.create(SCOPE, spec(connection), key="refuse")
@@ -264,9 +268,10 @@ async def test_invalid_policy_or_destination_refuses_before_any_io(
 @pytest.mark.asyncio
 async def test_reserved_metadata_cannot_inject_host_credential_references() -> None:
     wire = Wire()
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         with pytest.raises(UnsupportedCapability):
             await wire.driver(sdk).agents.create(
@@ -279,9 +284,10 @@ async def test_reserved_metadata_cannot_inject_host_credential_references() -> N
 @pytest.mark.parametrize("policy", [{"allowed_tools": []}, {"required": False}, {}])
 async def test_anonymous_policy_and_omissions_remain_explicit(policy: dict[str, JsonValue]) -> None:
     wire = Wire()
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = wire.driver(sdk, resolver=False)
         connection = MCPConnection(name="daimon-mcp", url=URL, tool_policy=policy)
@@ -322,9 +328,10 @@ async def test_metadata_capacity_failure_never_creates_or_resolves():
     oversized = spec().model_copy(
         update={"metadata": {"slot" + str(i): "value" for i in range(15)}}
     )
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         with pytest.raises(UnsupportedCapability):
             await wire.driver(sdk).agents.create(SCOPE, oversized, key="full")
@@ -353,9 +360,10 @@ async def test_invalid_resolved_secret_never_reaches_wire_or_error(secret: objec
     async def invalid(scope: Scope, ref: str, destination: str):
         return secret
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = wire.driver(sdk)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
@@ -382,9 +390,10 @@ async def test_invalid_resolved_secret_never_reaches_wire_or_error(secret: objec
 @pytest.mark.asyncio
 async def test_inline_mcp_and_vault_auth_refuse_before_resolving_or_writing() -> None:
     wire = Wire()
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = wire.driver(sdk)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
@@ -424,9 +433,10 @@ async def test_concurrent_accounts_resolve_fresh_scoped_bearers_without_cross_co
         await asyncio.sleep(0)
         return "fictional-" + scope.account_id
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -467,10 +477,10 @@ async def test_auth_preserves_the_admitted_g1_model_and_delegation_controls() ->
     # This requires G1's real control edge; no fabricated test-only settings.
     controls = SessionControls.model_validate({"model": "gpt-6-luna", "multi_agent_enabled": False})
     wire = Wire()
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
         base_url="https://openai.invalid/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
     ) as sdk:
         driver = wire.driver(sdk, controls=controls)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
@@ -497,10 +507,10 @@ async def test_authenticated_override_refuses_anonymous_unbound_destination() ->
             )
         }
     )
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
         base_url="https://openai.invalid/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
     ) as sdk:
         with pytest.raises(UnsupportedCapability) as refused:
             await wire.driver(sdk).agents.create(SCOPE, requested, key="mixed-tools-agent")
@@ -514,10 +524,10 @@ async def test_cancelled_resolver_cancels_before_session_post() -> None:
     async def cancelled(scope: Scope, ref: str, destination: str) -> str:
         raise asyncio.CancelledError()
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
         base_url="https://openai.invalid/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -668,11 +678,10 @@ async def test_unbound_secondary_auth_refuses_before_any_resolver_or_session_pos
         raw["tools"] = [secondary, *native] if position == "first" else [*native, secondary]
         return httpx.Response(200, json=raw)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(malicious_native_agent),
         api_key="offline-placeholder",
         base_url="https://openai.invalid/v1",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(malicious_native_agent)),
     ) as sdk:
         driver = wire.driver(sdk)
         requested = spec() if has_bound_server else spec(MCPConnection(name="public", url=URL))
@@ -714,10 +723,10 @@ async def test_clean_secondary_destination_requires_exact_scoped_binding() -> No
         ]
         return httpx.Response(200, json=raw)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(unbound_destination),
         api_key="offline-placeholder",
         base_url="https://openai.invalid/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(unbound_destination)),
     ) as sdk:
         driver = wire.driver(sdk)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
@@ -775,11 +784,10 @@ async def test_single_bound_mcp_and_allowlisted_tools_preserve_bytes_and_redact_
             ),
         }
     )
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
         base_url="https://openai.invalid/v1",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -851,11 +859,10 @@ async def test_multiple_bound_servers_refuse_before_resolver_or_write(saved: boo
         ]
         return httpx.Response(200, json=raw)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
         base_url="https://openai.invalid/v1",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
     ) as sdk:
         driver = wire.driver(sdk)
         if saved:

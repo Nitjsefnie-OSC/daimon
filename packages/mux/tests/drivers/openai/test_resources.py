@@ -10,6 +10,7 @@ from email import policy
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.resources import CredentialBinding, SkillUpload, SkillUploadFile
 from mux.drivers.openai import artifacts, skills, transport, vaults
@@ -174,9 +175,10 @@ class Wire:
     def ports(
         self,
     ) -> tuple[AsyncOpenAI, skills.OpenAISkills, artifacts.OpenAIArtifacts, vaults.OpenAIVaults]:
-        sdk = AsyncOpenAI(
+        sdk = build_async_openai(
+            transport=httpx.MockTransport(self.handle),
             api_key="offline-fixture",
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self.handle)),
+            base_url="https://openai.invalid/v1",
         )
         c = Context(
             transport.SDKTransport(sdk),

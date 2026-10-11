@@ -6,6 +6,7 @@ import json
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserToolConfirmation
 from mux.contracts.events import RequiresActionPayload
 from mux.drivers.openai import OpenAIDriver
@@ -14,7 +15,6 @@ from mux.drivers.openai.transport import Object, SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, UnsupportedCapability
-from openai import AsyncOpenAI
 
 from .conftest import REF, SCOPE, native_session, page, turn
 
@@ -67,9 +67,10 @@ async def test_sdk_posts_documented_origin_response(decision: str) -> None:
             return httpx.Response(200, json=raw)
         return httpx.Response(202)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -124,9 +125,10 @@ async def test_ambiguous_secret_or_stale_actions_never_post(fault: str) -> None:
         raw["required_actions"] = [pending, pending] if fault == "duplicate" else [pending]
         return httpx.Response(200, json=raw)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),

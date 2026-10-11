@@ -4,6 +4,7 @@ import json
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.drivers.openai import OpenAIDriver
@@ -11,7 +12,6 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
-from openai import AsyncOpenAI
 
 from .conftest import REF, SCOPE, native_session, page, turn
 
@@ -28,9 +28,10 @@ async def test_actual_pinned_sdk_paths_headers_query_body_and_202() -> None:
             else httpx.Response(200, json={"data": [], "has_more": False})
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         transport = SDKTransport(sdk)
         assert (
@@ -80,11 +81,11 @@ async def test_errors_are_owned_redacted_and_mutations_never_retry(
             status, json={"error": {"message": "sensitive-upstream-body", "code": "sensitive-code"}}
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        max_retries=5,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
-    ) as sdk:
+        base_url="https://openai.invalid/v1",
+    ).with_options(max_retries=5) as sdk:
         with pytest.raises(ProviderError) as exc:
             await SDKTransport(sdk).request("POST", "/agents/sessions/s/events", body={})
     assert exc.value.category == category and calls == 1
@@ -104,9 +105,10 @@ async def test_real_sdk_sse_and_close_before_first_event() -> None:
             content="data: " + json.dumps(wire) + "\n\n",
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         source = await SDKTransport(sdk).open_stream("/agents/sessions/s/events")
         assert [item async for item in source] == [wire]
@@ -119,9 +121,10 @@ async def test_malformed_reply_and_network_error() -> None:
     def malformed(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[])
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(malformed),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(malformed)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         with pytest.raises(ProviderError) as exc:
             await SDKTransport(sdk).request("GET", "/agents")
@@ -130,9 +133,10 @@ async def test_malformed_reply_and_network_error() -> None:
     def disconnect(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadError("sensitive", request=request)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(disconnect),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(disconnect)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         with pytest.raises(ProviderError) as exc:
             await SDKTransport(sdk).request("POST", "/agents/sessions", body={})
@@ -157,9 +161,10 @@ async def test_sse_error_is_owned_and_redacted() -> None:
             content="data: " + json.dumps(wire) + "\n\n",
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         source = await SDKTransport(sdk).open_stream("/agents/sessions/s/events")
         with pytest.raises(ProviderError) as exc:
@@ -183,11 +188,11 @@ async def test_public_submission_ports_preserve_key_in_real_http_header(mode: st
         posts.append(request)
         return httpx.Response(202)
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-placeholder",
-        max_retries=5,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
-    ) as sdk:
+        base_url="https://openai.invalid/v1",
+    ).with_options(max_retries=5) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
             account_scope_id="project",
