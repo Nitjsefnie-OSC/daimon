@@ -15,9 +15,11 @@ answer). A failed, oversize or declined file is only logged: status text
 around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
-Transient channel upload failures leave the listing entry for a later sweep.
-Otherwise the listing entry, the delivery ledger, is deleted; the sandbox keeps
-its copy, so the agent can still read or paste it later.
+Transient channel upload failures leave the listing entry for a later sweep,
+and an oversize file stays listed on every path, including a channel without
+file access. Otherwise the listing entry, the delivery
+ledger, is deleted; the sandbox keeps its copy, so the agent can still read or
+paste it later.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.output_delivery import (
+    MAX_BYTES_PER_FILE,
     DeliverableFile,
     OutputDeliveryDeferred,
     SkippedFile,
@@ -185,7 +188,9 @@ class TeamsOutputDelivery:
     ) -> None:
         files = self._files
         if files is None or not await files.is_available(inbound):
-            # Zero sends every file down the skip path: a log line, then delete.
+            # Zero sends every file down the skip path: a log line, then a
+            # delete for a file that fits the cap. A file over it is kept,
+            # as on every other path: no channel could take it either.
             await sweep_session_outputs(
                 self._runtime.anthropic,
                 session_id=session_id,
@@ -193,6 +198,7 @@ class TeamsOutputDelivery:
                 on_skip=_log_channel_skip,
                 sleep=self._sleep,
                 max_bytes=0,
+                discard_skipped_up_to=MAX_BYTES_PER_FILE,
             )
             return
         links: list[str] = []
