@@ -18319,7 +18319,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/isolated_sdk.py",
-      "line": 165,
+      "line": 180,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -18358,6 +18358,15 @@
     {
       "file": "packages/testing/daimon/testing/ma.py",
       "line": 255,
+      "module": "anthropic",
+      "names": [
+        "DEFAULT_TIMEOUT"
+      ],
+      "category": "test-support"
+    },
+    {
+      "file": "packages/testing/daimon/testing/ma.py",
+      "line": 296,
       "module": "anthropic",
       "names": [
         "DEFAULT_TIMEOUT"
@@ -18812,7 +18821,7 @@
     },
     {
       "file": "packages/testing/tests/test_isolated_sdk.py",
-      "line": 317,
+      "line": 323,
       "module": "anthropic",
       "names": [
         "DEFAULT_TIMEOUT",
@@ -18822,7 +18831,26 @@
     },
     {
       "file": "packages/testing/tests/test_isolated_sdk.py",
-      "line": 355,
+      "line": 360,
+      "module": "anthropic",
+      "names": [
+        "DEFAULT_TIMEOUT",
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/testing/tests/test_isolated_sdk.py",
+      "line": 403,
+      "module": "anthropic",
+      "names": [
+        "APIStatusError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/testing/tests/test_isolated_sdk.py",
+      "line": 435,
       "module": "anthropic",
       "names": [
         "DEFAULT_TIMEOUT"

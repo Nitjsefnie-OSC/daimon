@@ -5,6 +5,8 @@ from __future__ import annotations
 # Deliberate SDK/client identity probes; no production code uses these fields.
 # pyright: reportPrivateUsage=false
 from collections.abc import Iterator
+from pathlib import Path
+from ssl import SSLContext
 from typing import NoReturn
 from unittest.mock import patch
 
@@ -12,6 +14,7 @@ import httpx
 import pytest
 from daimon.testing.isolated_sdk import (
     SDK_ENV_VARS,
+    TLS_PROXY_ENV_VARS,
     AmbientSDKConfigurationError,
     build_gemini_client,
 )
@@ -28,12 +31,46 @@ FUTURE_NAMES = (
 )
 
 
+async def test_invented_keylog_path_refuses_before_tls_context_or_file_creation(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    target = tmp_path / "invented-tls-session-keys.log"
+    client = None
+    calls: list[httpx.Request] = []
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(500)
+
+    # Replace the entire environment with an invented owned path. No operator
+    # value is read and no handshake/request is needed to reproduce this bug.
+    with (
+        patch.object(os, "environ", {"SSLKEYLOGFILE": str(target)}),
+        patch("httpx.create_ssl_context", wraps=httpx.create_ssl_context) as tls,
+    ):
+        try:
+            with pytest.raises(AmbientSDKConfigurationError):
+                client = build_gemini_client(transport=httpx.MockTransport(reply))
+        finally:
+            if client is not None:
+                client.close()
+                await client.aio.aclose()
+    tls.assert_not_called()
+    assert not target.exists()
+    assert calls == []
+
+
 @pytest.fixture(autouse=True)
 def clean_sdk_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     import os
 
     for name in tuple(os.environ):
-        if name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_")):
+        if (
+            name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_"))
+            or name.upper() in TLS_PROXY_ENV_VARS
+        ):
             monkeypatch.delenv(name, raising=False)
     yield
 
@@ -62,8 +99,8 @@ def test_google_names_refuse_before_client_transport_or_credentials(
         assert name not in str(error.value)
 
 
-async def test_all_four_sdk_boundaries_ignore_proxies_tls_and_later_provider_env(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_all_four_sdk_boundaries_keep_clean_tls_despite_later_ambient_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import os
 
@@ -77,9 +114,10 @@ async def test_all_four_sdk_boundaries_ignore_proxies_tls_and_later_provider_env
         "NO_PROXY": "owned.invalid",
         "SSL_CERT_FILE": "/missing/isolated-test-cert",
         "SSL_CERT_DIR": "/missing/isolated-test-certs",
+        "SSLKEYLOGFILE": str(tmp_path / "invented-late-keylog.log"),
+        "REQUESTS_CA_BUNDLE": "/missing/isolated-test-ca",
+        "CURL_CA_BUNDLE": "/missing/isolated-test-curl-ca",
     }
-    for name, value in generic.items():
-        monkeypatch.setenv(name, value)
 
     def forbidden(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError("isolated client consulted ambient proxy/auth settings")
@@ -103,8 +141,17 @@ async def test_all_four_sdk_boundaries_ignore_proxies_tls_and_later_provider_env
         headers=headers,
     )
     try:
+        api = client._api_client
+        assert api._http_options.client_args is not None
+        assert api._http_options.async_client_args is not None
+        context = api._http_options.client_args["verify"]
+        assert isinstance(context, SSLContext) and context.keylog_filename is None
+        assert api._http_options.async_client_args["verify"] is context
+        assert api._http_options.async_client_args["ssl"] is context
         # Lazy Interactions clients and their copies must keep the original
         # explicitly owned configuration after the process environment changes.
+        for name, value in generic.items():
+            monkeypatch.setenv(name, value)
         for name in GOOGLE_NAMES:
             monkeypatch.setenv(name, "late-unowned-sentinel")
         list(client.models.list())
@@ -122,7 +169,6 @@ async def test_all_four_sdk_boundaries_ignore_proxies_tls_and_later_provider_env
             assert "x-goog-user-project" not in request.headers
             assert "late-unowned-sentinel" not in str(request.url)
             assert "late-unowned-sentinel" not in str(request.headers)
-        api = client._api_client
         assert api.vertexai is False and api.project is None and api.location is None
         assert api._credentials is None and api._use_aiohttp() is False
         assert api._httpx_client is not None and api._httpx_client._trust_env is False
@@ -132,6 +178,8 @@ async def test_all_four_sdk_boundaries_ignore_proxies_tls_and_later_provider_env
         assert headers == {"X-Explicit-Test": "owned"}
         assert all(os.environ[name] == value for name, value in generic.items())
         assert all(os.environ[name] == "late-unowned-sentinel" for name in GOOGLE_NAMES)
+        assert context.keylog_filename is None
+        assert not Path(generic["SSLKEYLOGFILE"]).exists()
     finally:
         client.close()
         await client.aio.aclose()

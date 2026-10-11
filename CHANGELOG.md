@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind common QA catalog admin operations through product APIs on disposable lane databases, preserving scoped readback and typed pending resource/platform gaps across all three backends.
 
 - Refresh offline QA Gemini tapes for explicit interaction tools on current integration, retaining strict wire equality and separate expected-failure reporting.
+- Refuse nine ambient TLS/proxy settings by name before test SDK construction, preventing invented TLS key-log paths from being opened; owned clean Gemini contexts have no key-log filename.
 
 ### Added
 
@@ -34,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add requester-only Teams cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.
 - Isolate Gemini full-byte bundle and F2 replay SDK clients with explicit fixture authentication and owned sync/async transports; refuse ambient provider settings before construction.
 - Add lead-signed whole-column QA budget admission with conservative receipt-based bounds, disjoint monotonic per-cell settlement and terminal release of never-started holds; incomplete usage stays held.
+- Route the shared no-retry Anthropic test builder through isolated SDK admission, retaining its handler/router API, native request bytes, SDK timeout and zero-retry behavior.
 
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.

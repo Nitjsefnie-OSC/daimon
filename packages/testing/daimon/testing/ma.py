@@ -293,11 +293,18 @@ def build_no_retry_anthropic(
     scripted conflict before the code under test can see it. A `MARouter`
     is accepted directly so callers need not spell `.dispatch`.
     """
+    from anthropic import DEFAULT_TIMEOUT
+    from daimon.testing.isolated_sdk import build_async_anthropic
+
     dispatch = handler.dispatch if isinstance(handler, MARouter) else handler
-    http_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(dispatch), base_url="https://api.anthropic.com"
+    return build_async_anthropic(
+        transport=httpx.MockTransport(dispatch),
+        api_key="test",
+        base_url="https://api.anthropic.com",
+        headers={},
+        max_retries=0,
+        timeout=DEFAULT_TIMEOUT,
     )
-    return AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
 
 
 @pytest.fixture

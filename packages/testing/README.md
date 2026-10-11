@@ -116,7 +116,14 @@ factories never clear the process environment; explicit test keys prevent
 credential-chain fallback. Start tests in a clean environment or remove only
 the relevant variables with a scoped test fixture. Missing keys, routes or
 transports also fail before HTTP client construction. Generic proxy and certificate environment settings are
-ignored by the supplied clients.
+refused before construction. The names-only guard additionally rejects
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `SSLKEYLOGFILE`, `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, `NO_PROXY`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE`, including
+empty, lowercase and mixed-case variants. `trust_env=False` alone does not
+disable Python's `SSLKEYLOGFILE`; Gemini constructs its explicit SSL context
+only after this preflight, with no key-log filename. Existing owned clients
+retain their explicit TLS/HTTP configuration if ambient settings appear later;
+new OpenAI/Anthropic SDK copies repeat the admission guard.
 
 Close OpenAI and Anthropic clients with their normal async context manager.
 Gemini owns both clients: call `client.close()` and `await client.aio.aclose()`.
@@ -130,8 +137,8 @@ shape. New factories default to one HTTP attempt, including Gemini models and
 interactions. Anthropic accepts an explicit `max_retries` and `timeout` for tests
 exercising retry behavior.
 
-The existing `build_fake_anthropic`, `build_stub_anthropic` and
-`ScriptedTransport.client` inherit the isolation guard. Their test key, provider
+The existing `build_fake_anthropic`, `build_stub_anthropic`,
+`build_no_retry_anthropic` and `ScriptedTransport.client` inherit the isolation guard. Their test key, provider
 URL, SDK timeout and retry behavior are preserved: fake/stub use two retries;
 scripted defaults to zero and honors its explicit retry budget. The existing
 `build_no_retry_anthropic` remains a separate builder outside this change.
@@ -216,3 +223,6 @@ Catalog lifecycle wrappers still need the separately owned normalized-event
 tap forwarding before native preview/draft completeness can be certified.
 Keep those dependent checks PENDING; final lifecycle posts and native-root
 completion receipts do not establish that additional coverage.
+scripted defaults to zero and honors its explicit retry budget. The no-retry
+builder accepts either a handler or `MARouter` and keeps zero retries, including
+409/429/5xx errors. Its SDK copies retain that budget and the isolation guard.
