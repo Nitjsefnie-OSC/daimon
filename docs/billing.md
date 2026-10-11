@@ -885,3 +885,10 @@ settled revisions and an exact ledger/debit match. Unknown rates or container
 time remain unknown; a known ledger debit does not establish a complete turn
 cost. Controlled test evidence certifies host arithmetic only. The API preserves
 historical Anthropic float/debit rounding and does not change displayed footers.
+
+The manual probe guard accepts an explicit cash reservation floor in addition
+to its priced token and runtime bound. It reserves the larger amount against
+the existing admission stop without changing the execution limits. Complete
+dated usage and measured infrastructure release the unused hold; incomplete
+evidence remains `estimated_unverified`. This accounting operation does not
+authorize a live run or impose native provider execution controls.

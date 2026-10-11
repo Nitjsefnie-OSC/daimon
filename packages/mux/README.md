@@ -724,3 +724,24 @@ adapter with exact Gemini profile/workspace routing; the guard remains effective
 when off or mismatched. Independent readback uses the public verification edge.
 Named-agent turns refuse the inline session plan. Whole D14/D5 cells remain
 PENDING. See [resource catalog capability](mux/drivers/gemini/RESOURCE-CATALOG.md).
+
+Manual probes may use `BudgetGuard.reserve_with_hold(..., minimum_hold_usd=Decimal(...))`
+to reserve the larger of a priced token/runtime bound and an explicit cash
+floor. The floor preserves the real limits, counts against the existing stop,
+and stays held until complete measured spend is available. It grants no live
+authorization; runners must verify their signed envelope before admission and
+read credentials afterward. The `A7` receipt label identifies a paired probe.
+Update ledger readers before writing that new label; old receipt bytes are unchanged.
+Optional `maximum_hold_usd`, `expected_config_sha256` and `expected_ledger_id`
+refuse stale installation pins or a reservation above the caller's verified
+envelope maximum under the ledger lock. These checks do not verify a signature.
+The ordinary `reserve` signature and existing adapter overrides remain unchanged.
+
+`usage_settlement.actual_from_anthropic_sessions` combines one or more reserved
+session walks into one `ActualSpend` for a single settlement. Supply normalized
+disjoint model-request observations with independently verified served models
+and matching measured running-time totals. Missing sessions, finality, cache
+write durations, pricing basis or runtime retain the hold; foreign, stale and
+overlapping evidence refuses. Known partial runtime still proves overrun floors.
+Runner controls and native budget acknowledgements remain separate. Ordinary
+guard admission and settlement use decimal precision 80 regardless of the caller.

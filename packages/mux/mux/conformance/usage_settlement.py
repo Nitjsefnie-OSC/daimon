@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
@@ -49,17 +50,28 @@ def actual_from_observations(
         ):
             raise BudgetLedgerError("usage evidence is foreign or overlapping")
         all_measured = all_measured and observation.completeness == "measured"
+        tokens = TokenUsage(
+            input_tokens=observation.input_tokens,
+            output_tokens=observation.output_tokens,
+            input_cached_tokens=observation.input_cached_tokens,
+            input_cache_write_tokens=observation.input_cache_write_tokens,
+        )
+        if provider == "anthropic":
+            duration = observation.native_meter.get("cache_creation")
+            if isinstance(duration, Mapping):
+                tokens = TokenUsage.model_validate(
+                    {
+                        **tokens.model_dump(),
+                        "input_cache_write_5m_tokens": duration.get("ephemeral_5m_input_tokens"),
+                        "input_cache_write_1h_tokens": duration.get("ephemeral_1h_input_tokens"),
+                    }
+                )
         requests.append(
             MeasuredRequest(
                 id=observation.id,
                 observed_at=observation.observed_at,
                 pricing_basis=pricing_basis,
-                tokens=TokenUsage(
-                    input_tokens=observation.input_tokens,
-                    output_tokens=observation.output_tokens,
-                    input_cached_tokens=observation.input_cached_tokens,
-                    input_cache_write_tokens=observation.input_cache_write_tokens,
-                ),
+                tokens=tokens,
             )
         )
     return ActualSpend(
@@ -67,6 +79,104 @@ def actual_from_observations(
         containers=containers,
         usage_complete=usage_complete and all_measured,
     )
+
+
+@dataclass(frozen=True)
+class AnthropicSessionSpend:
+    """One native session's verified model-request walk and running-time sum.
+
+    The runner establishes served model, finality, complete running intervals
+    and absence of unpriced auxiliary work before claiming usage_complete.
+    Observations use the shared driver normalizer with that verified model;
+    no model or missing runtime is inferred here. This is evidence, not a live
+    authorization, native budget acknowledgement or execution control.
+    """
+
+    session: ResourceRef
+    observations: tuple[UsageObservation, ...]
+    runtime: ContainerUsage | None
+    usage_complete: bool = False
+
+
+def actual_from_anthropic_sessions(
+    reservation: Reservation,
+    sessions: Iterable[AnthropicSessionSpend],
+    *,
+    pricing_basis: str | None = None,
+) -> ActualSpend:
+    """Combine a reserved single/pair session walk for ONE guard settlement.
+
+    Missing sessions, finality or runtime keep the reservation held. Foreign,
+    stale and overlapping identities refuse before any ledger append. A complete
+    walk can contain zero model requests, but never imply zero unknown runtime.
+    """
+    receipt = reservation.receipt
+    allowance = receipt.container_allowance
+    if (
+        receipt.provider != "anthropic"
+        or allowance is None
+        or allowance.meter != "agent_session"
+        or allowance.memory_gb is not None
+        or allowance.sessions < 1
+        or receipt.limits is None
+    ):
+        raise BudgetLedgerError("Anthropic session evidence needs an agent_session reservation")
+    sessions = tuple(sessions)
+    refs = [item.session for item in sessions]
+    if len({ref.id for ref in refs}) != len(refs) or len(refs) > allowance.sessions:
+        raise BudgetLedgerError("duplicate or excess session evidence")
+    if len({(ref.account_scope_id, ref.tenant_id, ref.account_id) for ref in refs}) > 1:
+        raise BudgetLedgerError("session evidence crosses account scopes")
+    complete = len(sessions) == allowance.sessions
+    requests: list[MeasuredRequest] = []
+    containers: list[ContainerUsage] = []
+    runtime_complete = complete
+    for item in sessions:
+        if type(item.usage_complete) is not bool:
+            raise BudgetLedgerError("session completeness must be an explicit boolean")
+        ref = item.session
+        if ref.provider != "anthropic" or ref.kind != "session":
+            raise BudgetLedgerError("foreign session evidence")
+        if any(
+            obs.session != ref
+            or obs.observed_at.tzinfo is None
+            or obs.observed_at < receipt.timestamp
+            for obs in item.observations
+        ):
+            raise BudgetLedgerError("foreign or stale request evidence")
+        evidence = actual_from_observations(
+            item.observations,
+            provider="anthropic",
+            model=receipt.model,
+            containers=None,
+            usage_complete=item.usage_complete,
+            pricing_basis=pricing_basis,
+        )
+        requests.extend(evidence.requests)
+        complete = complete and evidence.usage_complete
+        runtime = item.runtime
+        if runtime is None:
+            runtime_complete = False
+        elif (
+            runtime.id != ref.id
+            or runtime.meter != "agent_session"
+            or runtime.memory_gb is not None
+            or runtime.started_at.tzinfo is None
+            or runtime.started_at < receipt.timestamp
+        ):
+            raise BudgetLedgerError("foreign or stale runtime evidence")
+        else:
+            containers.append(runtime)
+    try:
+        return ActualSpend(
+            requests=tuple(requests),
+            # Retain known intervals as lower bounds even when another is
+            # missing. Global completeness fences exact settlement in that case.
+            containers=tuple(containers) if containers else None,
+            usage_complete=complete and runtime_complete,
+        )
+    except ValueError:
+        raise BudgetLedgerError("overlapping session request evidence") from None
 
 
 def settle_anthropic_events(
