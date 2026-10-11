@@ -59,6 +59,7 @@ from daimon.adapters.teams.identity import (
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import (
     SEND_TIMEOUT_S,
+    TEAMS_BILLING_COMMAND,
     TEAMS_SEND_ERRORS,
     TeamsSender,
     TeamsTurnLifecycle,
@@ -192,7 +193,7 @@ _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismat
 TEAMS_REFUSAL_NOUNS = RefusalNouns(
     scope="organisation",
     admin="an admin",
-    billing="`billing` in a 1:1 chat with me",
+    billing=TEAMS_BILLING_COMMAND,
     setup="`setup`",
 )
 # The log event each refusal is recorded under.

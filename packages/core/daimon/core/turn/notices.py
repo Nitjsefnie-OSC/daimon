@@ -51,6 +51,8 @@ class _Copy:
 
 _RETRY = "@mention Daimon to try again."
 _CARRY = "@mention Daimon to carry on."
+# Names who can top up and where: `{billing}` is the platform's billing command.
+_TOP_UP = "An admin can top up with {billing}."
 _COPY: dict[TerminationReason, _Copy] = {
     TerminationReason.INTERRUPTED: _Copy(
         "Stopped. Changes already made stay made.", _CARRY, "Send a message to carry on."
@@ -103,7 +105,7 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Send your message again in a moment.",
     ),
     TerminationReason.ADMISSION_BALANCE_DEPLETED: _Copy(
-        "Your team's Daimon credit has run out.", "Ask an admin to top up."
+        "Your team's Daimon credit has run out.", _TOP_UP
     ),
     TerminationReason.ADMISSION_CAP_EXCEEDED: _Copy(
         "You've used your monthly limit.", "Ask the team running Daimon to raise it."
@@ -158,7 +160,7 @@ class RefusalNouns:
 
 
 _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
-    "balance_depleted": _Copy("Your team's Daimon credit has run out.", "Ask an admin to top up."),
+    "balance_depleted": _Copy("Your team's Daimon credit has run out.", _TOP_UP),
     "cap_exceeded": _Copy(
         "You've used your monthly limit.", "Ask the team running Daimon to raise it."
     ),
@@ -205,7 +207,7 @@ def admission_refusal_text(
     return "\n\n".join(
         (
             copy.title.format(agent=agent, setup=nouns.setup),
-            copy.next_step.format(agent=agent, setup=nouns.setup),
+            copy.next_step.format(agent=agent, setup=nouns.setup, billing=nouns.billing),
         )
     )
 
@@ -259,6 +261,7 @@ def render_termination_notice(
     error: BaseException | None = None,
     in_dm: bool = False,
     setup_command: str = "`/agent-setup`",
+    billing_command: str = "`/billing`",
     agent_name: str | None = None,
 ) -> TerminationNotice | None:
     """Render one reason using the same words on every platform."""
@@ -281,7 +284,7 @@ def render_termination_notice(
         setup=setup_command,
     )
     next_step = (copy.dm_next_step if in_dm and copy.dm_next_step else copy.next_step).format(
-        setup=setup_command
+        setup=setup_command, billing=billing_command
     )
     in_flight: tuple[str, ...] = ()
     finished = 0

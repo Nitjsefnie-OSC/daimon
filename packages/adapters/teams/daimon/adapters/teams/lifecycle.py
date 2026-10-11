@@ -66,6 +66,8 @@ TEAMS_SEND_ERRORS = (httpx.HTTPError, OSError, ValueError)
 # A send that timed out may still have landed.
 _TIMEOUTS = (TimeoutError, httpx.TimeoutException)
 SEND_TIMEOUT_S = 30.0
+# How a person reaches the billing card in Teams, for the top-up line.
+TEAMS_BILLING_COMMAND = "`billing` in a 1:1 chat with me"
 
 
 def bound_request_id() -> str:
@@ -479,6 +481,7 @@ class TeamsTurnLifecycle:
                 error=err,
                 in_dm=self._direct_chat,
                 setup_command="`setup`",
+                billing_command=TEAMS_BILLING_COMMAND,
                 agent_name=self._agent_name,
             )
             if notice is not None:

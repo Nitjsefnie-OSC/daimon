@@ -3602,7 +3602,7 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
+        == "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
     ]
     assert depleted, (
         f"expected the exact D-10 over-balance copy via chat.postMessage, got: {post_bodies}"
@@ -3954,7 +3954,7 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
+        == "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
     ]
     assert depleted, (
         f"expected the exact over-balance copy via chat.postMessage, got: {post_bodies}"
