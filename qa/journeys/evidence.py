@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from PIL import Image, ImageChops
+from PIL import Image
 
 Status = Literal["PASS", "FAIL", "PENDING"]
 Boundary = Literal[
@@ -43,6 +43,10 @@ class Check:
     def effective_status(self) -> Status:
         if self.status == "FAIL":
             return "FAIL"
+        if self.status == "PASS" and not any(
+            item.required and item.observed for item in self.observations
+        ):
+            return "PENDING"
         if any(item.required and not item.observed for item in self.observations):
             return "PENDING"
         return self.status
@@ -79,6 +83,14 @@ class RunReport:
         return self.status
 
 
+def _private_directory(path: Path) -> None:
+    resolved = path.resolve()
+    if any((parent / ".git").exists() for parent in (resolved, *resolved.parents)):
+        raise ValueError("QA artifacts must be outside every Git checkout")
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
 def create_artifact_dir(run_id: str, root: Path | None = None) -> Path:
     """Create a private run directory outside the source checkout."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_id):
@@ -86,10 +98,7 @@ def create_artifact_dir(run_id: str, root: Path | None = None) -> Path:
     target_root = root or Path(
         os.environ.get("DAIMON_QA_ARTIFACT_ROOT", Path.home() / ".local/state/daimon/qa-journeys")
     )
-    checkout = Path(__file__).resolve().parents[2]
-    if target_root.resolve().is_relative_to(checkout):
-        raise ValueError("QA artifacts must be outside the repository")
-    target_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _private_directory(target_root)
     path = target_root / run_id
     path.mkdir(mode=0o700, exist_ok=False)
     return path
@@ -97,14 +106,16 @@ def create_artifact_dir(run_id: str, root: Path | None = None) -> Path:
 
 def write_report(report: RunReport, artifact_dir: Path) -> Path:
     report.finalize()
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    _private_directory(artifact_dir)
     path = artifact_dir / "report.json"
     payload = asdict(report)
     payload["minutes"] = report.minutes
     payload["checks"] = [
         {**asdict(check), "status": check.effective_status()} for check in report.checks
     ]
-    path.write_text(json.dumps(payload, default=str, indent=2) + "\n")
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as stream:
+        stream.write(json.dumps(payload, default=str, indent=2) + "\n")
+    path.chmod(0o600)
     return path
 
 
@@ -135,24 +146,33 @@ def compare_screenshots(
     with Image.open(accepted_baseline) as baseline_image, Image.open(current) as current_image:
         baseline = baseline_image.convert("RGB")
         observed = current_image.convert("RGB")
-    if baseline.size != observed.size:
-        return ScreenshotDiff(
-            step_id,
-            "FAIL",
-            True,
-            None,
-            None,
-            f"image dimensions differ: baseline={baseline.size}, current={observed.size}",
-        )
-    difference = ImageChops.difference(baseline, observed)
-    if difference.getbbox() is None:
+    width = max(baseline.width, observed.width)
+    height = max(baseline.height, observed.height)
+    difference = Image.new("RGB", (width, height), "black")
+    changed_pixels = 0
+    for y in range(height):
+        for x in range(width):
+            same_bounds = (
+                x < baseline.width
+                and y < baseline.height
+                and x < observed.width
+                and y < observed.height
+            )
+            if same_bounds and baseline.getpixel((x, y)) == observed.getpixel((x, y)):
+                continue
+            changed_pixels += 1
+            difference.putpixel((x, y), (255, 0, 0))
+    if changed_pixels == 0:
         return ScreenshotDiff(step_id, "PASS", False, 0, None, "pixels match")
-    changed_pixels = sum(1 for pixel in difference.get_flattened_data() if pixel != (0, 0, 0))
-    panel = Image.new("RGB", (baseline.width * 3, baseline.height))
+    panel = Image.new("RGB", (width * 3, height), (32, 32, 32))
     panel.paste(baseline, (0, 0))
-    panel.paste(observed, (baseline.width, 0))
-    panel.paste(difference, (baseline.width * 2, 0))
-    output_dir.mkdir(parents=True, exist_ok=True)
+    panel.paste(observed, (width, 0))
+    panel.paste(difference, (width * 2, 0))
+    _private_directory(output_dir)
     artifact = output_dir / f"{step_id}-diff.png"
     panel.save(artifact)
-    return ScreenshotDiff(step_id, "FAIL", True, changed_pixels, str(artifact), "pixels changed")
+    artifact.chmod(0o600)
+    detail = "pixels changed"
+    if baseline.size != observed.size:
+        detail += f"; dimensions baseline={baseline.size}, current={observed.size}"
+    return ScreenshotDiff(step_id, "FAIL", True, changed_pixels, str(artifact), detail)
