@@ -190,7 +190,9 @@ async def _reply_target_lines(
     """The ``<reply_targets>`` block for replies whose target the context does not show.
 
     A target already rendered in the history, delta or channel context, or part of
-    the query itself, needs only the ``reply_to`` id and is skipped here. Never
+    the query itself, needs only the ``reply_to`` id and is skipped here, except in
+    a merged query, where an id-only entry (``shown`` or ``unavailable``) still
+    ties each reply to its target. Never
     raises: a reply target is a convenience, not a reason to fail a turn.
     """
     query_ids = {m.id for m in query_messages}
@@ -199,10 +201,7 @@ async def _reply_target_lines(
     for replying in query_messages:
         try:
             target_id = _reply_target_id(replying)
-            if target_id is None or target_id in rendered_ids or target_id in query_ids:
-                continue
-            target = await _resolve_reply_target(home, replying)
-            if target is None:
+            if target_id is None:
                 continue
             origin = f" reply_from={quoteattr(str(replying.id))}"
             if composite:
@@ -213,6 +212,19 @@ async def _reply_target_lines(
                     f" reply_from_author={quoteattr(replying.author.display_name)}"
                     f" reply_from_excerpt={quoteattr(excerpt)}"
                 )
+            # A merged query has no single `reply_to`, so every reply in it keeps
+            # an entry naming its target, even when the target is shown elsewhere.
+            if target_id in rendered_ids or target_id in query_ids:
+                if composite:
+                    body.append(f'<message id={quoteattr(str(target_id))} shown="true"{origin}/>')
+                continue
+            target = await _resolve_reply_target(home, replying)
+            if target is None:
+                if composite:
+                    body.append(
+                        f'<message id={quoteattr(str(target_id))} unavailable="true"{origin}/>'
+                    )
+                continue
             if isinstance(target, discord.DeletedReferencedMessage):
                 body.append(f'<message id={quoteattr(str(target_id))} deleted="true"{origin}/>')
                 continue
@@ -270,12 +282,11 @@ def _render_message(
         + (f" reply_to={quoteattr(str(reply_to))}" if reply_to is not None else "")
     )
     text = _strip_bot_mention(msg.content, bot_user_id, bot_display_name=bot_display_name)
-    if max_content_chars is not None:
-        if not text.strip():
-            text = _embed_text(msg)
-        if len(text) > max_content_chars:
-            text = text[:max_content_chars] + _TRUNCATION_MARK
-            attrs += ' truncated="true"'
+    if not text.strip():
+        text = _embed_text(msg)
+    if max_content_chars is not None and len(text) > max_content_chars:
+        text = text[:max_content_chars] + _TRUNCATION_MARK
+        attrs += ' truncated="true"'
     attrs += extra_attrs
     content = escape(text)
 

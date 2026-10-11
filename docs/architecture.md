@@ -1115,9 +1115,10 @@ its `id`, plus `reply_to` when it is a reply, and the `<user_query>` carries
 `reply_to` when its single trigger is one. When the target is not among the
 replayed messages (before the delta's watermark, a delivered answer chunk the
 delta leaves out, or an older channel post), an untrusted `reply_targets` block
-holds it, cut at 2,000 characters, with the embed's title and description when
-the message has no text. A merged queued query lists one entry per reply, each
-with the replying message's id, author and a short excerpt. A deleted target is
+holds it, cut at 2,000 characters. A merged queued query lists one entry per reply, each
+with the replying message's id, author and a short excerpt; a target shown
+elsewhere or unavailable gets an id-only entry (`shown` or `unavailable`).
+A message with no text shows its embed's title and description. A deleted target is
 marked `deleted="true"`, and an unavailable one leaves only the id. The turn's
 own status card, posted before the context is built, is kept out of the history.
 

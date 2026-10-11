@@ -1732,7 +1732,11 @@ class TestReplyTargets:
         assert [(t.attrib["id"], t.attrib["reply_from"]) for t in targets] == [
             ("5", "31"),
             ("6", "32"),
-        ], "a reply to a sibling query message is id-only"
+            ("31", "33"),
+        ]
+        assert targets[2].attrib["shown"] == "true", "a reply to a sibling query message is id-only"
+        assert not (targets[2].text or "")
+        assert targets[2].attrib["reply_from_excerpt"] == "third, to the first"
         assert targets[0].attrib["reply_from_excerpt"] == "first reply"
         assert targets[1].attrib["reply_from_author"] == "Alice"
         query = _user_query(result)
@@ -1770,6 +1774,54 @@ class TestReplyTargets:
         (target,) = list(_root(result, "reply_targets"))
         assert "Revenue answer" in (target.text or "")
         assert "Q3 was 4.2M" in (target.text or "")
+
+    @pytest.mark.asyncio
+    async def test_composite_reply_to_a_shown_or_missing_target_keeps_its_entry(self) -> None:
+        shown = _make_message(msg_id=20, content="in the delta")
+        first = _make_message(msg_id=31, content="first reply", reply_to=shown)
+        gone = _make_message(msg_id=6, content="never fetched")
+        second = _make_message(msg_id=32, content="second reply", reply_to=gone)
+        assert second.reference is not None
+        second.reference.resolved = None
+        thread = _make_thread([shown, first, second])
+        thread.fetch_message = AsyncMock(
+            side_effect=discord.NotFound(MagicMock(status=404), "unknown message")
+        )
+
+        result, _ = await build_delta_xml(
+            thread,
+            second,
+            after_message_id=10,
+            query_text="first reply\n\nsecond reply",
+            query_message_ids=(31, 32),
+            query_messages=(first, second),
+        )
+
+        targets = list(_root(result, "reply_targets"))
+        assert [(t.attrib["id"], t.attrib["reply_from"]) for t in targets] == [
+            ("20", "31"),
+            ("6", "32"),
+        ]
+        assert targets[0].attrib["shown"] == "true"
+        assert targets[1].attrib["unavailable"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_an_embed_only_message_in_history_renders_its_text(self) -> None:
+        card = _make_message(
+            msg_id=12,
+            content="",
+            is_bot=True,
+            embeds=[discord.Embed(title="Done.", description="3 files written")],
+        )
+        trigger = _make_message(msg_id=30, content="what did you write?", reply_to=card)
+        thread = _make_thread([card, trigger])
+
+        result, _ = await build_delta_xml(thread, trigger, after_message_id=10)
+
+        (shown,) = list(_root(result, "thread_delta"))
+        assert shown.attrib["id"] == "12"
+        assert "3 files written" in (shown.text or "")
+        assert "<reply_targets" not in result
 
     @pytest.mark.asyncio
     async def test_a_long_target_is_cut_and_marked(self) -> None:
