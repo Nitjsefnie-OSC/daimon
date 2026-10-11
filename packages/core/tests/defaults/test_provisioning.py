@@ -972,6 +972,49 @@ async def test_verify_tenant_defaults_in_sync_report_makes_zero_write_requests(
     assert outcome.changed == (), "in_sync classification must carry no changed resources"
 
 
+async def test_verify_reuses_one_skill_list_for_multiple_agent_skill_refs(
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Dry-run agent resolution reuses the complete list already used by skills."""
+    _write_seed_tree(tmp_path)
+    (tmp_path / "agents" / "daimon.yaml").write_text(
+        "name: daimon\nmodel: claude-sonnet-4-6\n"
+        "skills:\n"
+        "  - type: custom\n    skill_id: cli-auth\n"
+        "  - type: custom\n    skill_id: cli-auth\n"
+    )
+    result = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id="guild-verify-skill-snapshot"
+    )
+    router, _write_count = _build_stateful_router(tenant_id=result.tenant_id)
+    skill_list_calls = 0
+
+    def dispatch(request: httpx.Request) -> httpx.Response:
+        nonlocal skill_list_calls
+        if request.method == "GET" and request.url.path == "/v1/skills":
+            skill_list_calls += 1
+        return router.dispatch(request)
+
+    client = build_fake_anthropic_http(dispatch)
+    first = await reconcile_tenant_defaults(
+        client, db_session_factory, tmp_path, tenant_id=result.tenant_id
+    )
+    assert not first.is_failure(), "initial reconcile must create the resources"
+
+    skill_list_calls = 0
+    report = await verify_tenant_defaults(
+        client, db_session_factory, tmp_path, tenant_id=result.tenant_id
+    )
+
+    assert skill_list_calls == 1, (
+        "verify should list skills once per tenant and reuse that complete view for both refs; "
+        f"observed {skill_list_calls} lists"
+    )
+    outcome = classify_verification(report)
+    assert outcome.status == "in_sync", f"expected in_sync, got {outcome.status!r}"
+
+
 async def test_verify_tenant_defaults_classifies_missing_agent_as_diverged(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],

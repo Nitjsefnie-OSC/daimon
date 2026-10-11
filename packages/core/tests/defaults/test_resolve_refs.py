@@ -16,15 +16,17 @@ _TENANT_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 _TENANT_B = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000002")
 
 
-def _skill_item(*, id_: str, display_title: str) -> dict[str, object]:
+def _skill_item(
+    *, id_: str, display_title: str, source: str = "custom", created_at: str = _CREATED_AT
+) -> dict[str, object]:
     return SkillListResponse(
         id=id_,
-        type="custom",
+        type=source,
         display_title=display_title,
         latest_version="1",
-        created_at=_CREATED_AT,
+        created_at=created_at,
         updated_at=_CREATED_AT,
-        source="custom",
+        source=source,
     ).model_dump(mode="json")
 
 
@@ -149,3 +151,69 @@ async def test_resolve_refs_resolves_synced_shaped_bare_name_with_slash() -> Non
     assert result == [{"type": "custom", "skill_id": "skill_synced"}], (
         "synced-shaped bare name with '/' must resolve via same prefix path as seeded skills"
     )
+
+
+async def test_resolve_refs_reuses_complete_snapshot_with_canonical_filtering() -> None:
+    """Snapshot matching keeps tenant/source filtering and newest duplicate selection."""
+    title = tenant_scoped_display_title(tenant_id=_TENANT_A, name="brainstorming")
+    view = [
+        SkillListResponse.model_validate(
+            _skill_item(id_="builtin", display_title=title, source="anthropic")
+        ),
+        SkillListResponse.model_validate(
+            _skill_item(
+                id_="foreign",
+                display_title=tenant_scoped_display_title(
+                    tenant_id=_TENANT_B, name="brainstorming"
+                ),
+            )
+        ),
+        SkillListResponse.model_validate(
+            _skill_item(id_="older", display_title=title, created_at="2026-04-20T00:00:00Z")
+        ),
+        SkillListResponse.model_validate(
+            _skill_item(id_="newer", display_title=title, created_at="2026-04-22T00:00:00Z")
+        ),
+    ]
+    list_calls = 0
+
+    def on_list(_req: object, _match: object) -> object:
+        nonlocal list_calls
+        list_calls += 1
+        return list_response([])
+
+    router = MARouter()
+    router.add("GET", r"/v1/skills", on_list)
+    client = build_fake_anthropic_http(router.dispatch)
+
+    result = await resolve_refs(
+        client,
+        refs=[SkillRef(type="custom", skill_id="brainstorming")],
+        tenant_id=_TENANT_A,
+        skills_view=view,
+    )
+
+    assert result == [{"type": "custom", "skill_id": "newer"}]
+    assert list_calls == 0
+
+
+async def test_resolve_refs_complete_empty_snapshot_does_not_fall_back_to_live_lookup() -> None:
+    """An empty complete snapshot is authoritative and avoids another list call."""
+    list_calls = 0
+
+    def on_list(_req: object, _match: object) -> object:
+        nonlocal list_calls
+        list_calls += 1
+        return list_response([])
+
+    router = MARouter()
+    router.add("GET", r"/v1/skills", on_list)
+    client = build_fake_anthropic_http(router.dispatch)
+    with pytest.raises(DefaultsError, match="not found"):
+        await resolve_refs(
+            client,
+            refs=[SkillRef(type="custom", skill_id="missing")],
+            tenant_id=_TENANT_A,
+            skills_view=[],
+        )
+    assert list_calls == 0
