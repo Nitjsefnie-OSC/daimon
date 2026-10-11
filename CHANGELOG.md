@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
 
+- Support explicit manual-probe cash hold floors and single settlement of disjoint Anthropic session pairs, preserving incomplete usage holds and exact decimal arithmetic.
 - Deliver neutral provider lifecycle records by their own event identity across reconnects, so media revisions sharing a compatibility display ID reach the optional tap once while native delivery stays unchanged.
 - Add explicit offline Discord, Slack and Teams callbacks that expose actual
   admission and session binding for backend-selection conformance.

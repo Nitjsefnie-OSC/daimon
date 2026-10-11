@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import Annotated, Final, Literal, TextIO
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 Money = Annotated[Decimal, Field(ge=0, max_digits=32, decimal_places=18)]
 Rate = Annotated[Decimal, Field(ge=0, max_digits=16, decimal_places=8)]
@@ -461,7 +461,7 @@ class BudgetConfig(ProbeModel):
 class ProbePlan(ProbeModel):
     provider: Identifier
     model: Identifier
-    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1)$")
+    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1|A7)$")
     limits: TokenLimits = TokenLimits(input_tokens=20_000, output_tokens=2_000)
     container_allowance: ContainerAllowance | None = None
 
@@ -640,7 +640,7 @@ class SpendReceipt(ProbeModel):
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     provider: Identifier
     model: Identifier
-    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1)$")
+    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1|A7)$")
     timestamp: datetime
     status: Literal[
         "reserved",
@@ -1105,9 +1105,67 @@ class BudgetGuard:
             temporary.unlink(missing_ok=True)
 
     def reserve(self, plan: ProbePlan, *, fixture_exists: bool = False) -> Reservation:
+        """Preserve the ordinary probe and adapter override admission signature."""
+        return self.reserve_with_hold(plan, fixture_exists=fixture_exists)
+
+    def reserve_with_hold(
+        self,
+        plan: ProbePlan,
+        *,
+        fixture_exists: bool = False,
+        minimum_hold_usd: Decimal = Decimal(0),
+        maximum_hold_usd: Decimal | None = None,
+        expected_config_sha256: str | None = None,
+        expected_ledger_id: str | None = None,
+    ) -> Reservation:
+        """Persist the larger of the priced bound and an explicit cash floor.
+
+        A floor neither grants live authorization nor changes token/runtime
+        limits. The runner verifies its signed envelope before calling this API
+        and reads credentials only after successful admission. Unknown spend
+        retains the full resulting reservation; complete actual releases it.
+        Optional pins and a ceiling bind admission to the runner's verified
+        installation and signed financial maximum, under the ledger lock.
+        """
+        try:
+            minimum_hold_usd = TypeAdapter[Decimal](Money).validate_python(
+                minimum_hold_usd, strict=True
+            )
+            if maximum_hold_usd is not None:
+                maximum_hold_usd = TypeAdapter[Decimal](Money).validate_python(
+                    maximum_hold_usd, strict=True
+                )
+                if minimum_hold_usd > maximum_hold_usd:
+                    raise BudgetRefused("reservation cash floor exceeds its ceiling")
+        except ValidationError:
+            raise BudgetRefused("invalid reservation cash floor") from None
+        if (
+            expected_config_sha256 is not None
+            and re.fullmatch(r"[a-f0-9]{64}", expected_config_sha256) is None
+        ) or (
+            expected_ledger_id is not None
+            and re.fullmatch(r"[a-f0-9]{32}", expected_ledger_id) is None
+        ):
+            raise BudgetRefused("invalid reservation installation pins")
         if any(sensitive_identifier(name) for name in (plan.provider, plan.model)):
             raise BudgetRefused("probe metadata must not contain credentials")
         with self._locked() as (file, lock, checkpoint, runs, config):
+            if (
+                expected_ledger_id is not None
+                and checkpoint.binding.ledger_id != expected_ledger_id
+            ):
+                raise BudgetRefused("reservation ledger pin changed")
+            if expected_config_sha256 is not None:
+                try:
+                    source = self.config_path.read_bytes()
+                    pinned_config = BudgetConfig.model_validate_json(source)
+                except (OSError, ValueError):
+                    raise BudgetRefused("reservation config pin changed") from None
+                if (
+                    hashlib.sha256(source).hexdigest() != expected_config_sha256
+                    or pinned_config != config
+                ):
+                    raise BudgetRefused("reservation config pin changed")
             budget = config.providers.get(plan.provider)
             allowed = plan.model in LIVE_MODEL_ALLOWLIST.get(plan.provider, frozenset())
             price = budget.models.get(plan.model) if budget is not None and allowed else None
@@ -1130,9 +1188,14 @@ class BudgetGuard:
                 ),
                 None,
             )
-            estimate = price.reserve(plan.limits) if price is not None else Decimal(0)
-            if allowance is not None and session_price is not None:
-                estimate += allowance.sessions * session_price.cost(allowance.seconds_per_session)
+            with localcontext() as context:
+                context.prec = 80
+                estimate = price.reserve(plan.limits) if price is not None else Decimal(0)
+                if allowance is not None and session_price is not None:
+                    estimate += allowance.sessions * session_price.cost(
+                        allowance.seconds_per_session
+                    )
+                estimate = max(estimate, minimum_hold_usd)
             receipt = SpendReceipt(
                 version=2,
                 price=price,
@@ -1166,6 +1229,8 @@ class BudgetGuard:
                 )
             ):
                 reason = "unconfigured"
+            elif maximum_hold_usd is not None and estimate > maximum_hold_usd:
+                reason = "budget"
             elif fixture_exists:
                 reason = "fixture_exists"
             else:
@@ -1343,7 +1408,11 @@ class BudgetGuard:
         Existing adapter overrides keep this signature. For an earlier admission
         overrun independent of the latest billable usage, use settle_with_overrun.
         """
-        return self._settle(reservation, status=status, limits=limits, usage=usage, actual=actual)
+        with localcontext() as context:
+            context.prec = 80
+            return self._settle(
+                reservation, status=status, limits=limits, usage=usage, actual=actual
+            )
 
     def settle_with_overrun(
         self,
@@ -1366,13 +1435,15 @@ class BudgetGuard:
         across both snapshots before summing. Even complete actual retains any
         residual floor above settled dollars. Native freshness checks belong to adapters.
         """
-        return self._settle(
-            reservation,
-            status=status,
-            limits=limits,
-            actual=actual,
-            overrun_evidence=overrun_evidence,
-        )
+        with localcontext() as context:
+            context.prec = 80
+            return self._settle(
+                reservation,
+                status=status,
+                limits=limits,
+                actual=actual,
+                overrun_evidence=overrun_evidence,
+            )
 
     @staticmethod
     def _covers_proof(actual: ActualSpend, proof: ActualSpend) -> bool:
