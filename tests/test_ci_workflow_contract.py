@@ -49,8 +49,15 @@ def test_ci_pytest_commands_collect_top_level_and_performance_tests() -> None:
 def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     jobs = _workflow("ci.yml")["jobs"]
     deploy = jobs["deploy-gcp"]
-    assert jobs["pytest-core"]["strategy"]["matrix"]["shard"] == [0, 1, 2]
+    assert jobs["pytest-core"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
     assert jobs["pytest-mcp"]["strategy"]["matrix"]["shard"] == [0, 1]
+    for job_name in ("pytest-core", "pytest-mcp"):
+        job = jobs[job_name]
+        shards = job["strategy"]["matrix"]["shard"]
+        command = next(
+            step["run"] for step in job["steps"] if "uv run pytest" in step.get("run", "")
+        )
+        assert f"--ci-shard-count={len(shards)}" in command
     assert set(deploy["needs"]) == {
         "lint",
         "pytest-core",
