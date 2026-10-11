@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ import httpx
 import pytest
 from daimon.testing.admin_bindings import AdminBindings, AdminReceipt
 from daimon.testing.catalog_admin import MCP_TOKEN_CALL, CatalogAdmin
+from daimon.testing.db import DatabasePreflight
 from daimon.testing.headless_bindings import (
     QA_TOKEN_MCP_URL,
     DbCheckInvalid,
@@ -42,27 +42,24 @@ ENV = {"env.qa_token_mcp_url": QA_TOKEN_MCP_URL}
 
 @pytest.fixture
 def db_session_factory(
+    db_preflight: DatabasePreflight,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> async_sessionmaker[AsyncSession]:
-    """The suite's factory, or a skip where the shared guard does not admit it.
+    """The suite's factory, after the shared preflight has admitted this database.
 
-    A plain local `daimon_test` outside CI is not an owned lane DB, so these
-    bindings would refuse it: skip there, as the guard's own tests do.
+    `db_preflight` resolves first: it skips the contributor's plain local
+    `daimon_test` and refuses every other unowned target before any engine.
     """
-    from daimon.testing.headless_bindings import owned_or_skip_plain_local
-
-    owned_or_skip_plain_local(db_session_factory)
+    del db_preflight
     return db_session_factory
 
 
 @pytest.fixture
 async def mcp_transport(
+    db_preflight: DatabasePreflight,
     tmp_path: Path,
-    db_session_factory: async_sessionmaker[AsyncSession],  # skips first where unowned
 ) -> AsyncIterator[httpx.AsyncBaseTransport]:
-    del db_session_factory
-    database_url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    assert database_url, "the parity lane provides an isolated test database"
+    database_url = db_preflight.url  # admitted by the shared preflight first
     qa = await build_host(database_url=database_url, port=0, root=tmp_path)
     try:
         async with serve(qa) as url:

@@ -12,15 +12,14 @@ is today's evidence for the cell, and a fix to the product flips it here.
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
 
 import httpx
 import pytest
 from daimon.core.mcp_token_check import is_token_rejected
+from daimon.testing.db import DatabasePreflight
 from daimon.testing.headless_bindings import (
     QA_TOKEN_MCP_URL,
     DbCheckInvalid,
@@ -75,27 +74,24 @@ class _Served:
 
 @pytest.fixture
 def db_session_factory(
+    db_preflight: DatabasePreflight,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> async_sessionmaker[AsyncSession]:
-    """The suite's factory, or a skip where the shared guard does not admit it.
+    """The suite's factory, after the shared preflight has admitted this database.
 
-    A plain local `daimon_test` outside CI is not an owned lane DB, so these
-    bindings would refuse it: skip there, as the guard's own tests do.
+    `db_preflight` resolves first: it skips the contributor's plain local
+    `daimon_test` and refuses every other unowned target before any engine.
     """
-    from daimon.testing.headless_bindings import owned_or_skip_plain_local
-
-    owned_or_skip_plain_local(db_session_factory)
+    del db_preflight
     return db_session_factory
 
 
 @pytest.fixture
 async def served(
+    db_preflight: DatabasePreflight,
     tmp_path: Path,
-    db_session_factory: async_sessionmaker[AsyncSession],  # skips first where unowned
 ) -> AsyncIterator[_Served]:
-    del db_session_factory
-    database_url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    assert database_url, "the parity lane provides an isolated test database"
+    database_url = db_preflight.url  # admitted by the shared preflight first
     qa = await build_host(database_url=database_url, port=0, root=tmp_path)
     try:
         async with serve(qa) as url:
@@ -343,79 +339,3 @@ def test_the_probe_transport_maps_to_loopback_only() -> None:
     for url in ("https://127.0.0.1:9/mcp", "http://10.0.0.1:9/mcp", "http://127.0.0.1/mcp"):
         with pytest.raises(BindingRefused):
             loopback_transport(url)
-
-
-# Only the contributor's plain local database skips; every other refusal fails.
-
-_PLAIN_LOCAL = "postgresql+asyncpg://offline:fixture@localhost/daimon_test"
-
-
-def _inert(url: str, binds: dict[type, object] | None = None) -> async_sessionmaker[AsyncSession]:
-    """A factory over an engine that is never connected to."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(url)
-    if binds is None:
-        return async_sessionmaker(engine)
-    return async_sessionmaker(engine, binds=cast(Any, binds))
-
-
-def _outcome(sessionmaker: async_sessionmaker[AsyncSession]) -> str:
-    """ "skip", "fail" or "admitted": a wrong skip must fail here, not hide as a skip."""
-    from daimon.testing.headless_bindings import owned_or_skip_plain_local
-
-    try:
-        owned_or_skip_plain_local(sessionmaker)
-    except pytest.skip.Exception:
-        return "skip"
-    except ValueError:
-        return "fail"
-    return "admitted"
-
-
-@pytest.mark.parametrize(
-    ("actions", "ci"), [(None, None), ("true", None), (None, "true"), ("true", "true")]
-)
-def test_only_a_plain_local_database_outside_exact_ci_skips(
-    actions: str | None, ci: str | None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-
-    for name, value in (("GITHUB_ACTIONS", actions), ("CI", ci)):
-        if value is None:
-            monkeypatch.delenv(name, raising=False)
-        else:
-            monkeypatch.setenv(name, value)
-    # In exact CI an unregistered shared schema is invalid provenance: it fails.
-    expected = "fail" if actions == ci == "true" else "skip"
-    assert _outcome(_inert(_PLAIN_LOCAL)) == expected
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "postgresql+asyncpg://offline:fixture@localhost/daimon_test?host=db.example.com",
-        "postgresql+asyncpg://offline:fixture@db.example.com/daimon_test",
-        "postgresql+asyncpg://offline:fixture@localhost/daimon",
-        "postgresql+asyncpg://offline:fixture@localhost/daimon_test_other",
-    ],
-)
-def test_a_url_override_remote_host_or_other_database_still_fails(
-    url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    monkeypatch.delenv("CI", raising=False)
-    assert _outcome(_inert(url)) == "fail"
-
-
-def test_a_foreign_routed_bind_on_a_plain_local_database_still_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from daimon.testing.headless_bindings import credential_request_route
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    monkeypatch.delenv("CI", raising=False)
-    remote = create_async_engine("postgresql+asyncpg://offline:fixture@db.example.com/daimon_test")
-    routed = _inert(_PLAIN_LOCAL, binds=credential_request_route(remote))
-    assert _outcome(routed) == "fail"

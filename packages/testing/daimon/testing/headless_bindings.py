@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import secrets
 import uuid
@@ -38,8 +37,6 @@ from pydantic import JsonValue
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
-    AsyncConnection,
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
 )
@@ -520,33 +517,3 @@ def credential_request_route(bind: object) -> dict[type, object]:
     from daimon.core._models import CredentialRequest
 
     return {CredentialRequest: bind}
-
-
-def owned_or_skip_plain_local(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
-    """Admit an owned test factory, or skip only the contributor's plain local database.
-
-    The shared guard refuses a plain local `daimon_test` outside CI, which is
-    the documented contributor setup, so a proof skips there. Everything else
-    the guard refuses still fails: invalid CI provenance (exact
-    GITHUB_ACTIONS == CI == "true"), any routed per-model bind, URL query
-    overrides, non-local hosts and other database names.
-    """
-    import pytest
-    from daimon.testing.db import require_owned_sessionmaker
-
-    try:
-        require_owned_sessionmaker(sessionmaker)
-    except ValueError:
-        bound = sessionmaker.kw.get("bind")
-        engine = bound.engine if isinstance(bound, AsyncConnection) else bound
-        if (
-            isinstance(engine, AsyncEngine)
-            and engine.url.get_backend_name() == "postgresql"
-            and engine.url.host in ("localhost", "127.0.0.1")
-            and engine.url.database == "daimon_test"
-            and not engine.url.query
-            and not sessionmaker.kw.get("binds")
-            and not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("CI") == "true")
-        ):
-            pytest.skip("needs an owned lane test DB or a registered isolated CI schema")
-        raise
