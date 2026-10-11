@@ -24,6 +24,31 @@ Discussion draft, 2026-10-11. This proposes an identity model; it does not autho
 
 **What does removing access do?** Proposed promise: stop new dispatch when removal takes effect. Already-dispatched work may finish; issued credentials may remain usable until confirmed revocation or expiry. Show that remaining access and its bound; unknown or unbounded access needs resolution before sharing. Removal preserves the workspace and cannot erase disclosed results.
 
+## How do people join, and which features need personal access?
+
+People need not be registered as a fixed participant list when a session starts. Proposed shared work follows an approved channel/thread access rule and checks the actual person when they interact. Someone arriving tomorrow continues the same shared files; someone stopping participation does not destroy them. A public Discord thread is visible to everyone who can view its parent channel, including people who have never posted. Thread subscription is not a confidentiality boundary. A change to channel access can expose history already there; approval must cover the people administrators are allowed to admit. [Discord thread permissions and membership](https://docs.discord.com/developers/topics/threads), checked 2026-10-11.
+
+For example, an agent approved for a project channel can use that project's repo and shared data connection. Alice starts an analysis; Bob joins later and asks for a chart change. In the proposed shared mode Bob uses the same workspace and approved agent access, without loading his own service accounts. This does not authorize broadening the channel beyond the resources' approved audience. The multiplayer proposal's private-thread-first restriction is still a proposed rollout limit, not a need for a fixed roster; ordinary public-channel threads must be evaluated against their full channel audience.
+
+Workspace sharing and credential ownership are independent. Existing agent-wide keys already serve separate per-caller sessions. "Team connection" means access intentionally shared through an agent; it need not be another account, team object or setup flow. Importing reviewed files transfers data, not another user's browser cookies, credentials or authority; copying is not continuous synchronization.
+
+The following are supported code paths, not a deployment usage inventory:
+
+| Existing workflow | Why a person's connection matters | Shared-work consequence |
+| --- | --- | --- |
+| Sign into an external MCP service | OAuth authorizes that person's service account; the grant is stored for that caller and agent. Other callers without a grant have the personal connector hidden unless an agent-wide credential also exists. | Shared work cannot inherit the starter's personal login. An agent service connection or separately authorized personal operation would be needed. |
+| Connect Slack for reads/search | Optional user access reaches channels the person can read even when the bot was not invited, and supports search. One-to-one DM results have a private-destination guard. | Simply switching to shared bot access would reduce this feature's reach. Person-sensitive reads need their own authority and output-audience handling. |
+| Link GitHub for extra repo permissions | The agent's baseline combines with the caller's GitHub permissions, up to the configured uplift ceiling. GitHub still receives an App token. | Fixed shared access deliberately excludes that extra permission. Personal-write workflows need an explicit replacement before retiring uplift. |
+| Legacy account-bound GitHub PAT | Ordinary non-App chat can retrieve the caller's older account credential through the CLI-token tool. | Preserve existing use during migration; do not copy the token into shared work. App mode refuses this CLI-token path. |
+
+Sources: [personal MCP sign-in](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/mcp_oauth/complete.py#L103), [per-caller connector filtering](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/mcp_personal_servers.py), [Slack read-client selection](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/adapters/mcp/daimon/adapters/mcp/tools/slack/_client.py#L79), [GitHub access formula](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/github_requester_access.py#L43), [CLI-token behavior](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/adapters/mcp/daimon/adapters/mcp/tools/cli_token.py#L40).
+
+Agent environment keys, agent MCP bearer connections and GitHub baseline access already fit the shared-agent pattern. The [Google broker](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/broker/providers/gcloud.py) uses the Google identity bound to the agent, not whichever person asks. These paths do not demonstrate demand for switching personal accounts on every message.
+
+Human permissions remain necessary even with agent credentials: who may edit setup, approve an action, stop a turn, read a channel or own a routine. Personal external credentials and those human authorization checks are different concerns. [Routines](../routines.md) remain separate runs with creator authorization and agent resources; App-mode routines use baseline GitHub access. Adding routines, wakes, agent handoff or personal Slack reads to a shared session needs explicit compatibility work. Shared files do not resolve those authority questions, and the current multiplayer proposal excludes some of those features from its first slice.
+
+No evidence here establishes how often these personal paths are used. The next product decision should use non-secret adoption metadata and concrete workflows before removing supported features. Personal-only-in-private remains a proposed policy change, not current behavior or an accepted requirement.
+
 ## What is isolated at each scope?
 
 Current source at `77ddd92f2`, for ordinary Discord/Slack chat. "Separate session" describes execution and sandbox files; it does not promise private results or private agent memory. The proposed shared mode would deliberately share a fresh session only after agreement.
@@ -107,3 +132,5 @@ Verdict: the core works, but the draft introduced too many roles and understated
 Multiplayer input received 2026-10-11 was incorporated into the one-page questions: separate account/requester/approver, enforcement across credential paths, permission to disclose retained results, browser state and tenant-key scope, and a bounded revocation promise separate from workspace deletion. Supporting concurrency and recovery details remain in shared-thread sections 5.1-5.5 and 9. This input accepts no product choice and authorizes no build.
 
 Issue intake received 2026-10-11: #790 and #788 are acceptance material for this model. Scope coverage and the outstanding reproduction are recorded above; issue closure/re-scoping is deferred until the model lands. No implementation mandate was added.
+
+Discussion receipt, 2026-10-11: ordinary threads have changing participants; avoid a fixed start-time roster and explain effects on existing features. The clarification above separates shared files from credential ownership and inventories source-supported personal workflows without claiming observed adoption. No product decision or build authorization was inferred.
