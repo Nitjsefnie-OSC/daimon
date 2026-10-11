@@ -113,6 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add explicit offline Discord Forbidden-path conformance observation with real ingress, serialized parent notices, configured backend readback and mutation-sensitive provider-turn write checks that retain default host naming.
 - Add explicitly injected Gemini conformance recovery and pinned inline-skill preparation hooks, with isolated actual-SDK offline crash/deployment proofs and honest shared-fixture PENDING boundaries.
 
+- Add an opt-in passive host admission observer and owned offline evidence hook for actual gate decisions, adapter refusal effects and independently counted native sends; incomplete capture remains pending without fabricated provider turns.
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.
 - Add an explicitly imported Discord C01 conformance probe over the existing per-thread mention queue and caller batching, with owner-controlled root barriers and raw platform evidence.

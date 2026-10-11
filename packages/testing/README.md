@@ -551,3 +551,73 @@ engine/session setup. Plain contributor databases skip before allocation;
 owned lane and registered isolated-CI schemas retain the real service/SDK
 readback paths. This composition adds no local ownership policy or fixture
 shortcut and leaves the signed resource operations unchanged.
+## Host admission evidence
+
+`daimon.testing.admission_evidence.admission_edge` observes one owned attempt.
+Pass the actual `TurnDeps`, authorized tenant `Scope`, backend label, platform,
+channel/thread/caller identity, capture ID and an `invoke(observer)` coroutine.
+Install that observer on core `admit(..., observer=observer)` inside the invocation
+and run the real adapter refusal handler. Core emits only the actual admitted
+decision or typed denial; its default observer is `None`. An ordinary observer
+exception preserves the host decision and produces an opt-in failure warning.
+
+Supply `effects()` with independently captured `AdmissionEffects` (actual
+`VisibleText`, `LogObservation`, reactions and coverage), a monotonic injectable
+clock, and an independently observed cumulative `native_send_count()` covering
+session creation and model input sends. Existing agent/environment metadata reads
+are distinct from native work. Unknown counts return `None`; missing counts,
+adapter coverage or a core decision remain typed PENDING. The hook checks every
+database bind before invoking anything, validates identity and capture windows,
+and records positive native-send deltas rather than hiding violated denials.
+
+Receipts contain no provider session/root or completed-turn evidence. Backend
+labels do not certify provider execution, live timing or a full catalog scenario.
+Capture a silent refusal as empty notices/reactions; never render a notice or
+manufacture a log from its reason. Discord's writers-none path is log-only, and
+its ingress prefilter may return before core admission. A metered first turn,
+ledger join and executable administrative setup require separate observations.
+This hook neither mutates budgets/credit nor binds the source executor itself.
+
+## Metered NEW15 admission join
+
+`daimon.testing.new15_bindings.New15Bindings` joins the original frozen channel
+budget scenario to an owned offline host. Supply `AdminBindings`, its exact
+`TurnDeps`, the actual member `Scope`, channel/thread/user identity, an explicit
+`ControlledTurnPricing`, a first-turn `DiscordSurfaceHarness` factory, and the
+second attempt's real adapter invocation, passive observer, platform effects
+and cumulative native-work counter. Its `run(source, evidence_id=...)` checks the
+pinned original source bytes and owned collaborators before mutation.
+
+The join calls real `admit`, public `bind_session`, and
+`ChannelAccounting.run_turn`; callers never construct an admission or prepared
+turn. Native runtimes, SDK clients and HTTP fixtures are explicitly supplied.
+Use the shared `isolated_sdk` builders and owned `MockTransport` boundaries.
+The original literal USD0.01 total budget is set before the first turn. The same
+real setter is repeated after the actual debit, before the second admission;
+no zero budget, direct ledger insertion or synthetic exhaustion is used.
+
+The first Discord lifecycle captures actual serialized posts. Its root metadata
+is joined only to a single completed record in the actual PostgreSQL native
+journal; absent or ambiguous terminals stay pending. The budget denial uses the
+unchanged real adapter refusal handler and `admission_edge`, including the
+source's twenty-second observation window. Its receipt has no native turn or
+session identity. Separate read-only accounting snapshots query the genuine
+channel debit and exceeded budget, then confirm budget cleanup without removing
+the debit. The `New15Run.outcome` property recalculates the pinned authored
+checks; a copied PASS or matching caller-supplied hash pair is never consulted.
+Foreign capture identities, mismatched roots, missing usage/coverage, extra
+native sends and silence cannot earn a pass.
+
+The included actual-SDK/Postgres proofs exercise Anthropic, OpenAI and Gemini.
+Their explicitly **mock** tariff is USD100 per million input/output tokens,
+markup one and zero offline native infrastructure; 100 input plus 50 output
+produces USD0.015 of test ledger debit. This is neither live price evidence nor
+provider spend. Gemini's driver record store is same-process only. Catalog-wide
+assertions, real Discord gateway timing and durable/restart certification remain
+separate evidence; the scoped authored outcome does not certify those domains.
+
+New DB proofs request the shared `db_preflight` before session setup. For a stale
+local editable installation, set `PYTEST_PLUGINS=daimon.testing.pytest_plugin`
+until its pytest entry point is refreshed; the environment setting also reaches
+the immutable golden runner's child processes. No production SDK builder or
+pytest runner source needs changing for this local installation detail.
