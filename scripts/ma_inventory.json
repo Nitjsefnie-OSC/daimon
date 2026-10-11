@@ -18510,7 +18510,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/headless_bindings.py",
-      "line": 36,
+      "line": 35,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -19488,7 +19488,7 @@
     },
     {
       "file": "tests/parity/test_qa_catalog_admin.py",
-      "line": 236,
+      "line": 233,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
