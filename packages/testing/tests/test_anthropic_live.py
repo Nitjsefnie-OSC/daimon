@@ -1264,3 +1264,467 @@ async def test_cross_session_native_id_collision_quarantines_provenance_and_keep
         assert set(context.transport.monitor.observations) == {
             (session, id_) for session in context.transport.session_ids
         }
+
+
+@pytest.mark.parametrize("package", ["A7", "F2-Anthropic"])
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "text/event-stream",
+        "Text/Event-Stream; charset=utf-8",
+        "TEXT/EVENT-STREAM",
+        None,
+        "application/octet-stream",
+    ],
+)
+async def test_stream_endpoint_is_monitored_regardless_of_native_content_type(
+    tmp_path, monkeypatch, package, content_type
+):
+    args, guard, _ = admission(tmp_path, monkeypatch, package)
+    native = Native()
+
+    async def wire(request):
+        if request.url.path.endswith("/events/stream"):
+            headers = {} if content_type is None else {"content-type": content_type}
+            return httpx.Response(
+                200,
+                headers=headers,
+                stream=FragmentedBytes(fragmented_usage("crlf", usage("header-proof", 2000000, 1))),
+            )
+        return await native.handle(request)
+
+    async def invoke(context):
+        session = await create(context)
+        stream = await context.driver.events.open_stream(SCOPE, session.ref)
+        async for _ in stream:
+            pytest.fail("over-budget SDK event escaped monitoring")
+        return {"status": "pass"}
+
+    result = await live.run_live(
+        args,
+        invoke,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(wire),
+    )
+    row = guard.report()[0]
+    assert row.actual_usd is None and row.held_usd >= Decimal("1") and row.admission_blocked
+    assert result["result"]["status"] != "pass" and len(receipts(guard)) == 2
+
+
+@pytest.mark.parametrize("case", ["open_stream_not_consumed", "late_stream_response"])
+async def test_settlement_closes_open_or_inflight_sdk_response_and_refuses_late_delivery(
+    tmp_path, monkeypatch, case
+):
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    args = replace(args, deadline_s=1)
+    release, opened, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    native, sources, contexts = Native(), [], []
+
+    class Source(FragmentedBytes):
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    async def wait_resisting_cancel():
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                continue
+
+    async def wire(request):
+        if request.url.path.endswith("/events/stream"):
+            if case == "late_stream_response":
+                opened.set()
+                await wait_resisting_cancel()
+            source = Source(fragmented_usage("lf", usage("late-sdk-response", 1000000, 1)))
+            sources.append(source)
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=source)
+        return await native.handle(request)
+
+    async def invoke(context):
+        contexts.append(context)
+        try:
+            session = await create(context)
+            stream = await context.driver.events.open_stream(SCOPE, session.ref)
+            if case == "open_stream_not_consumed":
+                opened.set()
+                await wait_resisting_cancel()
+            with suppress(live.LiveStopped, ProviderError):
+                async for _ in stream:
+                    pytest.fail("post-settlement event escaped")
+        except (live.LiveStopped, ProviderError):
+            pass
+        finally:
+            finished.set()
+        return {"status": "fail"}
+
+    runner = asyncio.create_task(
+        live.run_live(
+            args,
+            invoke,
+            secret_loader=lambda _: "offline-key",
+            transport_factory=lambda: httpx.MockTransport(wire),
+        )
+    )
+    try:
+        await asyncio.wait_for(opened.wait(), 3)
+        await asyncio.wait_for(runner, 3)
+        context = contexts[0]
+        assert context.transport.closed and context.transport.monitor.settled
+        assert all(source.closed for source in sources)
+        release.set()
+        await asyncio.wait_for(finished.wait(), 3)
+        assert all(source.closed for source in sources)
+        assert not context.transport.monitor.observations
+        assert not list(
+            args.ledger_path.parent.glob(live.late_usage_prefix(args.ledger_path) + "*.json")
+        )
+        assert len(receipts(guard)) == 2 and guard.report()[0].held_usd == Decimal(".35")
+        assert all(response.is_closed for response in context.transport.responses)
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("package", ["A7", "F2-Anthropic"])
+@pytest.mark.parametrize("arrival", ["after_settlement", "during_cleanup"])
+async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_entry_points(
+    tmp_path, monkeypatch, arrival, package
+):
+    from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
+    from daimon.testing.ma import sse_response
+    from daimon.testing.ma_models import ma_model_usage
+
+    args, guard, _ = admission(tmp_path, monkeypatch, package)
+    late_input = 1000000 if package == "A7" else 2000000
+    first, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    contexts, native, late_errors = [], Native(), []
+
+    def sdk_usage(id_, incoming):
+        return BetaManagedAgentsSpanModelRequestEndEvent(
+            id=id_,
+            type="span.model_request_end",
+            model_request_start_id="start-" + id_,
+            model_usage=ma_model_usage(input_tokens=incoming, output_tokens=1),
+            processed_at=datetime.now(UTC),
+        ).model_dump(mode="json")
+
+    class Source(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield sse_response([sdk_usage("first", 10)]).content
+            first.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+            yield sse_response([sdk_usage("late", late_input)]).content
+
+        async def aclose(self):
+            self.closed = True
+
+    source = Source()
+
+    async def wire(request):
+        if request.url.path.endswith("/events/stream"):
+            return httpx.Response(200, stream=source)
+        if request.url.path.endswith("/events") and arrival == "during_cleanup":
+            release.set()
+            await finished.wait()
+        return await native.handle(request)
+
+    async def invoke(context):
+        contexts.append(context)
+        sink = context.transport.monitor.on_late_usage
+
+        def capture(raw, session_id):
+            try:
+                sink(raw, session_id)
+            except BaseException as error:
+                late_errors.append(error)
+                raise
+
+        context.transport.monitor.on_late_usage = capture
+        try:
+            session = await create(context)
+            stream = await context.driver.events.open_stream(SCOPE, session.ref)
+            async for _ in stream:
+                pass
+        finally:
+            finished.set()
+        return {"status": "pass"}
+
+    runner = asyncio.create_task(
+        live.run_live(
+            args,
+            invoke,
+            secret_loader=lambda _: "offline-key",
+            transport_factory=lambda: httpx.MockTransport(wire),
+        )
+    )
+    try:
+        await asyncio.wait_for(first.wait(), 3)
+        runner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await runner
+        assert source.closed
+        if arrival == "during_cleanup":
+            assert finished.is_set() and not late_errors
+            assert (
+                guard.report()[0].held_usd >= (Decimal(".50") if package == "A7" else Decimal("1"))
+                and guard.report()[0].admission_blocked
+            )
+            assert len(receipts(guard)) == 2
+            assert not list(
+                args.ledger_path.parent.glob(live.late_usage_prefix(args.ledger_path) + "*.json")
+            )
+            assert set(contexts[0].transport.monitor.observations) == {
+                ("sess-1", "first"),
+                ("sess-1", "late"),
+            }
+            return
+        assert not finished.is_set()
+        assert len(receipts(guard)) == 2 and args.output.joinpath("receipt.json").exists()
+        release.set()
+        await asyncio.wait_for(finished.wait(), 3)
+        assert not late_errors
+        sidecars = list(
+            args.ledger_path.parent.glob(live.late_usage_prefix(args.ledger_path) + "*.json")
+        )
+        assert len(sidecars) == 1 and sidecars[0].stat().st_mode & 0o777 == 0o600
+        late = json.loads(sidecars[0].read_text())
+        assert (
+            late["admission_blocked"] and late["reconciliation_required"] and late["hold_retained"]
+        )
+        assert Decimal(late["retained_hold_usd"]) == args.hold
+        assert late["served_model_verified"] and late["proof"]["session"]["id"] == "sess-1"
+        assert late["proof"]["id"] == "late" and late["proof"]["input_tokens"] == late_input
+        assert Decimal(late["verified_monetary_hold_floor_usd"]) >= (
+            Decimal(".50") if package == "A7" else Decimal("1")
+        )
+        assert late["actual_usd"] is None and late["runtime"] is None
+        assert len(receipts(guard)) == 2  # Sidecar is a latch, never a second settlement.
+        assert set(contexts[0].transport.monitor.observations) == {("sess-1", "first")}
+        calls_before = list(native.requests)
+        for package in ("A7", "F2-Anthropic"):
+            blocked = replace(
+                args, package=package, approval_digest="c" * 64, output=tmp_path / package
+            )
+            with pytest.raises(live.LiveRefused, match="unreconciled late usage"):
+                await live.run_live(
+                    blocked,
+                    invoke,
+                    secret_loader=Mock(side_effect=AssertionError("key read")),
+                    transport_factory=Mock(side_effect=AssertionError("client constructed")),
+                )
+            with pytest.raises(live.LiveRefused, match="unreconciled late usage"):
+                live.admit(
+                    package=package,
+                    approval_path=tmp_path / "absent",
+                    go_path=tmp_path / "absent",
+                    go_digest="d" * 64,
+                    config_path=args.config_path,
+                    ledger_path=args.ledger_path,
+                    binding_path=tmp_path / "absent",
+                    output=tmp_path / package,
+                    source_head=args.source_head,
+                    source_clean=True,
+                )
+        assert native.requests == calls_before and len(receipts(guard)) == 2
+    finally:
+        release.set()
+
+
+async def test_unknown_cache_ttl_original_keeps_the_pinned_guard_monetary_floor(
+    tmp_path, monkeypatch
+):
+    from mux.conformance.usage_settlement import AnthropicSessionSpend
+    from mux.drivers.anthropic.usage import observation_from_event
+
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    native = Native()
+
+    async def invoke(context):
+        prior = await create(context)
+        await context.driver.session_admin.archive(SCOPE, prior.ref, key="prior-archive")
+        session = await create(context)
+        partial = usage("x", 0, 0)
+        partial["model_usage"]["cache_creation_input_tokens"] = 800000
+        del partial["model_usage"]["cache_creation"]
+        cached = usage("x", 0, 0)
+        cached["model_usage"]["cache_read_input_tokens"] = 1000000
+        output = usage("x", 0, 1200000)
+        for ref_, records in ((prior.ref, (partial,)), (session.ref, (cached, output))):
+            context.evidence.append(
+                AnthropicSessionSpend(
+                    ref_,
+                    tuple(
+                        observation_from_event(
+                            raw, ref_, observed_at=datetime.now(UTC), model_id=live.MODEL
+                        )
+                        for raw in records
+                    ),
+                    None,
+                )
+            )
+        return {"status": "fail"}
+
+    await live.run_live(
+        args,
+        invoke,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(native.handle),
+    )
+    row = guard.report()[0]
+    assert row.actual_usd is None and row.held_usd == Decimal(".80") and row.admission_blocked
+    assert len(receipts(guard)) == 2
+    assert row.actual_evidence.requests[0].tokens.input_cache_write_tokens == 800000
+    assert row.actual_evidence.requests[0].tokens.input_cache_write_1h_tokens is None
+    assert row.overrun_evidence.requests[0].tokens.input_tokens == 1000000
+
+
+@pytest.mark.parametrize("cancels", [1, 2, 3])
+@pytest.mark.parametrize(
+    "point",
+    ["main", "bookkeeping", "interrupt", "archive", "retire", "stream-close", "client-close"],
+)
+async def test_repeated_cancellation_at_every_finalizer_await_preserves_cleanup_and_settlement(
+    tmp_path, monkeypatch, cancels, point
+):
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+    native, contexts = Native(), []
+    runner = None
+
+    class Source(FragmentedBytes):
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+            if point == "stream-close":
+                entered.set()
+                await release.wait()
+
+    source = Source(fragmented_usage("lf", usage("unused", 10, 1)))
+
+    async def wire(request):
+        if request.url.path.endswith("/events/stream"):
+            return httpx.Response(200, stream=source)
+        if request.url.path.endswith("/events") and point in {"interrupt", "main", "bookkeeping"}:
+            if point == "interrupt":
+                entered.set()
+            await release.wait()
+        if request.url.path.endswith("/archive") and point == "archive":
+            entered.set()
+            await release.wait()
+        return await native.handle(request)
+
+    class Wire(httpx.MockTransport):
+        async def aclose(self):
+            if point == "client-close":
+                entered.set()
+                await release.wait()
+            await super().aclose()
+
+    async def invoke(context):
+        contexts.append(context)
+        await create(context)
+        if point == "main":
+            entered.set()
+            await release.wait()
+        if point == "bookkeeping":
+
+            def recancel(watcher):
+                runner.cancel()
+                entered.set()
+
+            watchers = [
+                watcher
+                for watcher in asyncio.all_tasks()
+                if getattr(watcher.get_coro(), "cr_frame", None) is not None
+                and watcher.get_coro().cr_frame.f_locals.get("self")
+                is context.transport.monitor.stop
+            ]
+            assert len(watchers) == 1
+            watchers[0].add_done_callback(recancel)
+        if point == "retire":
+
+            async def retire():
+                entered.set()
+                await release.wait()
+
+            context.retire = retire
+        if point == "stream-close":
+            await context.driver.events.open_stream(SCOPE, context.ref("sess-1", "session"))
+        return {"status": "pass"}
+
+    runner = asyncio.create_task(
+        live.run_live(
+            args,
+            invoke,
+            secret_loader=lambda _: "offline-key",
+            transport_factory=lambda: Wire(wire),
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        for _ in range(cancels - (1 if point == "bookkeeping" else 0)):
+            runner.cancel()
+            await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(runner, 3)
+        context = contexts[0]
+        assert context.transport.closed and context.transport.monitor.settled
+        assert context.client.is_closed() and context.transport.archived == {"sess-1"}
+        assert ("POST", "/v1/sessions/sess-1/events") in native.requests
+        assert ("POST", "/v1/sessions/sess-1/archive") in native.requests
+        assert len(receipts(guard)) == 2 and guard.report()[0].actual_usd is None
+        assert args.output.joinpath("receipt.json").exists()
+        if point == "stream-close":
+            assert source.closed
+    finally:
+        release.set()
+
+
+async def test_native_create_ack_body_is_not_read_twice_before_sdk_consumption(
+    tmp_path, monkeypatch
+):
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    native = Native()
+    bodies = []
+
+    class Once(httpx.AsyncByteStream):
+        def __init__(self, content):
+            self.content, self.reads = content, 0
+
+        async def __aiter__(self):
+            self.reads += 1
+            if self.reads > 1:
+                raise RuntimeError("native response body cannot be replayed")
+            yield self.content
+
+    async def wire(request):
+        response = await native.handle(request)
+        if request.url.path == "/v1/sessions":
+            source = Once(response.content)
+            bodies.append(source)
+            return httpx.Response(200, headers={"content-type": "application/json"}, stream=source)
+        return response
+
+    async def invoke(context):
+        session = await create(context)
+        assert session.ref.id == "sess-1"
+        return {"status": "pass"}
+
+    result = await live.run_live(
+        args,
+        invoke,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(wire),
+    )
+    assert result["result"]["status"] == "pass"
+    assert bodies[0].reads == 1 and len(receipts(guard)) == 2

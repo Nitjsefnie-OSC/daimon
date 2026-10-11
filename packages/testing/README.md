@@ -399,3 +399,20 @@ provenances for reconciliation. Financial proof projections keep one original
 maximum-cost witness per collided native ID and independent maximum-token witnesses;
 they cannot count a collision twice, fabricate a native ID, or erase a verified
 floor or overrun latch. Actual usage and runtime remain incomplete and held.
+
+The live probe transport monitors every native stream endpoint through the SDK
+decoder regardless of Content-Type and fences every response after settlement.
+Opened streams are force-closed; delayed responses are closed and refused.
+An adversarial already-pending iterator that supplies usage after settlement
+creates a private 0600 `.n4-late-usage-*` sidecar beside the ledger. It preserves
+accepted session/request/model proof, the pinned conservative monetary floor,
+and the retained unknown hold, with admission-blocked and reconciliation flags.
+Both `admit` and `run_live` refuse A7 or F2 while any such ledger sidecar exists,
+before an attempt, reservation, credential read or client construction. N8 must
+reconcile and archive that evidence outside its blocking namespace before F2 GO;
+a caller boolean cannot clear it. There is no second settlement or ledger edit.
+Cleanup bookkeeping, interrupt/archive, retirement, SDK close and the single
+settlement are protected by a shielded finalizer within the original deadline.
+Repeated caller cancellations are absorbed until that finalizer finishes, then
+cancellation is re-raised. Financial witness ranking uses the exact pinned N8
+monetary bound; missing cache TTL never removes its conservative retained hold.

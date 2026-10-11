@@ -184,6 +184,17 @@ class Admission:
         )
 
 
+def late_usage_prefix(ledger: Path) -> str:
+    return ".n4-late-usage-" + hashlib.sha256(str(ledger.resolve()).encode()).hexdigest() + "-"
+
+
+def refuse_late_usage(ledger: Path) -> None:
+    # Never trust a caller-edited boolean to clear a money-safety latch. N8 moves
+    # reconciled evidence out of this namespace after the signed reconciliation.
+    if any(ledger.parent.glob(late_usage_prefix(ledger) + "*.json")):
+        raise LiveRefused("unreconciled late usage blocks this ledger for A7 and F2")
+
+
 def admit(
     *,
     package: Package,
@@ -200,6 +211,7 @@ def admit(
 ) -> Admission:
     """A separately lead-pinned GO binds exact approval/install/source/recipe bytes."""
     refuse_ambient()
+    refuse_late_usage(ledger_path)
     go = json.loads(go_path.read_text())
     document = json.loads(approval_path.read_text())
     approval = document.get("approval", document)
@@ -314,6 +326,8 @@ class UsageMonitor:
     quarantined_ids: set[str] = field(default_factory=set[str])
     verified_models: dict[str, str] = field(default_factory=dict[str, str])
     threads: dict[str, str] = field(default_factory=dict[str, str])
+    settled: bool = False
+    on_late_usage: Callable[[Mapping[str, JsonValue], str], None] | None = None
 
     def threshold_receipts(self) -> list[dict[str, JsonValue]]:
         facts: list[dict[str, JsonValue]] = []
@@ -359,6 +373,10 @@ class UsageMonitor:
         raise LiveStopped(reason)
 
     def observe(self, raw: Mapping[str, JsonValue], session_id: str = "monitor") -> None:
+        if self.settled:
+            if raw.get("type") == "span.model_request_end" and self.on_late_usage is not None:
+                self.on_late_usage(raw, session_id)
+            self.halt("post-settlement native usage quarantined for reconciliation")
         with localcontext() as context:
             context.prec = 80
             try:
@@ -438,6 +456,7 @@ class MonitoredStream(httpx.AsyncByteStream):
         self.stream, self.monitor, self.session_id = stream, monitor, session_id
         self.headers = headers
         self.pending_bytes = 0
+        self.closed = False
 
     async def bounded_source(self, decoded: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
         async for chunk in decoded:
@@ -447,6 +466,8 @@ class MonitoredStream(httpx.AsyncByteStream):
             yield chunk
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self.closed:
+            raise LiveStopped("native stream sealed before iteration")
         # Public SDK edge uses its own incremental decoder and HTTP content decoding.
         upstream = httpx.Response(200, headers=self.headers, stream=self.stream)
         source = httpx.Response(
@@ -463,10 +484,31 @@ class MonitoredStream(httpx.AsyncByteStream):
                     if "type" not in event:
                         event["type"] = frame.event  # Same type injection as the SDK stream.
                     self.monitor.observe(cast(dict[str, JsonValue], event), self.session_id)
+            if self.closed:
+                raise LiveStopped("native stream sealed while response was in flight")
             # Forward one decoded frame, never a chunk containing later unchecked events.
             yield ("\n".join(frame.raw) + "\n\n").encode()
 
     async def aclose(self) -> None:
+        self.closed = True
+        await self.stream.aclose()
+
+
+class ResponseFence(httpx.AsyncByteStream):
+    def __init__(self, stream: httpx.AsyncByteStream, transport: LiveTransport) -> None:
+        self.stream, self.transport = stream, transport
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self.closed or self.transport.closed:
+            raise LiveStopped("native response sealed before iteration")
+        async for chunk in self.stream:
+            if self.closed or self.transport.closed:
+                raise LiveStopped("native response sealed while body was in flight")
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
         await self.stream.aclose()
 
 
@@ -504,6 +546,8 @@ class LiveTransport(httpx.AsyncBaseTransport):
         self.orphans: set[tuple[str, str]] = set()
         self.pending_creates = 0
         self.on_orphan: Callable[[str, str], Awaitable[None]] | None = None
+        self.responses: set[httpx.Response] = set()
+        self.pending_responses: set[asyncio.Task[object]] = set()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if self.closed:
@@ -553,13 +597,25 @@ class LiveTransport(httpx.AsyncBaseTransport):
         }
         if creating:
             self.pending_creates += 1
-        response = await self.upstream.handle_async_request(request)
+        pending = asyncio.current_task()
+        if pending is not None:
+            self.pending_responses.add(pending)
+        try:
+            response = await self.upstream.handle_async_request(request)
+        finally:
+            if pending is not None:
+                self.pending_responses.discard(pending)
+        if self.closed and not creating:
+            await response.aclose()
+            raise LiveStopped("late native response refused after settlement fence")
+        if not self.closed:
+            self.responses.add(response)  # Includes an in-flight native create body.
         if creating and not response.is_success:
             self.pending_creates -= 1
         if response.is_success and path.endswith("/archive"):
             self.archived.add(path.split("/")[-2])
-        if "text/event-stream" in response.headers.get("content-type", ""):
-            return httpx.Response(
+        if path.endswith("/events/stream"):
+            wrapped = httpx.Response(
                 response.status_code,
                 headers={
                     k: v
@@ -574,6 +630,9 @@ class LiveTransport(httpx.AsyncBaseTransport):
                 ),
                 extensions=response.extensions,
             )
+            self.responses.discard(response)
+            self.responses.add(wrapped)
+            return wrapped
         if (
             response.is_success
             and request.method == "POST"
@@ -607,11 +666,36 @@ class LiveTransport(httpx.AsyncBaseTransport):
                     model = model.get("id")
                 if model == MODEL:
                     self.monitor.verified_models[id_] = MODEL
-        return response
+        if self.closed:
+            await response.aclose()
+            raise LiveStopped("late native response refused after body fence")
+        if response.is_stream_consumed:
+            return response  # Preserve the ACK's cached body; native streams are one-shot.
+        wrapped = httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            stream=ResponseFence(cast(httpx.AsyncByteStream, response.stream), self),
+            extensions=response.extensions,
+        )
+        self.responses.discard(response)
+        self.responses.add(wrapped)
+        return wrapped
+
+    def seal(self) -> None:
+        self.closed = True
+        for pending in self.pending_responses:
+            pending.cancel()
+        for response in self.responses:
+            stream = response.stream
+            if isinstance(stream, (MonitoredStream, ResponseFence)):
+                stream.closed = True
 
     async def aclose(self) -> None:
-        self.closed = True
-        await self.upstream.aclose()
+        self.seal()
+        try:
+            await asyncio.gather(*(response.aclose() for response in self.responses))
+        finally:
+            await self.upstream.aclose()
 
 
 @dataclass
@@ -741,14 +825,23 @@ def selected_usage(
     )
 
 
+def monetary_bound(context: LiveContext, obs: UsageObservation) -> Decimal:
+    singleton = actual_from_anthropic_sessions(
+        context.reservation,
+        (AnthropicSessionSpend(obs.session, (obs,), None),),
+        pricing_basis="standard-global",
+    )
+    with localcontext() as precision:
+        precision.prec = 80
+        # Exact pure N8 bound, explicitly owner-granted for this proof selector.
+        return BudgetGuard._union_floor(  # pyright: ignore[reportPrivateUsage]
+            context.reservation.receipt, singleton, None
+        )
+
+
 def merged_usage(context: LiveContext) -> tuple[AnthropicSessionSpend, ...]:
     """Maximum dated verified floor per request; conflicts never imply complete actual."""
-    return selected_usage(
-        context,
-        lambda obs: context.transport.monitor.price.minimum_charge(
-            usage_tokens(obs), obs.observed_at
-        ),
-    )
+    return selected_usage(context, lambda obs: monetary_bound(context, obs))
 
 
 def limit_overrun_proof(context: LiveContext) -> ActualSpend | None:
@@ -788,6 +881,7 @@ async def run_live(
 ) -> Mapping[str, object]:
     """Exactly one admission/settlement, cleanup bounded inside the whole-run deadline."""
     refuse_ambient()
+    refuse_late_usage(admission.ledger_path)
     marker = admission.ledger_path.parent / (".n4-live-attempt-" + admission.approval_digest)
     try:
         fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -933,6 +1027,69 @@ async def run_live(
                 persist()
 
         transport.on_orphan = orphan_cleanup
+
+        def late_usage(raw: Mapping[str, JsonValue], session_id: str) -> None:
+            observed_at = datetime.now(UTC)
+            identity = hashlib.sha256(
+                (session_id + ":" + str(raw.get("id")) + ":" + observed_at.isoformat()).encode()
+            ).hexdigest()
+            path = admission.ledger_path.parent / (
+                late_usage_prefix(admission.ledger_path) + identity + ".json"
+            )
+            facts: dict[str, object] = {
+                "admission_blocked": True,
+                "reconciliation_required": True,
+                "hold_retained": True,
+                "retained_hold_usd": str(
+                    receipt.held_usd if receipt is not None else admission.hold
+                ),
+                "ledger_id": LEDGER_ID,
+                "run_id": reservation.receipt.run_id,
+                "config_sha256": HOST_CONFIG_SHA256,
+                "model": MODEL,
+                "observed_at": observed_at.isoformat(),
+                "actual_usd": None,
+                "usage_complete": False,
+                "runtime": None,
+            }
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                # Latch first: malformed or secret-bearing extra proof cannot remove it.
+                os.write(descriptor, (json.dumps(facts, indent=2) + "\n").encode())
+                os.fsync(descriptor)
+                verified = (
+                    session_id in transport.session_ids
+                    and monitor.verified_models.get(session_id) == MODEL
+                )
+                facts["served_model_verified"] = verified
+                if verified:
+                    observation = observation_from_event(
+                        raw,
+                        context.ref(session_id, "session"),
+                        observed_at=observed_at,
+                        model_id=MODEL,
+                    )
+                    usage_tokens(observation)
+                    facts["proof"] = observation.model_dump(mode="json")
+                    facts["verified_monetary_hold_floor_usd"] = str(
+                        monetary_bound(context, observation)
+                    )
+                    # Audit provider proof, not our trusted SHA pins (the tape
+                    # scanner treats long opaque hex as ambiguous encoded text).
+                    Audit((key,)).audit(observation.model_dump(mode="json"))
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    os.ftruncate(descriptor, 0)
+                    os.write(descriptor, (json.dumps(facts, indent=2) + "\n").encode())
+                    os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+
+        monitor.on_late_usage = late_usage
         try:
             # Reserve 15 seconds of the SAME deadline for interrupt/archive/close.
             task = asyncio.ensure_future(callback(context))
@@ -972,139 +1129,171 @@ async def run_live(
                 "failure_type": type(error).__name__,
             }
     finally:
-        if stop_task is not None:
-            stop_task.cancel()
-            await asyncio.gather(stop_task, return_exceptions=True)
-        if task is not None:
 
-            def consume_done(future: asyncio.Future[Mapping[str, object]]) -> None:
-                if not future.cancelled():
-                    future.exception()
-
-            task.add_done_callback(consume_done)
-        try:
-            if context is not None:
+        async def finalize() -> None:
+            nonlocal status, result, receipt
+            try:
                 remaining = max(0, admission.deadline_s - (time.monotonic() - started))
                 async with asyncio.timeout(remaining):
-                    try:
-                        await context.stop_session()
-                    finally:
+                    if stop_task is not None:
+                        stop_task.cancel()
+                        await asyncio.gather(stop_task, return_exceptions=True)
+                    if task is not None:
+
+                        def consume_done(future: asyncio.Future[Mapping[str, object]]) -> None:
+                            if not future.cancelled():
+                                future.exception()
+
+                        task.add_done_callback(consume_done)
+                    if context is not None:
                         try:
-                            if context.retire is not None:
-                                await context.retire()
+                            await context.stop_session()
                         finally:
-                            await context.client.close()
-        except Exception:
-            status = "failed"
-            result = {
-                "status": "failed",
-                "reason": "cleanup acknowledgement unavailable; hold retained",
-            }
-        finally:
-            actual = None
-            proof = None
-            if context is not None:
-                context.transport.closed = True
-                try:
-                    actual = actual_from_anthropic_sessions(
-                        reservation, merged_usage(context), pricing_basis="standard-global"
-                    )
-                    proof = limit_overrun_proof(context)
-                except Exception:
-                    actual = None
-            if proof is not None:
-                receipt = guard.settle_with_overrun(
-                    reservation,
-                    status=status,
-                    limits=admission.plan.limits,
-                    actual=actual,
-                    overrun_evidence=proof,
-                )
-            else:
-                receipt = guard.settle(
-                    reservation, status=status, limits=admission.plan.limits, actual=actual
-                )
-            if admission.output.is_dir():
-                facts: dict[str, object] = {
-                    "source_head": admission.source_head,
-                    "package": admission.package,
-                    "model": MODEL,
-                    "native_control_mode": "guard-only",
-                    "native_budget_sent": False,
-                    "provider_token_caps_enforced": False,
-                    "observed_per_request_thresholds": [100000, 20000],
-                    "wall_clock_deadline_seconds": admission.deadline_s,
-                    "stop_threshold_usd": str(admission.hold * Decimal(".8")),
-                    "result": result,
-                    "spend": receipt.model_dump(mode="json"),
+                            try:
+                                if context.retire is not None:
+                                    await context.retire()
+                            finally:
+                                await context.client.close()
+            except Exception:
+                status = "failed"
+                result = {
+                    "status": "failed",
+                    "reason": "cleanup acknowledgement unavailable; hold retained",
                 }
+            finally:
+                actual = None
+                proof = None
                 if context is not None:
-                    facts["requests"] = context.transport.requests
-                    facts["created_resources"] = sorted(context.transport.authorization.created)
-                    facts["pending_create_acknowledgements"] = context.transport.pending_creates
-                    facts["orphan_resources"] = sorted(context.transport.orphans)
-                    facts["reconciliation_required"] = bool(
-                        context.transport.pending_creates or context.transport.orphans
-                    )
-                    facts["conflicting_request_evidence"] = [
-                        id_
-                        for (_, id_), variants in verified_usage_variants(context).items()
-                        if len(
-                            {
-                                json.dumps(usage_tokens(obs).model_dump(), sort_keys=True)
-                                for obs in variants
-                            }
+                    context.transport.seal()
+                    try:
+                        actual = actual_from_anthropic_sessions(
+                            reservation, merged_usage(context), pricing_basis="standard-global"
                         )
-                        > 1
-                    ]
-                    facts["quarantined_native_request_ids"] = sorted(
-                        context.transport.monitor.quarantined_ids
+                        proof = limit_overrun_proof(context)
+                    except Exception:
+                        actual = None
+                if proof is not None:
+                    receipt = guard.settle_with_overrun(
+                        reservation,
+                        status=status,
+                        limits=admission.plan.limits,
+                        actual=actual,
+                        overrun_evidence=proof,
                     )
-                    facts["quarantined_request_provenance"] = [
-                        {"session_id": session, "native_request_id": request}
-                        for session, request in verified_usage_variants(context)
-                        if request in context.transport.monitor.quarantined_ids
-                    ]
-                    facts["reconciliation_required"] = bool(
-                        facts["reconciliation_required"]
-                        or context.transport.monitor.quarantined_ids
+                else:
+                    receipt = guard.settle(
+                        reservation, status=status, limits=admission.plan.limits, actual=actual
                     )
-                    facts["archived_sessions"] = sorted(context.transport.archived)
-                    facts["observed_token_threshold_crossings"] = (
-                        context.transport.monitor.observed_thresholds
-                    )
-                    facts["stream_stop_reason"] = context.transport.monitor.stop_reason
-                    facts["stream_cost_estimate_usd"] = (
-                        str(context.transport.monitor.cost)
-                        if context.transport.monitor.cost is not None
-                        else None
-                    )
-                    facts["monitor_cost_complete"] = False
-                    facts["monitor_cost_basis"] = "known token lower bound plus wall-time estimate"
-                    facts["observed_request_threshold_status"] = (
-                        context.transport.monitor.threshold_receipts()
-                    )
-                    facts["runtime_measurement"] = (
-                        "unknown; wall-clock monitoring is not billed-runtime proof"
-                    )
-                    facts["observed_request_meters"] = [
-                        raw.get("model_usage")
-                        for raw in context.transport.monitor.observations.values()
-                    ]
-                try:
-                    Audit(context.redaction_secrets if context else ()).audit(
-                        json.loads(json.dumps(facts))
-                    )
-                except RecordingError:
-                    facts = {
+                if context is not None:
+                    context.transport.monitor.settled = True
+                if admission.output.is_dir():
+                    facts: dict[str, object] = {
+                        "source_head": admission.source_head,
                         "package": admission.package,
                         "model": MODEL,
-                        "status": "failed",
-                        "reason": "evidence export refused by credential audit",
-                        "guard_settlement_persisted": True,
+                        "native_control_mode": "guard-only",
                         "native_budget_sent": False,
+                        "provider_token_caps_enforced": False,
+                        "observed_per_request_thresholds": [100000, 20000],
+                        "wall_clock_deadline_seconds": admission.deadline_s,
+                        "stop_threshold_usd": str(admission.hold * Decimal(".8")),
+                        "result": result,
+                        "spend": receipt.model_dump(mode="json"),
                     }
-                (admission.output / "receipt.json").write_text(json.dumps(facts, indent=2) + "\n")
+                    if context is not None:
+                        facts["requests"] = context.transport.requests
+                        facts["created_resources"] = sorted(context.transport.authorization.created)
+                        facts["pending_create_acknowledgements"] = context.transport.pending_creates
+                        facts["pending_native_responses"] = len(context.transport.pending_responses)
+                        facts["open_native_responses"] = sum(
+                            not response.is_closed for response in context.transport.responses
+                        )
+                        facts["orphan_resources"] = sorted(context.transport.orphans)
+                        facts["reconciliation_required"] = bool(
+                            context.transport.pending_creates
+                            or context.transport.orphans
+                            or context.transport.pending_responses
+                        )
+                        facts["conflicting_request_evidence"] = [
+                            id_
+                            for (_, id_), variants in verified_usage_variants(context).items()
+                            if len(
+                                {
+                                    json.dumps(usage_tokens(obs).model_dump(), sort_keys=True)
+                                    for obs in variants
+                                }
+                            )
+                            > 1
+                        ]
+                        facts["quarantined_native_request_ids"] = sorted(
+                            context.transport.monitor.quarantined_ids
+                        )
+                        facts["quarantined_request_provenance"] = [
+                            {"session_id": session, "native_request_id": request}
+                            for session, request in verified_usage_variants(context)
+                            if request in context.transport.monitor.quarantined_ids
+                        ]
+                        facts["reconciliation_required"] = bool(
+                            facts["reconciliation_required"]
+                            or context.transport.monitor.quarantined_ids
+                        )
+                        facts["archived_sessions"] = sorted(context.transport.archived)
+                        facts["observed_token_threshold_crossings"] = (
+                            context.transport.monitor.observed_thresholds
+                        )
+                        facts["stream_stop_reason"] = context.transport.monitor.stop_reason
+                        facts["stream_cost_estimate_usd"] = (
+                            str(context.transport.monitor.cost)
+                            if context.transport.monitor.cost is not None
+                            else None
+                        )
+                        facts["monitor_cost_complete"] = False
+                        facts["monitor_cost_basis"] = (
+                            "known token lower bound plus wall-time estimate"
+                        )
+                        facts["observed_request_threshold_status"] = (
+                            context.transport.monitor.threshold_receipts()
+                        )
+                        facts["runtime_measurement"] = (
+                            "unknown; wall-clock monitoring is not billed-runtime proof"
+                        )
+                        facts["observed_request_meters"] = [
+                            raw.get("model_usage")
+                            for raw in context.transport.monitor.observations.values()
+                        ]
+                    try:
+                        Audit(context.redaction_secrets if context else ()).audit(
+                            json.loads(json.dumps(facts))
+                        )
+                    except RecordingError:
+                        facts = {
+                            "package": admission.package,
+                            "model": MODEL,
+                            "status": "failed",
+                            "reason": "evidence export refused by credential audit",
+                            "guard_settlement_persisted": True,
+                            "native_budget_sent": False,
+                        }
+                    (admission.output / "receipt.json").write_text(
+                        json.dumps(facts, indent=2) + "\n"
+                    )
+
+        finalizer = asyncio.create_task(finalize())
+        recancelled = False
+        while not finalizer.done():
+            try:
+                await asyncio.shield(finalizer)
+            except asyncio.CancelledError:
+                recancelled = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        finalizer.result()
+        if recancelled:
+            raise asyncio.CancelledError
+
+    if receipt is None:
+        raise LiveRefused("settlement receipt unavailable")
     return {"result": result, "spend": receipt.model_dump(mode="json")}
 
 
