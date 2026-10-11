@@ -545,3 +545,9 @@ it changes no product permissions and does not assert a completed model turn.
 Whole D14/D5 cells still require the original runner assertions and actual host
 turn/log/text evidence where authored. Omitted callbacks stay pending. A1 native
 create conversion remains unsupported by this Anthropic-only edge.
+
+The composed resource admin proofs use the shared database preflight before
+engine/session setup. Plain contributor databases skip before allocation;
+owned lane and registered isolated-CI schemas retain the real service/SDK
+readback paths. This composition adds no local ownership policy or fixture
+shortcut and leaves the signed resource operations unchanged.

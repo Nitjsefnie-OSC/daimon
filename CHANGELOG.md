@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use the shared schema-aware database preflight for offline Discord ingress and Forbidden conformance fixtures, retaining connection-trap controls and contributor skips.
 
 - Keep shared database preflight admission separate for each resolved schema fixture when running multiple test packages together; document owned local databases and skipped shared fixtures on plain local `daimon_test`.
+- Compose the signed resource admin operations on shared database preflight, preserving native service behavior and contributor isolation.
 
 - Add an opt-in, rate-limited Discord stop reaction for explicit mentions denied by a confirmed writers=none rule; default denial behavior stays silent.
 
