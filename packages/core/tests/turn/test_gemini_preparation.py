@@ -516,7 +516,11 @@ async def test_final_host_outcome_preserves_failed_or_cancelled_root(
     assert not host.ancillary.requests
     assert outcome.termination != TerminationReason.COMPLETED
     if status != "cancelled":
-        assert outcome.termination == TerminationReason.UPSTREAM
+        assert outcome.termination == (
+            TerminationReason.SESSION_TERMINATED
+            if status in {"incomplete", "budget_exceeded"}
+            else TerminationReason.UPSTREAM
+        )
         assert outcome.state.error is not None and outcome.state.error.kind == "upstream"
         assert len(lifecycle.terminal_failures) == 1 and not lifecycle.terminal_success
     elif replay:
