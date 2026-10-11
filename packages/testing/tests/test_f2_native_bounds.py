@@ -227,6 +227,10 @@ def test_acceptance_exact_signed_envelope_and_separate_go(tmp_path, monkeypatch,
     fixtures = Path(__file__).parent / "fixtures/anthropic-live"
     name = "F2-R2" if fault == "workload_envelope" else "F2-native-budget-acceptance"
     approval = json.loads((fixtures / (name + ".json")).read_text())
+    # Signed public fixture names the authorized host, not the CI runner.
+    monkeypatch.setattr(
+        Path, "home", classmethod(lambda cls: Path(approval["credential_file"]).parents[2])
+    )
     if fault == "financial":
         approval["maximum_user_messages"] = 1
     authorization = tmp_path / "approval.json"
