@@ -180,6 +180,89 @@ async def test_valid_real_fixture_pools_and_schema_remain_unchanged(
         raise RuntimeError("fixture pools do not reach the admitted physical database/schema")
 
 
+@pytest.mark.usefixtures("db_preflight")
+def test_core_and_testing_conftest_reexports_keep_their_real_schema(
+    pytester: pytest.Pytester,
+) -> None:
+    """Run the evaluator's exact cross-package combination in one worker."""
+    root = Path(__file__).resolve().parents[3]
+    result = pytester.runpytest_subprocess(
+        "-q",
+        "-n",
+        "0",
+        "-c",
+        str(root / "pyproject.toml"),
+        str(root / "packages/core/tests/test_agent_faces.py"),
+        f"{Path(__file__).resolve()}::test_valid_real_fixture_pools_and_schema_remain_unchanged",
+        timeout=180,
+    )
+    result.assert_outcomes(passed=12, deselected=1)
+
+
+@pytest.mark.parametrize("ci", [False, True])
+def test_distinct_schema_definitions_each_admit_before_session_consumers(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, ci: bool
+) -> None:
+    """Conftest and class overrides cannot reuse another schema's admission."""
+    monkeypatch.setenv("DAIMON_DATABASE__TEST_URL", _SHARED if ci else _LANE)
+    for name in ("CI", "GITHUB_ACTIONS"):
+        if ci:
+            monkeypatch.setenv(name, "true")
+        else:
+            monkeypatch.delenv(name, raising=False)
+    pytester.makeconftest(
+        """
+import os
+import pytest
+@pytest.fixture(scope="session")
+def db_schema():
+    return f"test_w{os.getpid()}_1234abcd"
+@pytest.fixture(scope="session")
+def admitted_consumer(db_preflight, db_schema):
+    if db_preflight.schema != db_schema:
+        raise RuntimeError("session consumer received another schema's admission")
+    return db_preflight
+"""
+    )
+    first = pytester.path / "first"
+    second = pytester.path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "test_schema.py").write_text(
+        """
+def test_first(admitted_consumer, db_schema):
+    if admitted_consumer.schema != db_schema:
+        raise RuntimeError("first admission changed")
+"""
+    )
+    (second / "conftest.py").write_text(
+        """
+import os
+import pytest
+@pytest.fixture(scope="session")
+def db_schema():
+    return f"test_w{os.getpid()}_5678abcd"
+"""
+    )
+    (second / "test_other_schema.py").write_text(
+        """
+import os
+import pytest
+def test_second(admitted_consumer, db_preflight, db_schema):
+    if admitted_consumer.schema != db_schema or db_preflight.schema != db_schema:
+        raise RuntimeError("second admission changed")
+class TestClassOverride:
+    @pytest.fixture(scope="session")
+    def db_schema(self):
+        return f"test_w{os.getpid()}_90abcdef"
+    def test_class(self, admitted_consumer, db_preflight, db_schema):
+        if admitted_consumer.schema != db_schema or db_preflight.schema != db_schema:
+            raise RuntimeError("class admission changed")
+"""
+    )
+    pytester.runpytest_subprocess("-q", timeout=120).assert_outcomes(passed=3)
+
+
 @pytest.mark.parametrize(
     "case,expected_builds,expected_connections,expected_skips",
     [

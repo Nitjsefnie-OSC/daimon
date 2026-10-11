@@ -80,7 +80,9 @@ policy tests skip that documented contributor setup outside GitHub Actions CI;
 use an owned lane database to exercise those tests locally.
 
 Shared database fixtures also require the session-scoped `db_preflight` supplied
-by the testing package's `pytest11` plugin. It checks the DSN and process-owned
+by the testing package's `pytest11` plugin, keyed by the resolved `db_schema`
+value. Re-exported or overridden schemas receive separate admission
+even when multiple packages run in one worker. It checks the DSN and process-owned
 schema before `db_engine`, `db_nullpool_engine`, `db_clean` or session setup.
 Each constructed engine then passes the same registered-schema ownership guard
 before connecting. Valid lane/CI fixtures retain their pools, schema isolation,
@@ -89,6 +91,7 @@ other foreign targets fail before I/O. Existing conftest imports need no edits.
 Install the package/plugin with the usual `uv sync --all-extras --all-packages`;
 when plugin autoload is disabled, pass `-p daimon.testing.pytest_plugin` explicitly.
 Database-free tests do not request the preflight or need a database URL.
+
 # Isolated provider SDK clients
 
 `daimon.testing.isolated_sdk` supplies `build_async_openai`,
