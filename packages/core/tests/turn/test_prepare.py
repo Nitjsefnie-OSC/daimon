@@ -5,6 +5,7 @@ call, the `thread_sessions` mapping write, and recorder binding.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import uuid
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
@@ -833,12 +835,33 @@ async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
 
     session_bodies: list[dict[str, object]] = []
     router = _router_with_session_create(session_bodies=session_bodies)
-    deps = _deps(sessionmaker=db_session_factory, router=router)
+    create_started = asyncio.Event()
+
+    async def _stalled_session_create(request: httpx.Request) -> httpx.Response:
+        # The ceiling must fire here, between statements. A deadline already
+        # in the past fires 1 ms in, often mid-statement, and cancelling a
+        # query wedges the one connection every session in this test shares,
+        # so the check below failed with "another operation is in progress".
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            create_started.set()
+            await asyncio.Event().wait()
+        return router.dispatch(request)
+
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        anthropic=AsyncAnthropic(
+            api_key="test",
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(_stalled_session_create),
+                base_url="https://api.anthropic.com",
+            ),
+        ),
+    )
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+    deadline = datetime.now(UTC) + timedelta(seconds=1)
 
     with pytest.raises(TurnError) as exc_info:
         await bind_session(
@@ -850,10 +873,11 @@ async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
             thread_id="thread-ceiling-no-orphan",
             session_account_id=account.id,
             reuse_existing=True,
-            deadline=past_deadline,
+            deadline=deadline,
         )
 
     assert exc_info.value.kind == "ceiling"
+    assert create_started.is_set(), "the ceiling must fire during the session create"
 
     async with db_session_factory() as s:
         live = await get_live_thread_session(
