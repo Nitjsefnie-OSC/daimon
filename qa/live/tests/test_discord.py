@@ -737,6 +737,74 @@ def test_running_card_samples_refresh_footer_and_keep_unchanged_samples(
     assert turn.card_history[2]["message"] == refreshed
 
 
+def test_transient_card_readback_failure_is_unavailable_evidence_and_collection_settles(
+    backend: DiscordBackend, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend.owned.add("parent")
+    working: Message = {"id": "card", "channel_id": "parent", "working": True}
+    terminal: Message = {**working, "working": False, "content": "DONE"}
+    rows = iter([[working], [working], [terminal]])
+    failures = [1]
+    real_call = driver.call
+
+    def listed(*args: object, **kwargs: object) -> list[Message]:
+        driver.current = next(rows, [terminal])
+        return driver.current
+
+    def call(method: str, path: str, **kwargs: object) -> JsonValue:
+        if path == "/channels/parent/messages/card" and failures:
+            failures.pop()
+            raise SystemExit("HTTP 503 on GET " + path + ": unavailable")
+        return real_call(method, path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(driver, "turn_messages", listed)
+    monkeypatch.setattr(driver, "call", call)
+    turn = Turn(1, "123", "parent", utcnow())
+    backend.collect(turn, 0.1)
+    assert turn.settled
+    assert [("unavailable" in e, "message" in e) for e in turn.card_history] == [
+        (True, False),
+        (False, True),
+    ]
+    assert turn.card_history[0]["unavailable"] == "running card readback unavailable: SystemExit"
+    assert turn.card_history[0]["observed_at"] and turn.card_history[0]["poll_interval_s"]
+
+
+@pytest.mark.parametrize(
+    "readback",
+    [
+        {"id": "other", "channel_id": "parent", "working": True},
+        {"id": "card", "channel_id": "elsewhere", "working": True},
+    ],
+)
+def test_mismatched_card_readback_is_never_accepted_as_a_sample(
+    backend: DiscordBackend,
+    driver: FakeDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    readback: Message,
+) -> None:
+    backend.owned.add("parent")
+    monkeypatch.setattr(driver, "call", lambda *args, **kwargs: readback)
+    turn = Turn(1, "123", "parent", utcnow())
+    backend.sample_running_card(turn, {"id": "card", "channel_id": "parent", "working": True})
+    assert len(turn.card_history) == 1 and "message" not in turn.card_history[0]
+    assert "did not match" in str(turn.card_history[0]["unavailable"])
+
+
+def test_terminal_readback_race_is_excluded_and_unowned_card_refused(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    backend.owned.add("parent")
+    driver.current = [{"id": "card", "channel_id": "parent", "content": "SLEPT"}]
+    turn = Turn(1, "123", "parent", utcnow())
+    backend.sample_running_card(turn, {"id": "card", "channel_id": "parent", "working": True})
+    assert turn.card_history == []
+    calls = len(driver.calls)
+    with pytest.raises(ValueError, match="outside a channel created by this run"):
+        backend.sample_running_card(turn, {"id": "card", "channel_id": "foreign", "working": True})
+    assert len(driver.calls) == calls and turn.card_history == []
+
+
 @pytest.mark.parametrize(
     "failure",
     [

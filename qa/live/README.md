@@ -151,9 +151,13 @@ absence over content and all embed text, settled cards, reactions, attachment
 counts/uniqueness, scoped logs, read-only SQL, and the fixed Haiku judge.
 Running cards are fetched directly on every poll. Result `card_history` retains
 each immutable message snapshot, including its footer/timer, edit timestamp,
-and observation time, even when the card never changes. `card_edits_min` requires
-at least `max(2, minimum + 1)` running snapshots before judging the edit count;
-missing or sparse history is PENDING. Terminal edits do not count.
+and observation time, even when the card never changes. A failed or mismatched
+per-card readback is kept as card-specific `unavailable` evidence; collection and
+the other assertions continue. `card_edits_min` counts successive state changes
+(A, B, A, B is three edits). Proven edits PASS regardless of gaps. A shortfall is
+FAIL only with at least `max(2, minimum + 1)` snapshots of one card and no capture
+gap, between snapshots or from the last snapshot to the terminal card, wider than
+2.5 poll intervals; otherwise it is PENDING. Terminal edits do not count.
 The approved filtered attachment counts (`name_pattern`) and timed reaction
 observations remain PENDING until the FULL stage implements their semantics.
 The approved global regex assertions are appended to every executed turn: no

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from decimal import Decimal
 from typing import cast
 
@@ -28,6 +29,77 @@ from qa.live.types import (
 
 def answers(turn: Turn, backend: Backend) -> list[Message]:
     return [m for m in turn.messages if backend.classify(m) in {"answered", "answered_tool_only"}]
+
+
+# A capture gap wider than this many poll intervals could hide running edits.
+CARD_GAP_POLLS = 2.5
+CARD_STATE_KEYS = ("content", "embeds", "components", "attachments", "edited_timestamp")
+
+
+def running_card_edits(turn: Turn) -> tuple[int, list[tuple[datetime, Message]]]:
+    """Count successive state changes per running card (A->B->A->B is three edits)."""
+    samples: list[tuple[datetime, Message]] = []
+    seen: set[tuple[str, str]] = set()
+    for sample in turn.card_history:
+        if (
+            sample.get("phase") != "running"
+            or not sample.get("message_id")
+            or not isinstance(sample.get("observed_at"), str)
+            or not isinstance(sample.get("message"), dict)
+        ):
+            continue
+        observation = (str(sample["message_id"]), str(sample["observed_at"]))
+        if observation in seen:
+            continue
+        try:
+            observed = datetime.fromisoformat(str(sample["observed_at"]))
+        except ValueError:
+            raise Pending("running card sample has an invalid observation time") from None
+        if observed.tzinfo is None:
+            raise Pending("running card sample observation time lacks a timezone")
+        seen.add(observation)
+        samples.append((observed, sample))
+    samples.sort(key=lambda item: item[0])
+    previous: dict[str, str] = {}
+    edits = 0
+    for _, sample in samples:
+        identity = str(sample["message_id"])
+        card = obj(sample["message"])
+        state = json.dumps({key: card.get(key) for key in CARD_STATE_KEYS}, sort_keys=True)
+        if identity in previous and previous[identity] != state:
+            edits += 1
+        previous[identity] = state
+    return edits, samples
+
+
+def running_capture_covered(
+    turn: Turn, samples: list[tuple[datetime, Message]], minimum: int
+) -> None:
+    """Raise PENDING unless capture spans the running interval tightly enough to FAIL."""
+    counts: dict[str, int] = {}
+    for _, sample in samples:
+        counts[str(sample["message_id"])] = counts.get(str(sample["message_id"]), 0) + 1
+    if max(counts.values(), default=0) < max(2, minimum + 1):
+        raise Pending("insufficient running card samples; edit minimum is unproven")
+    intervals = [sample.get("poll_interval_s") for _, sample in samples]
+    if any(isinstance(i, bool) or not isinstance(i, (int, float)) or i <= 0 for i in intervals):
+        raise Pending("running card capture cadence is unknown; edit minimum is unproven")
+    bound = CARD_GAP_POLLS * max(cast(float, i) for i in intervals)
+    times = [observed for observed, _ in samples]
+    gaps = [(b - a).total_seconds() for a, b in zip(times, times[1:], strict=False)]
+    if turn.done_s is None:
+        raise Pending("running card end is unobserved; edit minimum is unproven")
+    gaps.append(turn.done_s - (times[-1] - turn.started_at).total_seconds())
+    widest = max(gaps)
+    if widest > bound:
+        missing = sum(
+            1 for e in turn.card_history if e.get("phase") == "running" and e.get("unavailable")
+        )
+        raise Pending(
+            f"running card capture gap {widest:.1f}s exceeds {bound:.1f}s"
+            + (f" ({missing} card readbacks unavailable)" if missing else "")
+            + "; edit minimum is unproven"
+        )
 
 
 def component_labels(component: Message) -> list[str]:
@@ -172,49 +244,14 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 )
                 reason = "refreshed card text " + ("matched" if passed else "did not match")
             elif kind == "card_edits_min":
-                samples = [
-                    e
-                    for e in turn.card_history
-                    if e.get("phase") == "running"
-                    and e.get("message_id")
-                    and e.get("observed_at")
-                    and isinstance(e.get("message"), dict)
-                ]
-                observed_counts: dict[str, set[str]] = {}
-                for sample in samples:
-                    observed_counts.setdefault(str(sample["message_id"]), set()).add(
-                        str(sample["observed_at"])
-                    )
-                if max((len(times) for times in observed_counts.values()), default=0) < max(
-                    2, assertion.minimum + 1
-                ):
-                    raise Pending("insufficient running card samples; edit minimum is unproven")
-                previous_cards: dict[str, str] = {}
-                edits: set[tuple[str, str]] = set()
-                for sample in samples:
-                    identity = str(sample["message_id"])
-                    card = obj(sample["message"])
-                    state = json.dumps(
-                        {
-                            key: card.get(key)
-                            for key in (
-                                "content",
-                                "embeds",
-                                "components",
-                                "attachments",
-                                "edited_timestamp",
-                            )
-                        },
-                        sort_keys=True,
-                    )
-                    if identity in previous_cards and previous_cards[identity] != state:
-                        edits.add((identity, state))
-                    previous_cards[identity] = state
-                passed = len(edits) >= assertion.minimum
-                if not passed and not turn.settled:
-                    raise Pending("turn did not settle; running card-edit minimum is unproven")
+                edits, samples = running_card_edits(turn)
+                passed = edits >= assertion.minimum
+                if not passed:
+                    if not turn.settled:
+                        raise Pending("turn did not settle; running card-edit minimum is unproven")
+                    running_capture_covered(turn, samples, assertion.minimum)
                 reason = (
-                    f"observed {len(edits)} distinct running card edits; "
+                    f"observed {edits} successive running card edits; "
                     f"minimum {assertion.minimum}; {len(samples)} running card samples"
                 )
             elif kind == "chunks_gap_max_s":

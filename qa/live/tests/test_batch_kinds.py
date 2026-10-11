@@ -92,9 +92,11 @@ def test_running_edits_are_distinct_and_exclude_terminal_edits() -> None:
             **edit,
             "observed_at": (turn.started_at + timedelta(seconds=i)).isoformat(),
             "message": {"id": "card", "edited_timestamp": "original"},
+            "poll_interval_s": 4,
         }
         for i in range(3)
     ]
+    turn.done_s = 3
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
     turn.settled = False
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
@@ -133,9 +135,11 @@ def test_adequately_sampled_frozen_card_fails_edit_minimum() -> None:
             "phase": "running",
             "observed_at": (turn.started_at + timedelta(seconds=i * 10)).isoformat(),
             "message": {"id": "card", "embeds": [{"footer": {"text": "Working · 0s"}}]},
+            "poll_interval_s": 4,
         }
         for i in range(5)
     ]
+    turn.done_s = 45
     check = Assertion(kind="card_edits_min", turn=1, minimum=3, during="running")
     assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
 
@@ -312,3 +316,89 @@ def test_dict_cli_arguments_are_refused_before_mutation(
     assert result.status == "PENDING" and not backend.events
     assert any("validated command string" in c.reason for c in result.checks)
     assert ledger.charged({result.run_id}) == 0
+
+
+def sampled(times: list[float], states: list[str], *, done_s: float = 65) -> Turn:
+    turn = observed(1, "card")
+    turn.done_s = done_s
+    turn.card_history = [
+        {
+            "message_id": "card",
+            "phase": "running",
+            "observed_at": (turn.started_at + timedelta(seconds=t)).isoformat(),
+            "elapsed_s": t,
+            "poll_interval_s": 4,
+            "message": {
+                "id": "card",
+                "edited_timestamp": None,
+                "embeds": [{"footer": {"text": state}}],
+            },
+        }
+        for t, state in zip(times, states, strict=True)
+    ]
+    return turn
+
+
+EDITS_MIN_3 = Assertion(kind="card_edits_min", turn=1, minimum=3, during="running")
+
+
+@pytest.mark.parametrize(
+    "times",
+    [
+        [0, 4, 8, 60],  # long mid-run gap: ticks at 10..50 s were never observable
+        [0, 4, 8, 12],  # early-only capture: nothing seen during the last 53 s
+    ],
+)
+def test_capture_gaps_never_turn_a_missed_edit_minimum_into_fail(times: list[float]) -> None:
+    states = ["Working · 0s"] * 3 + [f"Working · {times[-1]:g}s"]
+    check = evaluate(EDITS_MIN_3, [sampled(times, states)], FakeBackend(), FakeJudge())
+    assert check.status == "PENDING" and "capture gap" in check.reason, check.reason
+
+
+def test_unavailable_card_readbacks_leave_a_gap_that_stays_pending() -> None:
+    turn = sampled([0, 6, 12, 54, 60], ["Working · 0s"] * 5)
+    turn.card_history[3:3] = [
+        {
+            "message_id": "card",
+            "phase": "running",
+            "observed_at": (turn.started_at + timedelta(seconds=t)).isoformat(),
+            "poll_interval_s": 4,
+            "unavailable": "running card readback unavailable: SystemExit",
+        }
+        for t in range(18, 54, 6)
+    ]
+    check = evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge())
+    assert check.status == "PENDING" and "6 card readbacks unavailable" in check.reason
+
+
+def test_unknown_capture_cadence_stays_pending() -> None:
+    turn = sampled([0, 6, 12, 18, 24], ["Working · 0s"] * 5, done_s=30)
+    del turn.card_history[2]["poll_interval_s"]
+    assert evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
+
+
+def test_closely_sampled_frozen_card_shaped_like_live_d6_still_fails() -> None:
+    # Spacing and tail from saved result 20261010T152722810837Z-a5c43f74.
+    times = [8.74, 14.96, 21.6, 28.71, 35.24, 42.14, 49.24, 56.43]
+    turn = sampled(times, ["Working · 0s"] * len(times), done_s=62.91)
+    check = evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge())
+    assert check.status == "FAIL" and "0 successive" in check.reason, check.reason
+
+
+def test_repeating_states_count_successive_edits() -> None:
+    turn = sampled([0, 10, 20, 30], ["Running A", "Running B", "Running A", "Running B"])
+    check = evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge())
+    assert check.status == "PASS" and "observed 3 successive" in check.reason, check.reason
+
+
+def test_duplicate_observations_and_unchanged_samples_are_not_edits() -> None:
+    turn = sampled([0, 6, 12, 18, 24], ["A", "A", "B", "B", "A"], done_s=28)
+    turn.card_history.insert(3, dict(turn.card_history[2]))  # same observation twice
+    turn.card_history.reverse()  # evaluation orders by observation time
+    check = evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge())
+    assert check.status == "FAIL" and "observed 2 successive" in check.reason, check.reason
+
+
+def test_proven_edits_pass_despite_capture_gaps() -> None:
+    turn = sampled([0, 30, 31, 60], ["Working · 0s", "Working · 30s", "x", "Working · 60s"])
+    assert evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge()).status == "PASS"

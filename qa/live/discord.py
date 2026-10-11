@@ -512,27 +512,45 @@ class DiscordBackend:
         raise WatchTimeout("watch timed out; collected last messages, no terminal proof")
 
     def sample_running_card(self, turn: Turn, message: Message) -> None:
-        """Read the actual card each poll, including unchanged and never-edited cards."""
+        """Read the actual card each poll, including unchanged and never-edited cards.
+
+        A failed or mismatched readback is kept as card-specific unavailable
+        evidence (it widens the capture gap the evaluator checks) rather than
+        aborting collection and the scenario's unrelated assertions.
+        """
         channel = str(message.get("channel_id") or turn.thread_id or turn.channel_id)
         self._owned(channel)
         identity = str(message.get("id") or "")
         if not identity:
             raise Pending("running card has no message identity")
-        row = obj(self.driver.call("GET", f"/channels/{channel}/messages/{identity}"))
-        if str(row.get("id")) != identity or str(row.get("channel_id")) != channel:
-            raise Pending("running card readback did not match the owned message")
+        unavailable: str | None = None
+        row: Message = {}
+        try:
+            row = obj(self.driver.call("GET", f"/channels/{channel}/messages/{identity}"))
+        except (Exception, SystemExit) as exc:
+            unavailable = "running card readback unavailable: " + type(exc).__name__
+        if unavailable is None and (
+            str(row.get("id")) != identity or str(row.get("channel_id")) != channel
+        ):
+            unavailable = "running card readback did not match the owned message"
+        observed = utcnow()
+        sample: Message = {
+            "message_id": identity,
+            "phase": "running",
+            "observed_at": observed.isoformat(),
+            "elapsed_s": (observed - turn.started_at).total_seconds(),
+            "poll_interval_s": self.config.poll_interval_s,
+        }
+        if unavailable is not None:
+            turn.card_history.append({**sample, "unavailable": unavailable})
+            return
         # A card can become terminal between the list read and this direct read.
         if self.classify(row) != "working":
             return
-        observed = utcnow()
         turn.card_history.append(
             {
-                "message_id": identity,
+                **sample,
                 "edited_timestamp": row.get("edited_timestamp"),
-                "phase": "running",
-                "observed_at": observed.isoformat(),
-                "elapsed_s": (observed - turn.started_at).total_seconds(),
-                "poll_interval_s": self.config.poll_interval_s,
                 "message": json.loads(json.dumps(row)),
             }
         )
