@@ -208,7 +208,33 @@ jobs:
           DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
         run: uv run alembic upgrade head
       - name: pytest (discord)
-        run: uv run pytest packages/adapters/discord -n auto
+        id: discord-pytest
+        timeout-minutes: 13
+        env:
+          DAIMON_PYTEST_HANG_DIR: ${{ runner.temp }}
+          PGPASSWORD: daimon
+        run: |
+          (sleep 360; bash .github/scripts/discord-postgres-diagnostics.sh > "$RUNNER_TEMP/discord-postgres-hang.txt" 2>&1) &
+          diagnostic_pid=$!
+          trap 'kill "$diagnostic_pid" 2>/dev/null || true' EXIT
+          uv run pytest packages/adapters/discord -n 2 -rfE --tb=short -o faulthandler_timeout=300
+      - name: Discord hang diagnostics
+        if: always() && steps.discord-pytest.outcome != 'success'
+        env:
+          PGPASSWORD: daimon
+        run: |
+          for file in "$RUNNER_TEMP"/discord-pytest-current-*.txt; do
+            if [ -f "$file" ]; then
+              echo "Active test in ${file##*/}:"
+              cat "$file"
+            fi
+          done
+          if [ -f "$RUNNER_TEMP/discord-postgres-hang.txt" ]; then
+            echo "Postgres snapshot while pytest was still running:"
+            cat "$RUNNER_TEMP/discord-postgres-hang.txt"
+          fi
+          echo "Postgres snapshot after pytest stopped:"
+          bash .github/scripts/discord-postgres-diagnostics.sh
 
   pytest-slack:
     runs-on: ubuntu-latest
