@@ -1,10 +1,16 @@
-"""`RunningTurns` -- the process's registry of turns currently executing.
+"""`RunningTurns` -- the process's registry of turns in progress.
 
 `run_prepared_turn` registers the task it runs in for the whole call, so every
 entry point that reaches it (a mention, a reply-to-continue button, a wizard
-submit, a direct message) is counted without any bookkeeping of its own. A
-shutdown drain reads it to know what is still running and to cancel what is
-left after its grace window.
+submit, a direct message) is counted without any bookkeeping of its own. Entry
+points that accept work before they reach it (a wizard submit or a direct
+message waiting for a turn slot, then preparing its session) also register for
+the whole accepted operation, through its cleanup; entries nest per task.
+
+A shutdown drain reads it to know what is still in progress. When its grace
+runs out it calls `begin_shutdown` and cancels the tasks: cleanup code reads
+`shutting_down` to tell that cancellation from any other and to leave the
+provider session recoverable (`docs/architecture.md`, shutdown drain).
 
 One instance lives on `TurnDeps`, so it is shared by every turn the adapter
 process runs. No I/O.
@@ -18,14 +24,15 @@ from collections.abc import Iterator
 
 
 class RunningTurns:
-    """Tasks inside `run_prepared_turn`, keyed by task; a task may nest entries."""
+    """Tasks inside a turn or an accepted turn operation, keyed by task."""
 
     def __init__(self) -> None:
         self._entries: dict[asyncio.Task[object], int] = {}
+        self._shutting_down = False
 
     @contextlib.contextmanager
     def track(self) -> Iterator[None]:
-        """Count the current task as running a turn until the block exits."""
+        """Count the current task as in progress until the block exits."""
         task = asyncio.current_task()
         if task is None:  # pragma: no cover - only reachable outside an event loop
             yield
@@ -41,8 +48,17 @@ class RunningTurns:
                 self._entries.pop(task, None)
 
     def tasks(self) -> set[asyncio.Task[object]]:
-        """The tasks still running a turn. A finished task is never reported."""
+        """The tasks still in progress. A finished task is never reported."""
         return {task for task in self._entries if not task.done()}
 
     def count(self) -> int:
         return len(self.tasks())
+
+    def begin_shutdown(self) -> None:
+        """Mark the cancellations that follow as a shutdown's. Irreversible."""
+        self._shutting_down = True
+
+    @property
+    def shutting_down(self) -> bool:
+        """Whether a shutdown drain has started cancelling turns in this process."""
+        return self._shutting_down

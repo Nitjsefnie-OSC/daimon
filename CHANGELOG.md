@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A Discord deploy now counts every running turn when it drains, including ones started from a wizard's Submit button or a direct message, and stops whatever is still running at the end of the grace window the same way for all of them. Before, the drain reported such turns as zero and left them to die with the process.
+- A Discord deploy now waits for every turn in progress, including wizard submits and DMs that are still queued or preparing, and starts no queued turn once it begins cancelling. A thread turn cut off by the deploy keeps its marker, so the next process delivers its finished answer or interrupts its session; a cut-off DM interrupts its own session. Before, a wizard turn was invisible to the drain and its session could keep running with nothing left to recover it.
 - Deleting a Discord thread while it is answering no longer leaves an error message in the channel. The turn stops, nothing more is written to the thread, and messages queued behind it are dropped instead of started. A deleted thread's chats are retired so a restart does not revive them. A thread that cannot be written to because it is archived and cannot be reopened stops the turn the same way, but keeps its chats.
 - A reply to an earlier Discord message is now answered about that message. The agent is told which message you replied to, including one from before its last turn, or part of a long answer, instead of treating your reply as being about the latest message.
 - Discord turns no longer show the agent their own status card as an empty message from itself right before your request, so it stops saying the message you replied to "has no text".

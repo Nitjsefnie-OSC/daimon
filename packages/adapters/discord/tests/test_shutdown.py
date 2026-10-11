@@ -293,3 +293,32 @@ async def test_drain_cancels_a_registered_turn_left_after_the_grace_window() -> 
     assert cleaned_up.is_set(), "its cleanup ran before the client closed"
     assert running.count() == 0
     close.assert_called_once()
+
+
+@pytest.mark.parametrize("by_drain", [True, False], ids=["drain", "other-cancel"])
+async def test_only_the_drains_cancel_keeps_a_turns_marker_for_recovery(by_drain: bool) -> None:
+    """A turn's cleanup keeps its thread marker only while unwinding from the
+    drain's cancel; any other end of a turn clears it as before."""
+    bot, running, _close = _bot_with_running_turns()
+    entered = asyncio.Event()
+    seen: list[bool] = []
+
+    async def turn() -> None:
+        with running.track():
+            try:
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                seen.append(bot._keeps_turn_for_recovery())  # pyright: ignore[reportPrivateUsage]
+
+    task = asyncio.create_task(turn())
+    await entered.wait()
+    assert not bot._keeps_turn_for_recovery()  # pyright: ignore[reportPrivateUsage]
+    if by_drain:
+        with patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.05):
+            await asyncio.wait_for(bot._drain_and_close(), timeout=5.0)  # pyright: ignore[reportPrivateUsage]
+    else:
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert seen == [by_drain]

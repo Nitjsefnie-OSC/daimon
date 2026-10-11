@@ -808,9 +808,11 @@ class DaimonBot(commands.Bot):
     def _running_turn_tasks(self) -> set[asyncio.Task[object]]:
         """Every task running a turn: per-thread claims plus `run_prepared_turn`'s registry.
 
-        The registry covers entry points that never claim a thread here (a
-        wizard submit, a direct message); the claims cover turns still before
-        `run_prepared_turn` (queued, preparing). The calling task is excluded,
+        The registry covers turns inside `run_prepared_turn` and the whole
+        accepted operation of entry points that never claim a thread here (a
+        wizard submit or a direct message, from its slot wait to its cleanup);
+        the claims cover mention-path turns before `run_prepared_turn`
+        (queued, preparing). The calling task is excluded,
         so the drain never counts or cancels itself.
         """
         tasks = set(self.runtime.turn_deps.running_turns.tasks())
@@ -823,14 +825,31 @@ class DaimonBot(commands.Bot):
             tasks.discard(current)
         return tasks
 
+    def _keeps_turn_for_recovery(self) -> bool:
+        """Whether the current task is unwinding from the shutdown drain's cancel.
+
+        Such a turn's MA session is still running and nothing in this process
+        will read it again, so its cleanup must not clear the thread marker:
+        the next process's orphan sweep needs it to deliver a finished answer
+        or interrupt the session, and it only acts once this owner is gone.
+        """
+        task = asyncio.current_task()
+        return (
+            self.runtime.turn_deps.running_turns.shutting_down is True
+            and task is not None
+            and task.cancelling() > 0
+        )
+
     async def _drain_and_close(self) -> None:
         """Graceful shutdown drain.
 
         Flips draining=True so on_message rejects new mentions, then waits
         until no turn is running -- no claimed thread, no held turn slot and no
         turn inside `run_prepared_turn`, whichever entry point started it -- or
-        the grace window elapses. Cancels turns left after the grace period,
-        waits for their cleanup and retained card writes, then closes the client.
+        the grace window elapses. Then it stops granting turn slots, cancels
+        what is left, waits for their cleanup and retained card writes, and
+        closes the client. A cancelled turn's provider session is left for
+        recovery, not abandoned: see `docs/architecture.md`.
         """
         self.draining = True
         # Pending auto batches are unasked-for turns that have not started;
@@ -860,7 +879,16 @@ class DaimonBot(commands.Bot):
         _, late = await asyncio.wait({notices}, timeout=_DRAIN_NOTICES_S)
         if late:
             log.warning("discord.drain_notices_timed_out", budget_s=_DRAIN_NOTICES_S)
+        # Cancellation phase. Grant no further slot first, so releasing a
+        # cancelled turn's slot cannot start a queued one this snapshot missed.
+        # Cancelled turns leave their provider sessions recoverable: the thread
+        # marker stays for the next process's orphan sweep, and a DM interrupts
+        # its own session (`RunningTurns.shutting_down`).
+        self.turn_queue.stop_dispatch()
+        self.runtime.turn_deps.running_turns.begin_shutdown()
         tasks = self._running_turn_tasks()
+        if tasks:
+            log.info("discord.drain_cancelling", turns=len(tasks))
         for task in tasks:
             task.cancel()
         if tasks:
@@ -3482,6 +3510,9 @@ class DaimonBot(commands.Bot):
             done_ids = {prepared.mapping_id}
             if outcome is not None:
                 done_ids.add(outcome.mapping_id)
+            if self._keeps_turn_for_recovery():
+                # Cancelled by the shutdown drain: leave the marker for recovery.
+                done_ids.clear()
             for done_id in done_ids - {None}:
                 if done_id is None:  # pragma: no cover - set difference guarantees this
                     continue
@@ -4592,6 +4623,9 @@ class DaimonBot(commands.Bot):
             _done_ids = {prepared.mapping_id}
             if outcome is not None:
                 _done_ids.add(outcome.mapping_id)
+            if self._keeps_turn_for_recovery():
+                # Cancelled by the shutdown drain: leave the marker for recovery.
+                _done_ids.clear()
             for _done_id in _done_ids - {None}:
                 if _done_id is None:  # pragma: no cover - set difference guarantees this
                     continue

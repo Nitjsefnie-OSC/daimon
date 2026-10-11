@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +26,7 @@ from uuid import UUID
 import discord
 import httpx
 import pytest
+from daimon.adapters.discord import theme
 from daimon.adapters.discord import wizard_submit as wizard_submit_module
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.post_transport import DiscordPostTransport
@@ -528,39 +529,71 @@ async def test_the_shutdown_drain_counts_and_waits_for_a_running_wizard_turn(
     assert await list_orphaned_turns(db_session, platform="discord") == []
 
 
-async def test_the_shutdown_drain_cancels_a_wizard_turn_still_running_after_the_grace(
+class _HeldStream(httpx.AsyncByteStream):
+    """An SSE stream MA opened and never writes to: the turn is running."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        await asyncio.Event().wait()
+        yield b""  # pragma: no cover - never reached
+
+
+def _hold_streams(router: MARouter, *, accepted: asyncio.Event) -> None:
+    """MA accepts the turn's `user.message` and keeps it running."""
+    for index, (method, pattern, handler) in enumerate(router.routes):
+        if method == "GET" and pattern.pattern.endswith("/events/stream"):
+            router.routes[index] = (
+                method,
+                pattern,
+                lambda _r, _m: httpx.Response(
+                    200, headers={"content-type": "text/event-stream"}, stream=_HeldStream()
+                ),
+            )
+        elif method == "POST" and pattern.pattern.endswith("/events"):
+
+            def record(
+                request: httpx.Request,
+                match: re.Match[str],
+                handler: Callable[[httpx.Request, re.Match[str]], httpx.Response] = handler,
+            ) -> httpx.Response:
+                response = handler(request, match)
+                accepted.set()
+                return response
+
+            router.routes[index] = (method, pattern, record)
+
+
+async def test_a_wizard_turn_cut_by_the_drain_keeps_its_marker_and_the_next_boot_stops_it(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
+    """MA accepted the turn and is still running it when the grace runs out.
+    The drain cancels the task, but the thread marker must survive it: the
+    next process's orphan sweep is what interrupts (or delivers) the session."""
     tenant = await _seed_funded_tenant(db_session, workspace_id="800003502")
     row = await _seed_review_row(db_session_factory, tenant=tenant)
 
     channel = _make_channel(thread_id=5036, parent_id=4036)
-    router = _build_router(str(tenant.id), sent_events=[], stream_hits=[])
+    sent_events: list[dict[str, Any]] = []
+    accepted = asyncio.Event()
+    router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=[])
+    _hold_streams(router, accepted=accepted)
     runtime = _make_runtime(db_session_factory, router)
     bot = _make_bot(runtime)
     bot.close = AsyncMock()  # type: ignore[method-assign]
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 
-    entered = asyncio.Event()
-
-    async def _stuck_impl(*_args: Any, **_kwargs: Any) -> Any:
-        entered.set()
-        await asyncio.Event().wait()
-
     with (
         patch("daimon.core.turn.prepare.create_session") as mock_create_session,
-        patch.object(run_module, "run_prepared_turn_impl", _stuck_impl),
-        patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.2),
+        patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.1),
     ):
         mock_create_session.return_value = ma_session(
-            id="sess_fresh_cut", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
+            id="sess_drain_accepted", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
         )
         item = await WizardSubmitButton.from_custom_id(
             interaction, MagicMock(), _submit_match(row.id)
         )
         assert await item.interaction_check(interaction) is True
         await item.callback(interaction)
-        await asyncio.wait_for(entered.wait(), timeout=10.0)
+        await asyncio.wait_for(accepted.wait(), timeout=10.0)
         turn_tasks = set(bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
         await asyncio.wait_for(bot._drain_and_close(), timeout=15.0)  # pyright: ignore[reportPrivateUsage]
         _, still_running = await asyncio.wait(turn_tasks, timeout=5.0)
@@ -568,10 +601,123 @@ async def test_the_shutdown_drain_cancels_a_wizard_turn_still_running_after_the_
             task.cancel()
 
     assert not still_running, "the drain cancels a wizard turn left after the grace"
-    assert any(task.cancelled() for task in turn_tasks)
     assert runtime.turn_deps.running_turns.count() == 0
     assert bot.turn_queue.in_flight() == 0, "its finally released the turn slot"
     bot.close.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue]
+    markers = await list_orphaned_turns(db_session, platform="discord")
+    assert [(m.ma_session_id, m.active_turn_message_id) for m in markers] == [
+        ("sess_drain_accepted", "42")
+    ], "the marker of a turn MA is still running survives the drain"
+    assert markers[0].active_turn_owner_key == runtime.owner_key, "owned by the old process"
+    assert [e["type"] for b in sent_events for e in b["events"]] == ["user.message"]
+
+    # The next process boots; the old owner is gone.
+    async with db_session_factory() as session:
+        (intent,) = await list_recoverable_turn_card_intents(session, platform="discord")
+    card = channel.send.return_value
+    card.webhook_id = None
+    card.embeds = [
+        discord.Embed(title="Working on it…", color=discord.Color(theme.COLOR_IN_PROGRESS))
+    ]
+    card.attachments = []
+    card.edit.return_value = card
+    channel.fetch_message = AsyncMock(return_value=card)
+    successor = _make_bot(runtime)
+    successor._orphan_recovery_armed = True  # pyright: ignore[reportPrivateUsage]
+    successor.get_channel = MagicMock(return_value=channel)  # type: ignore[method-assign]
+    await successor._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+    for task in list(successor._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+        task.cancel()
+    await asyncio.gather(*list(successor._bg_tasks), return_exceptions=True)  # pyright: ignore[reportPrivateUsage]
+
+    assert [e["type"] for b in sent_events for e in b["events"]] == [
+        "user.message",
+        "user.interrupt",
+    ], "the orphan sweep stops the session the cut turn left running"
+    assert await list_orphaned_turns(db_session, platform="discord") == []
+    edited = card.edit.await_args
+    assert edited is not None
+    assert edited.kwargs["embed"].title == "Daimon restarted before this request finished."
+    assert intent.message_id == "42"
+
+
+async def test_a_queued_wizard_never_starts_once_the_drain_cancels_the_running_one(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Cap 1: the second submit waits for the first one's slot. Cancelling the
+    first must not hand its slot to the second, which the drain also cancels,
+    leaving its card for boot recovery."""
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800003503")
+    rows = [await _seed_review_row(db_session_factory, tenant=tenant) for _ in range(2)]
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=[])
+    runtime = _make_runtime(db_session_factory, router)
+    runtime.settings.discord.max_concurrent_turns = 1
+    bot = _make_bot(runtime)
+    assert bot.turn_queue.global_cap == 1
+    closing = asyncio.Event()
+
+    async def close() -> None:
+        # Production close() yields to the loop; give a granted slot its chance.
+        closing.set()
+        await asyncio.sleep(0.3)
+
+    bot.close = AsyncMock(side_effect=close)  # type: ignore[method-assign]
+    entered: list[str] = []
+    first_entered = asyncio.Event()
+
+    async def _held_impl(*_args: Any, **kwargs: Any) -> Any:
+        entered.append(kwargs["thread_id"])
+        first_entered.set()
+        await asyncio.Event().wait()
+
+    channels = [_make_channel(thread_id=5037 + i, parent_id=4037) for i in range(2)]
+    with (
+        patch.object(run_module, "run_prepared_turn_impl", _held_impl),
+        patch(
+            "daimon.core.turn.prepare.create_session",
+            side_effect=[
+                ma_session(
+                    id=f"sess_drain_queue_{i}",
+                    agent_id=_AGENT_ID,
+                    model=_MODEL_ID,
+                    environment_id=_ENV_ID,
+                )
+                for i in range(2)
+            ],
+        ),
+        patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.1),
+    ):
+        for i, (row, channel) in enumerate(zip(rows, channels, strict=True)):
+            interaction = _interaction(
+                user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123
+            )
+            item = await WizardSubmitButton.from_custom_id(
+                interaction, MagicMock(), _submit_match(row.id)
+            )
+            await item.callback(interaction)
+            if i == 0:
+                await asyncio.wait_for(first_entered.wait(), timeout=10.0)
+        async with asyncio.timeout(10):
+            while bot.turn_queue.depth() != 1:
+                await asyncio.sleep(0.01)
+        turn_tasks = set(bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+        assert len(bot._running_turn_tasks()) == 2, "the queued submit is in progress too"  # pyright: ignore[reportPrivateUsage]
+
+        await asyncio.wait_for(bot._drain_and_close(), timeout=15.0)  # pyright: ignore[reportPrivateUsage]
+        _, still_running = await asyncio.wait(turn_tasks, timeout=5.0)
+        for task in still_running:
+            task.cancel()
+
+    assert closing.is_set()
+    assert entered == [str(channels[0].id)], "the queued wizard never started its turn"
+    assert not still_running, "both wizard operations were cancelled within the drain"
+    assert runtime.turn_deps.running_turns.count() == 0
+    assert bot.turn_queue.in_flight() == 0 and bot.turn_queue.depth() == 0
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="discord")
+    assert {intent.thread_id for intent in intents} == {str(c.id) for c in channels}, (
+        "both cards stay recoverable for the next boot"
+    )
 
 
 async def test_two_concurrent_submits_bill_exactly_one_turn(

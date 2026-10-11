@@ -50,9 +50,10 @@ mentions that arrive while the wizard turn runs, with nothing left to drain
 them. The practical effect is that a wizard turn and a mention turn can run
 concurrently against the same thread's session -- an accepted trade-off, not
 a bug, for the first cut of this feature. The shutdown drain still counts,
-waits for and finally cancels a running wizard turn like any other:
-`run_prepared_turn` registers itself in `TurnDeps.running_turns`, which
-`_drain_and_close` reads alongside `_processing`. If the session
+waits for and finally cancels a wizard turn like any other: the whole
+submitted operation registers in `TurnDeps.running_turns`, which
+`_drain_and_close` reads alongside `_processing`. A turn cancelled that way
+keeps its thread marker for the next process's orphan sweep. If the session
 dies under both turns at once, dead-session recovery (`core.turn.run`) runs
 under the per-thread preparation lock, so the second turn adopts the first
 one's replacement and the thread still has one live session.
@@ -354,11 +355,16 @@ async def run_wizard_submit_turn(
     spec: WizardSpec,
     state: WizardState,
 ) -> None:
-    with observe_turn(
-        bot.runtime.sessionmaker,
-        tenant_id=row.tenant_id,
-        platform="discord",
-        channel_id=str(interaction.channel_id),
+    # The whole accepted operation -- slot wait, preparation, the turn and its
+    # cleanup -- is in progress for the shutdown drain, not only the turn.
+    with (
+        bot.runtime.turn_deps.running_turns.track(),
+        observe_turn(
+            bot.runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            platform="discord",
+            channel_id=str(interaction.channel_id),
+        ),
     ):
         return await run_wizard_submit_turn_observed(
             bot=bot, interaction=interaction, row=row, spec=spec, state=state
@@ -732,6 +738,8 @@ async def run_wizard_submit_turn_observed(
                         id=prepared.mapping_id,
                         active_turn_message_id=lifecycle.final_message_id,
                         now=datetime.now(UTC),
+                        # A successor's orphan sweep leaves a live owner's marker alone.
+                        owner_key=bot.runtime.owner_key,
                     )
                     await marker_session.commit()
 
@@ -761,6 +769,11 @@ async def run_wizard_submit_turn_observed(
                 final_message_id = lifecycle_holder[0].final_message_id
                 if final_message_id is not None:
                     marker_ids[outcome.mapping_id] = final_message_id
+            # A shutdown cancelled this turn mid-run: its MA session is still
+            # going. The marker stays for the next process's orphan sweep, which
+            # delivers a finished answer or interrupts the session.
+            if bot._keeps_turn_for_recovery():  # pyright: ignore[reportPrivateUsage]  # the drain's shared rule
+                marker_ids.clear()
             for marker_id, expected_message_id in marker_ids.items():
                 async with bot.runtime.sessionmaker() as marker_session:
                     await clear_active_turn_if_message_id(
