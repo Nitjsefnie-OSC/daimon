@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
@@ -357,6 +358,38 @@ class DiscordBackend:
             payload["message_reference"] = {"message_id": reply_message_id, "channel_id": channel}
         if step.file and reply_message_id:
             raise Pending("file with reply reference is not yet supported by qa.py")
+        pending = f"pending-{uuid.uuid4().hex}" if step.do == "thread_reply" else None
+        if pending is not None:
+            # Register the successor boundary BEFORE the POST: Discord can accept
+            # the trigger while its receipt is delayed, and the predecessor's
+            # watcher must not settle on this follow-up's messages meanwhile.
+            # Until the real trigger id is known, the send time bounds it.
+            with self.overlap_lock:
+                self._link(pending, channel, sent_at, followup=True)
+        try:
+            message_id = self._post(channel, step, content, payload)
+        except BaseException:
+            if pending is not None:
+                with self.overlap_lock:
+                    self._unlink(pending)
+            raise
+        self.baselines[message_id] = {fingerprint(m) for m in baseline}
+        self.baseline_ids[message_id] = {str(m.get("id")) for m in baseline}
+        if pending is not None:
+            # A Daimon card still working when the follow-up is posted proves
+            # an in-flight predecessor, even if no watcher is collecting it.
+            with self.overlap_lock:
+                self.inflight[message_id] = [
+                    m
+                    for m in baseline
+                    if str(obj(m.get("author")).get("id")) == self.target.daimon_id
+                    and self.classify(m) == "working"
+                ]
+                self._rename(pending, message_id)
+        self.driver.set_role("user")
+        return message_id
+
+    def _post(self, channel: str, step: Step, content: str, payload: Message) -> str:
         if step.file:
             # Reuse qa.py's multipart upload; only the emitted message ID is captured.
             import contextlib
@@ -379,23 +412,23 @@ class DiscordBackend:
             message_id = str(result["id"])
         if not message_id.isdigit():
             raise ValueError("driver did not return a Discord message id")
-        self.baselines[message_id] = {fingerprint(m) for m in baseline}
-        self.baseline_ids[message_id] = {str(m.get("id")) for m in baseline}
-        if step.do == "thread_reply":
-            # A Daimon card still working when the follow-up is posted proves
-            # an in-flight predecessor, even if no watcher is collecting it.
-            with self.overlap_lock:
-                self.inflight[message_id] = [
-                    m
-                    for m in baseline
-                    if str(obj(m.get("author")).get("id")) == self.target.daimon_id
-                    and self.classify(m) == "working"
-                ]
-                # Link now, before the predecessor's watcher can settle on
-                # this follow-up's messages ahead of its own collector starting.
-                self._link(message_id, channel, sent_at, followup=True)
-        self.driver.set_role("user")
         return message_id
+
+    def _unlink(self, trigger_id: str) -> None:
+        """Roll back a pre-POST link whose follow-up was never sent. Lock held."""
+        for prior in self.predecessors.pop(trigger_id, []):
+            self.successors[prior.trigger_id] = [
+                link for link in self.successors.get(prior.trigger_id, []) if link[0] != trigger_id
+            ]
+
+    def _rename(self, pending: str, trigger_id: str) -> None:
+        """Rekey a pre-POST link to the posted trigger id. Lock held."""
+        for prior in self.predecessors.pop(pending, []):
+            self.predecessors.setdefault(trigger_id, []).append(prior)
+            self.successors[prior.trigger_id] = [
+                (trigger_id, sent) if link == pending else (link, sent)
+                for link, sent in self.successors.get(prior.trigger_id, [])
+            ]
 
     def _link(self, trigger_id: str, channel: str, sent_at: datetime, *, followup: bool) -> None:
         """Link a trigger to every turn still unfinished in the thread it was sent to.

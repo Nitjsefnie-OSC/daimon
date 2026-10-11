@@ -424,8 +424,11 @@ thread and never waits for its terminal answer or guesses a thread ID. Watchers
 finish before assertions, teardown, and accounting.
 The follow-up is sent only while its predecessor is positively running (a
 working card on its latest poll and no terminal observation); otherwise the
-scenario is PENDING and nothing is sent. A follow-up is linked at send time to
-every turn still unfinished in that thread, including in-thread predecessors.
+scenario is PENDING and nothing is sent. A follow-up is linked to every turn
+still unfinished in that thread, including in-thread predecessors, before its
+POST is issued (bounded by the send time until the trigger id returns), so a
+delayed POST receipt can't let the predecessor settle on the follow-up's
+messages. A failed POST rolls the link back.
 Overlapping turns in one thread are attributed by the product's serial order:
 messages created before the follow-up trigger belong to the predecessor, and the
 follow-up owns messages from its first card observed working that was created

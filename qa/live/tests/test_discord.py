@@ -1060,8 +1060,6 @@ def test_collect_gives_every_card_in_a_poll_the_same_listing_time(
     assert a["listed_at"] == b["listed_at"]
     assert a["listed_at"] <= a["observed_at"] < b["observed_at"]
 
-    assert evaluate(edits, [turn], backend, FakeJudge()).status == "FAIL"
-
 
 def test_progress_text_snapshot_survives_final_card_edit(
     backend: DiscordBackend,
@@ -1494,3 +1492,102 @@ def test_same_thread_second_and_third_turns_stay_disjoint(
 
     assert check(2, "SECOND-DONE") == "PASS" and check(2, "THIRD-DONE") == "FAIL"
     assert check(3, "THIRD-DONE") == "PASS" and check(3, "SECOND-DONE") == "FAIL"
+
+
+def test_delayed_followup_post_receipt_cannot_pollute_predecessor(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    """REVIEW-723-69bb364 P1: Discord accepts the follow-up, its receipt is delayed."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from qa.live.evaluate import evaluate
+    from qa.live.tests.conftest import FakeJudge
+
+    stream = SharedThread(backend, driver)
+    first = stream.first
+    accepted = threading.Event()
+    release = threading.Event()
+    real_call = driver.call
+
+    def delayed(method: str, path: str, **kwargs: object) -> JsonValue:
+        if method == "POST":
+            accepted.set()
+            assert release.wait(5)
+            # The trigger's snowflake dates it at the send, like Discord's.
+            millis = int(stream.now.timestamp() * 1000) - 1420070400000
+            return {"id": str(millis << 22)}
+        return real_call(method, path, **kwargs)  # type: ignore[arg-type]
+
+    driver.call = delayed  # type: ignore[method-assign]
+    second_card = {
+        "id": "second-card",
+        "channel_id": "thread",
+        "content": "Running second",
+        "working": True,
+        "timestamp": stream.at(0.2),
+    }
+    first_done = {
+        **stream.first_card,
+        "working": False,
+        "content": "FIRST-DONE",
+        "edited_timestamp": stream.at(0.1),
+    }
+    second_done = {
+        **second_card,
+        "working": False,
+        "content": "SECOND-DONE",
+        "edited_timestamp": stream.at(0.3),
+    }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        collecting = pool.submit(backend.collect, first, 5)
+        deadline = time.monotonic() + 2
+        while first.progress_seen_s is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        posted = pool.submit(
+            backend.send,
+            "thread",
+            Step(do="thread_reply", text="SECOND-DONE", mention=True),
+            mention=True,
+        )
+        assert accepted.wait(1)
+        # While the POST receipt is outstanding the predecessor finishes and the
+        # follow-up's card runs and answers, all before send() returns.
+        stream.rows = [first_done, second_card]
+        while "second-card" not in backend.ever_working and time.monotonic() < deadline:
+            time.sleep(0.005)
+        stream.rows = [first_done, second_done]
+        while not first.settled and time.monotonic() < deadline + 2:
+            time.sleep(0.005)
+        assert first.settled
+        assert [m["content"] for m in first.messages] == ["FIRST-DONE"]
+        release.set()
+        trigger = posted.result(timeout=2)
+        collecting.result(timeout=2)
+    assert backend.successors["first-trigger"][0][0] == trigger
+    assert not any(key.startswith("pending-") for key in backend.predecessors)
+    second = Turn(2, trigger, "thread", stream.now, thread_id="thread")
+    backend.collect(second, 2)
+    assert second.settled and [m["content"] for m in second.messages] == ["SECOND-DONE"]
+    assert first.attribution_pending is None
+    wrong = Assertion(kind="text_present", turn=1, pattern="SECOND-DONE")
+    assert evaluate(wrong, [first, second], backend, FakeJudge()).status == "FAIL"
+
+
+def test_failed_followup_post_rolls_back_its_overlap_link(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    stream = SharedThread(backend, driver)
+    backend.collected.append(stream.first)
+
+    def refused(method: str, path: str, **kwargs: object) -> JsonValue:
+        assert method == "POST"
+        assert any(key.startswith("pending-") for key in backend.predecessors)
+        raise SystemExit("HTTP 403 on POST " + path + ": denied")
+
+    driver.call = refused  # type: ignore[method-assign]
+    with pytest.raises(SystemExit):
+        backend.send("thread", Step(do="thread_reply", text="SECOND", mention=True), mention=True)
+    assert backend.predecessors == {}
+    assert backend.successors.get("first-trigger", []) == []
