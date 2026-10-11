@@ -265,7 +265,9 @@ async def test_d5_real_member_edit_and_independent_revision_readback(case: Case)
     assert before.payload["description"] == "qa-original"
     start = len(case.binding.trace.requests)
     receipt = await case.edge.attempt_member_edit(MemberAgentEdit(case.member, "qa-unbound-c6"))
-    # Record real product behavior; this must not silently award a denial PASS.
+    # Main #505 (bfaffd2a) now refuses unbound-agent mutations. Observe the
+    # actual member path; neither an identity refusal nor an operator edit
+    # establishes this denial, and it is not a whole-scenario PASS.
     assert receipt.observations["before"] == before.model_dump(mode="json")
     after = await case.edge.read_agent("qa-unbound-c6")
     assert receipt.observations["after"] == after.model_dump(mode="json")
@@ -281,18 +283,25 @@ async def test_d5_real_member_edit_and_independent_revision_readback(case: Case)
         for r in case.binding.trace.requests[start:]
         if r.method == "POST" and r.path == f"/v1/agents/{before.native_id}"
     ]
-    assert len(updates) == 2
-    assert updates[0]["version"] == 1 and updates[0]["description"] == "qa probe"
-    assert updates[1]["version"] == 2
-    assert updates[1]["mcp_servers"] == [
-        {"name": "deepwiki", "url": "https://mcp.deepwiki.com/mcp", "type": "url"}
-    ]
+    assert updates == []
     case.binding.trace.assert_consumed()
-    assert receipt.status == "executed" and receipt.observations["errors"] == []
-    assert (before.version, after.version) == (1, 3)
-    assert after.payload["description"] == "qa probe"
-    assert "deepwiki" in after.cli_json and before.payload != after.payload
-    print("D5 actual member edit: executed; revision 1 -> 3; unchanged=false")
+    assert receipt.status == "refused" and receipt.code == "ADMIN_MEMBER_EDIT_REFUSED"
+    expected_error = (
+        "'qa-unbound-c6' is not limited by a channel rule exclusively to channels this caller "
+        "administers, so an admin must change its setup. Tell the caller to ask a workspace "
+        "or server admin to make the requested change to 'qa-unbound-c6'; carry the specific "
+        "action from the conversation into that handoff. Do not retry. An admin can provision "
+        "a channel-restricted agent that you administer."
+    )
+    assert receipt.observations["errors"] == [
+        {"operation": operation, "error": expected_error}
+        for operation in ("update_agent", "attach_mcp_server")
+    ]
+    assert (before.version, after.version) == (1, 1)
+    assert before.payload == after.payload and before.cli_json == after.cli_json
+    assert receipt.observations["unchanged"] is True
+    assert receipt.observations["revision_unchanged"] is True
+    print("D5 actual member edit: refused; revision 1 -> 1; unchanged=true; zero native POSTs")
     row = frozen("QA-D5-UNBOUND-AGENT-EDIT-REFUSED")
     archived = await case.binding.execute(row["operations"][1]["source"], {"nonce": "c6"})
     assert archived.status == "executed" and archived.observations["archived"] is True

@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compose the signed backend selector, host conformance evidence and explicitly configured Gemini runtime; deployment clients refuse ambient routing and TLS settings without changing default Anthropic behavior.
 
 - Support explicit manual-probe cash hold floors and single settlement of disjoint Anthropic session pairs, preserving incomplete usage holds and exact decimal arithmetic.
+- Update the offline Anthropic unbound-agent edit observation for main #505: both member mutations refuse with independent unchanged revision readback and zero native writes.
 - Deliver neutral provider lifecycle records by their own event identity across reconnects, so media revisions sharing a compatibility display ID reach the optional tap once while native delivery stays unchanged.
 - Add explicit offline Discord, Slack and Teams callbacks that expose actual
   admission and session binding for backend-selection conformance.

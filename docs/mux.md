@@ -1702,9 +1702,11 @@ operations to unchanged Anthropic CLI functions on an owned test tenant. Its
 member probe executes the real MCP update/attach paths with the independently
 selected native agent identity and a real local user account. Independent CLI
 JSON and SDK revision reads preserve provider skill IDs and refuse interleaved
-revision changes. The observed unbound-agent edit currently succeeds and changes
-the revision; it is evidence of a failing unchanged-agent predicate, not a denial
-certificate. Host message/log assertions remain separate runner obligations.
+revision changes. After main #505 (`bfaffd2a`), both attempted member edits of an
+unbound agent refuse with an admin handoff. Independent actual-SDK reads prove
+the payload and revision are unchanged, and the captured trace has zero native
+mutation POSTs. This is a bound refusal observation, not a whole-scenario PASS.
+Host message/log assertions remain separate runner obligations.
 Explicit fixture manifests and isolated SDK/database guards are required;
 unsupported providers/shapes remain typed pending. No product behavior or native
 create conversion changes.
