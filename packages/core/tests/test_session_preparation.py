@@ -75,6 +75,7 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError
+from daimon.core.turn.outcomes import TurnObservation
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
     PreparedTurn,
@@ -727,6 +728,8 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
         account=account,
     )
     assert isinstance(first, PreparedTurn)
+    observation = TurnObservation(db_session_factory, tenant.id, "discord", "channel-b", "thread-1")
+    observation.session_id = first.ma_session_id
 
     async def checkpoint(self: WorkspaceTransferRunner, **kwargs: Any) -> PreparedReplacement:
         old_session_id = kwargs["old_session_id"]
@@ -748,6 +751,7 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
             markup=self.markup,
             channel_id=self.channel_id,
         )
+        observation.note_usage(event, metered=True)
         await recorder(event=event)
         missed = event.model_copy(update={"id": "evt_checkpoint_missed"})
         transport.state.events[old_session_id].append(missed.model_dump(mode="json"))
@@ -764,14 +768,30 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
         markup=Decimal("1"),
         channel_id="channel-b",
     )
-    second = await _prepare(
-        deps,
-        replace(_admission(account=account), budget_channel_id="channel-b"),
-        tenant=tenant,
-        account=account,
-        transfer=runner,
-    )
+    with observation.activate():
+        second = await _prepare(
+            deps,
+            replace(_admission(account=account), budget_channel_id="channel-b"),
+            tenant=tenant,
+            account=account,
+            transfer=runner,
+        )
     assert isinstance(second, PreparedTurn) and second.ma_session_id != first.ma_session_id
+    assert observation._samples[(first.ma_session_id, "evt_checkpoint_live")].cost is not None
+    assert observation.model_by_session[second.ma_session_id] == _MODEL
+    new_event = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_successor_live",
+        is_error=False,
+        model_request_start_id="start_successor",
+        model_usage=ma_model_usage(input_tokens=1000, output_tokens=100),
+        processed_at=_NOW,
+        type="span.model_request_end",
+    )
+    observation.session_id = second.ma_session_id
+    observation.note_usage(new_event, metered=True)
+    await second._record(event=new_event)
+    transport.state.events[second.ma_session_id].append(new_event.model_dump(mode="json"))
+    assert observation._samples[(second.ma_session_id, new_event.id)].cost is not None
     # The fake list endpoint excludes archived sessions by default. Expose the
     # predecessor to exercise the sweep's attribution when its log is listed.
     old = transport.state.sessions[first.ma_session_id]
@@ -780,9 +800,12 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
     async with db_session_factory() as session:
         rows = (await session.scalars(select(UsageEvent).order_by(UsageEvent.id))).all()
         debits = (await session.scalars(select(TenantLedger).order_by(TenantLedger.id))).all()
-    assert len(rows) == len(debits) == 2
-    assert {row.channel_id for row in rows} == {"channel-a"}
-    assert {row.channel_id for row in debits} == {"channel-a"}
+    assert len(rows) == len(debits) == 3
+    assert {row.channel_id for row in rows} == {"channel-a", "channel-b"}
+    assert {row.channel_id for row in debits} == {"channel-a", "channel-b"}
+    assert sum(row.channel_id == "channel-a" for row in debits) == 2
+    assert sum(row.channel_id == "channel-b" for row in debits) == 1
+    assert all(row.delta_usd < 0 for row in debits)
 
 
 async def test_budget_channel_change_waits_for_active_session_before_replacement(

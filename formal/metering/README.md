@@ -13,7 +13,7 @@ java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -config Metering.cfg Metering.tla
 java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -config BalanceGate.cfg BalanceGate.tla
 ```
 
-The directory holds three models:
+The directory holds four models:
 
 - `Metering.tla` covers who writes a model call's usage and ledger rows, how
   many times, and with which price and attribution.
@@ -21,6 +21,20 @@ The directory holds three models:
   the gate reads the balance once, before spend lands.
 - `BudgetChannelRecovery.tla` checks legacy stamp resolution, replacement on a
   channel change, and live versus recovered checkpoint attribution.
+- `ReplacementUsage.tla` checks the replacing turn's checkpoint and successor
+  outcome prices alongside their separate ledger debits.
+
+`ReplacementUsageSafe` checks 6 states. `ReplacementUsageUnpriced` reaches
+`PricedObservation` after 3 states: the predecessor checkpoint is debited to A,
+but its diagnostic sample has no registered model. The safe configuration
+registers the predecessor model in `_bind_checkpoint_recorder` before the
+checkpoint event. `BindSuccessor` represents `prepare_session_for_turn` binding
+the new recorder before returning the prepared turn; `SuccessorCall` represents
+the subsequent `run_prepared_turn`. `Sweep` represents the idempotent
+`usage_events` and ledger inserts. This is a bounded ordering check, replayed
+by `test_replacement_checkpoint_live_and_recovered_debits_use_old_channel`
+against PostgreSQL and the MA fake. It does not model failures in the recorder
+or the MA service.
 
 State counts below come from single-worker TLC 2.19 (tla2tools v1.7.4) runs.
 

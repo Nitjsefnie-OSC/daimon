@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Replacement checkpoints now report priced model calls in turn outcomes while retaining their predecessor-channel debits.
 - Restart recovery detaches a chat session when interrupting its orphaned turn fails, so the next message starts a fresh session instead of reaching a busy one.
 - Reused chat sessions are replaced when their budget channel changes, so the usage sweep charges missed turns to the channel that admitted them.
 - New Discord threads retain links to recent channel uploads after busy chat moves them outside the 25-message context window.
