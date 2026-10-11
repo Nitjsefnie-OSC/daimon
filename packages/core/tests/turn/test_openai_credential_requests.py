@@ -366,6 +366,7 @@ async def case(db_engine: AsyncEngine, db_clean: None, tmp_path: Path) -> AsyncI
             copy=True,
             copy_from="daimon",
             channel_label="Credential Team",
+            actor_account_id=resource.id,
             resource_host=host,
         )
         assert copied.agent_name is not None

@@ -112,6 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bind the OpenAI credential-offer test channel copy to its explicit native resource account, retaining the separate credential requester and strict host-scope refusal.
+
 - Record the OpenAI NEW27 native MCP-form prerequisite as source-bound PENDING under the opt-in profile; retain the frozen unused-request predicate and require real native submit/probe/readback before any verdict.
 - Align opt-in OpenAI GitHub-offer evidence assertions with the merged product card copy, retaining rendered-card mutation controls.
 - Use shared isolated SDK construction in OpenAI tests and inject it into offline conformance/F1 factories without adding a mux-to-host dependency. The explicit SDK component retains C06/C07/C09 mutation controls and honest C08 refusal.
