@@ -20,7 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -114,6 +114,17 @@ def _validate_pdf_name(name: str) -> None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="invalid file name")
 
 
+def mount_viewer_assets(app: FastAPI) -> None:
+    """Serve the viewer's CSS and JS at ``/viewer`` on the assembled app.
+
+    The mount goes on the app, not the reader router: FastAPI before 0.137
+    drops ``Mount`` routes in ``include_router`` without a warning, so a
+    router-level mount 404s ``/viewer/app.css`` and ``/viewer/app.js`` and
+    the page stays on "Loading…".
+    """
+    app.mount("/viewer", StaticFiles(directory=_VIEWER_DIR), name="viewer-assets")
+
+
 def build_reader_router(
     *,
     settings: Settings,
@@ -137,7 +148,6 @@ def build_reader_router(
     """
     conn = conn_factory()
     router = APIRouter()
-    router.mount("/viewer", StaticFiles(directory=_VIEWER_DIR), name="viewer-assets")
 
     async def resolve_recipient(slug: str, request: Request) -> RecipientRow:
         token = request.query_params.get("k") or request.cookies.get(f"rh_{slug}")
