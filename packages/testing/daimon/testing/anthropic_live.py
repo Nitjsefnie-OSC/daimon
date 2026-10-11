@@ -216,7 +216,7 @@ def admit(
     document = json.loads(approval_path.read_text())
     approval = document.get("approval", document)
     signed = {
-        "A7": "8de5c78c88a67a826a626516814a4e2575617d2796545f54da876f3a7b74e9f4",
+        "A7": "920af00a4ad7169eded2898a44d8688c983f318b24e355bc4fe8f12e096267e0",
         "F2-Anthropic": "8eea963b8f3541d8a36d79b87e6e983c40cb9cbe1875086202270e505585fab3",
     }
     if digest_json(approval) != signed[package]:
@@ -305,6 +305,153 @@ class OwnedAuthorization(ResourceAuthorization):
         if resource_id is not None and (kind, resource_id) in self.created:
             return
         super().check(scope, kind, resource_id)
+
+
+class LiveRequestMetadata(BaseModel):
+    """Closed routes and separately audited identities; no opaque URL blobs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    method: Literal["GET", "POST", "DELETE"]
+    route: Literal[
+        "/v1/agents",
+        "/v1/sessions",
+        "/v1/skills",
+        "/v1/vaults",
+        "/v1/agents/{resource_id}",
+        "/v1/sessions/{resource_id}",
+        "/v1/skills/{resource_id}",
+        "/v1/vaults/{resource_id}",
+        "/v1/agents/{resource_id}/archive",
+        "/v1/sessions/{resource_id}/archive",
+        "/v1/vaults/{resource_id}/archive",
+        "/v1/sessions/{resource_id}/events",
+        "/v1/sessions/{resource_id}/events/stream",
+        "/v1/vaults/{resource_id}/credentials",
+        "/v1/skills/{resource_id}/versions",
+        "/v1/skills/{resource_id}/versions/{version}/content",
+    ]
+    resource_id: str | None = None
+    version: str | None = None
+
+
+def request_metadata(
+    requests: list[tuple[str, str]], resources: frozenset[tuple[str, str]]
+) -> list[dict[str, JsonValue]]:
+    """Project only known routes and already authorized/accepted parent IDs."""
+    result: list[dict[str, JsonValue]] = []
+    kinds = {"agents": "agent", "sessions": "session", "skills": "skill", "vaults": "vault"}
+    for method, path in requests:
+        parts = path.split("/")
+        if (
+            method not in {"GET", "POST", "DELETE"}
+            or len(parts) < 3
+            or parts[:2] != ["", "v1"]
+            or parts[2] not in kinds
+            or any(not part or any(c in part for c in "?#%\\\r\n") for part in parts[1:])
+        ):
+            raise RecordingError("unknown live request route; export refused")
+        collection = parts[2]
+        resource_id = version = None
+        route = f"/v1/{collection}"
+        if len(parts) == 3:
+            if method not in {"GET", "POST"}:
+                raise RecordingError("unknown live request route; export refused")
+        else:
+            resource_id = parts[3]
+            if (kinds[collection], resource_id) not in resources:
+                raise RecordingError("unaccepted live request identity; export refused")
+            route += "/{resource_id}"
+            tail = tuple(parts[4:])
+            allowed = (
+                not tail
+                and (method == "GET" or collection == "agents" and method == "POST")
+                or not tail
+                and collection == "skills"
+                and method == "DELETE"
+                or tail == ("archive",)
+                and collection in {"agents", "sessions", "vaults"}
+                and method == "POST"
+                or tail == ("events",)
+                and collection == "sessions"
+                and method in {"GET", "POST"}
+                or tail == ("events", "stream")
+                and collection == "sessions"
+                and method == "GET"
+                or tail == ("credentials",)
+                and collection == "vaults"
+                and method in {"GET", "POST"}
+                or tail == ("versions",)
+                and collection == "skills"
+                and method in {"GET", "POST"}
+            )
+            if (
+                len(tail) == 3
+                and tail[0] == "versions"
+                and tail[2] == "content"
+                and collection == "skills"
+                and method == "GET"
+            ):
+                version = tail[1]
+                route += "/versions/{version}/content"
+                allowed = True
+            else:
+                route += "".join("/" + segment for segment in tail)
+            if not allowed:
+                raise RecordingError("unknown live request route; export refused")
+        projected = LiveRequestMetadata.model_validate(
+            {"method": method, "route": route, "resource_id": resource_id, "version": version}
+        )
+        result.append(projected.model_dump(mode="json"))
+    return result
+
+
+def monitor_token_estimate(price: ModelPrice, tokens: TokenUsage, at: datetime) -> Decimal | None:
+    """Unknown write TTL uses the highest pinned rate only for the stop estimate."""
+    exact = price.actual(tokens, at)
+    if exact is not None:
+        return exact
+    if (
+        at.tzinfo is None
+        or price.effective_from is None
+        or price.source is None
+        or at.astimezone(UTC).date() < price.effective_from
+        or price.effective_until is not None
+        and at.astimezone(UTC).date() >= price.effective_until
+        or price.actual_input_limit is not None
+        and tokens.minimum_input_tokens > price.actual_input_limit
+        or any(
+            value is None
+            for value in (
+                tokens.input_tokens,
+                tokens.output_tokens,
+                tokens.input_cached_tokens,
+                tokens.input_cache_write_tokens,
+            )
+        )
+        or not tokens.input_cache_write_tokens
+        or tokens.input_cache_write_5m_tokens is not None
+        and tokens.input_cache_write_1h_tokens is not None
+    ):
+        return None
+    rate = (
+        price.short_prompt
+        if price.short_prompt is not None
+        and cast(int, tokens.input_tokens) <= price.short_prompt.through_input_tokens
+        else price
+    )
+    with localcontext() as context:
+        context.prec = 80
+        return (
+            (
+                cast(int, tokens.input_tokens)
+                - cast(int, tokens.input_cached_tokens)
+                - tokens.input_cache_write_tokens
+            )
+            * rate.input
+            + cast(int, tokens.input_cached_tokens) * rate.cached_input
+            + tokens.input_cache_write_tokens * price.cache_write_input
+            + cast(int, tokens.output_tokens) * rate.output
+        ) / Decimal(1000000)
 
 
 @dataclass
@@ -411,6 +558,8 @@ class UsageMonitor:
             )
             obs = observation_from_event(event, ref, observed_at=datetime.now(UTC), model_id=MODEL)
             cache = obs.native_meter.get("cache_creation")
+            if cache is not None and not isinstance(cache, dict):
+                raise ValueError("invalid cache TTL split")
             duration = cache if isinstance(cache, dict) else {}
             tokens = TokenUsage(
                 input_tokens=obs.input_tokens,
@@ -428,7 +577,7 @@ class UsageMonitor:
                 event["id"]
             ) not in self.observed_thresholds:
                 self.observed_thresholds.append(str(event["id"]))
-            amount = self.price.actual(tokens, datetime.now(UTC))
+            amount = monitor_token_estimate(self.price, tokens, datetime.now(UTC))
             if amount is None:
                 self.halt("usage cost is unknown")
             costs[request_id] = max(costs.get(request_id, Decimal(0)), amount)
@@ -1201,7 +1350,6 @@ async def run_live(
                         "spend": receipt.model_dump(mode="json"),
                     }
                     if context is not None:
-                        facts["requests"] = context.transport.requests
                         facts["created_resources"] = sorted(context.transport.authorization.created)
                         facts["pending_create_acknowledgements"] = context.transport.pending_creates
                         facts["pending_native_responses"] = len(context.transport.pending_responses)
@@ -1262,6 +1410,13 @@ async def run_live(
                             for raw in context.transport.monitor.observations.values()
                         ]
                     try:
+                        if context is not None:
+                            facts["requests"] = request_metadata(
+                                context.transport.requests,
+                                context.transport.authorization.resources
+                                | frozenset(context.transport.authorization.created)
+                                | frozenset(context.transport.orphans),
+                            )
                         Audit(context.redaction_secrets if context else ()).audit(
                             json.loads(json.dumps(facts))
                         )
