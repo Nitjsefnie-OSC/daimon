@@ -41,7 +41,29 @@ ENV = {"env.qa_token_mcp_url": QA_TOKEN_MCP_URL}
 
 
 @pytest.fixture
-async def mcp_transport(tmp_path: Path) -> AsyncIterator[httpx.AsyncBaseTransport]:
+def db_session_factory(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> async_sessionmaker[AsyncSession]:
+    """The suite's factory, or a skip where the shared guard does not admit it.
+
+    A plain local `daimon_test` outside CI is not an owned lane DB, so these
+    bindings would refuse it: skip there, as the guard's own tests do.
+    """
+    from daimon.testing.db import require_owned_sessionmaker
+
+    try:
+        require_owned_sessionmaker(db_session_factory)
+    except ValueError:
+        pytest.skip("needs an owned lane test DB or a registered isolated CI schema")
+    return db_session_factory
+
+
+@pytest.fixture
+async def mcp_transport(
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],  # skips first where unowned
+) -> AsyncIterator[httpx.AsyncBaseTransport]:
+    del db_session_factory
     database_url = os.environ.get("DAIMON_DATABASE__TEST_URL")
     assert database_url, "the parity lane provides an isolated test database"
     qa = await build_host(database_url=database_url, port=0, root=tmp_path)
