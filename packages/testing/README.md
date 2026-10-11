@@ -416,3 +416,14 @@ settlement are protected by a shielded finalizer within the original deadline.
 Repeated caller cancellations are absorbed until that finalizer finishes, then
 cancellation is re-raised. Financial witness ranking uses the exact pinned N8
 monetary bound; missing cache TTL never removes its conservative retained hold.
+
+The A7 replacement entry pins financial authorization
+`920af00a4ad7169eded2898a44d8688c983f318b24e355bc4fe8f12e096267e0`;
+the original attempt marker and hold remain untouched. A separate source/binding
+GO is still required. Managed-agent spans normally expose aggregate cache writes
+without TTL splits. The stop monitor prices such writes conservatively at the
+pinned highest one-hour rate, while complete splits retain exact pricing. This
+estimate neither invents TTL counters nor changes unknown actual usage or guard
+settlement. Receipt request metadata uses fixed route templates and separately
+audited authorized resource IDs. Unknown routes and credential-bearing identities
+refuse export; the shared recording audit is unchanged.

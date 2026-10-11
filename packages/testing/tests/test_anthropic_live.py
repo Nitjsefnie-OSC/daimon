@@ -1728,3 +1728,233 @@ async def test_native_create_ack_body_is_not_read_twice_before_sdk_consumption(
     )
     assert result["result"]["status"] == "pass"
     assert bodies[0].reads == 1 and len(receipts(guard)) == 2
+
+
+@pytest.mark.parametrize(
+    "split",
+    ["absent", None, {}, {"ephemeral_5m_input_tokens": 100}, {"ephemeral_1h_input_tokens": 100}],
+)
+def test_real_a7_cache_write_counts_keep_unknown_ttl_and_use_conservative_monitor(split):
+    from pathlib import Path
+
+    from mux.conformance.budget import TokenUsage
+    from mux.drivers.anthropic.usage import observation_from_event
+
+    config = BudgetConfig.load(Path(__file__).parent / "fixtures/anthropic-live/host-config.json")
+    provider = config.providers["anthropic"]
+    price = provider.models[live.MODEL]
+    event = usage("real-count-reconstruction", 4, 13)
+    event["model_usage"]["cache_creation_input_tokens"] = 642
+    if split == "absent":
+        del event["model_usage"]["cache_creation"]
+    else:
+        event["model_usage"]["cache_creation"] = split
+    before = json.dumps(event, sort_keys=True)
+    at = datetime(2026, 10, 11, 15, tzinfo=UTC)
+    observation = observation_from_event(event, ref("session", "session"), observed_at=at)
+    durations = split if isinstance(split, dict) else {}
+    tokens = TokenUsage(
+        input_tokens=646,
+        output_tokens=13,
+        input_cached_tokens=0,
+        input_cache_write_tokens=642,
+        input_cache_write_5m_tokens=durations.get("ephemeral_5m_input_tokens"),
+        input_cache_write_1h_tokens=durations.get("ephemeral_1h_input_tokens"),
+    )
+    assert price.actual(tokens, at) is None
+    assert live.monitor_token_estimate(price, tokens, at) == Decimal(".0006489")
+    monitor = live.UsageMonitor(price, provider.session_prices[0], Decimal(".28"))
+    monitor.observe(event, "accepted-session")
+    assert not monitor.stop.is_set() and monitor.cost >= Decimal(".0006489")
+    assert observation.native_meter == event["model_usage"]
+    assert json.dumps(event, sort_keys=True) == before
+
+
+def test_complete_ttl_split_keeps_exact_pricing_and_stale_price_stays_unknown():
+    from pathlib import Path
+
+    from mux.conformance.budget import TokenUsage
+
+    price = (
+        BudgetConfig.load(Path(__file__).parent / "fixtures/anthropic-live/host-config.json")
+        .providers["anthropic"]
+        .models[live.MODEL]
+    )
+    tokens = TokenUsage(
+        input_tokens=646,
+        output_tokens=13,
+        input_cached_tokens=0,
+        input_cache_write_tokens=642,
+        input_cache_write_5m_tokens=642,
+        input_cache_write_1h_tokens=0,
+    )
+    at = datetime(2026, 10, 11, 15, tzinfo=UTC)
+    assert (
+        live.monitor_token_estimate(price, tokens, at)
+        == price.actual(tokens, at)
+        == Decimal(".00008715")
+    )
+    unknown = tokens.model_copy(
+        update={"input_cache_write_5m_tokens": None, "input_cache_write_1h_tokens": None}
+    )
+    assert live.monitor_token_estimate(price, unknown, datetime(2026, 10, 12, tzinfo=UTC)) is None
+
+
+@pytest.mark.parametrize("split", ["absent", None, {"ephemeral_5m_input_tokens": 10}])
+def test_unknown_ttl_conservative_monitor_estimate_can_trigger_stop(split, tmp_path, monkeypatch):
+    _, _, config = admission(tmp_path, monkeypatch)
+    provider = config.providers["anthropic"]
+    event = usage("unknown-write-threshold", 0, 0)
+    event["model_usage"]["cache_creation_input_tokens"] = 1000000
+    if split == "absent":
+        del event["model_usage"]["cache_creation"]
+    else:
+        event["model_usage"]["cache_creation"] = split
+    monitor = live.UsageMonitor(
+        provider.models[live.MODEL], provider.session_prices[0], Decimal(".28")
+    )
+    with pytest.raises(live.LiveStopped, match="stop threshold"):
+        monitor.observe(event)
+    assert monitor.cost >= Decimal(".28") and monitor.stop.is_set()
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [-1, True, "642", {"ephemeral_5m_input_tokens": -1}, {"ephemeral_5m_input_tokens": 643}],
+)
+def test_unknown_ttl_does_not_accept_invalid_splits(invalid, tmp_path, monkeypatch):
+    _, _, config = admission(tmp_path, monkeypatch)
+    provider = config.providers["anthropic"]
+    event = usage("invalid-ttl", 4, 13)
+    event["model_usage"]["cache_creation_input_tokens"] = 642
+    event["model_usage"]["cache_creation"] = invalid
+    monitor = live.UsageMonitor(
+        provider.models[live.MODEL], provider.session_prices[0], Decimal(".28")
+    )
+    with pytest.raises(live.LiveStopped, match="malformed"):
+        monitor.observe(event)
+
+
+@pytest.mark.parametrize(
+    "suffix,method", [("events/stream", "GET"), ("events", "POST"), ("archive", "POST")]
+)
+def test_real_length_session_paths_have_audited_typed_receipt_metadata(suffix, method):
+    from mux.conformance.recording import Audit, RecordingError
+
+    id_ = "sesn_" + "A" * 26
+    path = f"/v1/sessions/{id_}/{suffix}"
+    with pytest.raises(RecordingError, match="ambiguous encoded content"):
+        Audit(()).audit(path)
+    projected = live.request_metadata([(method, path)], frozenset({("session", id_)}))
+    assert projected == [
+        {
+            "method": method,
+            "route": "/v1/sessions/{resource_id}/" + suffix,
+            "resource_id": id_,
+            "version": None,
+        }
+    ]
+    Audit(()).audit(projected)
+
+
+@pytest.mark.parametrize("id_", ["Bearer " + "synthetic-only-secret", "sk-" + "x" * 40])
+def test_typed_receipt_resource_identity_never_exempts_credentials(id_):
+    from mux.conformance.recording import Audit, RecordingError
+
+    projected = live.request_metadata(
+        [("GET", f"/v1/sessions/{id_}/events/stream")], frozenset({("session", id_)})
+    )
+    with pytest.raises(RecordingError):
+        Audit(()).audit(projected)
+
+
+@pytest.mark.parametrize(
+    "method,path,resources",
+    [
+        ("GET", "/unknown", frozenset()),
+        ("GET", "/v1/sessions/foreign/events", frozenset()),
+        ("POST", "/v1/sessions", frozenset()),
+        ("GET", "/v1/sessions/owned/unknown", frozenset({("session", "owned")})),
+        ("GET", "/v1/sessions/owned/events?key=untrusted", frozenset({("session", "owned")})),
+    ],
+)
+def test_receipt_metadata_refuses_unknown_routes_and_foreign_identities(method, path, resources):
+    from mux.conformance.recording import RecordingError
+
+    if path == "/v1/sessions":
+        assert live.request_metadata([(method, path)], resources)[0]["resource_id"] is None
+    else:
+        with pytest.raises(RecordingError):
+            live.request_metadata([(method, path)], resources)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"],
+)
+def test_unknown_ttl_monitor_never_prices_missing_aggregate_counts(field, tmp_path, monkeypatch):
+    _, _, config = admission(tmp_path, monkeypatch)
+    provider = config.providers["anthropic"]
+    event = usage("missing-aggregate", 4, 13)
+    del event["model_usage"]["cache_creation"]
+    event["model_usage"]["cache_creation_input_tokens"] = 642
+    event["model_usage"][field] = None
+    monitor = live.UsageMonitor(
+        provider.models[live.MODEL], provider.session_prices[0], Decimal(".28")
+    )
+    with pytest.raises(live.LiveStopped, match="unknown"):
+        monitor.observe(event)
+
+
+async def test_real_length_native_session_and_unknown_write_ttl_export_without_changing_hold(
+    tmp_path, monkeypatch
+):
+    from daimon.testing.ma import sse_response
+
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    native = Native()
+    id_ = "sesn_" + "A" * 26
+    event = usage("request-live-regression", 4, 13)
+    event["processed_at"] = datetime.now(UTC).isoformat()
+    event["model_request_start_id"] = "request-start-regression"
+    event["model_usage"]["cache_creation_input_tokens"] = 642
+    del event["model_usage"]["cache_creation"]
+
+    async def wire(request):
+        if request.url.path == "/v1/sessions":
+            native.created += 1
+            return httpx.Response(
+                200,
+                json=ma_session(id=id_, agent_id="agent-test", model=live.MODEL).model_dump(
+                    mode="json"
+                ),
+            )
+        if request.url.path.endswith("/events/stream"):
+            return sse_response([event])
+        return await native.handle(request)
+
+    async def invoke(context):
+        session = await create(context)
+        stream = await context.driver.events.open_stream(SCOPE, session.ref)
+        async for _ in stream:
+            pass
+        return {"status": "pass"}
+
+    await live.run_live(
+        args,
+        invoke,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(wire),
+    )
+    receipt = json.loads((args.output / "receipt.json").read_text())
+    assert receipt["result"]["status"] == "pass"
+    assert receipt["stream_stop_reason"] is None
+    assert receipt["observed_request_meters"][0]["cache_creation_input_tokens"] == 642
+    assert "cache_creation" not in receipt["observed_request_meters"][0]
+    assert any(
+        item["route"] == "/v1/sessions/{resource_id}/events/stream" and item["resource_id"] == id_
+        for item in receipt["requests"]
+    )
+    assert receipt["archived_sessions"] == [id_]
+    assert len(receipts(guard)) == 2 and guard.report()[0].actual_usd is None
+    assert guard.report()[0].held_usd == Decimal(".35")
