@@ -713,3 +713,14 @@ cell exactly once, using decimal precision 80 from measurement through totals.
 Terminal closure releases never-started cells and retains
 unknown usage as held. Runner adoption and native spending controls remain
 separate from this offline API. See the [column admission contract](mux/conformance/README.md#whole-column-admission).
+Gemini resource administration can explicitly select
+`resource_catalog_enabled=True` with an owned `AgentCatalogTransport`. The
+native catalog adapter compiles concrete bundle pins, fences creation before
+POST and verifies independent SDK GET readback. Local PostgreSQL CAS retains old
+native IDs and authored revisions; Gemini provider versions are never invented.
+The default is false and existing inline ports remain selected. The host also
+requires its explicit default-false capability and the same enabled agent
+adapter with exact Gemini profile/workspace routing; the guard remains effective
+when off or mismatched. Independent readback uses the public verification edge.
+Named-agent turns refuse the inline session plan. Whole D14/D5 cells remain
+PENDING. See [resource catalog capability](mux/drivers/gemini/RESOURCE-CATALOG.md).

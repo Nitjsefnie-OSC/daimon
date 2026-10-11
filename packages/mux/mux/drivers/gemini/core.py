@@ -117,6 +117,13 @@ class Base:
             raise ScopeViolation(spec.agent.id, "no owned inline agent")
         if agent.revision != spec.agent_revision:
             raise ProviderError("conflict", retryable=False)
+        if (
+            isinstance(agent.native, dict)
+            and agent.native.get("resource_mode") == "gemini.named_agent_catalog@1"
+        ):
+            # This default-off admin slice verifies native definitions, not a
+            # live named-agent session plan. Never substitute an inline clone.
+            refuse("named_agent_session_plan")
         request = compile_agent(agent.spec, authenticated_mcp=self._mcp_secrets is not None)
         environment: JsonValue = {"type": "remote"}
         if spec.environment is not None:

@@ -12,6 +12,7 @@ import uuid
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import Protocol
 
 import structlog
 from daimon.core.constants import AGENT_SKILL_CAP
@@ -33,7 +34,7 @@ from daimon.core.stores.neutral_catalog import (
     SkillVersion,
 )
 from mux.contracts.ids import Scope, SkillRef
-from mux.contracts.ports import ManagedAgents
+from mux.contracts.ports import Agents, ManagedAgents
 from mux.contracts.resources import (
     Agent,
     AgentSpec,
@@ -48,6 +49,24 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 AgentGate = Callable[[Agent], Awaitable[None]]
 PinResolver = Callable[[Scope, SkillRef], Awaitable[SkillRef]]
 _log = structlog.get_logger(__name__)
+
+
+class NativeCatalogReadback(Agents, Protocol):
+    """Explicit provider-owned readback, without SDK or credential access."""
+
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def profile_id(self) -> str: ...
+
+    @property
+    def account_scope_id(self) -> str: ...
+
+    @property
+    def enabled(self) -> bool: ...
+
+    async def verify(self, scope: Scope, retained: Agent) -> Agent: ...
 
 
 @dataclass(frozen=True)
@@ -121,6 +140,8 @@ class NeutralResourceHost:
         account_scope_id: str,
         operation_key: str,
         resolve_pin: PinResolver | None = None,
+        resource_catalog_enabled: bool = False,
+        catalog_adapter: NativeCatalogReadback | None = None,
     ) -> None:
         if (
             scope.is_platform
@@ -136,6 +157,26 @@ class NeutralResourceHost:
         self.workspace = account_scope_id
         self.operation_key = operation_key
         self.resolve_pin = resolve_pin
+        self._gemini_catalog: NativeCatalogReadback | None = None
+        if backend.capabilities().provider == "gemini":
+            if (
+                resource_catalog_enabled is not True
+                or catalog_adapter is None
+                or catalog_adapter.enabled is not True
+                or catalog_adapter.provider != "gemini"
+                or catalog_adapter.profile_id != "gemini.inline_reuse"
+                or backend.capabilities().profile_id != "gemini.inline_reuse"
+                or catalog_adapter.account_scope_id != account_scope_id
+                or backend.agents is not catalog_adapter
+            ):
+                raise UnsupportedCapability(
+                    ("neutral_resource_host_after_g2",), backend.capabilities().profile_id
+                )
+            self._gemini_catalog = catalog_adapter
+            self.catalog = PostgresNeutralCatalog(
+                sessions, provider="gemini", account_scope_id=account_scope_id
+            )
+            return
         if backend.capabilities().provider != "openai":
             raise UnsupportedCapability(
                 ("neutral_resource_host_after_g2",), backend.capabilities().profile_id
@@ -172,6 +213,17 @@ class NeutralResourceHost:
 
     async def read(self, catalog_id: str) -> AgentRevision:
         row = await self.entry(catalog_id)
+        if self._gemini_catalog is not None:
+            fresh = await self._gemini_catalog.verify(self.scope, row.agent)
+            self.check(fresh)
+            if (
+                fresh.spec != row.agent.spec
+                or fresh.ref != row.agent.ref
+                or fresh.revision != row.agent.revision
+                or fresh.lifecycle != row.agent.lifecycle
+            ):
+                raise CatalogConflict("native agent differs from the retained catalog revision")
+            return row
         fresh = await self.backend.agents.retrieve(self.scope, row.agent.ref)
         self.check(fresh)
         if (

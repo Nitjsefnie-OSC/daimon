@@ -8,6 +8,8 @@ from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Scope
 from mux.contracts.ports import Models
 from mux.contracts.profile import Profile
 from mux.contracts.usage import UsageObservation
+from mux.drivers.gemini.catalog import GeminiCatalogAdapter
+from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.core import (
     Base,
     GeminiAgents,
@@ -60,8 +62,23 @@ class GeminiManagedAgents:
         model_for_interaction: Callable[[str], ModelRef | None] | None = None,
         mcp_secrets: MCPSecretResolver | None = None,
         skill_bundle_publisher: SkillBundlePublisher | None = None,
+        resource_catalog_enabled: bool = False,
+        resource_catalog_transport: AgentCatalogTransport | None = None,
     ) -> None:
-        self.agents = GeminiAgents(transport, storage, account_scope_id, mcp_secrets=mcp_secrets)
+        if type(resource_catalog_enabled) is not bool:
+            raise ValueError("resource catalog capability must be an explicit bool")
+        self.catalog_adapter: GeminiCatalogAdapter | None = None
+        if resource_catalog_enabled:
+            if resource_catalog_transport is None:
+                raise UnsupportedCapability(
+                    ("gemini_resource_catalog_transport",), PROFILE.profile_id
+                )
+            self.catalog_adapter = GeminiCatalogAdapter(
+                transport, storage, account_scope_id, resource_catalog_transport, enabled=True
+            )
+        self.agents = self.catalog_adapter or GeminiAgents(
+            transport, storage, account_scope_id, mcp_secrets=mcp_secrets
+        )
         self.environments = GeminiEnvironments(transport, storage, account_scope_id)
         self.sessions = GeminiSessions(
             transport, storage, account_scope_id, mcp_secrets=mcp_secrets
@@ -96,4 +113,4 @@ class GeminiManagedAgents:
         raise UnsupportedCapability((namespace,), PROFILE.profile_id)
 
 
-__all__ = ["GeminiManagedAgents", "MCPSecretResolver"]
+__all__ = ["GeminiCatalogAdapter", "GeminiManagedAgents", "MCPSecretResolver"]
