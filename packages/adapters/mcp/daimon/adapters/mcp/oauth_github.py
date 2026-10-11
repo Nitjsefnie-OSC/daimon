@@ -313,7 +313,7 @@ def _no_repos_page(link: str, install_url: str) -> Response:
 
 def _cancelled_page(back: str = "") -> Response:
     return github_page(
-        title="Nothing was connected.",
+        title="No changes saved.",
         body_html="<p>You can close this tab.</p>"
         + (f'<div class="gh-actions">{back}</div>' if back else ""),
     )

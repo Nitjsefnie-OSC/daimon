@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Follow-up turns obey the tenant's current concurrency cap after an operator changes it, without starting queued turns above a lowered cap.
 - Registered Discord tenants with an unjoined guild receive defaults updates on restart, so their agents no longer keep stale guidance.
 - One `yes` now approves only the latest skill-add preview in a thread, even when the previews target different agents.
+- Canceling Connect GitHub says "No changes saved", covering additions, removals, and working-repo edits.
 - Agents created before the Connect GitHub change get the new guidance on the next restart.
 - Agents no longer suggest pasting a GitHub token. When a private repo can't be read, they offer the Connect GitHub link. Agents that already use a saved token keep working.
 - QA reports model verification as n/a PENDING on confirmed pre-admission skipped turns, preserving product silence failures and recording zero spend.
