@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2410,
+  "files_scanned": 2420,
   "parse_errors": [],
   "calls": [
     {
@@ -9758,7 +9758,7 @@
     },
     {
       "file": "packages/adapters/cli/daimon/adapters/cli/runtime.py",
-      "line": 9,
+      "line": 13,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic",
@@ -9993,6 +9993,15 @@
       "module": "anthropic",
       "names": [
         "APIStatusError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_openai_resource_routing.py",
+      "line": 26,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "test"
     },
@@ -19000,6 +19009,15 @@
         "AsyncAnthropic"
       ],
       "category": "test-support"
+    },
+    {
+      "file": "packages/testing/tests/test_admission_evidence.py",
+      "line": 18,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
     },
     {
       "file": "packages/testing/tests/test_channel_accounting.py",
