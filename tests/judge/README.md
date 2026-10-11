@@ -118,8 +118,9 @@ provider tool records are never executed locally. Administrative setup, context
 fetch, attachments, burst concurrency, waits and special reply routing remain
 explicit execution gaps. Original setup/teardown commands are never run, and
 no workspace cleanup occurs. Preview/reconnect tapes need a later capture slice.
-OpenAI and Gemini dispatch zero requests and remain typed PENDING until G1/G2
-host wiring is available. The matrix planner still tracks the 30 extras separately;
+Without native fixture inputs OpenAI stays `OPENAI_FIXTURE_UNAVAILABLE`;
+Gemini stays PENDING until its G2 host binding is available. The OpenAI
+fixture consumer below enables explicit G1 execution. The matrix planner still tracks the 30 extras separately;
 the executor report scores only the frozen 159 cells.
 
 Results distinguish full-cell status from `catalog_outcome` (all original/global
@@ -148,8 +149,186 @@ test uses scripted SDK HTTP/SSE to verify that pre-tool narration, tool results
 and text beyond the host's 1000-character limit do not reach this boundary.
 The test also covers an actual tool-only empty return. It exercises the existing
 legacy headless host and driver; mux admission/session reuse are separate runner
-checks. Binding these receipts to the effects oracle is a following slice once
-that oracle lands on integration. This capture alone
-does not change any TARGET-53 score or claim platform parity.
+checks. The helper alone awards no TARGET-53 score; the executor binding below
+feeds these returned-output observations to the effects oracle. Neither
+boundary certifies platform parity.
 
 Focused verification: `uv run pytest tests/judge/test_headless_output.py`.
+Explicit `wait_done.timeout_s` is currently `PENDING / WAIT_DONE_TIMEOUT_UNBOUND`
+before any SDK dispatch, for valid and malformed values alike. A timeout-less
+`wait_done` joins the already awaited driver turn. The ten-second offline
+watchdog protects the fixture process; it does not certify a catalog wait deadline.
+
+The catalog executor now explicitly selects the `headless_return` output
+boundary. Its real mux driver invocation returns the final response after the
+last tool, with the same 1000-character limit as the production headless host.
+The executor receives that returned string through `capture_headless_return`
+and binds it to the acknowledged journal root/session, checking its minted
+evidence ID and monotonic capture window. It accepts no deserialized output
+receipt as an execution input. CLI replay rebuilds these observations from the
+source-pinned transport, rather than trusting a prior result report.
+
+`headless_outputs` retains the receipts; `rendered_text` is a compatibility view
+of their returned strings. For `surface: headless` only, a nonblank actual return contributes one `VisibleText`
+at the caller-receipt time. An empty return has complete text capture and no
+visible message. A host exception produces no output receipt or text coverage;
+a native failed root that the host actually returns from still retains its
+returned text and its independent failed root outcome. No pre-tool narration,
+tool result or transient render snapshot is promoted into visible evidence.
+Only a headless-surface scenario delivers its returned string directly, so
+that return closes its text window. For Discord, Slack and Teams scenarios,
+headless receipts remain diagnostic output: `texts` stays empty and
+`text_capture_complete` stays false until the scenario's actual surface is captured.
+Text predicates on those platforms remain PENDING; notices, cards, drafts,
+footers, truncation and joined chunks are not observed by a headless return. Card/reaction/log/tool/approval coverage remains false; native
+completion and native tool records do not fill those domains.
+
+N3's effects oracle evaluates every original/global predicate against this
+headless view. Authored offline tapes can PASS deterministic returned-text
+predicates for headless-surface scenarios only; they certify neither model instruction following nor Discord
+rendering, human actions or provider/platform parity. Missing execution steps,
+explicit wait deadlines and catalog capability gaps still remain PENDING.
+
+
+Supply `--provider-fixtures packages/testing/fixtures/target53/index.json` to
+execute the OpenAI column through merged G1. N3's fixture loader verifies the
+frozen target, original catalog bytes and native payload hashes; the consumer
+also verifies the selected codec source and public projection. Each channel
+persists an explicit Luna revision. The selected, already prepared session is
+owned by a thread binding; this slice does not certify resource provisioning.
+
+The consumer supplies exact cold history and session-read replies alongside
+N3's native Agents session input/SSE recipe. Every HTTP reply and SSE frame must
+be consumed once and every stream closed. Queued sends have no input/root IDs;
+the runner checks the persisted accepted send claim, then binds output to the
+fresh authoritative journal root. Prior owned roots may appear in follow-up
+history but cannot supply current output. An empty scripted Anthropic client
+refuses any legacy fallback. Billing is exempt for these offline turns; no
+provider usage or billed-spend claim is made.
+
+Unbound setup, attachments, native tool/workspace recipes, completion gates,
+explicit wait deadlines and routing hooks refuse dispatch. No external gate is
+released early to earn credit. All source predicates and gaps remain in the
+report. The first G1 consumer executes four frozen cells / four turns / 24 mock
+requests, producing **0 OpenAI PASS / 0 FAIL / 53 PENDING**. Discord text predicates
+remain PENDING because no actual Discord output has been captured; raw headless
+returns confer no text credit on those cells. Headless-surface microcases test
+complete returned-text capture and follow-up isolation separately. Platform delivery/rendering,
+remote effects and parity remain uncaptured. The G2 consumer below executes Gemini separately.
+
+
+Until the native factory pins every SDK option explicitly, the consumer refuses
+ambient admin-key, organization, project, webhook-secret or custom-header options
+before client construction. This checks environment variable names only and
+never reads or logs their values. The explicit dummy SDK key/base URL and strict
+mock transport supply the offline boundary; no credential files are read.
+
+
+With G2 stacked, the same `--provider-fixtures` option executes Gemini through
+its registered `gemini.inline_reuse` backend and codec, using an explicit
+`gemini-3.8-flash` revision, caller-private runtime and fenced turn persistence.
+N3's logical session labels pin virgin local driver-created configuration
+records; no provider event, root, usage or terminal is seeded. Cold sessions
+consume the exact native POST, SSE and saved GET. Followups retrieve the old
+interaction before sending and retain its workspace/previous-interaction chain.
+Saved GET status/steps supply authoritative completion; an SSE completion frame
+alone cannot PASS. The accepted native receipt and every journal record bind the
+fresh root to its selected session. Strict wire consumption also proves stream
+closure. An empty Anthropic transport rejects any legacy fallback.
+
+The first Gemini column executes four cells / four turns / 12 mock requests,
+with **0 Gemini PASS / 0 FAIL / 53 PENDING** and eight supplemental host PASS
+checks. The full matrix remains **0 PASS / 0 FAIL / 159 PENDING**: the authored
+turns do not capture the catalog's Discord surface or missing effects. All
+original/global assertions and unbound steps remain. A separate headless-surface
+two-turn microcase checks returned-text isolation and reuse without changing
+any scored scenario. Offline accounting observes one accepted primary dispatch;
+it makes no live spend or price claim and refuses fallback attempts. SDK key,
+project, location, endpoint and Vertex/enterprise options refuse construction
+by environment variable name only. No credential files or live transport are
+used. This slice is conditional on G2 merging; the lead restacks it.
+
+Discord text binding now feeds each executed Discord-surface turn through
+`DiscordSurfaceHarness` using the actual `DiscordTurnLifecycle`,
+`DiscordPostTransport` and discord.py serialization. The capture runs alongside
+the real Anthropic/G1/G2 driver lifecycle; it never posts a substituted headless
+return. `discord_surfaces` retains the owned adapter receipts. The binding checks
+acknowledged native session/root identity, the host window and surviving-message
+consistency with the complete send/edit/delete history. `VisibleText` includes
+surviving message content, embed text and component labels in post order. Drafts
+and deleted messages remain diagnostic history. Long replies retain the adapter's
+actual split messages, independently of the headless return's 1000-character cap.
+
+A single completed delivery closes this transport's text window. Partial adapter
+delivery and attachment pixels leave coverage incomplete. Billing-dependent text
+predicates remain partial because these offline host turns exempt billing and do
+not bind account debits/ledger usage. Titles, cards, external tool posts,
+reactions, other platform adapters, browser pixels and live model behavior remain
+uncaptured. No catalog assertions or fixture/source pins are weakened. The table
+scenario exercises `render_tables=False`, the existing ordinary adapter default:
+raw pipe rows in the actual posts produce a real oracle FAIL.
+
+Focused verification: `uv run pytest -q -o addopts='' tests/judge/test_discord_catalog_surface.py tests/judge/test_headless_executor.py tests/judge/test_openai_catalog.py tests/judge/test_gemini_catalog.py packages/testing/tests/test_discord_surface.py`.
+
+Catalog baseline reporting retains raw `CellResult.status` and oracle diagnostics,
+and adds `reported_status` to distinguish `EXPECTED-FAIL`. Only the reviewed
+QA-NEW37 source and its first raw-pipe predicate qualify under the actual default
+`render_tables=False` harness. A completed native root and complete real adapter
+text capture are required. Extra/global/host failures remain ordinary FAIL;
+expected failures never become PASS. `scored_counts` includes a separate
+`EXPECTED-FAIL` bucket within the unchanged 159-cell denominator.
+
+The original Anthropic table replay is non-equivalent: it has internal pipes,
+no Markdown separator, and Taste rather than the requested Price. Its prior PASS
+is withdrawn. Before dispatch, authored Anthropic table controls must provide
+three columns / four rows, outer pipes, a separator, and Fruit / Colour-or-Color /
+Price headers. An unqualified control is
+`PENDING / REPLAY_TABLE_CONTROL_NOT_EQUIVALENT`; the readability oracle is kept
+unchanged. Synthetic matched-input controls are unscored. The fixture owner can
+supply an equivalent table independently; it then exercises the same observed
+expected default-off failure as the OpenAI/Gemini controls. No native content,
+catalog predicate, source pin or application default is rewritten for a PASS.
+
+Current-integration matrix refresh retains the frozen 53 × 3 denominator and
+all original/global predicates. After the Gemini explicit-tools merge (#708),
+the authored native requests explicitly include `tools: []`; missing tools on
+an old wire tape still refuse exact equality. The transport safety default is
+retained. Only those request fields and their native file/index hashes change;
+authored input text, response frames, saved snapshots and other providers stay
+unchanged. Source-verified current SDK/host replays produce fresh receipts.
+Slack and Teams catalog hosts now forward the same driver lifecycle hooks to
+`SlackSurfaceHarness` and `TeamsSurfaceHarness`. `platform_surfaces` retains
+immutable SDK post receipts scoped to the independently acknowledged native
+session/root and host window. The binding validates the full send/edit/delete
+history and surviving snapshots before supplying body text, card text and
+control labels to the oracle. Text is observed at capture close in message
+creation order for positive predicates. Forbidden-text and no-preamble checks
+also inspect the validated transient post history, so later retirement cannot
+hide a visible violation. Notification-only fallbacks never supply visible text.
+
+One normal invocation and exactly one terminal adapter delivery close the
+post window. Delivery failures, unclosed runs and unknown visuals retain partial
+text coverage; billing-dependent predicates remain partial without a real
+accounting footer. Cards, tools, approvals, titles, external posts, live ingress
+and browser pixels are not certified by this binding. Newly pinned regression
+microcases exercise both platforms through Anthropic, OpenAI and Gemini, with
+follow-up isolation and the original global predicates retained. Frozen manual
+Slack/Teams rows still have no executable steps/assertions and remain PENDING;
+this binding does not rewrite them or add full-cell PASS credit.
+
+
+The ordered catalog step runner records every original operation in
+`CellResult.step_receipts`. It binds local channel revisions, real host turns,
+owned-root completion waits and actual delays up to 30 seconds. Explicit catalog
+deadlines bound the host task and drain cancellation; a shorter 10-second offline
+watchdog can refuse sooner. Malformed deadlines cannot authorize dispatch.
+Foreign or tentative terminal captures cannot complete a wait.
+
+Unsupported admin/context/routing/attachment/native-schema/concurrency operations
+stop dependent work. A completed earlier prefix can provide partial host evidence
+while the full cell stays PENDING. Remote tool/workspace effects retain their
+typed gap even when scripted native records are consumed. Preserved operation
+hooks clear only after an owned step actually runs; unknown hooks remain barriers.
+No catalog operation or assertion is removed, and all source mappings are
+validated for completeness and order before any channel/turn callback. Anthropic
+missing inputs remain PENDING; their pinned replay fixture handoff belongs to N3.

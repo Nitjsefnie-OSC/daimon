@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Permit QA admin bindings on the CI test database only with registered current-process schema isolation; refuse remote destinations, URL overrides and local shared/operator databases before connection.
 - Bind common QA catalog admin operations through product APIs on disposable lane databases, preserving scoped readback and typed pending resource/platform gaps across all three backends.
 
+- Refresh offline QA Gemini tapes for explicit interaction tools on current integration, retaining strict wire equality and separate expected-failure reporting.
 
 ### Added
 
@@ -37,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify explicitly selected OpenAI native session spend caps before host input,
   retain acknowledged session references for cleanup on control failure, and
   preserve optional cap omission and default provider behavior.
+- Execute offline catalog steps in source order with measured completion deadlines and short waits; retain completed turn prefixes and typed PENDING at unsupported operations.
+
+### Added
+
+- Use shared isolated SDK factories for pinned offline OpenAI and Gemini replays, refusing ambient provider settings by name before value reads or client allocation.
+- Execute source-ordered offline TARGET-53 catalog steps through the three selected backend hosts, with bounded completion waits, strict native replay consumption and explicit PENDING for unsupported operations and effects.
+- Bind catalog text to actual headless or Discord/Slack/Teams adapter captures, retain transient posts for forbidden-text checks, and report equivalent default-disabled table controls as EXPECTED-FAIL.
+- Add opt-in offline host clock and native-root completion capture helpers, keeping source completion deadlines separate from invocation cleanup and preserving independently acknowledged journal authority.
+
+- Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Document the existing per-tenant table-rendering opt-in for Anthropic, OpenAI and Gemini host turns, retaining plain-text defaults.
@@ -49,6 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add opt-in scoped single-server HTTPS MCP authentication to the Gemini driver, with closed native intent/policies, fresh SDK-dispatch resolution, secret-free persistence and DEBUG logs, and fail-closed replay/continuation admission.
 - Refuse ambient OpenAI custom headers before configured client construction so process headers cannot replace channel credentials or project routing.
+- Verify explicitly selected OpenAI native session spend caps before host input,
+  retain acknowledged session references for cleanup on control failure, and
+  preserve optional cap omission and default provider behavior.
+- Report known offline Discord table baseline defects as EXPECTED-FAIL, and refuse score credit for non-equivalent Anthropic table controls.
+- Match the Anthropic NEW37 authored table to OpenAI/Gemini (Fruit/Colour/Price, separator and outer pipes), exposing the expected default-disabled Discord table-rendering failure rather than a non-equivalent spurious PASS.
+
+- Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
+- Pin offline MCP/tool recipes to approved single-server OpenAI authentication; verify nine admitted preparations and explicit NEW17 two-server refusal before resolution or native I/O, preserving authored inputs and outcome gaps.
+- Bind offline catalog Slack and Teams text to actual scoped adapter posts through all three native hosts, preserving manual-scenario and unobserved-effect gaps.
+
+- Bind offline catalog Discord text to actual adapter posts across Anthropic, OpenAI and Gemini, retaining scoped surface receipts and honest partial coverage.
+
+- Add opt-in scoped single-server HTTPS MCP authentication to the Gemini driver, with closed native intent/policies, fresh SDK-dispatch resolution, secret-free persistence and DEBUG logs, and fail-closed replay/continuation admission.
 
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.
 - Gemini explicitly sends configured tools (or an empty list) on every interaction, preventing implicit provider web-tool defaults, including continuations and fallback sends.
@@ -63,6 +87,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain scoped OpenAI/Gemini agent revisions, checked skill bundles and upload ownership in an additive host catalog.
 - Construct OpenAI turn runtimes for explicitly configured channels from scoped operator deployment plans, with deferred credential access and durable journal/usage state.
 - Support complete Gemini skill bundles through an explicitly injected, scoped GCS publisher with immutable version receipts; retain inline text mounts and refuse missing deployment dependencies explicitly.
+### Added
+
+- Offline TARGET-53 Gemini execution through the explicit G2 host with source-pinned native Interactions replays, fenced accepted roots and saved-GET completion. Four cells execute while all 53 Gemini cells remain pending for uncaptured catalog effects/surfaces; no live calls or platform-text credit.
+
+- Restrict complete visible-text evidence from headless returns to headless-surface QA scenarios; keep Discord, Slack and Teams text predicates pending until actual surface capture.
+- Execute pinned OpenAI catalog fixtures through the real fenced G1 host, preserving queued-send/root evidence, strict wire consumption and honest offline oracle failures.
+
+- Bind offline QA visible-text predicates to actual scoped headless returns, preserving failed roots and leaving platform/tool/card effects uncaptured.
+
+- Refuse timeout-specific offline catalog credit until the explicit wait_done deadline is bound, keeping those cells PENDING before dispatch.
+- Add strict offline OpenAI/Gemini SDK replay transports and source-pinned TARGET-53 fixture bindings, retaining unsupported operations as explicit gaps for the outcome oracle.
+- Restrict complete visible-text evidence from headless returns to headless-surface QA scenarios; keep Discord, Slack and Teams text predicates pending until actual surface capture.
+
+- Bind offline QA visible-text predicates to actual scoped headless returns, preserving failed roots and leaving platform/tool/card effects uncaptured.
+
+- Refuse timeout-specific offline catalog credit until the explicit wait_done deadline is bound, keeping those cells PENDING before dispatch.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.

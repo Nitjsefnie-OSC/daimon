@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2255,
+  "files_scanned": 2281,
   "parse_errors": [],
   "calls": [
     {
@@ -18653,6 +18653,15 @@
       "category": "test-support"
     },
     {
+      "file": "packages/testing/daimon/testing/turn_clock.py",
+      "line": 18,
+      "module": "anthropic.types",
+      "names": [
+        "RawMessageStreamEvent"
+      ],
+      "category": "test-support"
+    },
+    {
       "file": "packages/testing/daimon/testing/turn_fakes.py",
       "line": 28,
       "module": "anthropic.types",
@@ -19088,6 +19097,51 @@
       "module": "anthropic.types.beta.sessions.beta_managed_agents_unknown_error",
       "names": [
         "BetaManagedAgentsUnknownError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/discord_catalog_surface.py",
+      "line": 8,
+      "module": "anthropic.types",
+      "names": [
+        "RawMessageStreamEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/gemini_catalog_host.py",
+      "line": 12,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/openai_catalog_host.py",
+      "line": 12,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/platform_catalog_surface.py",
+      "line": 8,
+      "module": "anthropic.types",
+      "names": [
+        "RawMessageStreamEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/test_turn_clock.py",
+      "line": 10,
+      "module": "anthropic.types",
+      "names": [
+        "RawMessageStreamEvent"
       ],
       "category": "test"
     },

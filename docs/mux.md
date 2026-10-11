@@ -1437,3 +1437,19 @@ server; the server’s auth and policy checks remain mandatory. The F2 offline
 proof uses all original default skill bytes, one mapped code-execution tool,
 and two read-only MCP calls served by a disposable loopback host. Model/GCS
 execution stays replayed and the uninjected default adapter remains PENDING.
+
+### Ordered offline catalog steps
+
+The QA catalog executor binds channel selection, host turns, completion deadlines
+and waits of at most 30 seconds in source order. Completion deadlines cancel and
+drain the owned turn task; wait receipts require complete terminal captures for
+the acknowledged session and root. Every source operation retains a receipt.
+An unsupported admin operation, ingress route, context message, attachment,
+native schema or completion gate stops dependent steps. Earlier completed turns
+remain partial evidence; catalog capabilities and remote tool/workspace effects
+remain typed PENDING and cannot earn a full scenario PASS.
+
+Native OpenAI/Gemini fixtures retain exact wire consumption and source validation
+before any mock dispatch. Anthropic inputs remain the existing authored native
+SDK tapes; missing tapes stay PENDING until the fixture owner supplies pinned
+inputs. Frozen TARGET-53 membership, assertions and source hashes are unchanged.
