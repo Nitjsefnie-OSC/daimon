@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import daimon.adapters.discord.bot as bot_module
+import daimon.adapters.discord.conformance as conformance_module
 import discord
 import pytest
 import pytest_asyncio
@@ -32,6 +33,9 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.testing.db import db_clean as db_clean
+from daimon.testing.db import db_engine as db_engine
+from daimon.testing.db import db_schema as db_schema
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .harness import make_bot
@@ -41,6 +45,10 @@ if TYPE_CHECKING:
     from discord.types.threads import Thread as ThreadPayload
 
 pytestmark = pytest.mark.asyncio
+
+# This module needs genuinely committed rows on separate pooled connections.
+# Re-export the shared fixtures locally so its schema/pool cannot inherit an
+# unrelated test's retained transaction and block tenant provisioning in setup.
 
 
 @pytest_asyncio.fixture
@@ -186,11 +194,24 @@ async def test_actual_drain_preserves_per_caller_order_bytes_attachments_and_thr
 
 @pytest.mark.parametrize("failure", ["exception", "timeout", "cancel"])
 async def test_failure_restores_handler_and_cleans_only_probe_threads(
-    bot: DaimonBot, failure: str
+    bot: DaimonBot, failure: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     envelope = _envelope(bot)
     original = envelope.bot._handle_mention  # pyright: ignore[reportPrivateUsage]
     entered = asyncio.Event()
+    deadline = asyncio.timeout(None)
+
+    def controlled_timeout(delay: float) -> asyncio.Timeout:
+        assert delay == 2.0
+        return deadline
+
+    # Only the explicit probe gets a controlled real Timeout. Keep admission
+    # outside the timing race, then expire it at the actual callback boundary.
+    monkeypatch.setattr(
+        conformance_module,
+        "asyncio",
+        SimpleNamespace(**{**vars(asyncio), "timeout": controlled_timeout}),
+    )
 
     async def run(_turn: MentionTurn, barrier: AdmissionBarrier | None) -> None:
         assert barrier is not None
@@ -200,19 +221,34 @@ async def test_failure_restores_handler_and_cleans_only_probe_threads(
         await asyncio.Event().wait()
 
     task = asyncio.create_task(multi_human_evidence(replace(envelope, run=run, timeout_s=2.0)))
-    async with asyncio.timeout(30):
-        await entered.wait()
-    if failure == "cancel":
-        task.cancel()
+    waiter = asyncio.create_task(entered.wait())
     expected = {
         "exception": LookupError,
         "timeout": TimeoutError,
         "cancel": asyncio.CancelledError,
     }[failure]
-    with pytest.raises(expected):
-        await task
+    try:
+        async with asyncio.timeout(30):
+            done, _ = await asyncio.wait((task, waiter), return_when=asyncio.FIRST_COMPLETED)
+            if waiter not in done:
+                await task
+                pytest.fail("probe finished without entering the real callback")
+            if failure == "timeout":
+                deadline.reschedule(asyncio.get_running_loop().time())
+            elif failure == "cancel":
+                task.cancel()
+            with pytest.raises(expected):
+                await task
+    finally:
+        # Even a setup/entry/assertion failure must not strand admission tasks.
+        task.cancel()
+        waiter.cancel()
+        await asyncio.gather(task, waiter, return_exceptions=True)
+    assert deadline.expired() is (failure == "timeout")
     assert envelope.bot._handle_mention == original  # pyright: ignore[reportPrivateUsage]
     assert not envelope.bot._processing and not envelope.bot._pending  # pyright: ignore[reportPrivateUsage]
+    assert envelope.bot.turn_queue.in_flight(envelope.tenant_id) == 0
+    assert envelope.bot.turn_queue.depth() == 0
 
 
 async def test_early_completed_callback_is_rejected_and_existing_instance_handler_restored(

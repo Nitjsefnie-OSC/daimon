@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Isolate pooled Discord conformance test fixtures and control timeout expiry after real callback entry, avoiding shared-transaction setup hangs and deadline races.
+
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
 - Explicit mux runtime configuration now refuses reserved provider-prefixed credential references before the first turn; deployment examples use host-scoped key names. Default settings and private SDK environment guards are unchanged.
 
