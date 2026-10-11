@@ -57,6 +57,11 @@ from daimon.adapters.discord.post_transport import (
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
+from daimon.adapters.discord.thread_gone import (
+    ThreadStops,
+    TurnThreadWatch,
+    stop_reason_of,
+)
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
@@ -140,6 +145,7 @@ from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     clear_active_turn_if_message_id,
     get_live_thread_session,
+    list_live_thread_sessions,
     list_orphaned_turns,
     lock_orphaned_turn,
     mark_dead,
@@ -582,6 +588,9 @@ class DaimonBot(commands.Bot):
         self._processing_tasks: dict[int, asyncio.Task[object]] = {}
         self._pending: dict[int, list[discord.Message]] = {}
         self._queued_reactions: set[int] = set()
+        # Threads whose running turn lost its thread (deleted) or its right to write
+        # to it (archived), so the card lifecycle and the bot agree on one answer (#809).
+        self._thread_stops = ThreadStops()
         # Continuation dispatches skipped because the thread was processing,
         # keyed by thread id: re-run when the thread is released (see
         # `_release_thread`). Last writer wins; a dispatch reads every pending
@@ -2101,7 +2110,7 @@ class DaimonBot(commands.Bot):
                 await self._handle_mention(trigger, guild_id, tenant_id, unprompted=True)
                 await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
             finally:
-                self._release_thread(thread_id)
+                await self._release_and_clear(thread_id, tenant_id, clear_reactions=False)
                 self._pending.pop(thread_id, None)
 
     async def _maybe_hint_unmentioned_reply(
@@ -2465,17 +2474,26 @@ class DaimonBot(commands.Bot):
                         # a follow-up queued behind a failing originating turn still
                         # gets its drain turn instead of being silently discarded.
                         if created_thread_ids:
-                            await self._drain_pending_mentions(
-                                created_thread_ids[0], guild_id, tenant_id
-                            )
+                            try:
+                                await self._drain_pending_mentions(
+                                    created_thread_ids[0], guild_id, tenant_id
+                                )
+                            except Exception:
+                                # Once the thread exists nothing for it is posted in the
+                                # parent channel, so a drain failing on a lost thread ends
+                                # here instead of reaching the prologue error post (#809).
+                                if self._thread_stops.get(created_thread_ids[0]) is None:
+                                    raise
+                                log.warning("thread_gone.drain_failed", exc_info=True)
                     finally:
                         # No-op in the normal case (the drain above already emptied
                         # the queue) — this only catches messages that arrive after
                         # the final drain iteration, the same residual window the
                         # thread branch below has.
                         for created_id in created_thread_ids:
-                            self._release_thread(created_id)
-                            await self._clear_queued_reactions(self._pending.pop(created_id, []))
+                            await self._release_and_clear(
+                                created_id, tenant_id, clear_reactions=True
+                            )
                     return
 
                 thread_id = message.channel.id
@@ -2485,8 +2503,7 @@ class DaimonBot(commands.Bot):
                     await self._handle_mention(message, guild_id, tenant_id)
                     await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
                 finally:
-                    self._release_thread(thread_id)
-                    await self._clear_queued_reactions(self._pending.pop(thread_id, []))
+                    await self._release_and_clear(thread_id, tenant_id, clear_reactions=True)
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
         except Exception as exc:  # on_message event-handler boundary
@@ -2530,6 +2547,8 @@ class DaimonBot(commands.Bot):
         self._queued_reactions.add(id(message))
         self._thread_queue.enqueue(thread_id, message)
         try:
+            if self._thread_lost(message):
+                return  # no reaction in a gone or closed thread; the release finishes the row
             await message.add_reaction("⌛")
         except Exception as exc:
             # best-effort queue marker after the message is already queued; see docstring
@@ -2540,11 +2559,23 @@ class DaimonBot(commands.Bot):
             )
         finally:
             # The drain can finish while add_reaction is still in flight.
-            if id(message) not in self._queued_reactions:
+            if id(message) not in self._queued_reactions and not self._thread_lost(message):
                 await self._remove_mention_reaction(message, "⌛")
 
+    def _thread_lost(self, message: discord.Message) -> bool:
+        """Whether `message` sits in a thread that is gone or closed (#809).
+
+        A reaction there fails the same way every other write does, so none is
+        issued. A message in the parent channel (the 👀 on a channel mention) is
+        not in the lost thread and is still cleared.
+        """
+        channel = message.channel
+        return (
+            isinstance(channel, discord.Thread) and self._thread_stops.get(channel.id) is not None
+        )
+
     async def _remove_mention_reaction(self, message: discord.Message, emoji: str) -> None:
-        if message.guild is None or self.user is None:
+        if message.guild is None or self.user is None or self._thread_lost(message):
             return
         try:
             await message.remove_reaction(emoji, self.user)
@@ -2555,6 +2586,41 @@ class DaimonBot(commands.Bot):
         for message in messages:
             self._queued_reactions.discard(id(message))
             await self._remove_mention_reaction(message, "⌛")
+
+    async def _drop_queued(self, messages: list[discord.Message], tenant_id: uuid.UUID) -> None:
+        """Give up on messages queued behind a turn whose thread is gone or closed (#809).
+
+        No turn will run them, so their admission rows are finished (startup
+        replay must not start them again). Their hourglass stays: it sits in the
+        thread, and no reaction call is issued there once the thread is lost.
+        """
+        if not messages:
+            return
+        for message in messages:
+            self._queued_reactions.discard(id(message))  # bookkeeping only: no reaction call
+        try:
+            await self._finish_admitted_messages(
+                tenant_id, tuple(str(m.id) for m in messages), discard_committed=True
+            )
+        except Exception as exc:  # the rows stay pending; replay finds the thread gone
+            log.warning("thread_gone.finish_queued_failed", err_type=type(exc).__name__)
+        log.info("thread_gone.queued_dropped", dropped=len(messages))
+
+    async def _release_and_clear(
+        self, thread_id: int, tenant_id: uuid.UUID, *, clear_reactions: bool
+    ) -> None:
+        """Release a thread's turn slot; messages that arrived after the last drain go with it.
+
+        A stopped thread's leftover queue is dropped (admissions finished);
+        otherwise the callers' own cleanup stands. The stop is read before the
+        release, which forgets it.
+        """
+        stopped = self._thread_stops.get(thread_id) is not None
+        self._release_thread(thread_id)
+        if stopped:
+            await self._drop_queued(self._pending.pop(thread_id, []), tenant_id)
+        elif clear_reactions:
+            await self._clear_queued_reactions(self._pending.pop(thread_id, []))
 
     async def _handle_prologue_failure(
         self,
@@ -2610,6 +2676,12 @@ class DaimonBot(commands.Bot):
             return groups
 
         async def run(messages: list[discord.Message]) -> None:
+            if self._thread_stops.get(thread_id) is not None:
+                # Checked before every group, so a thread lost mid-drain starts nothing more.
+                for message in messages:
+                    draining.pop(id(message), None)
+                await self._drop_queued(messages, tenant_id)
+                return
             try:
                 await self._handle_mention(
                     messages[0],
@@ -2674,7 +2746,8 @@ class DaimonBot(commands.Bot):
             # of seconds. Queued mentions already have their own hourglass.
             if not unprompted and content_override is None:
                 try:
-                    await message.add_reaction("👀")
+                    if not self._thread_lost(message):
+                        await message.add_reaction("👀")
                 except Exception as exc:
                     log.warning("mention.reaction_failed", err_type=type(exc).__name__)
             await self._orchestrate(
@@ -2712,6 +2785,14 @@ class DaimonBot(commands.Bot):
             )
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc, surface=surface)
         finally:
+            await self._retire_gone_thread(
+                tenant_id,
+                created_thread_ids[0]
+                if created_thread_ids
+                else message.channel.id
+                if isinstance(message.channel, discord.Thread)
+                else None,
+            )
             await self._finish_admitted_messages(
                 tenant_id,
                 admitted_message_ids or (str(message.id),),
@@ -2738,29 +2819,57 @@ class DaimonBot(commands.Bot):
 
         The error goes where the turn was: onto its status card while that is
         still up, else into its thread, and into the mention's channel only when
-        no thread was opened.
+        no thread was opened. Never raises: a failed error post is logged, so
+        nothing escapes `_handle_mention` into the prologue handler, which would
+        post into the parent channel for a thread that no longer exists (#809).
+
+        A thread that is gone or closed gets no error anywhere: there is nobody
+        to read it, and the parent channel must not be told about it.
         """
-        _capture_turn_error(exc, rid=rid, tenant_id=tenant_id, guild_id=guild_id)
-        error_text = render_error(exc, request_id=rid)
-        if surface is not None and surface.end_card is not None:
-            try:
-                await surface.end_card(error_text)
-                return
-            except Exception as card_exc:  # the card is best effort; the post below is not
-                log.warning("turn.error_card_failed", error_type=type(card_exc).__name__)
         thread = surface.thread if surface is not None else None
-        target: discord.abc.Messageable = thread if thread is not None else message.channel
-        transport = DiscordPostTransport(
-            self,
-            target,
-            name="Daimon",
-            avatar_url=None,
-            builtin=True,
-        )
-        if isinstance(target, discord.Thread):
-            await safe_thread_send(target, error_text, transport=transport)
-        else:
-            await transport.send(error_text)
+        if thread is not None:
+            # A failure that is itself the thread's loss (a write outside the
+            # turn's transport) counts the same as one the transport saw.
+            if (stop := stop_reason_of(exc)) is not None:
+                self._thread_stops.signal(thread.id, reason=stop[0], code=stop[1], phase="failure")
+            if self._thread_stops.get(thread.id) is not None:
+                log.info("turn.error_not_posted", reason="thread_stopped", thread_id=thread.id)
+                return
+        try:
+            _capture_turn_error(exc, rid=rid, tenant_id=tenant_id, guild_id=guild_id)
+            error_text = render_error(exc, request_id=rid)
+            if surface is not None and surface.end_card is not None:
+                try:
+                    await surface.end_card(error_text)
+                    return
+                except Exception as card_exc:  # the card is best effort; the post below is not
+                    log.warning("turn.error_card_failed", error_type=type(card_exc).__name__)
+                    if (stop := stop_reason_of(card_exc)) is not None and thread is not None:
+                        self._thread_stops.signal(
+                            thread.id, reason=stop[0], code=stop[1], phase="failure"
+                        )
+                    if thread is not None and self._thread_stops.get(thread.id) is not None:
+                        return  # the card write found the thread lost: say nothing anywhere
+            target: discord.abc.Messageable = thread if thread is not None else message.channel
+            transport = DiscordPostTransport(
+                self,
+                target,
+                name="Daimon",
+                avatar_url=None,
+                builtin=True,
+            )
+            if isinstance(target, discord.Thread):
+                await safe_thread_send(target, error_text, transport=transport)
+            else:
+                await transport.send(error_text)
+        except Exception as post_exc:  # the error post is the last resort; never raise from it
+            if thread is not None and (stop := stop_reason_of(post_exc)) is not None:
+                self._thread_stops.signal(thread.id, reason=stop[0], code=stop[1], phase="failure")
+            log.warning(
+                "turn.error_post_failed",
+                error_type=type(post_exc).__name__,
+                thread_id=thread.id if thread is not None else None,
+            )
 
     async def _dispatch_continuations(
         self, *, tenant_id: uuid.UUID, thread: discord.Thread, guild_id: str
@@ -2817,7 +2926,7 @@ class DaimonBot(commands.Bot):
                 drain_on_error=True,
             )
         finally:
-            self._release_thread(thread.id)
+            await self._release_and_clear(thread.id, tenant_id, clear_reactions=False)
 
     async def _channel_by_id(self, channel_id: int) -> object:
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
@@ -2934,6 +3043,7 @@ class DaimonBot(commands.Bot):
 
     def _release_thread(self, thread_id: int) -> None:
         self._processing_tasks.pop(thread_id, None)
+        self._thread_stops.forget(thread_id)
 
         def resume(_key: int, request: tuple[uuid.UUID, discord.Thread, str]) -> None:
             tenant_id, thread, guild_id = request
@@ -3087,6 +3197,7 @@ class DaimonBot(commands.Bot):
             ma_agent_id=agent.id,
             requester_id=int(row.requester_external_user_id),
         )
+        watch = TurnThreadWatch(self._thread_stops, thread.id)
         transport = DiscordPostTransport(
             self,
             thread,
@@ -3094,6 +3205,7 @@ class DaimonBot(commands.Bot):
             avatar_url=identity.avatar_url,
             builtin=identity.builtin,
             identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
+            watch=watch,
         )
 
         async def _edit_message(
@@ -3112,6 +3224,8 @@ class DaimonBot(commands.Bot):
             await transport.delete(msg)
 
         cancel = asyncio.Event()
+        # A thread lost mid-turn sets the same event Stop does: the normal interrupt path.
+        self._thread_stops.watch(thread.id, cancel)
 
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
@@ -3132,6 +3246,7 @@ class DaimonBot(commands.Bot):
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
+                thread_stopped=watch.is_stopped,
                 model_id=agent.model.id,
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
@@ -3168,6 +3283,7 @@ class DaimonBot(commands.Bot):
             reuse_existing=True,
             deadline=turn_deadline_at,
         )
+        watch.session_id = prepared.ma_session_id
 
         if prepared.mapping_id is not None and lifecycle.final_message_id is not None:
             async with self.runtime.sessionmaker() as session:
@@ -3259,6 +3375,7 @@ class DaimonBot(commands.Bot):
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
+                thread_stopped=watch.is_stopped,
                 model_id=agent.model.id,
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
@@ -3287,6 +3404,7 @@ class DaimonBot(commands.Bot):
         )
         outcome: RunOutcome | None = None
         archive_after = False
+        watch.phase = "running"
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
@@ -3355,6 +3473,10 @@ class DaimonBot(commands.Bot):
             path="continuation",
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
         )
+        if self._thread_stops.get(thread.id) is not None:
+            # The thread is gone or closed: no answer, notice, file or archive to deliver.
+            await self._retire_gone_thread(tenant_id, thread.id)
+            return
         final_lifecycle = lifecycle_holder[0]
         if outcome.state.error is None and prepared.mapping_id is not None:
             if final_lifecycle.watermark_message_id is not None:
@@ -3406,7 +3528,20 @@ class DaimonBot(commands.Bot):
             await session.commit()
 
     async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
+        had_running_turn = payload.thread_id in self._processing
+        # Every time, so a deployment can show whether this event beats the first 10003.
+        log.info(
+            "thread.deleted",
+            thread_id=str(payload.thread_id),
+            parent_id=str(payload.parent_id),
+            guild_id=str(payload.guild_id),
+            had_running_turn=had_running_turn,
+        )
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
+        if had_running_turn:
+            # Before any await: the turn stops at its next write or wait.
+            self._thread_stops.signal(payload.thread_id, reason="gone", code=None, phase="running")
+        await self._retire_thread_sessions(tenant_id, payload.thread_id)
         async with self.runtime.sessionmaker() as session:
             await update_lifecycle(
                 session,
@@ -3417,6 +3552,38 @@ class DaimonBot(commands.Bot):
                 deleted=True,
             )
             await session.commit()
+
+    async def _retire_gone_thread(self, tenant_id: uuid.UUID, thread_id: int | None) -> None:
+        """After a turn: if its thread was deleted, nothing in it may be revived.
+
+        A closed (archived) thread keeps its sessions; it can be mentioned again.
+        """
+        if thread_id is None:
+            return
+        stop = self._thread_stops.get(thread_id)
+        if stop is not None and stop.reason == "gone":
+            await self._retire_thread_sessions(tenant_id, thread_id)
+
+    async def _retire_thread_sessions(self, tenant_id: uuid.UUID, thread_id: int) -> None:
+        """Mark every account's live session in a deleted thread dead and clear its turn marker.
+
+        Neither startup replay nor orphan recovery then revives a conversation
+        nobody can reach. Best effort: a failure is logged and the sessions stay
+        live, where the next boot's recovery finds the thread gone.
+        """
+        try:
+            async with self.runtime.sessionmaker() as session:
+                rows = await list_live_thread_sessions(
+                    session, tenant_id=tenant_id, platform="discord", thread_id=str(thread_id)
+                )
+                for row in rows:
+                    await clear_active_turn(session, id=row.id)
+                    await mark_dead(session, id=row.id)
+                await session.commit()
+        except Exception as exc:  # cleanup of a conversation nobody can reach
+            log.warning(
+                "thread_gone.retire_failed", thread_id=str(thread_id), err_type=type(exc).__name__
+            )
 
     async def _orchestrate(
         self,
@@ -3719,6 +3886,7 @@ class DaimonBot(commands.Bot):
             log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
             identity = AgentIdentity(name=agent.name, avatar_url=None, builtin=True)
 
+        watch = TurnThreadWatch(self._thread_stops, thread.id)
         transport = DiscordPostTransport(
             self,
             thread,
@@ -3726,6 +3894,7 @@ class DaimonBot(commands.Bot):
             avatar_url=identity.avatar_url,
             builtin=identity.builtin,
             identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
+            watch=watch,
         )
 
         async def _edit_message(
@@ -3744,6 +3913,8 @@ class DaimonBot(commands.Bot):
             await transport.delete(msg)
 
         cancel = asyncio.Event()
+        # A thread lost mid-turn sets the same event Stop does: the normal interrupt path.
+        self._thread_stops.watch(thread.id, cancel)
 
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
@@ -3765,6 +3936,7 @@ class DaimonBot(commands.Bot):
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
+                thread_stopped=watch.is_stopped,
                 model_id=agent.model.id,
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
@@ -3977,6 +4149,7 @@ class DaimonBot(commands.Bot):
             thread_id=thread.id,
             reused=prepared.reused,
         )
+        watch.session_id = prepared.ma_session_id
         # A planned transition the caller didn't necessarily ask to see this
         # turn: say what happened to the workspace BEFORE the answer, so a
         # replacement is never discovered only by its side effects.
@@ -4259,6 +4432,7 @@ class DaimonBot(commands.Bot):
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
+                thread_stopped=watch.is_stopped,
                 model_id=agent.model.id,
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
@@ -4301,6 +4475,7 @@ class DaimonBot(commands.Bot):
         )
         outcome: RunOutcome | None = None
         archive_after = False
+        watch.phase = "running"
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
@@ -4382,6 +4557,10 @@ class DaimonBot(commands.Bot):
             path="mention",
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
         )
+        if self._thread_stops.get(thread.id) is not None:
+            # The thread is gone or closed: the turn was interrupted and there is no
+            # answer, notice, reaction, file or archive left to deliver (#809).
+            return
         state = outcome.state
         mapping_id = outcome.mapping_id
         final_lifecycle = lifecycle_holder[0]
