@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn, cast
 
 import anthropic
 import httpx
@@ -350,6 +350,173 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     assert outcome.state.error is None, "a clean idle-end-turn run has no error"
     assert outcome.termination is TerminationReason.COMPLETED
     assert len(session_bodies) == 0, "no create_session call on the happy path"
+
+
+async def test_reattaching_to_a_session_debits_calls_no_worker_streamed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#17: a deploy killed the worker streaming the last turn while the MA session
+    kept making model calls. The next turn on the reused session debits those calls
+    (live path's key and price) once it is over -- after the message was sent."""
+    from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+        BetaManagedAgentsSpanModelRequestEndEvent,
+    )
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-gap",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+    gap = [
+        BetaManagedAgentsSpanModelRequestEndEvent(
+            id=f"evt_gap_{i}",
+            is_error=False,
+            model_request_start_id=f"start_{i}",
+            model_usage=ma_model_usage(input_tokens=1000, output_tokens=100),
+            processed_at=_NOW,
+            type="span.model_request_end",
+        ).model_dump(mode="json")
+        for i in range(2)
+    ]
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(
+        session_bodies=[],
+        dead_session_ids=set(),
+        sent_batches=sent,
+        events_by_session={"sess_1": gap},
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    admission = _admission(
+        account_id=account.id,
+        agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+        env=ma_environment(id="env_1", tenant_id=tenant.id),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-gap",
+            external_user_id="user-1",
+            user_message="hello again",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    assert outcome.state.error is None
+    async with db_session_factory() as s:
+        rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
+    assert sorted(r.event_id for r in rows) == ["evt_gap_0", "evt_gap_1"], (
+        "every call the dead worker never streamed is metered on reattach"
+    )
+    reconciled = [e for e in logs if e["event"] == "billing.reconciled_unbilled"]
+    assert [e["debited"] for e in reconciled] == [2], "debited once, at turn end"
+    events = [e["event"] for e in logs]
+    assert events.index("billing.reconciled_unbilled") > events.index("turn.completed"), (
+        "the catch-up runs after the turn, never in front of the user's message"
+    )
+    assert sent, "the turn still sent its message"
+
+
+@pytest.mark.parametrize("ceiling", [False, True], ids=["completed", "ceiling"])
+async def test_a_slow_billing_catch_up_neither_fails_nor_holds_the_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    ceiling: bool,
+) -> None:
+    """The catch-up is bounded by its own budget and runs outside the ceiling: a
+    stalled MA read cannot turn a healthy turn into a ceiling failure, and the
+    turn returns about one budget later, with its outcome intact."""
+    import functools
+    import time
+
+    from daimon.core.usage_reconcile import reconcile_unbilled
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-slow-catch-up",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+
+    stall_s, budget_s = 30.0, 0.2
+
+    async def _stalled_list(_request: httpx.Request, _match: object) -> httpx.Response:
+        await asyncio.sleep(stall_s)  # an upstream that never answers in time
+        return list_response([])
+
+    router.routes.insert(
+        0, ("GET", re.compile(r"/v1/sessions/(?P<sid>[^/]+)/events"), cast(Any, _stalled_list))
+    )
+    monkeypatch.setattr(
+        run_module, "reconcile_unbilled", functools.partial(reconcile_unbilled, budget_s=budget_s)
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    started = time.monotonic()
+    with structlog.testing.capture_logs() as logs:
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-slow-catch-up",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+            deadline=(datetime.now(UTC) - timedelta(seconds=5)) if ceiling else None,
+        )
+
+    elapsed = time.monotonic() - started
+    assert elapsed < budget_s + 2.0 < stall_s, f"the turn was held {elapsed:.2f}s by its catch-up"
+    expected = TerminationReason.CEILING if ceiling else TerminationReason.COMPLETED
+    assert outcome.termination is expected
+    assert [e["truncated"] for e in logs if e["event"] == "billing.reconciled_unbilled"] == [True]
 
 
 async def test_a_turn_is_registered_as_running_for_exactly_the_call(
