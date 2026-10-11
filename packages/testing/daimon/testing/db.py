@@ -15,8 +15,10 @@ Import these into a package conftest to make them discoverable by pytest:
 Model:
 
 - One external Postgres (the compose service) and one dedicated test database
-  whose name contains ``test`` (substring guard; misconfiguration fails loudly
-  instead of nuking dev data). Migrations must already be applied there.
+  on local PostgreSQL named ``daimon_test_nc_*``, or ``daimon_test`` in exact
+  GitHub Actions CI with a registered process-owned schema. A shared pytest
+  preflight refuses other targets before engine fixtures run. Migrations must
+  already be applied there. Plain local ``daimon_test`` fixtures skip.
 - Each pytest worker process owns ONE schema, ``test_w<pid>_<8hex>``, built once
   per session (``CREATE SCHEMA`` + ``Base.metadata.create_all``) and dropped at
   session end. The pid + nonce keep two worktrees' ``gw0`` workers apart on the
@@ -48,6 +50,7 @@ import re
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Literal, cast
 from urllib.parse import urlparse
 from weakref import WeakKeyDictionary
@@ -58,7 +61,8 @@ from cryptography.fernet import Fernet
 from daimon.core import platform_names
 from daimon.core._models import Base
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import ArgumentError, DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -82,9 +86,76 @@ _DROP_CHUNK_SIZE = 4
 _last_db_test: str | None = None
 _TEST_CRYPTO_KEYS = (Fernet.generate_key().decode("ascii"),)
 _TEST_ENGINE_SCHEMAS: WeakKeyDictionary[AsyncEngine, str] = WeakKeyDictionary()
+_OWNED_DATABASE_REFUSAL = (
+    "Test hooks require owned local lane engines or registered isolated CI schemas"
+)
 
 
-def _require_test_dsn() -> str:
+@dataclass(frozen=True)
+class DatabasePreflight:
+    """Validated fixture configuration; never expose credentials in its repr."""
+
+    url: str = field(repr=False)
+    schema: str
+
+
+def _require_owned_database(url: URL, schema: str | None) -> None:
+    """Common URL/process-schema policy, with no engine allocation or I/O.
+
+    Engine admission supplies ONLY builder-registered schema provenance here.
+    Preflight supplies the future fixture schema; the actual engine must still
+    pass require_owned_sessionmaker before its first connection.
+    """
+    schema_match = WORKER_SCHEMA_PATTERN.fullmatch(schema) if schema is not None else None
+    isolated_ci = (
+        url.database == "daimon_test"
+        and os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("CI") == "true"
+        and schema_match is not None
+        and int(schema_match[1]) == os.getpid()
+    )
+    if (
+        url.get_backend_name() != "postgresql"
+        or url.host not in ("localhost", "127.0.0.1")
+        or url.query
+        or not (
+            re.fullmatch(r"daimon_test_nc_[A-Za-z0-9][A-Za-z0-9_]{0,47}", url.database or "")
+            or isolated_ci
+        )
+    ):
+        raise ValueError(_OWNED_DATABASE_REFUSAL)
+
+
+def preflight_test_database(schema: str) -> DatabasePreflight:
+    """Validate the fixture DSN before allocating any engine or connection.
+
+    The contributor's ordinary local daimon_test skips outside exact CI. All
+    other unowned targets fail closed. Actual engines retain the #756 builder
+    provenance check; preflight is not a grant for an injected/routed engine.
+    """
+    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
+    if not url:
+        raise RuntimeError("DAIMON_DATABASE__TEST_URL must be set to run daimon tests.")
+    try:
+        parsed = make_url(url)
+    except (ArgumentError, ValueError):
+        raise ValueError(_OWNED_DATABASE_REFUSAL) from None
+    _check_identifier(schema)
+    if (
+        parsed.get_backend_name() == "postgresql"
+        and parsed.host in ("localhost", "127.0.0.1")
+        and not parsed.query
+        and parsed.database == "daimon_test"
+        and not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("CI") == "true")
+    ):
+        pytest.skip(
+            "Shared DB fixtures require an owned lane database or isolated GitHub Actions CI"
+        )
+    _require_owned_database(parsed, schema)
+    return DatabasePreflight(url, schema)
+
+
+def _require_test_dsn() -> str:  # pyright: ignore[reportUnusedFunction]  # retained for existing test harness imports
     """Read the test DSN and refuse to proceed unless it contains 'test'."""
     url = os.environ.get("DAIMON_DATABASE__TEST_URL")
     if not url:
@@ -92,8 +163,7 @@ def _require_test_dsn() -> str:
     db_name = urlparse(url).path.lstrip("/")
     if "test" not in db_name:
         raise RuntimeError(
-            f"Refusing to run destructive fixtures against database {db_name!r} "
-            f"(from {url!r}) — database name must contain the substring 'test'."
+            "Refusing destructive fixtures: database name must contain the substring 'test'."
         )
     return url
 
@@ -172,7 +242,7 @@ def require_owned_sessionmaker(sm_or_engine: object) -> None:
     Connection binds inherit their actual engine's policy; unbound factories,
     synchronous binds and malformed routing maps are refused. No defaults change.
     """
-    refusal = "Test hooks require owned local lane engines or registered isolated CI schemas"
+    refusal = _OWNED_DATABASE_REFUSAL
     bindings: tuple[object, ...]
     if isinstance(sm_or_engine, AsyncEngine):
         bindings = (sm_or_engine,)
@@ -196,26 +266,7 @@ def require_owned_sessionmaker(sm_or_engine: object) -> None:
             engine = binding
         else:
             raise ValueError(refusal)
-        url = engine.url
-        schema = isolated_test_schema(engine)
-        schema_match = WORKER_SCHEMA_PATTERN.fullmatch(schema) if schema is not None else None
-        isolated_ci = (
-            url.database == "daimon_test"
-            and os.environ.get("GITHUB_ACTIONS") == "true"
-            and os.environ.get("CI") == "true"
-            and schema_match is not None
-            and int(schema_match[1]) == os.getpid()
-        )
-        if (
-            url.get_backend_name() != "postgresql"
-            or url.host not in ("localhost", "127.0.0.1")
-            or url.query
-            or not (
-                re.fullmatch(r"daimon_test_nc_[A-Za-z0-9][A-Za-z0-9_]{0,47}", url.database or "")
-                or isolated_ci
-            )
-        ):
-            raise ValueError(refusal)
+        _require_owned_database(engine.url, isolated_test_schema(engine))
 
 
 def _wipe_sql(schema: str) -> str:
@@ -392,16 +443,18 @@ def db_schema() -> str:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def db_engine(db_schema: str) -> AsyncIterator[AsyncEngine]:
+async def db_engine(db_preflight: DatabasePreflight, db_schema: str) -> AsyncIterator[AsyncEngine]:
     """Session-scoped pooled engine pinned to the worker schema.
 
     Assumes ``alembic upgrade head`` has already been applied to the test DB
     (CI runs it explicitly; local dev runs it once). Sweeps a few orphaned
     worker schemas, builds this worker's schema once, drops it at session end.
     """
-    url = _require_test_dsn()
-    engine = build_test_engine(url, db_schema, pool_size=2, max_overflow=0, pool_timeout=30)
+    engine = build_test_engine(
+        db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=30
+    )
     try:
+        require_owned_sessionmaker(engine)
         async with engine.connect() as conn:
             await _require_migrated(conn)
         await sweep_orphan_schemas(engine)
@@ -417,7 +470,9 @@ async def db_engine(db_schema: str) -> AsyncIterator[AsyncEngine]:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def db_nullpool_engine(db_engine: AsyncEngine, db_schema: str) -> AsyncIterator[AsyncEngine]:
+async def db_nullpool_engine(
+    db_preflight: DatabasePreflight, db_engine: AsyncEngine, db_schema: str
+) -> AsyncIterator[AsyncEngine]:
     """NullPool twin of ``db_engine`` on the same schema.
 
     For code that opens its own event loop per call (Typer commands under
@@ -425,8 +480,9 @@ async def db_nullpool_engine(db_engine: AsyncEngine, db_schema: str) -> AsyncIte
     nothing may be pooled across calls. Depends on ``db_engine`` so the schema
     exists for its whole life.
     """
-    engine = build_test_engine(_require_test_dsn(), db_schema, poolclass=NullPool)
+    engine = build_test_engine(db_preflight.url, db_schema, poolclass=NullPool)
     try:
+        require_owned_sessionmaker(engine)
         yield engine
     finally:
         await engine.dispose()
@@ -441,7 +497,10 @@ platform_names.defer_writes()
 
 @pytest_asyncio.fixture
 async def db_clean(
-    db_engine: AsyncEngine, db_schema: str, request: pytest.FixtureRequest
+    db_preflight: DatabasePreflight,
+    db_engine: AsyncEngine,
+    db_schema: str,
+    request: pytest.FixtureRequest,
 ) -> AsyncIterator[None]:
     """Wipe every ORM table in the worker schema before the test runs.
 
@@ -449,6 +508,7 @@ async def db_clean(
     connections are checked in. A no-op under ``@pytest.mark.fresh_schema``.
     """
     global _last_db_test
+    require_owned_sessionmaker(db_engine)
     item = _request_item(request)
     # A test before this one may have left name writes running, or remembered
     # names the wipe below deletes.
@@ -491,6 +551,7 @@ async def _fresh_schema_session(url: str) -> AsyncIterator[AsyncSession]:
     schema = _new_schema_name("f")
     engine = build_test_engine(url, schema, poolclass=NullPool)
     try:
+        require_owned_sessionmaker(engine)
         await _create_schema_with_tables(engine, schema)
         try:
             async with engine.connect() as conn:
@@ -508,6 +569,7 @@ async def _fresh_schema_session(url: str) -> AsyncIterator[AsyncSession]:
 
 @pytest_asyncio.fixture
 async def db_session(
+    db_preflight: DatabasePreflight,
     db_engine: AsyncEngine,
     db_clean: None,
     request: pytest.FixtureRequest,
@@ -519,7 +581,7 @@ async def db_session(
     schema instead (see module docstring).
     """
     if _request_item(request).get_closest_marker("fresh_schema") is not None:
-        async with _fresh_schema_session(_require_test_dsn()) as session:
+        async with _fresh_schema_session(db_preflight.url) as session:
             yield session
         return
     async with db_engine.connect() as conn:

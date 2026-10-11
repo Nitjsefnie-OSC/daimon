@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add explicit offline Discord, Slack and Teams callbacks that expose actual
   admission and session binding for backend-selection conformance.
 - Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
+- Validate shared test database ownership before fixture setup, and bind metered channel proofs to the run's exact persisted usage identity.
+
+- Add an owned offline metered-turn seam with controlled prices and independent channel ledger/budget readback through the real host billing path.
 
 - Prove OpenAI C04 offline with real SDK delivery, fenced intent/ack crashes and restart recovery that retains unknown input identity without resending.
 - Prove OpenAI interaction preparation offline across skill upload/pinning, MCP and input-file binding, retaining typed unavailable execution and the canonical C11 gaps.
