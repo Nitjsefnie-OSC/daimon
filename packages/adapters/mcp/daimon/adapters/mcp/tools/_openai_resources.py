@@ -24,7 +24,7 @@ from fastmcp.exceptions import ToolError
 
 if TYPE_CHECKING:
     from anthropic.types.beta import BetaManagedAgentsAgent
-    from daimon.core.neutral_resources import NeutralResourceHost
+    from daimon.core.neutral_resources import HostAgentView, NeutralResourceHost
     from mux.contracts.resources import Agent
 
 OPENAI_PROFILE = "openai.persistent_workspace"
@@ -130,3 +130,44 @@ def gate_view(agent: Agent) -> BetaManagedAgentsAgent:
             metadata=metadata,
         ),
     )
+
+
+async def resolve_host_agent(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    host: NeutralResourceHost,
+    *,
+    name: str,
+    expected_ma_agent_id: str | None,
+    location_channel_id: str | None,
+) -> HostAgentView:
+    """`resolve_setup_agent`'s rules for an agent behind the host, provider-neutrally.
+
+    A chat call must name the agent it means (`expected_ma_agent_id`, the native
+    id); an agent the caller's channel isolation hides resolves as missing; and
+    the named id must be the current agent. Same refusals, before any change.
+    """
+    from daimon.adapters.mcp.tools._rule_view import load_caller_view
+    from daimon.core.stores.domain import CHAT_PLATFORMS
+
+    if auth.platform in CHAT_PLATFORMS and expected_ma_agent_id is None:
+        raise ToolError(
+            "Pass expected_ma_agent_id from the selected target or list_agents before acting. "
+            "Which current agent should I configure? Nothing was changed."
+        )
+    view = await host.find(name)
+    caller = await load_caller_view(runtime, auth, location_channel_id=location_channel_id)
+    seen = view if view is not None and caller.sees_agent(gate_view(view.revision.agent)) else None
+    if expected_ma_agent_id is not None:
+        if seen is not None and seen.id == expected_ma_agent_id:
+            return seen
+        raise ToolError(
+            f"The selected agent '{name}' ({expected_ma_agent_id}) is missing or changed. "
+            "Which current agent should I configure? Nothing was changed."
+        )
+    if seen is None:
+        raise ToolError(
+            f"agent '{name}' not found. Which current agent should I configure? "
+            "Nothing was changed."
+        )
+    return seen

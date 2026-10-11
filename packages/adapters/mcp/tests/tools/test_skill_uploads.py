@@ -31,7 +31,7 @@ from daimon.adapters.mcp.tools.skill_uploads import (
     _add_skill_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
-from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.github_credentials import encrypt_token
@@ -1748,7 +1748,7 @@ async def test_openai_cards_off_yes_adds_through_the_authorized_host(
         world.runtime,
         auth,
         agent_name="helper",
-        expected_ma_agent_id=None,
+        expected_ma_agent_id="openai_helper",
         skill_md=_MD,
         origin_context_id=origin,
     )
@@ -1758,7 +1758,7 @@ async def test_openai_cards_off_yes_adds_through_the_authorized_host(
             world.runtime,
             auth,
             agent_name="helper",
-            expected_ma_agent_id=None,
+            expected_ma_agent_id="openai_helper",
             skill_md=_MD,
             origin_context_id=reply,
             content_hash=preview.preview.content_hash,
@@ -1785,7 +1785,7 @@ async def test_openai_yes_please_cancels_the_preview_like_every_backend(
         world.runtime,
         auth,
         agent_name="helper",
-        expected_ma_agent_id=None,
+        expected_ma_agent_id="openai_helper",
         skill_md=_MD,
         origin_context_id=origin,
     )
@@ -1795,7 +1795,7 @@ async def test_openai_yes_please_cancels_the_preview_like_every_backend(
                 world.runtime,
                 auth,
                 agent_name="helper",
-                expected_ma_agent_id=None,
+                expected_ma_agent_id="openai_helper",
                 skill_md=_MD,
                 origin_context_id=reply,
                 content_hash=preview.preview.content_hash,
@@ -1852,8 +1852,115 @@ async def test_a_host_for_another_account_is_refused_before_any_change(
             world.runtime,
             auth,
             agent_name="helper",
-            expected_ma_agent_id=None,
+            expected_ma_agent_id="openai_helper",
             skill_md=_MD,
             origin_context_id=origin,
         )
     assert all(host.added == [] for host in hosts.hosts) and world.created == []
+
+
+async def _pending_rows(world: _World) -> int:
+    async with world.runtime.session_factory() as session:
+        count = await session.scalar(text("SELECT count(*) FROM pending_skill_adds"))
+    return int(count or 0)
+
+
+@pytest.mark.parametrize(
+    ("expected", "refusal"),
+    [(None, "Pass expected_ma_agent_id"), ("openai_someone_else", "missing or changed")],
+)
+async def test_an_openai_chat_add_must_name_the_current_agent(
+    expected: str | None,
+    refusal: str,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    hosts = await _openai_room(world, monkeypatch, tmp_path)
+    with pytest.raises(ToolError, match=refusal):
+        await _add_skill_impl(
+            world.runtime,
+            auth,
+            agent_name="helper",
+            expected_ma_agent_id=expected,
+            skill_md=_MD,
+            origin_context_id=origin,
+        )
+    assert all(host.added == [] for host in hosts.hosts) and await _pending_rows(world) == 0
+
+
+async def test_an_agent_another_channel_keeps_to_itself_is_refused_alike_from_here(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Another channel reads only its own agents and "helper" runs there alone: from
+    ROOM the add is refused before any preview, identically on either backend."""
+    refusals: dict[str, str] = {}
+    for backend in ("anthropic", "openai"):
+        world = await _world(db_session_factory)
+        elsewhere = "222222222222222222"
+        async with db_session_factory.begin() as session:
+            await set_access_policy(
+                session,
+                tenant_id=world.tenant_id,
+                policy=TenantAccessPolicy(
+                    channel_rules={elsewhere: ChannelRule(readers="own", writers="own")},
+                    agent_rules={"helper": AgentRule(runs_in=(elsewhere,))},
+                ),
+            )
+        auth, origin = await _cards_off_turn(world)
+        room = tmp_path / backend
+        room.mkdir()
+        hosts = await _openai_room(world, monkeypatch, room) if backend == "openai" else None
+        with pytest.raises(ToolError) as refused:
+            await _add_skill_impl(
+                world.runtime,
+                auth,
+                agent_name="helper",
+                expected_ma_agent_id="openai_helper" if backend == "openai" else "agent_helper",
+                skill_md=_MD,
+                origin_context_id=origin,
+            )
+        refusals[backend] = str(refused.value)
+        assert world.created == [] and await _pending_rows(world) == 0
+        if hosts is not None:
+            assert all(host.added == [] for host in hosts.hosts)
+    assert refusals["openai"] == refusals["anthropic"], "the same refusal on both backends"
+
+
+async def test_an_agent_the_callers_view_hides_resolves_as_missing_behind_the_host(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """resolve_host_agent applies the caller's isolation view, as resolve_setup_agent does."""
+    from daimon.adapters.mcp.tools import _rule_view
+
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    hosts = await _openai_room(world, monkeypatch, tmp_path)
+    seen: list[object] = []
+
+    class _Hides:
+        def sees_agent(self, agent: object) -> bool:
+            seen.append(agent)
+            return False
+
+    async def hiding_view(*_args: object, **_kwargs: object) -> _Hides:
+        return _Hides()
+
+    monkeypatch.setattr(_rule_view, "load_caller_view", hiding_view)
+    with pytest.raises(ToolError, match="missing or changed"):
+        await _add_skill_impl(
+            world.runtime,
+            auth,
+            agent_name="helper",
+            expected_ma_agent_id="openai_helper",
+            skill_md=_MD,
+            origin_context_id=origin,
+        )
+    assert [getattr(agent, "name", None) for agent in seen] == ["helper"]
+    assert all(host.added == [] for host in hosts.hosts) and await _pending_rows(world) == 0
