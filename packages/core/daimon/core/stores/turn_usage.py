@@ -1,15 +1,104 @@
 """Read-only per-turn telemetry queries. Billing remains authoritative elsewhere."""
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from daimon.core._models import TurnOutcome
+from daimon.core._models import AccountingOutbox, TurnOutcome, UsageObservation
 from daimon.core.context_prompt import TurnContext
+from daimon.core.stores import mux_state, tenant_ledger
+from daimon.core.stores.domain import TenantLedgerRow
+from mux.contracts.resources import ProviderBinding
+from mux.state.store import binding_slot
+from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
+
+
+@dataclass(frozen=True)
+class AccountingRevision:
+    row: OutboxRow
+    settled: bool
+
+
+@dataclass(frozen=True)
+class UsageAccountingRows:
+    """Persisted facts only: no pricing, root closure or settlement inferred."""
+
+    binding: ProviderBinding | None
+    revisions: tuple[AppliedUsage, ...]
+    outbox: tuple[AccountingRevision, ...]
+    ledger: tuple[TenantLedgerRow, ...]
+
+
+async def read_accounting_revisions(
+    session: AsyncSession, *, tenant_id: UUID, binding: ProviderBinding
+) -> UsageAccountingRows:
+    """Read all binding revisions without applier locks, claims or writes.
+
+    Caller owns transaction consistency and authorization. Include unattributed
+    revisions so a root-specific filter cannot silently drop unknown work.
+    """
+    if binding.thread.channel.tenant_id != str(tenant_id):
+        raise ValueError("accounting binding must belong to the requested tenant")
+    # SELECTs must not implicitly flush pending objects in the caller's session.
+    with session.no_autoflush:
+        return await _read_accounting_revisions(session, tenant_id=tenant_id, binding=binding)
+
+
+async def _read_accounting_revisions(
+    session: AsyncSession, *, tenant_id: UUID, binding: ProviderBinding
+) -> UsageAccountingRows:
+    current = await mux_state.get_binding(session, binding_slot(binding))
+    revision_rows = await session.execute(
+        select(UsageObservation.observation_id, UsageObservation.revision, UsageObservation.applied)
+        .where(UsageObservation.tenant_id == tenant_id, UsageObservation.binding_id == binding.id)
+        .order_by(UsageObservation.observation_id, UsageObservation.revision)
+    )
+    revisions: list[AppliedUsage] = []
+    for identity, revision, body in revision_rows:
+        value = AppliedUsage.model_validate(body)
+        if (value.binding_id, value.observation_id, value.revision) != (
+            binding.id,
+            identity,
+            revision,
+        ) or (value.observation.id, value.observation.revision) != (identity, revision):
+            raise ValueError("durable usage row identity mismatch")
+        revisions.append(value)
+    rows = await session.execute(
+        select(
+            AccountingOutbox.observation_id,
+            AccountingOutbox.revision,
+            AccountingOutbox.row,
+            AccountingOutbox.applied_at,
+        )
+        .where(AccountingOutbox.tenant_id == tenant_id, AccountingOutbox.binding_id == binding.id)
+        .order_by(AccountingOutbox.observation_id, AccountingOutbox.revision)
+    )
+    outbox: list[AccountingRevision] = []
+    for identity, revision, body, applied_at in rows:
+        row = OutboxRow.model_validate(body)
+        if row.key != (binding.id, identity, revision) or (
+            row.observation.id,
+            row.observation.revision,
+        ) != (identity, revision):
+            raise ValueError("durable outbox row identity mismatch")
+        outbox.append(AccountingRevision(row, applied_at is not None))
+    keys = {
+        f"turn:{item.row.observation.session.id}:{item.row.observation_id}"
+        if item.row.revision == 1
+        else f"adjust:{binding.id}:{item.row.observation_id}:{item.row.revision}"
+        for item in outbox
+    }
+    ledger = tuple(
+        row
+        for row in await tenant_ledger.list_for_tenant(session, tenant_id=tenant_id)
+        if row.idempotency_key in keys
+    )
+    return UsageAccountingRows(current, tuple(revisions), tuple(outbox), ledger)
 
 
 class TurnUsageRow(BaseModel):

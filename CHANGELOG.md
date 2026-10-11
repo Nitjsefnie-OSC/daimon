@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Isolate Gemini full-byte bundle and F2 replay SDK clients with explicit fixture authentication and owned sync/async transports; refuse ambient provider settings before construction.
 - Add lead-signed whole-column QA budget admission with conservative receipt-based bounds, disjoint monotonic per-cell settlement and terminal release of never-started holds; incomplete usage stays held.
 - Route the shared no-retry Anthropic test builder through isolated SDK admission, retaining its handler/router API, native request bytes, SDK timeout and zero-retry behavior.
+- Add an owned-test read-only turn accounting API with native usage revisions, explicit dated rate/model attribution, infrastructure unknowns and independent coverage/settlement completeness across Anthropic, OpenAI and Gemini.
 
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.

@@ -813,3 +813,14 @@ models require a higher observation revision. Capture follows successful
 commit, so a batch failure rolls back every debit and emits no usage sample.
 Gemini Flash currently retains interaction usage; this API refuses to invent
 independent child meters or add delegated costs to potentially inclusive totals.
+
+Offline tests can read normalized native revisions through
+`stores.turn_usage.read_accounting_revisions` without claiming or replaying the
+accounting outbox. `daimon.testing.turn_accounting.TurnAccountingReader` adds a
+coherent read-only snapshot restricted to owned test databases, explicit dated
+rate/model and infrastructure evidence, and independent native turn inventory
+coverage. Its completeness flag requires complete measured prices and coverage,
+settled revisions and an exact ledger/debit match. Unknown rates or container
+time remain unknown; a known ledger debit does not establish a complete turn
+cost. Controlled test evidence certifies host arithmetic only. The API preserves
+historical Anthropic float/debit rounding and does not change displayed footers.

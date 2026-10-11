@@ -226,3 +226,52 @@ completion receipts do not establish that additional coverage.
 scripted defaults to zero and honors its explicit retry budget. The no-retry
 builder accepts either a handler or `MARouter` and keeps zero retries, including
 409/429/5xx errors. Its SDK copies retain that budget and the isolation guard.
+## Read-only turn accounting
+
+`daimon.testing.turn_accounting.TurnAccountingReader` reads Anthropic, OpenAI
+and Gemini usage from an owned test database. Construct it with `sessions`, an
+authorized tenant `scope`, the current `binding`, `native_session` and
+`root_turn_id`. It checks every database bind before connecting and uses one
+`REPEATABLE READ READ ONLY` snapshot. It neither claims outbox rows nor changes
+usage, prices or ledger entries. The public store seam is
+`daimon.core.stores.turn_usage.read_accounting_revisions(session, tenant_id=..., binding=...)`;
+callers of that lower-level function own authorization and snapshot consistency.
+The store suppresses autoflush without changing the caller's pending objects or
+session policy; even an ordinary caller-owned transaction remains a read here.
+
+```python
+report = await reader.snapshot(
+    attributions=tuple(revision_rates),  # RevisionRateAttribution per exact id/revision
+    inventory=native_inventory,         # TurnUsageInventory captured independently
+    markup=Decimal("1"),
+)
+```
+
+Every `NormalizedUsageRevision` retains the original observation, native revision
+and meter, latest/selected flags, optional settlement state, attributed model,
+dated `ProviderPrice`, evidence references, token cost, infrastructure dollars
+and seconds, total cost and signed ledger delta. A missing native model needs
+independent admitted model context and `model_evidence_id`; a tariff alone does
+not establish attribution. Missing rates, evidence, token stages or container
+time remain unknown. `not_applicable` infrastructure requires explicit zero
+dollars and an evidence reference; its duration stays `None`. Rates are supplied
+explicitly because accounting revisions do not persist the applier's tariff.
+
+`TurnUsageInventory` binds the binding/session/root to every latest native
+id/revision and the evidence for a terminal inventory or exhausted request walk.
+Capture it from the native path, never by enumerating these accounting rows.
+It may attribute historical request spans lacking a persisted turn ID without
+rewriting them. Missing members, stale revisions, other unattributed session
+work, pending settlement and mismatched ledger cost prevent `complete=True`.
+Disjoint child usage adds its own model work; independently measured shared
+infrastructure must be attributed once. Covered aggregates and session-to-turn
+allocations remain explicitly unsupported.
+
+The report separates `coverage_complete`, `pricing_complete` and
+`settlement_complete`. `total_usd` and `expected_ledger_usd` are `None` until
+coverage and prices are complete; a known ledger debit can still be reported
+while those totals remain unknown. `known_model_usd` is only the subtotal of
+known selected model costs, including an empty subtotal of zero. All monetary
+aggregation uses decimal precision 80. Controlled rates and inventory evidence
+prove offline host arithmetic; they do not certify live invoices or supply a
+missing posted footer. `issues` explain incomplete results.
