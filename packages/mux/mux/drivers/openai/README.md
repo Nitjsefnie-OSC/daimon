@@ -639,3 +639,21 @@ explicit profile guard in `run_prepared_turn_impl` excludes OpenAI. Native histo
 replay retains the same session and correctly records `recovered=False`; a
 recovered replacement row is not claimed. Admission/remaining driver branches
 without executed native cases stay PENDING until those proofs are supplied.
+
+### NEW27 native credential prerequisite (opt-in only)
+
+`tests/judge/openai_rejected_token_catalog.py` binds the frozen NEW27 source to
+an actual A3 MCP-form admission attempt. The current native adapter offers only
+GitHub and environment input, so the result is
+`PENDING: OPENAI_NATIVE_MCP_FORM_UNAVAILABLE` under the opt-in profile.
+No credential submit, rejecting HTTP probe or scoped `used_at` readback has
+occurred. N7's Anthropic consume-before-probe FAIL is not OpenAI evidence.
+
+Native MCP-token request persistence and interaction submission are product
+prerequisites. Their eventual conformance binding must invoke the real native
+submit against N7's owned loopback rejecting probe and query its genuinely
+minted request using fixed parameterized scope predicates. Do not translate
+OpenAI identities into `target_ma_agent_id`, execute the source SQL template,
+invent a request row, or change consume/probe ordering to earn this assertion.
+When native MCP offers become available, the current diagnostic refuses until
+that submit/probe/readback binding exists. No default runtime installs this hook.
