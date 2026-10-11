@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from anthropic.types import RawMessageStreamEvent
@@ -36,6 +37,7 @@ from daimon.adapters.discord.embed import (
 )
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.output_delivery import AnswerMessage
+from daimon.adapters.discord.progress_receipt import InitialProgressReceipt
 from daimon.adapters.discord.provider_events import ProviderDraft
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
@@ -342,7 +344,9 @@ class DiscordTurnLifecycle:
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: uuid.UUID | None = None,
         budget_channel_id: str | None = None,
+        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
+        waiting_for_tenant_slot: Callable[[], bool] | None = None,
     ) -> None:
         self._requester_id = requester_id
         self._turn_id = turn_id
@@ -358,7 +362,10 @@ class DiscordTurnLifecycle:
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
         self._budget_channel_id = budget_channel_id
+        self._on_initial_progress = on_initial_progress
         self._alert_webhook_url = alert_webhook_url
+        self._waiting_for_tenant_slot = waiting_for_tenant_slot
+        self._queue_card_shown = False
         self._edit = edit
         self._urgent_edit = urgent_edit
         self._delete = delete
@@ -502,7 +509,25 @@ class DiscordTurnLifecycle:
         """
         if self._unprompted:
             return
-        await self._maybe_flush()
+        await self._maybe_flush(initial=True)
+
+    async def on_slot_started(self) -> None:
+        """Clear opted-in queue wording on the existing card after the real wait."""
+        if not self._queue_card_shown or self._terminal or self._message_ref is None:
+            return
+        self._waiting_for_tenant_slot = None
+        now = self._clock()
+        try:
+            await self._edit_message(
+                self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
+            )
+        except Exception:
+            # Cosmetic wording must not prevent an admitted turn from running.
+            # The ordinary render/terminal path will try this same card again.
+            log.info("turn.queue_card_clear_failed", exc_info=True)
+            return
+        self._last_flush = now
+        self._queue_card_shown = False
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract (D-11):
@@ -834,9 +859,13 @@ class DiscordTurnLifecycle:
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the one status embed: headline, tool lines and the latest draft."""
-        return [build_discord_embed(to_embed_data(self._state, now=now))]
+        embed = build_discord_embed(to_embed_data(self._state, now=now))
+        if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
+            embed.title = "Queued — waiting for a free slot…"
+            self._queue_card_shown = True
+        return [embed]
 
-    async def _maybe_flush(self) -> None:
+    async def _maybe_flush(self, *, initial: bool = False) -> None:
         """Post or edit the embeds, subject to debounce. No-op after terminal."""
         if self._terminal:
             return
@@ -844,14 +873,16 @@ class DiscordTurnLifecycle:
         if self._message_ref is None:
             # First post — immediate, no debounce
             self._first_post_attempted = True
-            message = await self._send_message(
-                embeds=self._build_embeds(now), view=self._cancel_view
-            )
+            embeds = self._build_embeds(now)
+            rendered_json = self._initial_render_json(embeds) if initial else None
+            message = await self._send_message(embeds=embeds, view=self._cancel_view)
             self._message_ref = message
             self._card_message_ref = message
             self._card_writes.track(message)
             self._initial_card_message_ref = message
             self._last_flush = now
+            if rendered_json is not None:
+                self._observe_initial_progress(message, rendered_json, operation="send")
             if self._on_first_post is not None:
                 # Persist the returned message ID before the turn proceeds. If
                 # this fails, retain the prepared intent and stop the caller.
@@ -863,10 +894,12 @@ class DiscordTurnLifecycle:
             await self._on_first_post(self._message_ref)
             self._on_first_post = None
         elif now - self._last_flush >= _DEBOUNCE_S:
+            embeds = self._build_embeds(now)
+            rendered_json = self._initial_render_json(embeds) if initial else None
             # Keep every on-wire edit alive when the render loop is cancelled.
             # Its completion reconciles the card if terminal delivery overtook it.
             task = asyncio.create_task(
-                self._edit_progress(self._message_ref, self._build_embeds(now)),
+                self._edit_progress(self._message_ref, embeds, rendered_json=rendered_json),
                 name="discord.progress_edit",
             )
             self._progress_edits.add(task)
@@ -892,12 +925,23 @@ class DiscordTurnLifecycle:
             self._progress_settled.set()
         self._card_writes.queue_repair()
 
-    async def _edit_progress(self, message: discord.Message, embeds: list[discord.Embed]) -> None:
+    async def _edit_progress(
+        self,
+        message: discord.Message,
+        embeds: list[discord.Embed],
+        *,
+        rendered_json: str | None = None,
+    ) -> None:
         try:
             if not self._terminal:
-                await self._edit_message(
+                landed = await self._edit_message(
                     message, progress=True, embeds=embeds, view=self._cancel_view
                 )
+                if landed and rendered_json is not None:
+                    assert self._message_ref is not None
+                    self._observe_initial_progress(
+                        self._message_ref, rendered_json, operation="edit"
+                    )
         except Exception:
             log.warning("turn.progress_edit_failed", exc_info=True)
             raise
@@ -921,6 +965,36 @@ class DiscordTurnLifecycle:
                     await self._progress_settled.wait()
             except TimeoutError:
                 pass
+
+    def _initial_render_json(self, embeds: list[discord.Embed]) -> str | None:
+        if self._on_initial_progress is None:
+            return None
+        # Freeze before awaiting send: an early Cancel click may mutate the view.
+        return json.dumps(
+            {
+                "embeds": [embed.to_dict() for embed in embeds],
+                "components": self._cancel_view.to_components() if self._cancel_view else [],
+            }
+        )
+
+    def _observe_initial_progress(
+        self,
+        message: discord.Message,
+        rendered_json: str,
+        *,
+        operation: Literal["send", "edit"],
+    ) -> None:
+        if self._on_initial_progress is None:
+            return
+        self._on_initial_progress(
+            InitialProgressReceipt(
+                operation=operation,
+                destination_id=str(message.channel.id),
+                message_id=str(message.id),
+                rendered_json=rendered_json,
+                observed_s=self._clock(),
+            )
+        )
 
     def _apply_usage(self, state: TurnState) -> None:
         """Price the turn's accumulated token totals onto the embed state before a

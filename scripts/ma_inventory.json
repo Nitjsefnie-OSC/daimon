@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2444,
+  "files_scanned": 2459,
   "parse_errors": [],
   "calls": [
     {
@@ -10459,7 +10459,7 @@
     },
     {
       "file": "packages/adapters/discord/daimon/adapters/discord/lifecycle.py",
-      "line": 27,
+      "line": 28,
       "module": "anthropic.types",
       "names": [
         "RawMessageStreamEvent"
@@ -10676,8 +10676,21 @@
       "category": "test"
     },
     {
+      "file": "packages/adapters/discord/tests/test_gateway_ingress.py",
+      "line": 869,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsAgentMessageEvent",
+        "BetaManagedAgentsSessionEndTurn",
+        "BetaManagedAgentsSessionStatusIdleEvent",
+        "BetaManagedAgentsSessionStatusRunningEvent",
+        "BetaManagedAgentsTextBlock"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 27,
+      "line": 28,
       "module": "anthropic",
       "names": [
         "BadRequestError",
@@ -10687,7 +10700,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 28,
+      "line": 29,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -10696,7 +10709,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 31,
+      "line": 32,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_usage",
       "names": [
         "BetaManagedAgentsSpanModelUsage"
@@ -10705,7 +10718,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 2717,
+      "line": 2770,
       "module": "anthropic",
       "names": [
         "APIStatusError"
@@ -12149,7 +12162,7 @@
     },
     {
       "file": "packages/adapters/slack/daimon/adapters/slack/lifecycle.py",
-      "line": 50,
+      "line": 51,
       "module": "anthropic.types",
       "names": [
         "RawMessageStreamEvent"

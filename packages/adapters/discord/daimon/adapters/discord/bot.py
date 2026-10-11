@@ -60,6 +60,7 @@ from daimon.adapters.discord.provider_actions import (
     discord_provider_action_hook,
     provider_action_options,
 )
+from daimon.adapters.discord.queue_card import queue_card_ticket, tenant_slot_waiter
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
@@ -208,6 +209,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 from discord.ext import commands
+from discord.http import HTTPClient
 
 log = structlog.get_logger()
 
@@ -617,8 +619,21 @@ async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[
 class DaimonBot(commands.Bot):
     """Discord bot process. Slash commands + turn pipeline."""
 
-    def __init__(self, *, runtime: DiscordRuntime, intents: discord.Intents) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: DiscordRuntime,
+        intents: discord.Intents,
+        http_client: HTTPClient | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         super().__init__(command_prefix=[], intents=intents)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
+        # Explicit in-process ingress only; normal gateway/HTTP and time remain
+        # untouched when neither dependency is supplied.
+        if http_client is not None:
+            self.http = http_client
+            self._connection.http = http_client
+        self._ingress_clock = clock
         self.runtime = with_budget_notifier(
             runtime, self.open_member_dm, self.is_closed, client=self
         )
@@ -2582,7 +2597,12 @@ class DaimonBot(commands.Bot):
                 await message.channel.send(GLOBAL_CAP_NOTICE)
                 return
 
-            with holding(ticket):
+            with (
+                holding(ticket),
+                queue_card_ticket(ticket, cap=cap)
+                if self.runtime.settings.discord.tenant_cap_waiting_card
+                else contextlib.nullcontext(),
+            ):
                 # Channel-level mentions each open their own thread + MA session, so
                 # they run in parallel — no serialization (bounded by the
                 # per-tenant and optional process-wide slots claimed above).
@@ -3677,7 +3697,7 @@ class DaimonBot(commands.Bot):
                 platform_role_ids=member_role_ids(author)
                 if isinstance(author, discord.Member)
                 else None,
-                now=datetime.now(UTC),
+                now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
             )
@@ -3936,6 +3956,12 @@ class DaimonBot(commands.Bot):
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_id
                 ),
+                waiting_for_tenant_slot=(
+                    tenant_slot_waiter(self.turn_queue, tenant_id)
+                    if self.runtime.settings.discord is not None
+                    and self.runtime.settings.discord.tenant_cap_waiting_card
+                    else None
+                ),
             )
 
         turn_card_intent, lifecycle = await post_initial_turn_card(
@@ -3985,9 +4011,8 @@ class DaimonBot(commands.Bot):
 
         surface.end_card = _end_card_with_error
 
-        # Over a cap the turn waits here, behind its ordinary card: the queue
-        # is never shown. Stop ends the wait like any turn; the max wait is a
-        # safeguard that ends the card with the ordinary error.
+        # Over a cap the turn waits behind its existing card. Queue wording
+        # is explicitly opt-in; Stop and timeout keep their existing paths.
         assert self.runtime.settings.discord is not None
         slot = await wait_for_slot(
             cancel,
@@ -4016,11 +4041,16 @@ class DaimonBot(commands.Bot):
             )
             return
 
+        if self.runtime.settings.discord.tenant_cap_waiting_card:
+            await lifecycle.on_slot_started()
+
         # D-03 boundary: the per-turn ceiling clock starts here, once admission
         # has passed and the turn holds its slot, and covers session
         # bind/create (bind_session) plus the driver pump (run_prepared_turn)
         # as ONE shared budget -- admit() and the queue wait are outside it.
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+        turn_deadline_at = turn_deadline(
+            now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC)
+        )
 
         discord_settings = self.runtime.settings.discord
         assert discord_settings is not None, (
