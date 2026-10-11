@@ -409,6 +409,9 @@ class DiscordBackend:
                 after=turn.trigger_id,
                 daimon_id=self.target.daimon_id,
             )
+            # Poll membership: every card listed working in this poll shares
+            # this listing time, taken before any slow direct card read.
+            listed_at = utcnow()
             turn.baseline_message_ids = sorted(self.baseline_ids.get(turn.trigger_id, set()))
             raw = self.driver.messages(turn.channel_id, after=None, limit=100)
             if self.driver.exists(turn.trigger_id):
@@ -489,7 +492,7 @@ class DiscordBackend:
                 # poll, edited or not: a card later converted into an answer
                 # chunk needs proof it ran this turn (chunks_gap_max_s).
                 if verdict == "working":
-                    self.sample_running_card(turn, message)
+                    self.sample_running_card(turn, message, listed_at=listed_at)
             if "working" in turn.verdicts and turn.progress_seen_s is None:
                 turn.progress_seen_s = elapsed
             terminal = bool(messages) and all(v in self.driver.TERMINAL for v in turn.verdicts)
@@ -511,13 +514,19 @@ class DiscordBackend:
         turn.ended_at = utcnow()
         raise WatchTimeout("watch timed out; collected last messages, no terminal proof")
 
-    def sample_running_card(self, turn: Turn, message: Message) -> None:
+    def sample_running_card(
+        self, turn: Turn, message: Message, *, listed_at: datetime | None = None
+    ) -> None:
         """Read the actual card each poll, including unchanged and never-edited cards.
 
-        A failed or mismatched readback is kept as card-specific unavailable
-        evidence (it widens the capture gap the evaluator checks) rather than
-        aborting collection and the scenario's unrelated assertions.
+        `listed_at` is when the poll's listing showed the card working; it is
+        recorded separately from the snapshot time so a slow direct read can't
+        erase the known running start, and it identifies poll membership. A
+        failed or mismatched readback is kept as card-specific unavailable
+        evidence, and a card that raced to terminal before its direct read is
+        kept as its observed end; neither carries a payload or counts as an edit.
         """
+        listed = listed_at or utcnow()
         channel = str(message.get("channel_id") or turn.thread_id or turn.channel_id)
         self._owned(channel)
         identity = str(message.get("id") or "")
@@ -537,6 +546,7 @@ class DiscordBackend:
         sample: Message = {
             "message_id": identity,
             "phase": "running",
+            "listed_at": listed.isoformat(),
             "observed_at": observed.isoformat(),
             "elapsed_s": (observed - turn.started_at).total_seconds(),
             "poll_interval_s": self.config.poll_interval_s,
@@ -544,8 +554,10 @@ class DiscordBackend:
         if unavailable is not None:
             turn.card_history.append({**sample, "unavailable": unavailable})
             return
-        # A card can become terminal between the list read and this direct read.
+        # A card can become terminal between the list read and this direct read:
+        # it was running at `listed_at` and had ended by `observed_at`.
         if self.classify(row) != "working":
+            turn.card_history.append({**sample, "ended": True})
             return
         turn.card_history.append(
             {

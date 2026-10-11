@@ -72,35 +72,47 @@ def running_card_edits(turn: Turn) -> tuple[int, list[tuple[datetime, Message]]]
     return edits, samples
 
 
+def _stamp(entry: Message, key: str) -> datetime:
+    value = entry.get(key)
+    if not isinstance(value, str):
+        raise Pending("running card observation time is missing; edit minimum is unproven")
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        raise Pending("running card sample has an invalid observation time") from None
+    if stamp.tzinfo is None:
+        raise Pending("running card sample observation time lacks a timezone")
+    return stamp
+
+
 def running_capture_covered(
     turn: Turn, samples: list[tuple[datetime, Message]], minimum: int
 ) -> None:
     """Raise PENDING unless every running card's capture is tight enough to FAIL.
 
-    Coverage is checked per card identity. Each card's running interval starts
-    at its first known running observation, including failed readbacks, and
-    ends at the next poll that no longer listed it as working (or at terminal
-    proof). Another card's snapshots never qualify this card's missed time.
+    Coverage is checked per card identity. A card's running interval starts at
+    the earliest poll listing it working (`listed_at`, taken before the direct
+    read, so failed or slow readbacks still count). It ends when its direct
+    read raced to terminal, else at the next poll that no longer listed it
+    working, else at terminal proof. Another card's reads never end it.
     """
     counts: dict[str, int] = {}
     for _, sample in samples:
         counts[str(sample["message_id"])] = counts.get(str(sample["message_id"]), 0) + 1
     if max(counts.values(), default=0) < max(2, minimum + 1):
         raise Pending("insufficient running card samples; edit minimum is unproven")
-    known: dict[str, list[datetime]] = {}
+    listed: dict[str, list[datetime]] = {}
+    ended: dict[str, list[datetime]] = {}
     intervals: list[JsonValue] = []
     for entry in turn.card_history:
         if entry.get("phase") != "running" or not entry.get("message_id"):
             continue
-        if not isinstance(entry.get("observed_at"), str):
-            raise Pending("running card observation time is missing; edit minimum is unproven")
-        try:
-            observed = datetime.fromisoformat(str(entry["observed_at"]))
-        except ValueError:
-            raise Pending("running card sample has an invalid observation time") from None
-        if observed.tzinfo is None:
-            raise Pending("running card sample observation time lacks a timezone")
-        known.setdefault(str(entry["message_id"]), []).append(observed)
+        identity = str(entry["message_id"])
+        observed = _stamp(entry, "observed_at")
+        poll = _stamp(entry, "listed_at") if "listed_at" in entry else observed
+        listed.setdefault(identity, []).append(poll)
+        if entry.get("ended") is True:
+            ended.setdefault(identity, []).append(observed)
         intervals.append(entry.get("poll_interval_s"))
     if any(isinstance(i, bool) or not isinstance(i, (int, float)) or i <= 0 for i in intervals):
         raise Pending("running card capture cadence is unknown; edit minimum is unproven")
@@ -108,17 +120,19 @@ def running_capture_covered(
         raise Pending("running card end is unobserved; edit minimum is unproven")
     bound = CARD_GAP_POLLS * max(cast(float, i) for i in intervals)
     terminal = turn.started_at + timedelta(seconds=turn.done_s)
-    every = sorted(t for times in known.values() for t in times)
+    polls = sorted({t for times in listed.values() for t in times})
     successful: dict[str, list[datetime]] = {}
     for observed, sample in samples:
         successful.setdefault(str(sample["message_id"]), []).append(observed)
-    for identity, times in known.items():
+    for identity, times in listed.items():
         good = sorted(successful.get(identity, []))
         if not good:
             raise Pending(f"running card {identity} was never read back; edit minimum is unproven")
-        last_known = max(times)
-        # The next poll that saw other cards but not this one bounds its end.
-        end = min([t for t in every if t > last_known] + [terminal])
+        if identity in ended:
+            end = min(ended[identity])
+        else:
+            last = max(times)
+            end = next((p for p in polls if p > last), terminal)
         edges = [min(times), *good, max(end, good[-1])]
         widest = max((b - a).total_seconds() for a, b in zip(edges, edges[1:], strict=False))
         if widest > bound:

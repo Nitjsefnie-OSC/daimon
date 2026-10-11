@@ -157,10 +157,15 @@ the other assertions continue. `card_edits_min` counts successive state changes
 (A, B, A, B is three edits). Proven edits PASS regardless of gaps. A shortfall is
 FAIL only with at least `max(2, minimum + 1)` snapshots of one card and, for every
 running card separately, no capture gap wider than 2.5 poll intervals: from the
-card's first known running observation (failed readbacks included) to its first
-snapshot, between its snapshots, and from its last snapshot to its end (the next
-poll that no longer lists it as working, or terminal). A card never read back, or
-another card's snapshots, cannot qualify missed time. Otherwise it is PENDING.
+card's first known running observation to its first snapshot, between its
+snapshots, and from its last snapshot to its end. Each sample records `listed_at`,
+the poll's listing time taken before the slow direct read, separately from the
+snapshot's `observed_at`; failed and slow readbacks therefore keep the known
+running start, and `listed_at` identifies poll membership. A card ends when its
+direct read raced to terminal (kept as an `ended` entry without a payload), else
+at the next poll that no longer lists it working, else at terminal. Another
+card's read in the same poll never ends it. A card never read back, or another
+card's snapshots, cannot qualify missed time. Otherwise it is PENDING.
 Terminal edits do not count.
 The approved filtered attachment counts (`name_pattern`) and timed reaction
 observations remain PENDING until the FULL stage implements their semantics.
