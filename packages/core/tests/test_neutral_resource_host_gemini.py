@@ -538,7 +538,7 @@ async def test_host_sdk_refuses_tls_proxy_and_keylog_before_any_client_effect(
     keylog = tmp_path / "must-not-create-keylog"
     value = "" if empty else str(keylog)
     monkeypatch.setenv(name, value)
-    before = dict(os.environ)
+    before = frozenset(os.environ)
 
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("hostile TLS/proxy configuration reached SDK or HTTP construction")
@@ -550,6 +550,7 @@ async def test_host_sdk_refuses_tls_proxy_and_keylog_before_any_client_effect(
     with pytest.raises(AmbientSDKConfigurationError):
         async with case.driver():
             raise AssertionError("hostile configuration reached the resource driver")
-    assert dict(os.environ) == before
+    assert frozenset(os.environ) == before
+    assert os.environ[name] == value
     assert not keylog.exists()
     assert not case.trace.requests
