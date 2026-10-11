@@ -22,6 +22,15 @@ Reports include the actual observation boundaries, checks, elapsed minutes and
 billed token counts. Screenshots, DOM snapshots and backend receipts stay with
 the run. Missing native-client evidence stays PENDING.
 
+The scripted cases cover Discord and Slack turn delivery, usage/debit records,
+and setup roster visibility for members and admins. Chromium covers GitHub
+selection, save, cancellation, and reopening a used invitation at desktop and
+mobile widths. Cancellation leaves no grants; reopening adds no duplicate grant.
+The report-host journey renders a local PDF and compares its title, revision,
+reader and budget with stored state. It also opens the mobile chat panel. This
+browser check allows the viewer's two pinned PDF.js CDN assets; model requests
+are disabled. Sidebar answers still need separate provider evidence.
+
 `compare_screenshots` requires an explicitly accepted baseline. It writes
 side-by-side comparisons for changed steps and never updates the baseline.
 The regression tests deliberately alter an image to verify change detection.
