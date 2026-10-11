@@ -73,11 +73,25 @@ and `CI=true`, plus `build_test_engine` provenance for a current-process
 `test_w<pid>_<8hex>` or `test_f<pid>_<8hex>` schema on every engine. Execution
 options and engine clones do not establish that provenance. Unbound factories,
 foreign or synchronous binds, URL overrides and malformed routing maps fail
-before I/O. Ordinary fixtures retain their existing behavior.
+before I/O.
 
 Guard adopters refuse plain local `daimon_test` by design. Their real-database
 policy tests skip that documented contributor setup outside GitHub Actions CI;
 use an owned lane database to exercise those tests locally.
+
+Shared database fixtures also require the session-scoped `db_preflight` supplied
+by the testing package's `pytest11` plugin, keyed by the resolved `db_schema`
+value. Re-exported or overridden schemas receive separate admission
+even when multiple packages run in one worker. It checks the DSN and process-owned
+schema before `db_engine`, `db_nullpool_engine`, `db_clean` or session setup.
+Each constructed engine then passes the same registered-schema ownership guard
+before connecting. Valid lane/CI fixtures retain their pools, schema isolation,
+cleanup and transactions. Plain local `daimon_test` skips before engine creation;
+other foreign targets fail before I/O. Existing conftest imports need no edits.
+Install the package/plugin with the usual `uv sync --all-extras --all-packages`;
+when plugin autoload is disabled, pass `-p daimon.testing.pytest_plugin` explicitly.
+Database-free tests do not request the preflight or need a database URL.
+
 # Isolated provider SDK clients
 
 `daimon.testing.isolated_sdk` supplies `build_async_openai`,
@@ -154,7 +168,7 @@ and `CI=true`, plus `build_test_engine` provenance for a current-process
 `test_w<pid>_<8hex>` or `test_f<pid>_<8hex>` schema on every engine. Execution
 options and engine clones do not establish that provenance. Unbound factories,
 foreign or synchronous binds, URL overrides and malformed routing maps fail
-before I/O. Ordinary fixtures retain their existing behavior.
+before I/O. Shared fixture setup also runs the preflight described above.
 
 Offline admin proof fixtures skip a contributor's plain local `daimon_test`
 outside exact GitHub Actions CI, with a clear lane-database/isolation reason.
@@ -275,3 +289,41 @@ known selected model costs, including an empty subtotal of zero. All monetary
 aggregation uses decimal precision 80. Controlled rates and inventory evidence
 prove offline host arithmetic; they do not certify live invoices or supply a
 missing posted footer. `issues` explain incomplete results.
+
+## Metered channel budget proofs
+
+`daimon.testing.channel_accounting.ChannelAccounting(sessions, scope, platform,
+channel_id)` supplies an explicit owned-database accounting seam. Its
+`snapshot(now=...)` reads channel ledger entries, usage projections, net spend
+and the current production budget status in one repeatable read-only transaction.
+All-time channel spend and the budget's windowed spend are separate. Every bind
+must pass the shared owned/isolated-CI guard and use the same engine.
+
+`await run_turn(deps=..., prepared=..., pricing=ControlledTurnPricing(...),
+thread_id=..., external_user_id=..., user_message=..., lifecycle=..., cancel=...,
+operation_key=..., binding=...)` drives the actual `run_prepared_turn` and turn
+driver. Preparation, admission, isolated offline provider transports and actual
+post capture belong to the caller. The seam binds the real legacy/provider usage
+recorder to explicit **mock** prices instead of trusting the preparation's
+recorder callback. It inserts no ledger or usage rows directly. Native providers
+require their current durable binding and unchanged native usage; missing actual
+infrastructure retains pending usage. It supports one root, without delegation
+or recovery. The receipt retains the real host outcome, before/after independent
+snapshots, new debit rows, pricing policy and explicit issues.
+The success flag requires a completed single attempt; a failed or cancelled
+turn can still carry genuine reconciled provider charges in its readback.
+It correlates the run's observed meter with its exact persisted observation,
+native root, revision and debit key. Another root's real charge or an ambiguous
+native meter does not certify this run. Native revisions are included in the
+same read-only snapshot, scoped through the channel's durable binding slots.
+
+The proof uses USD 100 per million input/output tokens, zero explicitly
+inapplicable offline native infrastructure and markup 1. A mocked 100-input /
+50-output turn generates one genuine USD 0.015000 ledger debit through production
+billing, exhausting the original USD 0.01 total channel budget. These exaggerated
+rates exercise host arithmetic; they are not current provider prices or live
+spend. Anthropic runs an isolated SDK HTTP/SSE fixture. OpenAI/Gemini accounting
+proofs mock only the TurnIO boundary and use their real usage normalizers; this
+does not certify their native codecs. The API alone proves neither first-turn
+posted text nor the next admission refusal/no-send. Consumers retain those
+independent NEW15 checks and do not promote source cells from a helper PASS.

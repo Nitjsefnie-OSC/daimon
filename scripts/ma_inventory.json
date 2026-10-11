@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2302,
+  "files_scanned": 2306,
   "parse_errors": [],
   "calls": [
     {
@@ -18300,6 +18300,15 @@
       "category": "test-support"
     },
     {
+      "file": "packages/testing/daimon/testing/channel_accounting.py",
+      "line": 19,
+      "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
+      "names": [
+        "BetaManagedAgentsSpanModelRequestEndEvent"
+      ],
+      "category": "test-support"
+    },
+    {
       "file": "packages/testing/daimon/testing/factories.py",
       "line": 19,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_usage",
@@ -18818,6 +18827,15 @@
         "AsyncAnthropic"
       ],
       "category": "test-support"
+    },
+    {
+      "file": "packages/testing/tests/test_channel_accounting.py",
+      "line": 13,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsSessionEvent"
+      ],
+      "category": "test"
     },
     {
       "file": "packages/testing/tests/test_isolated_sdk.py",

@@ -301,6 +301,14 @@ under **Channel budgets** after the top spenders, the five most used budgets
 on that platform (active ones first, by share of the limit spent) with a count
 of the rest.
 
+Owned offline tests can use `daimon.testing.channel_accounting.ChannelAccounting`
+to run a prepared host turn with explicit mock prices through the real usage
+recorders, then independently query its channel debits and current budget state
+in a read-only transaction. The test seam preserves the configured budget limit;
+it does not seed synthetic debits or infer a charge from a reply. Mock prices
+prove billing arithmetic, and do not establish provider actual spend or certify
+the next turn's admission/refusal. See the testing package README for the API.
+
 What a budget does not cover:
 
 - **Earlier spend.** Attribution starts with this release; debits recorded
