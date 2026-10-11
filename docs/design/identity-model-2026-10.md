@@ -24,6 +24,21 @@ Discussion draft, 2026-10-11. This proposes an identity model; it does not autho
 
 **What does removing access do?** Proposed promise: stop new dispatch when removal takes effect. Already-dispatched work may finish; issued credentials may remain usable until confirmed revocation or expiry. Show that remaining access and its bound; unknown or unbounded access needs resolution before sharing. Removal preserves the workspace and cannot erase disclosed results.
 
+## What is isolated at each scope?
+
+Current source at `77ddd92f2`, for ordinary Discord/Slack chat. "Separate session" describes execution and sandbox files; it does not promise private results or private agent memory. The proposed shared mode would deliberately share a fresh session only after agreement.
+
+| Scope | Sessions and files today | Agents, memory and credentials today | Billing today |
+| --- | --- | --- | --- |
+| Tenant | Session lookup and stored records include the tenant. Tenant isolation is enforced by Daimon; provider infrastructure is shared. | Tenant-scoped agents, memory bindings and credential records. A tenant-wide provider key can still reach more than one team's permitted resources. | Tenant balance/ledger; provider bill belongs to the deployment operator. |
+| Channel | A channel supplies routing and read/write rules, not its own universal sandbox. Threads have caller-specific sessions. Posted results follow channel/thread readership. | Agents can serve several channels. Channel restrictions must be configured; changing channels alone does not separate the same agent's memory or keys. | Optional channel budget; thread usage follows its attributed parent channel. |
+| User | Each account gets its own session in the same thread. Unpublished sandbox files should stay with that session; posted attachments are visible to thread readers. | Personal OAuth and caller authority differ by account. Agent memory, agent keys and GitHub baseline access can be shared. | Usage attributed to requester; optional personal cap. No separate personal balance is implied. |
+| Thread | Lookup includes thread and account. Different threads have separate sessions; people in one thread still have separate sessions today. Messages and posted files are shared with its readers. | Same agent can share memory/connections across threads. A new thread does not reset those. | Usage records retain session/requester attribution; no independent thread balance. |
+
+Agent memory is one store per `(tenant, agent)`, not per user/thread. Read-only mounting prevents new writes; it does not remove earlier contents. Channel rules constrain reads, posting and where agents run, with documented admin exceptions; they do not narrow arbitrary external credentials. Proposed private work therefore also needs memory approved for that private audience, not just a personal session.
+
+Checked against [session lookup](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/stores/thread_sessions.py), [memory binding](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/memory_resource.py), the credential paths below, [channel and agent rules](../permissions.md), and [billing](../billing.md). This is a source-backed description, not an end-to-end isolation audit.
+
 ## Four cases that test the rule
 
 1. **GitHub today.** Repositories are granted to an agent; at most one is its working repo, none by default. Eligible callers already receive the agent baseline, plus their linked GitHub permission capped by the agent ceiling for that uplift. App tokens use a per-session vault; Daimon's own MCP token names the creator. Lending that session to a teammate could lend the creator's effective access. Proposed shared work makes the baseline's audience explicit and excludes personal uplift; GitHub still sees the App, not the human requester. Later personal elevation would require a separately authorized backend action. Ordinary sessions keep current rules during migration. [Access formula](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/github_requester_access.py#L43), [session vault](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/github_app_session.py#L191).
@@ -58,6 +73,22 @@ Costs are relative work estimates, not delivery dates. Start by recording identi
 
 Source checks at `77ddd92f2`: [environment mounting](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/credential_env.py), [caller vaults](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/mcp_vault.py), [MCP credential mirroring and personal OAuth precedence](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/agent_mcp_credentials.py), [per-caller session lookup](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/stores/thread_sessions.py). The [architecture](../architecture.md) supplies context; the source distinguishes current App vaults and per-caller lookup more precisely than its older summaries. No deployment credential inventory was read.
 
+## Issue tests and disposition
+
+[#790: define isolation](https://github.com/pymc-labs/daimon/issues/790) is covered by the scope table and distinction between execution, shared memory/credentials and result visibility. Keep it open while this model is a discussion draft. When the model is accepted and lands, link this document and close the documentation portion; re-scope any remaining code-vs-model verification with explicit examples. A proposed guarantee is not evidence that it is implemented.
+
+[#788: files cross between users](https://github.com/pymc-labs/daimon/issues/788) remains an unresolved bug report. No reproduction has been performed in this design-only effort. The report gives no session IDs, file IDs, message IDs or deployed revision. Per-account lookup contradicts intentional cross-user sandbox sharing, but does not prove that every preparation or delivery path preserved it during the reported incident.
+
+Current output delivery lists files by MA session ID and Discord/Slack schedule sweeps using the outcome's session ID. The Discord code explicitly permits a later turn's file to land on an earlier answer while the same session's sweep settles. That explains a possible same-session attribution error, not cross-account mixing by itself. [Core sweep](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/core/daimon/core/output_delivery.py#L162), [Discord scheduling](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/adapters/discord/daimon/adapters/discord/bot.py#L775), [Slack scheduling](https://github.com/pymc-labs/daimon/blob/77ddd92f23f1f6dc100aca665c83f3bf6bb06f05/packages/adapters/slack/daimon/adapters/slack/app.py#L2910).
+
+The follow-up needs a two-user reproduction owner, not closure as intended sharing:
+
+1. Use two distinct accounts, one agent and one thread on a recorded revision. Each creates a distinct synthetic file with known bytes; keep one file unpublished and publish another. Record account, turn, session, file and destination-message IDs, plus content hashes.
+2. Verify the accounts resolve to different sessions. Inspect sandbox files separately from chat history, downloaded attachments, shared memory and shared repos. Repeat with overlapping output delivery, then with identical filenames and different contents.
+3. Classify the result: an attachment visible to both thread readers is expected; unpublished bytes crossing sandbox boundaries violate the current model; bytes attached to another caller's answer violate delivery attribution even when both readers may see them. Session IDs and hashes must establish which occurred.
+
+When this model lands, re-scope #788 around that evidence and the failing path, preserving the original report. Proposed multiplayer sharing neither resolves nor legitimizes an existing isolation bug. No live test, bug fix or successful reproduction is claimed here.
+
 ## Product choices still open
 
 1. Can everyone an agent is approved to serve use its team connections, with results visible to its approved readers? Recommend yes, after the authorized manager records that sharing and its scope. Prefer one approved audience per agent over a new permission matrix for every tool.
@@ -74,3 +105,5 @@ One read-only Claude Opus 5.5 high consultation completed on 2026-10-11; the res
 Verdict: the core works, but the draft introduced too many roles and understated sharing that exists today. The revision starts with one agent audience, identifies existing shared keys/baselines, makes creator authority explicit, and separates future GitHub changes from the shared release. It records manager responsibility and retains provider authority checks where available; a declaration alone is not proof of resource rights. Browser isolation alternatives are now explicit. No independent validation of implementation or provider contracts is implied.
 
 Multiplayer input received 2026-10-11 was incorporated into the one-page questions: separate account/requester/approver, enforcement across credential paths, permission to disclose retained results, browser state and tenant-key scope, and a bounded revocation promise separate from workspace deletion. Supporting concurrency and recovery details remain in shared-thread sections 5.1-5.5 and 9. This input accepts no product choice and authorizes no build.
+
+Issue intake received 2026-10-11: #790 and #788 are acceptance material for this model. Scope coverage and the outstanding reproduction are recorded above; issue closure/re-scoping is deferred until the model lands. No implementation mandate was added.
