@@ -38,7 +38,11 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._channel_policy import load_read_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._openai_resources import gate_view, openai_skill_host
+from daimon.adapters.mcp.tools._openai_resources import (
+    gate_view,
+    openai_skill_host,
+    resolve_host_agent,
+)
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.adapters.mcp.tools.agents import (
@@ -481,14 +485,15 @@ async def _add_skill_impl(
             )
     else:
         host = hosted
-        view = await host.find(agent_name)
-        if view is None:
-            raise ToolError(f"There is no agent named '{agent_name}' here. Nothing was changed.")
-        if expected_ma_agent_id is not None and expected_ma_agent_id != view.id:
-            raise ToolError(
-                f"'{agent_name}' is no longer the agent this change was meant for. "
-                "Nothing was changed. Do not retry."
-            )
+        # The same identity and channel-isolation rules as resolve_setup_agent.
+        view = await resolve_host_agent(
+            runtime,
+            auth,
+            host,
+            name=agent_name,
+            expected_ma_agent_id=expected_ma_agent_id,
+            location_channel_id=origin_channel_id(origin),
+        )
 
         async def neutral_recheck(fresh: Agent) -> None:
             # The same pin and skill-change policy as the Anthropic path, on the
