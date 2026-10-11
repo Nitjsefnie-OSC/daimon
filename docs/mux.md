@@ -1948,3 +1948,30 @@ Anthropic returns only `ADMIN_ANTHROPIC_SKILL_DELETE_OBSERVATION_ONLY`, after
 actual SDK reads and scoped channel observation; it never changes that
 backend's deletion behavior. A bound refusal predicate is not a full NEW19
 scenario pass: setup, host turn and teardown evidence remain separate.
+### Gemini chat Add-skill capability
+
+The operator may supply `McpRuntime.gemini_skill_capability` as a
+`GeminiSkillCapability` from `daimon.adapters.mcp.tools._gemini_resources`.
+The runtime default is `None`; the capability's own `enabled` default is
+`False`. Enable it only with an A1 native-catalog resource factory and an exact
+`GeminiSkillGrant` for the tenant, caller account, platform, channel, current
+configuration digest and provider workspace. Only explicitly selected
+`gemini.inline_reuse`, `gemini-3.8-flash`, per-caller channels use this route.
+Grants for another caller or channel keep the existing path without adding a
+configuration read. A selected stale, duplicate or wrong-workspace grant
+refuses before the factory is called.
+
+The returned host must match the complete authorized scope and enabled Gemini
+catalog adapter before any catalog access. The existing selected-native-ID,
+caller channel-isolation, pin and skill-change gates run before fetching or
+previewing a source. Confirmation uses the unchanged pending-preview state
+machine, bound to the native agent ID and content hash. The A1 host retains the
+concrete bundle and creates a new independently verified native definition via
+PostgreSQL CAS; older definitions remain available to existing sessions. The
+same source handlers, preview/result schemas and confirmation text apply.
+
+The shared matcher accepts a whole `yes`, `y`, `confirm` or `approve` after its
+existing normalization. `yes please` still cancels the preview on every
+provider. Consequently the frozen NEW18 scenario remains FAIL; the offline
+canonical-yes workflow proof does not award a full chat/provider cell PASS.
+No SDK, operator credential or environment discovery is added by this route.
