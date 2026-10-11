@@ -10,6 +10,7 @@ does not hold yet, through the turn's own recorder.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -40,7 +41,7 @@ from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_model_usage
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 10, 11, 9, 0, 0, tzinfo=UTC)
 MODEL = "claude-sonnet-4-6"
@@ -202,6 +203,30 @@ async def _reconcile(
     )
 
 
+# A slow upstream for the timeout regressions: one read takes SLOW_READ_S and a
+# pass's budget fits one read plus its database work, but never two reads. The
+# margin keeps them deterministic on a loaded CI runner.
+SLOW_READ_S = 0.5
+ONE_READ_BUDGET_S = 0.8
+
+
+async def _passes_until_billed(
+    deps: TurnDeps,
+    tenant_id: uuid.UUID,
+    db_session: AsyncSession,
+    *,
+    want: int,
+    max_passes: int,
+    **bounds: Any,
+) -> list[Any]:
+    """Run passes until `want` calls are debited (or `max_passes` ran). A stalled
+    cursor never gets there; a slow but progressing one does."""
+    results: list[Any] = []
+    while len(results) < max_passes and len(await _ledger(db_session)) < want:
+        results.append(await _reconcile(deps, tenant_id, **bounds))
+    return results
+
+
 async def test_gap_requests_are_debited_with_the_turn_key(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -352,27 +377,27 @@ async def test_capped_passes_resume_until_every_old_gap_is_billed(
 
     first = await _reconcile(deps, tenant.id, page_size=3, max_pages=2)
     assert first.truncated and first.debited == 6
-    assert len(reads) == 2, "never reads past the page cap; nothing behind it to repair yet"
-    assert reads[0].params["order"] == "asc"
-    assert reads[0].params["types[]"] == "span.model_request_end"
-    assert "created_at[gte]" not in reads[0].params, "a never-read session starts at the top"
+    forward = [r for r in reads if "created_at[lt]" not in r.params]
+    assert len(forward) == 2, "never reads past the page cap"
+    assert forward[0].params["order"] == "asc"
+    assert forward[0].params["types[]"] == "span.model_request_end"
+    assert "created_at[gte]" not in forward[0].params, "a never-read session starts at the top"
 
     reads.clear()
     second = await _reconcile(deps, tenant.id, page_size=3, max_pages=2)
     assert second.debited == 4 and not second.truncated
-    assert reads[0].params["created_at[gte]"].startswith("2026-10-11T14:00:00"), (
-        "resumes exactly at the cursor (evt_05), not before it"
-    )
-    assert reads[-1].params["created_at[lt]"].startswith("2026-10-11T14:00:00"), (
-        "then one repair page of the history behind where this pass started"
-    )
+    forward = [r for r in reads if "created_at[lt]" not in r.params]
+    assert forward[0].params["page"] == "6", "continues the unfinished listing with MA's cursor"
     assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_{i:02d}" for i in range(10)}
 
     reads.clear()
     third = await _reconcile(deps, tenant.id, page_size=3, max_pages=2)
     assert third.debited == 0 and not third.truncated
-    assert len(reads) == 2, "a caught-up session costs one forward read and one repair page"
-    assert third.scanned == 1 + 3, "forward rereads only the boundary call"
+    forward = [r for r in reads if "created_at[lt]" not in r.params]
+    assert [r.params["created_at[gte]"][:19] for r in forward] == ["2026-10-11T18:00:00"], (
+        "a finished listing re-opens at the newest call handled"
+    )
+    assert len(reads) == 2, "a caught-up session costs one forward read and one repair read"
 
 
 @pytest.mark.parametrize("step_s", [0, 20], ids=["equal-timestamps", "dense"])
@@ -407,13 +432,13 @@ async def test_repeated_timeouts_still_make_progress(
     tenant = await make_tenant(db_session)
     await db_session.commit()
     events = [_request_end(f"evt_{i:02d}", at=NOW + timedelta(seconds=i * 20)) for i in range(6)]
-    deps = _deps(db_session_factory, _paged_router(events, page_size=3, stall_s=0.25))
+    deps = _deps(db_session_factory, _paged_router(events, page_size=3, stall_s=SLOW_READ_S))
 
-    debited = [
-        (await _reconcile(deps, tenant.id, page_size=3, budget_s=0.4)).debited for _ in range(4)
-    ]
+    results = await _passes_until_billed(
+        deps, tenant.id, db_session, want=6, max_passes=6, page_size=3, budget_s=ONE_READ_BUDGET_S
+    )
 
-    assert len(await _ledger(db_session)) == 6, f"debited per pass: {debited}"
+    assert len(await _ledger(db_session)) == 6, f"debited per pass: {[r.debited for r in results]}"
 
 
 async def test_a_call_listed_late_is_found_by_the_repair_scan(
@@ -441,21 +466,21 @@ async def test_the_repair_scan_cycles_through_history_one_page_a_pass(
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    events = _spaced(7)
     reads: list[httpx.URL] = []
-    deps = _deps(db_session_factory, _paged_router(events, page_size=3, reads=reads))
-    await _reconcile(deps, tenant.id, page_size=3)  # bills all; cursor at evt_06
+    deps = _deps(db_session_factory, _paged_router(_spaced(7), page_size=3, reads=reads))
 
-    starts: list[str | None] = []
+    await _reconcile(deps, tenant.id, page_size=3)  # bills everything; cursor at evt_06
+    repair_pages: list[str | None] = []
     for _ in range(4):
         reads.clear()
         await _reconcile(deps, tenant.id, page_size=3)
-        starts.append(reads[-1].params.get("created_at[gte]"))
+        repair = [r for r in reads if "created_at[lt]" in r.params]
+        assert len(repair) == 1, "exactly one repair read per pass"
+        repair_pages.append(repair[0].params.get("page"))
 
-    assert starts[0] is None, "the first repair cycle starts at the top"
-    assert starts[1] is not None and starts[1].startswith("2026-10-11T11:00:00"), "then resumes"
-    assert starts[2] is not None and starts[2].startswith("2026-10-11T13:00:00")
-    assert starts[3] is None, "and restarts once it reaches the forward cursor"
+    assert repair_pages == [None, "3", None, "3"], (
+        "each cycle starts at the top, continues with MA's cursor, and restarts at the end"
+    )
 
 
 async def test_a_timed_out_pass_keeps_its_progress_and_the_next_resumes(
@@ -464,12 +489,11 @@ async def test_a_timed_out_pass_keeps_its_progress_and_the_next_resumes(
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    reads: list[httpx.URL] = []
-    router = _paged_router(_spaced(6), page_size=2, reads=reads, stall_s=5.0, stall_on_read=2)
+    router = _paged_router(_spaced(6), page_size=2, stall_s=5.0, stall_on_read=2)
     deps = _deps(db_session_factory, router)
 
     with structlog.testing.capture_logs() as logs:
-        first = await _reconcile(deps, tenant.id, page_size=2, budget_s=0.1)
+        first = await _reconcile(deps, tenant.id, page_size=2, budget_s=1.0)
     assert first.truncated and first.debited == 2, "the first page committed before the stall"
     assert [e["truncated"] for e in logs if e["event"] == "billing.reconciled_unbilled"] == [True]
 
@@ -536,24 +560,131 @@ async def test_nothing_to_bill_reads_one_page_and_stays_quiet(
 
 
 async def test_concurrent_cursor_writes_never_move_it_backwards(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    db_engine: AsyncEngine,
 ) -> None:
+    """Separate connections, as two workers' passes would use."""
+    await db_session.close()
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as s, s.begin():
+        await usage_reconcile_progress.begin_pass(s, managed_session_id=SESSION)
+
     async def advance(at: datetime, ids: list[str]) -> None:
-        async with db_session_factory() as s, s.begin():
+        async with factory() as s, s.begin():
             await usage_reconcile_progress.advance(
-                s, managed_session_id=SESSION, through=at, ids=ids
+                s, managed_session_id=SESSION, through=at, ids=ids, since=None, page=None
             )
 
-    await advance(NOW, ["a"])
-    await advance(NOW, ["b"])  # same time: ids merge
-    await advance(NOW - timedelta(minutes=1), ["old"])  # a slower pass: ignored
-    async with db_session_factory() as s:
-        merged = await usage_reconcile_progress.get(s, managed_session_id=SESSION)
-    assert merged is not None
-    assert (merged.covered_through, merged.covered_ids) == (NOW, {"a", "b"})
+    async def mark() -> tuple[datetime | None, frozenset[str]]:
+        async with factory() as s:
+            progress = await usage_reconcile_progress.get(s, managed_session_id=SESSION)
+        assert progress is not None
+        return progress.covered_through, progress.covered_ids
 
-    await advance(NOW + timedelta(minutes=1), ["c"])  # later time: replaces the boundary
+    await asyncio.gather(advance(NOW, ["a"]), advance(NOW, ["b"]))
+    assert await mark() == (NOW, {"a", "b"}), "the same time merges the boundary ids"
+    later = NOW + timedelta(minutes=1)
+    await asyncio.gather(advance(later, ["c"]), advance(NOW, ["d"]))
+    assert await mark() == (later, {"c"}), "a later time wins; an older write is ignored"
+
+
+async def test_tied_timestamps_with_repeated_timeouts_eventually_finish(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Review regression (B3a): nine calls share one timestamp, every read is slow
+    and a pass's budget fits one page; each pass reads the next unread page."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    events = [_request_end(f"evt_tied_{i:02d}") for i in range(9)]
+    deps = _deps(db_session_factory, _paged_router(events, page_size=3, stall_s=SLOW_READ_S))
+
+    results = await _passes_until_billed(
+        deps, tenant.id, db_session, want=9, max_passes=6, page_size=3, budget_s=ONE_READ_BUDGET_S
+    )
+
+    assert len(await _ledger(db_session)) == 9, f"debited per pass: {[r.debited for r in results]}"
+    assert all(r.debited for r in results), "every pass bills new calls; none rereads old pages"
+
+
+async def test_tied_repair_listing_survives_repeated_timeouts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Review regression (B3a): nine late calls share one timestamp behind a newer
+    covered call, and only repair reads are slow."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    events = [_request_end("evt_new", at=NOW + timedelta(minutes=10))]
+    deps = _deps(db_session_factory, _paged_router(events, page_size=3))
+    await _reconcile(deps, tenant.id)
+    events[:0] = [_request_end(f"evt_late_{i:02d}") for i in range(9)]
+    router = _paged_router(events, page_size=3)
+
+    async def slow_repair(request: httpx.Request) -> httpx.Response:
+        if "created_at[lt]" in request.url.params:
+            await asyncio.sleep(SLOW_READ_S)
+        return await cast(Any, router.dispatch(request))
+
+    deps = dataclasses.replace(deps, anthropic=build_fake_anthropic(cast(Any, slow_repair)))
+
+    results = await _passes_until_billed(
+        deps, tenant.id, db_session, want=10, max_passes=6, page_size=3, budget_s=ONE_READ_BUDGET_S
+    )
+
+    assert len(await _ledger(db_session)) == 10, f"debited per pass: {[r.debited for r in results]}"
+    assert all(r.debited for r in results), "every pass bills new calls; none rereads old pages"
+
+
+async def test_repair_gets_its_turn_when_every_read_is_slow(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Review regression (B3b): a caught-up session whose forward read takes most
+    of the budget still runs its repair scan on alternate passes, and a pass that
+    misses a due repair page says so."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    events = [_request_end("evt_new", at=NOW + timedelta(minutes=10))]
+    await _reconcile(_deps(db_session_factory, _paged_router(events, page_size=3)), tenant.id)
+    events.insert(0, _request_end("evt_late", at=NOW))
+    deps = _deps(db_session_factory, _paged_router(events, page_size=3, stall_s=SLOW_READ_S))
+
+    with structlog.testing.capture_logs() as logs:
+        results = await _passes_until_billed(
+            deps,
+            tenant.id,
+            db_session,
+            want=2,
+            max_passes=3,
+            page_size=3,
+            budget_s=ONE_READ_BUDGET_S,
+        )
+
+    assert f"turn:{SESSION}:evt_late" in await _ledger(db_session)
+    assert sum(r.repaired for r in results) == 1
+    assert any(r.repair_skipped for r in results), "a pass that missed its repair page reports it"
+    skipped = [
+        e for e in logs if e["event"] == "billing.reconciled_unbilled" and e["repair_skipped"]
+    ]
+    assert skipped, "and logs it"
+
+
+async def test_a_new_call_at_the_boundary_time_is_billed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    events = [_request_end("evt_boundary_a")]
+    deps = _deps(db_session_factory, _paged_router(events, page_size=3))
+    await _reconcile(deps, tenant.id)
+    events.insert(0, _request_end("evt_boundary_b"))
+
+    result = await _reconcile(deps, tenant.id)
+
+    assert result.debited == 1 and len(await _ledger(db_session)) == 2
     async with db_session_factory() as s:
-        later = await usage_reconcile_progress.get(s, managed_session_id=SESSION)
-    assert later is not None
-    assert (later.covered_through, later.covered_ids) == (NOW + timedelta(minutes=1), {"c"})
+        progress = await usage_reconcile_progress.get(s, managed_session_id=SESSION)
+    assert progress is not None
+    assert progress.covered_ids == {"evt_boundary_a", "evt_boundary_b"}

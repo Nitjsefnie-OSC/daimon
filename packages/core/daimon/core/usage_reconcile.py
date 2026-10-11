@@ -19,21 +19,28 @@ turn's own recorder. Pricing, markup, attribution and the
 path's; a call recorded concurrently by a live stream or the sweep is an
 `ON CONFLICT DO NOTHING` no-op, never a second debit.
 
-Progress is durable (`usage_reconcile_progress`) and exact:
+Progress is durable (`usage_reconcile_progress`):
 
-- **Forward scan.** Resumes at the newest call time it handled, skipping the
-  ids it already handled at exactly that time, so a resumed pass rereads at
-  most the calls sharing that one timestamp. The page cap counts only pages
-  that move the cursor, so a group of calls sharing a timestamp cannot
-  starve it; every handled page is committed before the next is read.
+- **Forward scan.** Continues the listing it left unfinished with MA's own
+  page cursor, so a resumed pass reads the next unread page, never pages it
+  already handled, even through calls sharing one timestamp. Once a listing
+  reaches its end, the next one opens at the newest call time handled; the
+  ids handled at exactly that time are kept for the boundary. Every handled
+  page is committed, with its continuation, before the next is read.
 - **Repair scan.** One page per pass of the history behind the forward
-  cursor, on its own cursor that restarts from the top once it catches up.
-  It catches a call MA made listable only after newer ones had been listed
-  (MA does not document that listing is append-ordered), within one full
-  rescan cycle of the session.
+  position at the start of a cycle, continued the same way and restarted
+  once it reaches that position. It catches a call MA made listable only
+  after newer ones had been listed (MA does not document that listing is
+  append-ordered).
+- **Fairness.** The forward scan goes first. A repair cycle starts only once
+  the forward scan has no unfinished listing (a backlog is billed first, and
+  it shrinks every pass). When a pass runs out of budget before a due repair
+  page, the next pass runs the repair scan first, so a slow forward read
+  cannot starve it.
 
-Bounds: the forward page cap, one repair page, and one wall-clock budget
-around the whole pass, MA reads and database work alike.
+Bounds per pass: at most `max_pages` forward reads and one repair read (plus
+one re-open each if MA rejects a stored page cursor), inside one wall-clock
+budget around the whole pass, MA reads and database work alike.
 """
 
 from __future__ import annotations
@@ -44,9 +51,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 import structlog
-from anthropic import AsyncAnthropic, omit
+from anthropic import AsyncAnthropic, BadRequestError, NotFoundError, omit
+from anthropic.pagination import AsyncPageCursor
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from daimon.core.stores import usage_events, usage_reconcile_progress
 from daimon.core.turn.posture import UsageRecorder
@@ -63,17 +72,10 @@ _TYPES = ["span.model_request_end"]
 
 @dataclass
 class _Mark:
-    """An exact position in `processed_at` order: a time and the ids handled at it."""
+    """A position in `processed_at` order: a time and the ids handled at it."""
 
     at: datetime | None = None
     ids: set[str] = field(default_factory=set[str])
-
-    def covers(self, event: BetaManagedAgentsSpanModelRequestEndEvent) -> bool:
-        if self.at is None:
-            return False
-        return event.processed_at < self.at or (
-            event.processed_at == self.at and event.id in self.ids
-        )
 
     def extend(self, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
         if self.at is None or event.processed_at > self.at:
@@ -91,6 +93,9 @@ class _Tally:
     debited: int = 0
     debit_usd: Decimal = Decimal("0")
     pages: int = 0
+    forward_done: bool = False
+    repair_due: bool = False
+    repair_read: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,7 +106,8 @@ class ReconcileResult:
     which `repaired` were found by the repair scan); `debited`/`debit_usd`
     count only the ledger rows this pass actually inserted (a concurrent
     writer that won the key is not counted). `truncated` means the forward
-    scan stopped at its page cap or the budget before reaching the end.
+    scan did not reach the end of the listing; `repair_skipped` means a
+    repair page was due but the budget ran out before it was read.
     """
 
     scanned: int
@@ -110,6 +116,7 @@ class ReconcileResult:
     debited: int
     debit_usd: Decimal
     truncated: bool
+    repair_skipped: bool
 
 
 async def _bill_page(
@@ -123,6 +130,8 @@ async def _bill_page(
     """Debit the calls on one page with no usage row; return how many were missing."""
     tally.pages += 1
     tally.scanned += len(calls)
+    if not calls:
+        return 0
     async with sessionmaker() as s:
         recorded = await usage_events.recorded_among(
             s, managed_session_id=managed_session_id, event_ids=[e.id for e in calls]
@@ -132,16 +141,154 @@ async def _bill_page(
         if event.id in recorded:
             continue
         missing += 1
+        tally.missing += 1
         debit = await record(event=event)
         if debit is not None:
             tally.debited += 1
             tally.debit_usd += debit
-    tally.missing += missing
     return missing
 
 
 def _calls(data: Sequence[object]) -> list[BetaManagedAgentsSpanModelRequestEndEvent]:
     return [e for e in data if isinstance(e, BetaManagedAgentsSpanModelRequestEndEvent)]
+
+
+def _next(page: AsyncPageCursor[Any]) -> str | None:
+    return page.next_page if page.has_next_page() else None
+
+
+async def _open(
+    anthropic: AsyncAnthropic,
+    managed_session_id: str,
+    *,
+    page_size: int,
+    since: datetime | None,
+    lt: datetime | None,
+    token: str | None,
+) -> AsyncPageCursor[Any]:
+    """Open (or, with `token`, continue) a listing; re-open it if MA rejects the cursor."""
+
+    async def _list(page: str | None) -> AsyncPageCursor[Any]:
+        return await anthropic.beta.sessions.events.list(
+            managed_session_id,
+            order="asc",
+            limit=page_size,
+            types=_TYPES,
+            created_at_gte=since if since is not None else omit,
+            created_at_lt=lt if lt is not None else omit,
+            page=page if page is not None else omit,
+        )
+
+    if token is None:
+        return await _list(None)
+    try:
+        return await _list(token)
+    except (BadRequestError, NotFoundError):
+        # An expired or unknown cursor: start the same listing over. A session
+        # that is really gone 404s again here and propagates.
+        log.info("billing.reconcile_cursor_reset", managed_session_id=managed_session_id)
+        return await _list(None)
+
+
+async def _forward(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    managed_session_id: str,
+    record: UsageRecorder,
+    progress: usage_reconcile_progress.Progress,
+    *,
+    page_size: int,
+    max_pages: int,
+    tally: _Tally,
+) -> None:
+    position = _Mark(progress.covered_through, set(progress.covered_ids))
+    if progress.forward_page is not None:
+        since, token = progress.forward_since, progress.forward_page
+    else:
+        since, token = position.at, None
+    page = await _open(
+        anthropic, managed_session_id, page_size=page_size, since=since, lt=None, token=token
+    )
+    reads = 1
+    stored = (
+        progress.covered_through,
+        progress.covered_ids,
+        progress.forward_since,
+        progress.forward_page,
+    )
+    while True:
+        calls = _calls(page.data)
+        await _bill_page(
+            calls,
+            sessionmaker=sessionmaker,
+            managed_session_id=managed_session_id,
+            record=record,
+            tally=tally,
+        )
+        for event in calls:
+            position.extend(event)
+        following = _next(page)
+        state = (position.at, frozenset(position.ids), since, following)
+        if state != stored:  # a caught-up rescan of the boundary writes nothing
+            async with sessionmaker() as s, s.begin():
+                await usage_reconcile_progress.advance(
+                    s,
+                    managed_session_id=managed_session_id,
+                    through=position.at,
+                    ids=position.ids,
+                    since=since,
+                    page=following,
+                )
+            stored = state
+        if following is None:
+            tally.forward_done = True
+            return
+        if reads >= max_pages:
+            return
+        page = await page.get_next_page()
+        reads += 1
+
+
+async def _repair(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    managed_session_id: str,
+    record: UsageRecorder,
+    progress: usage_reconcile_progress.Progress,
+    *,
+    page_size: int,
+    tally: _Tally,
+) -> None:
+    if not progress.repair_due:
+        return  # nothing covered yet, or a forward backlog comes first
+    if progress.repair_lt is not None:
+        lt, since, token = progress.repair_lt, progress.repair_since, progress.repair_page
+    else:
+        assert progress.covered_through is not None  # `repair_due`
+        lt, since, token = progress.covered_through, None, None  # a new cycle
+    page = await _open(
+        anthropic, managed_session_id, page_size=page_size, since=since, lt=lt, token=token
+    )
+    calls = _calls(page.data)
+    tally.repaired += await _bill_page(
+        calls,
+        sessionmaker=sessionmaker,
+        managed_session_id=managed_session_id,
+        record=record,
+        tally=tally,
+    )
+    tally.repair_read = True
+    following = _next(page)
+    async with sessionmaker() as s, s.begin():
+        # The cursor is only valid with the filters it was issued for, so the
+        # listing's own `since`/`lt` are kept until the cycle ends.
+        await usage_reconcile_progress.set_repair(
+            s,
+            managed_session_id=managed_session_id,
+            lt=lt if following is not None else None,
+            since=since if following is not None else None,
+            page=following,
+        )
 
 
 async def reconcile_unbilled(
@@ -162,99 +309,56 @@ async def reconcile_unbilled(
     database propagate; the budget expiring does not (the pass is reported as
     truncated and its committed progress is kept).
 
-    Logs `billing.reconciled_unbilled` on every pass that finds a missing call
-    or is cut short.
+    Logs `billing.reconciled_unbilled` on every pass that finds a missing
+    call, leaves the forward listing unfinished, or misses a due repair page.
     """
     started = time.monotonic()
     tally = _Tally()
-    truncated = True
     try:
         async with asyncio.timeout(budget_s):
-            async with sessionmaker() as s:
-                progress = await usage_reconcile_progress.get(
+            async with sessionmaker() as s, s.begin():
+                progress = await usage_reconcile_progress.begin_pass(
                     s, managed_session_id=managed_session_id
                 )
-            forward = _Mark()
-            if progress is not None:
-                forward = _Mark(progress.covered_through, set(progress.covered_ids))
-            forward_start = forward.at
+            tally.repair_due = progress.repair_due
 
-            # Forward: from the exact position, oldest first.
-            page = await anthropic.beta.sessions.events.list(
-                managed_session_id,
-                order="asc",
-                limit=page_size,
-                types=_TYPES,
-                created_at_gte=forward.at if forward.at is not None else omit,
-            )
-            advancing = 0
-            while True:
-                calls = _calls(page.data)
-                moved = any(not forward.covers(e) for e in calls)
-                await _bill_page(
-                    calls,
-                    sessionmaker=sessionmaker,
-                    managed_session_id=managed_session_id,
-                    record=record,
+            async def forward() -> None:
+                await _forward(
+                    anthropic,
+                    sessionmaker,
+                    managed_session_id,
+                    record,
+                    progress,
+                    page_size=page_size,
+                    max_pages=max_pages,
                     tally=tally,
                 )
-                for event in calls:
-                    forward.extend(event)
-                if moved and forward.at is not None:
-                    async with sessionmaker() as s, s.begin():
-                        await usage_reconcile_progress.advance(
-                            s,
-                            managed_session_id=managed_session_id,
-                            through=forward.at,
-                            ids=forward.ids,
-                        )
-                    advancing += 1
-                if not page.has_next_page():
-                    truncated = False
-                    break
-                if advancing >= max_pages:
-                    break
-                page = await page.get_next_page()
 
-            # Repair: one cursor-moving page of the history behind the forward
-            # start, so a call listed late is reached within one rescan cycle.
-            if forward_start is not None and progress is not None:
-                repair = _Mark(progress.repair_through, set(progress.repair_ids))
-                page = await anthropic.beta.sessions.events.list(
+            async def repair() -> None:
+                await _repair(
+                    anthropic,
+                    sessionmaker,
                     managed_session_id,
-                    order="asc",
-                    limit=page_size,
-                    types=_TYPES,
-                    created_at_gte=repair.at if repair.at is not None else omit,
-                    created_at_lt=forward_start,
+                    record,
+                    progress,
+                    page_size=page_size,
+                    tally=tally,
                 )
-                while True:
-                    calls = _calls(page.data)
-                    moved = any(not repair.covers(e) for e in calls)
-                    tally.repaired += await _bill_page(
-                        calls,
-                        sessionmaker=sessionmaker,
-                        managed_session_id=managed_session_id,
-                        record=record,
-                        tally=tally,
-                    )
-                    for event in calls:
-                        repair.extend(event)
-                    if not page.has_next_page() or moved:
-                        break
-                    page = await page.get_next_page()
-                done = not page.has_next_page()
-                async with sessionmaker() as s, s.begin():
-                    await usage_reconcile_progress.set_repair(
-                        s,
-                        managed_session_id=managed_session_id,
-                        through=None if done else repair.at,
-                        ids=() if done else repair.ids,
-                    )
-    except TimeoutError:
-        pass
 
-    if tally.missing or truncated:
+            # Forward first, unless the last pass ran out of budget before its
+            # due repair page: then repair goes first this time.
+            if progress.repair_starved and progress.repair_due:
+                await repair()
+                await forward()
+            else:
+                await forward()
+                await repair()
+    except TimeoutError:
+        pass  # committed progress is kept; the flags say what did not finish
+
+    truncated = not tally.forward_done
+    repair_skipped = tally.repair_due and not tally.repair_read
+    if tally.missing or truncated or repair_skipped:
         log.info(
             "billing.reconciled_unbilled",
             managed_session_id=managed_session_id,
@@ -265,6 +369,7 @@ async def reconcile_unbilled(
             debit_usd=str(tally.debit_usd),
             pages=tally.pages,
             truncated=truncated,
+            repair_skipped=repair_skipped,
             elapsed_s=round(time.monotonic() - started, 3),
         )
     return ReconcileResult(
@@ -274,4 +379,5 @@ async def reconcile_unbilled(
         debited=tally.debited,
         debit_usd=tally.debit_usd,
         truncated=truncated,
+        repair_skipped=repair_skipped,
     )

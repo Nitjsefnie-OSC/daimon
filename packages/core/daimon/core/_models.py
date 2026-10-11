@@ -3273,17 +3273,23 @@ class DiscordGatewayLease(Base):
 
 
 class UsageReconcileProgress(Base):
-    """How far the turn-end billing catch-up has read one MA session.
+    """Where the turn-end billing catch-up is in one MA session.
 
-    Two exact continuations over the session's `span.model_request_end`
-    events, ordered by `processed_at` (`daimon.core.usage_reconcile`):
+    The catch-up reads the session's `span.model_request_end` events in
+    `processed_at` order (`daimon.core.usage_reconcile`) with two scans:
 
-    - forward: `covered_through` is the newest call time handled, and
-      `covered_ids` the ids handled at exactly that time, so a resumed scan
-      skips them and calls sharing a timestamp can never stall it;
-    - repair: a slower rescan of the already-covered history, one page per
-      pass, that catches a call MA listed only after newer ones. NULL
-      `repair_through` means the next repair cycle starts from the top.
+    - forward: `covered_through`/`covered_ids` is the newest call time handled
+      and the ids handled at exactly that time. While a forward listing is
+      unfinished, `forward_since` is the filter it was opened with and
+      `forward_page` MA's cursor for its next page, so a resumed pass reads
+      the next unread page instead of rereading covered ones.
+    - repair: a rescan of history older than `repair_lt` (the forward
+      position when the cycle began), from `repair_since`, continued with
+      `repair_page`. NULL `repair_lt` means no cycle is in progress.
+
+    `repair_starved` is set when a pass starts with a repair page due and
+    cleared once one is handled; while it is set, the next pass runs the
+    repair scan first, so a slow forward read cannot starve it.
 
     A missing row means "never read". Private to `daimon.core.stores.**` per
     the import-linter ORM contract.
@@ -3292,10 +3298,16 @@ class UsageReconcileProgress(Base):
     __tablename__ = "usage_reconcile_progress"
 
     managed_session_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    covered_through: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    covered_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    repair_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    repair_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
+    covered_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    covered_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
+    forward_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    forward_page: Mapped[str | None] = mapped_column(Text)
+    repair_lt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    repair_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    repair_page: Mapped[str | None] = mapped_column(Text)
+    repair_starved: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

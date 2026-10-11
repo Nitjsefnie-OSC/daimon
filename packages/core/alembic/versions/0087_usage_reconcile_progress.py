@@ -17,15 +17,19 @@ def upgrade() -> None:
     op.create_table(
         "usage_reconcile_progress",
         sa.Column("managed_session_id", sa.Text(), primary_key=True),
-        sa.Column("covered_through", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("covered_ids", postgresql.ARRAY(sa.Text()), nullable=False),
-        sa.Column("repair_through", sa.DateTime(timezone=True)),
+        sa.Column("covered_through", sa.DateTime(timezone=True)),
         sa.Column(
-            "repair_ids",
+            "covered_ids",
             postgresql.ARRAY(sa.Text()),
             nullable=False,
             server_default=sa.text("'{}'"),
         ),
+        sa.Column("forward_since", sa.DateTime(timezone=True)),
+        sa.Column("forward_page", sa.Text()),
+        sa.Column("repair_lt", sa.DateTime(timezone=True)),
+        sa.Column("repair_since", sa.DateTime(timezone=True)),
+        sa.Column("repair_page", sa.Text()),
+        sa.Column("repair_starved", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
