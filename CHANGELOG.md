@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Isolate pooled Discord conformance test fixtures and control timeout expiry after real callback entry, avoiding shared-transaction setup hangs and deadline races.
+- Guard live Anthropic probes with SDK SSE decoding, monotone verified usage floors and quarantined late-create cleanup.
+
 - Add explicitly admitted, one-attempt Haiku 5.5 A7/F2 probe entries with shared deadlines and streamed-cost stops; no native budget field or default runtime change.
 
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.

@@ -382,3 +382,13 @@ no wall time or rounded native list cost is presented as exact billed spend.
 Only acknowledged created IDs enter cleanup. Normalized F2 recordings use the
 existing recorder; raw provider bodies and credentials are never exported.
 The default modes remain offline and do not load credentials or a ledger.
+
+The live monitor consumes the SDK's decoded SSE events before forwarding each
+frame, including fragmented CRLF/JSON and multiple events in a single chunk.
+Conflicting verified walks keep the maximum dated request floor and any earlier
+financial token-limit latch through the public settlement edges; they never
+certify complete actual usage. A create acknowledgement received after stopping
+or sealing is quarantined outside the accepted inventory. Its durable orphan
+receipt triggers scoped single-attempt retirement (session interrupt/archive),
+with no new session or second settlement. This bounded late cleanup is explicitly
+outside the expired run deadline and retains the hold for reconciliation.

@@ -21,9 +21,10 @@ from pathlib import Path
 from typing import Literal, Never, cast
 
 import httpx
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, AsyncStream
 from daimon.testing.isolated_sdk import TLS_PROXY_ENV_VARS, build_async_anthropic
 from mux.conformance.budget import (
+    ActualSpend,
     BudgetConfig,
     BudgetGuard,
     ContainerAllowance,
@@ -41,6 +42,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.usage import UsageObservation
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
+from mux.drivers.anthropic.resources.vaults import Vaults
 from mux.drivers.anthropic.usage import observation_from_event
 from mux.errors import ScopeViolation
 from pydantic import BaseModel, ConfigDict, JsonValue
@@ -411,30 +413,58 @@ class UsageMonitor:
 
 
 class MonitoredStream(httpx.AsyncByteStream):
+    """Monitor the SDK's decoded SSE frames before forwarding them to its consumer."""
+
     def __init__(
-        self, stream: httpx.AsyncByteStream, monitor: UsageMonitor, session_id: str
+        self,
+        stream: httpx.AsyncByteStream,
+        monitor: UsageMonitor,
+        session_id: str,
+        *,
+        headers: httpx.Headers | None = None,
     ) -> None:
         self.stream, self.monitor, self.session_id = stream, monitor, session_id
-        self.buffer = b""
+        self.headers = headers
+        self.pending_bytes = 0
+
+    async def bounded_source(self, decoded: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        async for chunk in decoded:
+            self.pending_bytes += len(chunk)
+            if self.pending_bytes > 2_000_000:
+                self.monitor.halt("native SSE frame exceeded the evidence limit")
+            yield chunk
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        async for chunk in self.stream:
-            self.buffer += chunk.replace(b"\r\n", b"\n")
-            if len(self.buffer) > 2_000_000:
-                self.monitor.halt("native SSE frame exceeded the evidence limit")
-            while b"\n\n" in self.buffer:
-                frame, self.buffer = self.buffer.split(b"\n\n", 1)
-                payload = b"\n".join(
-                    line[5:].lstrip() for line in frame.splitlines() if line.startswith(b"data:")
-                )
-                if payload:
-                    event = json.loads(payload)
-                    if isinstance(event, dict):
-                        self.monitor.observe(cast(dict[str, JsonValue], event), self.session_id)
-            yield chunk
+        # Public SDK edge uses its own incremental decoder and HTTP content decoding.
+        upstream = httpx.Response(200, headers=self.headers, stream=self.stream)
+        source = httpx.Response(
+            200, stream=_BoundedBytes(self.bounded_source(upstream.aiter_bytes()))
+        )
+        async for frame in AsyncStream.raw_events(source):
+            self.pending_bytes = 0
+            if frame.data and frame.event != "ping":
+                try:
+                    event = json.loads(frame.data)
+                except ValueError:
+                    self.monitor.halt("native SSE payload is malformed")
+                if isinstance(event, dict):
+                    if "type" not in event:
+                        event["type"] = frame.event  # Same type injection as the SDK stream.
+                    self.monitor.observe(cast(dict[str, JsonValue], event), self.session_id)
+            # Forward one decoded frame, never a chunk containing later unchecked events.
+            yield ("\n".join(frame.raw) + "\n\n").encode()
 
     async def aclose(self) -> None:
         await self.stream.aclose()
+
+
+class _BoundedBytes(httpx.AsyncByteStream):
+    def __init__(self, iterator: AsyncIterator[bytes]) -> None:
+        self.iterator = iterator
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self.iterator:
+            yield chunk
 
 
 class LiveTransport(httpx.AsyncBaseTransport):
@@ -459,6 +489,9 @@ class LiveTransport(httpx.AsyncBaseTransport):
         self.requests: list[tuple[str, str]] = []
         self.stopping = False
         self.closed = False
+        self.orphans: set[tuple[str, str]] = set()
+        self.pending_creates = 0
+        self.on_orphan: Callable[[str, str], Awaitable[None]] | None = None
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if self.closed:
@@ -500,15 +533,32 @@ class LiveTransport(httpx.AsyncBaseTransport):
             self.skill_bodies.append((request.headers["content-type"], await request.aread()))
         if request.method == "POST" and path == "/v1/agents":
             self.agent_body = json.loads(await request.aread())
+        creating = request.method == "POST" and path in {
+            "/v1/sessions",
+            "/v1/agents",
+            "/v1/skills",
+            "/v1/vaults",
+        }
+        if creating:
+            self.pending_creates += 1
         response = await self.upstream.handle_async_request(request)
+        if creating and not response.is_success:
+            self.pending_creates -= 1
         if response.is_success and path.endswith("/archive"):
             self.archived.add(path.split("/")[-2])
         if "text/event-stream" in response.headers.get("content-type", ""):
             return httpx.Response(
                 response.status_code,
-                headers=response.headers,
+                headers={
+                    k: v
+                    for k, v in response.headers.items()
+                    if k.lower() not in {"content-encoding", "content-length"}
+                },
                 stream=MonitoredStream(
-                    cast(httpx.AsyncByteStream, response.stream), self.monitor, path.split("/")[3]
+                    cast(httpx.AsyncByteStream, response.stream),
+                    self.monitor,
+                    path.split("/")[3],
+                    headers=response.headers,
                 ),
                 extensions=response.extensions,
             )
@@ -527,6 +577,14 @@ class LiveTransport(httpx.AsyncBaseTransport):
                 "/v1/skills": "skill",
                 "/v1/vaults": "vault",
             }[path]
+            self.pending_creates -= 1
+            if self.closed or self.stopping or self.monitor.stop.is_set():
+                orphan = (kind, id_)
+                if orphan not in self.orphans:
+                    self.orphans.add(orphan)
+                    if self.on_orphan is not None:
+                        await self.on_orphan(kind, id_)
+                raise LiveStopped("late create acknowledgement quarantined for reconciliation")
             self.authorization.created.add((kind, id_))
             if kind == "session":
                 self.session_id = id_
@@ -584,49 +642,115 @@ class LiveContext:
                     )
 
 
-def merged_usage(context: LiveContext) -> tuple[AnthropicSessionSpend, ...]:
-    """Keep verified streamed requests even when the terminal fetch fails."""
-    by_session: dict[str, dict[str, UsageObservation]] = {}
-    for evidence in context.evidence:
-        if evidence.session.id not in context.transport.session_ids:
-            raise LiveRefused("walk evidence is outside the accepted inventory")
-        if context.transport.monitor.verified_models.get(evidence.session.id) != MODEL:
-            raise LiveRefused("walk evidence has no served-model provenance")
-        by_session[evidence.session.id] = {obs.id: obs for obs in evidence.observations}
+def usage_tokens(obs: UsageObservation) -> TokenUsage:
+    cache = obs.native_meter.get("cache_creation")
+    duration = cache if isinstance(cache, dict) else {}
+    return TokenUsage.model_validate(
+        {
+            "input_tokens": obs.input_tokens,
+            "output_tokens": obs.output_tokens,
+            "input_cached_tokens": obs.input_cached_tokens,
+            "input_cache_write_tokens": obs.input_cache_write_tokens,
+            "input_cache_write_5m_tokens": duration.get("ephemeral_5m_input_tokens"),
+            "input_cache_write_1h_tokens": duration.get("ephemeral_1h_input_tokens"),
+        }
+    )
+
+
+def verified_usage_variants(context: LiveContext) -> dict[tuple[str, str], list[UsageObservation]]:
+    variants: dict[tuple[str, str], list[UsageObservation]] = {}
     monitor = context.transport.monitor
+
+    def retain(obs: UsageObservation) -> None:
+        session = obs.session
+        if (
+            session.id not in context.transport.session_ids
+            or session != context.ref(session.id, "session")
+            or monitor.verified_models.get(session.id) != MODEL
+            or obs.model is None
+            or obs.model.provider != "anthropic"
+            or obs.model.id != MODEL
+            or obs.observed_at.tzinfo is None
+            or obs.observed_at < context.reservation.receipt.timestamp
+            or obs.grain != "model_request"
+            or obs.basis != "increment"
+            or obs.covers
+        ):
+            return  # Foreign/stale/unverified facts never erase independent verified proof.
+        try:
+            usage_tokens(obs)
+        except (ValueError, TypeError):
+            return  # Malformed categories never erase valid independent proof.
+        variants.setdefault((session.id, obs.id), []).append(obs)
+
+    for evidence in context.evidence:
+        for obs in evidence.observations:
+            if obs.session == evidence.session:
+                retain(obs)
     for id_, raw in monitor.observations.items():
         session_id = monitor.event_sessions[id_]
-        if (
-            session_id not in context.transport.session_ids
-            or monitor.verified_models.get(session_id) != MODEL
-        ):
-            continue  # Raw unverified facts remain in the receipt, never promoted to the ledger.
         try:
-            obs = observation_from_event(
-                raw,
-                context.ref(session_id, "session"),
-                observed_at=monitor.observed_times[id_],
-                model_id=MODEL,
+            retain(
+                observation_from_event(
+                    raw,
+                    context.ref(session_id, "session"),
+                    observed_at=monitor.observed_times[id_],
+                    model_id=MODEL,
+                )
             )
         except (ValueError, KeyError, TypeError):
             continue
-        bucket = by_session.setdefault(session_id, {})
-        prior = bucket.get(id_)
-        if prior is not None and (
-            prior.input_tokens != obs.input_tokens
-            or prior.output_tokens != obs.output_tokens
-            or prior.input_cached_tokens != obs.input_cached_tokens
-            or prior.input_cache_write_tokens != obs.input_cache_write_tokens
-            or prior.native_meter.get("cache_creation") != obs.native_meter.get("cache_creation")
-        ):
-            raise LiveRefused("stream and walk usage disagree")
-        bucket.setdefault(id_, obs)
+    return variants
+
+
+def selected_usage(
+    context: LiveContext, key: Callable[[UsageObservation], Decimal | int]
+) -> tuple[AnthropicSessionSpend, ...]:
+    by_session: dict[str, list[UsageObservation]] = {}
+    for (session, _), variants in verified_usage_variants(context).items():
+        by_session.setdefault(session, []).append(max(variants, key=key))
     return tuple(
         AnthropicSessionSpend(
-            context.ref(id_, "session"), tuple(bucket.values()), runtime=None, usage_complete=False
+            context.ref(id_, "session"), tuple(observations), runtime=None, usage_complete=False
         )
-        for id_, bucket in by_session.items()
+        for id_, observations in by_session.items()
     )
+
+
+def merged_usage(context: LiveContext) -> tuple[AnthropicSessionSpend, ...]:
+    """Maximum dated verified floor per request; conflicts never imply complete actual."""
+    return selected_usage(
+        context,
+        lambda obs: context.transport.monitor.price.minimum_charge(
+            usage_tokens(obs), obs.observed_at
+        ),
+    )
+
+
+def limit_overrun_proof(context: LiveContext) -> ActualSpend | None:
+    # A cheaper conflicting snapshot must not erase either financial token-limit latch.
+    for input_ in (True, False):
+        evidence = selected_usage(
+            context,
+            (lambda obs: usage_tokens(obs).minimum_input_tokens)
+            if input_
+            else (lambda obs: obs.output_tokens or 0),
+        )
+        count = sum(
+            usage_tokens(obs).minimum_input_tokens if input_ else obs.output_tokens or 0
+            for item in evidence
+            for obs in item.observations
+        )
+        maximum = (
+            context.admission.plan.limits.input_tokens
+            if input_
+            else context.admission.plan.limits.output_tokens
+        )
+        if count > maximum:
+            return actual_from_anthropic_sessions(
+                context.reservation, evidence, pricing_basis="standard-global"
+            )
+    return None
 
 
 async def run_live(
@@ -699,6 +823,92 @@ async def run_live(
         context = LiveContext(
             admission, client, native, transport, reservation, redaction_secrets=(key,)
         )
+
+        async def orphan_cleanup(kind: str, id_: str) -> None:
+            facts: dict[str, object] = {
+                "kind": kind,
+                "id": id_,
+                "acknowledged_at": datetime.now(UTC).isoformat(),
+                "reconciliation_required": True,
+                "hold_retained": True,
+                "late_cleanup_outside_original_deadline": True,
+                "interrupt_ack": False,
+                "retirement_ack": False,
+            }
+            orphan_path = admission.output / (
+                "orphan-" + hashlib.sha256((kind + ":" + id_).encode()).hexdigest() + ".json"
+            )
+
+            def persist() -> None:
+                Audit((key,)).audit(json.loads(json.dumps(facts)))
+                descriptor = os.open(
+                    orphan_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+                )
+                try:
+                    os.write(descriptor, (json.dumps(facts, indent=2) + "\n").encode())
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+
+            persist()  # Durable evidence precedes any further native IO.
+            cleanup_client: AsyncAnthropic | None = None
+            try:
+                async with asyncio.timeout(6):
+                    cleanup_client = build_async_anthropic(
+                        transport=transport_factory(),
+                        api_key=key,
+                        max_retries=0,
+                        timeout=httpx.Timeout(3),
+                    )
+                    owned = OwnedAuthorization(admission.binding.scope, frozenset({(kind, id_)}))
+                    cleanup = AnthropicManagedAgents(
+                        cleanup_client,
+                        account_scope_id=admission.binding.account_scope_id,
+                        authorization=owned,
+                    )
+                    ref = context.ref(id_, kind)
+                    if kind == "session":
+                        try:
+                            async with asyncio.timeout(3):
+                                await cleanup.events.cancel(
+                                    admission.binding.scope,
+                                    ref,
+                                    turn_id="live-root",
+                                    key="late-orphan-interrupt",
+                                )
+                                facts["interrupt_ack"] = True
+                        finally:
+                            async with asyncio.timeout(3):
+                                await cleanup.session_admin.archive(
+                                    admission.binding.scope, ref, key="late-orphan-archive"
+                                )
+                                facts["retirement_ack"] = True
+                    elif kind == "agent":
+                        await cleanup.agents.archive(
+                            admission.binding.scope, ref, key="late-orphan-agent"
+                        )
+                        facts["retirement_ack"] = True
+                    elif kind == "skill":
+                        await cleanup.skills.delete(
+                            admission.binding.scope, id_, key="late-orphan-skill"
+                        )
+                        facts["retirement_ack"] = True
+                    elif kind == "vault":
+                        vaults = cleanup.extension(Vaults, namespace="anthropic.vaults", version=1)
+                        await vaults.archive(admission.binding.scope, ref, key="late-orphan-vault")
+                        facts["retirement_ack"] = True
+            except Exception:
+                facts["cleanup_failed"] = True
+            finally:
+                if cleanup_client is not None:
+                    try:
+                        async with asyncio.timeout(1):
+                            await cleanup_client.close()
+                    except Exception:
+                        facts["cleanup_failed"] = True
+                persist()
+
+        transport.on_orphan = orphan_cleanup
         try:
             # Reserve 15 seconds of the SAME deadline for interrupt/archive/close.
             task = asyncio.ensure_future(callback(context))
@@ -768,17 +978,28 @@ async def run_live(
             }
         finally:
             actual = None
+            proof = None
             if context is not None:
                 context.transport.closed = True
                 try:
                     actual = actual_from_anthropic_sessions(
                         reservation, merged_usage(context), pricing_basis="standard-global"
                     )
+                    proof = limit_overrun_proof(context)
                 except Exception:
                     actual = None
-            receipt = guard.settle(
-                reservation, status=status, limits=admission.plan.limits, actual=actual
-            )
+            if proof is not None:
+                receipt = guard.settle_with_overrun(
+                    reservation,
+                    status=status,
+                    limits=admission.plan.limits,
+                    actual=actual,
+                    overrun_evidence=proof,
+                )
+            else:
+                receipt = guard.settle(
+                    reservation, status=status, limits=admission.plan.limits, actual=actual
+                )
             if admission.output.is_dir():
                 facts: dict[str, object] = {
                     "source_head": admission.source_head,
@@ -796,6 +1017,22 @@ async def run_live(
                 if context is not None:
                     facts["requests"] = context.transport.requests
                     facts["created_resources"] = sorted(context.transport.authorization.created)
+                    facts["pending_create_acknowledgements"] = context.transport.pending_creates
+                    facts["orphan_resources"] = sorted(context.transport.orphans)
+                    facts["reconciliation_required"] = bool(
+                        context.transport.pending_creates or context.transport.orphans
+                    )
+                    facts["conflicting_request_evidence"] = [
+                        id_
+                        for (_, id_), variants in verified_usage_variants(context).items()
+                        if len(
+                            {
+                                json.dumps(usage_tokens(obs).model_dump(), sort_keys=True)
+                                for obs in variants
+                            }
+                        )
+                        > 1
+                    ]
                     facts["archived_sessions"] = sorted(context.transport.archived)
                     facts["observed_token_threshold_crossings"] = (
                         context.transport.monitor.observed_thresholds

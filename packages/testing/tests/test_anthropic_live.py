@@ -932,3 +932,237 @@ async def test_stream_and_final_walk_merge_each_native_request_once(tmp_path, mo
         secret_loader=lambda _: "offline-key",
         transport_factory=lambda: httpx.MockTransport(native.handle),
     )
+
+
+class FragmentedBytes(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+
+def fragmented_usage(case, event):
+    frame = b"event: span.model_request_end\r\ndata: " + json.dumps(event).encode() + b"\r\n\r\n"
+    if case == "crlf":
+        return [frame[:-3], frame[-3:-1], frame[-1:]]
+    if case == "lf":
+        lf = frame.replace(b"\r\n", b"\n")
+        return [lf[:-1], lf[-1:]]
+    if case == "json":
+        split = frame.index(b"input_tokens") + 4
+        return [frame[:split], frame[split : split + 7], frame[split + 7 :]]
+    if case == "multi":
+        return [b"event: ping\ndata: {}\n\n" + frame + b"event: ping\ndata: {}\n\n"]
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize("case", ["crlf", "lf", "json", "multi"])
+async def test_sdk_decoded_fragmentation_never_bypasses_the_signed_stop(case):
+    from pathlib import Path
+
+    from anthropic import AsyncStream
+
+    config = BudgetConfig.load(Path(__file__).parent / "fixtures/anthropic-live/host-config.json")
+    provider = config.providers["anthropic"]
+    event = usage("fragmented-proof", 1000000, 1)
+    chunks = fragmented_usage(case, event)
+    baseline = httpx.Response(200, stream=FragmentedBytes(chunks))
+    decoded = [
+        frame.json()
+        async for frame in AsyncStream.raw_events(baseline)
+        if frame.event == "span.model_request_end"
+    ]
+    assert decoded == [event]
+    monitor = live.UsageMonitor(
+        provider.models[live.MODEL], provider.session_prices[0], Decimal(".28")
+    )
+    downstream = httpx.Response(
+        200, stream=live.MonitoredStream(FragmentedBytes(chunks), monitor, "accepted")
+    )
+    consumed = []
+    with pytest.raises(live.LiveStopped, match="stop threshold"):
+        async for frame in AsyncStream.raw_events(downstream):
+            consumed.append(frame)
+    assert monitor.stop.is_set() and monitor.cost >= Decimal(".50")
+    assert list(monitor.observations) == [event["id"]]
+    assert all(frame.event != "span.model_request_end" for frame in consumed)
+
+
+@pytest.mark.parametrize("case", ["crlf", "lf", "json", "multi"])
+async def test_fragmented_stream_conflicting_walk_and_failed_fetch_keep_verified_floor(
+    tmp_path, monkeypatch, case
+):
+    from mux.conformance.usage_settlement import AnthropicSessionSpend
+    from mux.drivers.anthropic.usage import observation_from_event
+
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    native = Native()
+
+    async def wire(request):
+        if request.url.path.endswith("/events/stream"):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=FragmentedBytes(
+                    fragmented_usage(case, usage("conflicting-proof", 1000000, 1))
+                ),
+            )
+        if request.method == "GET":
+            raise httpx.ReadError("terminal fetch failed", request=request)
+        return await native.handle(request)
+
+    async def invoke(context):
+        session = await create(context)
+        stream = await context.driver.events.open_stream(SCOPE, session.ref)
+        try:
+            async for _ in stream:
+                pass
+        except live.LiveStopped:
+            context.evidence.append(
+                AnthropicSessionSpend(
+                    session.ref,
+                    (
+                        observation_from_event(
+                            usage("conflicting-proof", 100, 1),
+                            session.ref,
+                            observed_at=datetime.now(UTC),
+                            model_id=live.MODEL,
+                        ),
+                    ),
+                    None,
+                )
+            )
+        return {"status": "fail"}
+
+    result = await live.run_live(
+        args,
+        invoke,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(wire),
+    )
+    row = guard.report()[0]
+    assert row.actual_usd is None and row.held_usd >= Decimal(".50")
+    assert row.admission_blocked is True and len(receipts(guard)) == 2
+    assert len(row.actual_evidence.requests) == 1
+    assert row.actual_evidence.requests[0].tokens.input_tokens == 1000000
+    assert result["spend"]["actual_usd"] is None
+    exported = json.loads((args.output / "receipt.json").read_text())
+    assert exported["conflicting_request_evidence"] == ["conflicting-proof"]
+
+
+async def test_late_inflight_create_ack_is_quarantined_and_retired_without_another_settlement(
+    tmp_path, monkeypatch
+):
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    args = replace(args, deadline_s=1)
+    release, finished = asyncio.Event(), asyncio.Event()
+    contexts, calls = [], []
+
+    async def wire(request):
+        path = request.url.path
+        calls.append((request.method, path))
+        if path == "/v1/sessions":
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+            return httpx.Response(
+                200, json=ma_session(id="late-session", model=live.MODEL).model_dump(mode="json")
+            )
+        if path.endswith("/events"):
+            assert [e["type"] for e in json.loads(request.content)["events"]] == ["user.interrupt"]
+            return send_events_response()
+        if path.endswith("/archive"):
+            return httpx.Response(
+                200, json=ma_session(id="late-session", model=live.MODEL).model_dump(mode="json")
+            )
+        raise AssertionError(path)
+
+    async def invoke(context):
+        contexts.append(context)
+        try:
+            with suppress(ProviderError):
+                await create(context)
+        finally:
+            finished.set()
+        return {"status": "fail"}
+
+    try:
+        await asyncio.wait_for(
+            live.run_live(
+                args,
+                invoke,
+                secret_loader=lambda _: "offline-key",
+                transport_factory=lambda: httpx.MockTransport(wire),
+            ),
+            timeout=3,
+        )
+        context = contexts[0]
+        assert context.transport.closed and not context.transport.session_ids
+        assert not context.transport.authorization.created
+        exported = json.loads((args.output / "receipt.json").read_text())
+        assert exported["pending_create_acknowledgements"] == 1
+        assert exported["reconciliation_required"] is True
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=3)
+        assert not context.transport.session_ids and not context.transport.authorization.created
+        assert context.transport.orphans == {("session", "late-session")}
+        assert calls == [
+            ("POST", "/v1/sessions"),
+            ("POST", "/v1/sessions/late-session/events"),
+            ("POST", "/v1/sessions/late-session/archive"),
+        ]
+        orphan = json.loads(next(args.output.glob("orphan-*.json")).read_text())
+        assert orphan["interrupt_ack"] and orphan["retirement_ack"]
+        assert orphan["reconciliation_required"] and orphan["hold_retained"]
+        assert guard.report()[0].actual_usd is None and guard.report()[0].held_usd == Decimal(".35")
+        assert len(receipts(guard)) == 2
+    finally:
+        release.set()
+
+
+async def test_conflicting_more_expensive_walk_cannot_erase_stream_input_limit_latch(
+    tmp_path, monkeypatch
+):
+    from mux.conformance.usage_settlement import AnthropicSessionSpend
+    from mux.drivers.anthropic.usage import observation_from_event
+
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    native = Native()
+
+    async def invoke(context):
+        session = await create(context)
+        context.transport.monitor.observe(usage("limit-proof", 200001, 1), session.ref.id)
+        cheaper_input = usage("limit-proof", 0, 1)
+        cheaper_input["model_usage"]["cache_creation_input_tokens"] = 190000
+        cheaper_input["model_usage"]["cache_creation"]["ephemeral_1h_input_tokens"] = 190000
+        context.evidence.append(
+            AnthropicSessionSpend(
+                session.ref,
+                (
+                    observation_from_event(
+                        cheaper_input,
+                        session.ref,
+                        observed_at=datetime.now(UTC),
+                        model_id=live.MODEL,
+                    ),
+                ),
+                None,
+            )
+        )
+        return {"status": "pass"}
+
+    await live.run_live(
+        args,
+        invoke,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(native.handle),
+    )
+    row = guard.report()[0]
+    assert row.actual_usd is None and row.held_usd >= Decimal(".35")
+    assert row.admission_blocked is True and len(receipts(guard)) == 2
+    assert row.actual_evidence.requests[0].tokens.input_tokens == 190000
+    assert row.overrun_evidence.requests[0].tokens.input_tokens == 200001
