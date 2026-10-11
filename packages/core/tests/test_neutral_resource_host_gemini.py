@@ -12,6 +12,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -34,7 +35,11 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_gemini_client
+from daimon.testing.isolated_sdk import (
+    TLS_PROXY_ENV_VARS,
+    AmbientSDKConfigurationError,
+    build_gemini_client,
+)
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
@@ -519,4 +524,32 @@ async def test_host_sdk_refuses_ambient_configuration_before_client_allocation(
         async with case.driver():
             raise AssertionError("ambient configuration reached the product driver")
     assert frozenset(os.environ) == before
+    assert not case.trace.requests
+
+
+@pytest.mark.parametrize("name", TLS_PROXY_ENV_VARS)
+@pytest.mark.parametrize("empty", [False, True])
+async def test_host_sdk_refuses_tls_proxy_and_keylog_before_any_client_effect(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, empty: bool
+) -> None:
+    from google import genai
+
+    case = SDKCase(setup)
+    keylog = tmp_path / "must-not-create-keylog"
+    value = "" if empty else str(keylog)
+    monkeypatch.setenv(name, value)
+    before = dict(os.environ)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("hostile TLS/proxy configuration reached SDK or HTTP construction")
+
+    monkeypatch.setattr(genai, "Client", forbidden)
+    monkeypatch.setattr(httpx, "Client", forbidden)
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden)
+    monkeypatch.setattr(httpx, "create_ssl_context", forbidden)
+    with pytest.raises(AmbientSDKConfigurationError):
+        async with case.driver():
+            raise AssertionError("hostile configuration reached the resource driver")
+    assert dict(os.environ) == before
+    assert not keylog.exists()
     assert not case.trace.requests
