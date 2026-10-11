@@ -1162,23 +1162,23 @@ async def run_live(
                 }
             finally:
                 actual = None
-                proof = None
+                overrun_witness = None
                 if context is not None:
                     context.transport.seal()
                     try:
                         actual = actual_from_anthropic_sessions(
                             reservation, merged_usage(context), pricing_basis="standard-global"
                         )
-                        proof = limit_overrun_proof(context)
+                        overrun_witness = limit_overrun_proof(context)
                     except Exception:
                         actual = None
-                if proof is not None:
+                if overrun_witness is not None:
                     receipt = guard.settle_with_overrun(
                         reservation,
                         status=status,
                         limits=admission.plan.limits,
                         actual=actual,
-                        overrun_evidence=proof,
+                        overrun_evidence=overrun_witness,
                     )
                 else:
                     receipt = guard.settle(
