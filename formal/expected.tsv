@@ -147,6 +147,8 @@ adapter_recovery	AdapterOverlap	OverlapCASOnly	violates:NoStolenClear	88	-	pre-c
 adapter_recovery	AdapterOverlap	OverlapGated	clean	205	-	c923083 (Slack) / #232 (Discord): admission waits for recovery
 adapter_recovery	AdapterOverlap	OrphanedTurnReuse	violates:NoMessageIntoRunning	135	-	regression, fixed on main by #232: restart orphan kept running, next message ignored
 adapter_recovery	AdapterOverlap	OrphanSweepInterrupts	clean	187	-	#232 (merged): sweep interrupts the orphan
+adapter_recovery	AdapterOverlap	OrphanInterruptFailedUnsafe	violates:NoMessageIntoRunning	135	-	failed interrupt clears the marker but leaves the old MA mapping live
+adapter_recovery	AdapterOverlap	OrphanInterruptFailedDetached	clean	205	-	failed interrupt detaches the old mapping before the next bind
 adapter_recovery	AdapterOverlap	OrphanSendWaits	clean	197	-	alternative: never send into a running session
 adapter_recovery	AdapterOverlap	RollingOverlap	violates:NoStolenClear	86	-	assumption: overlapping processes reap the sibling's live marker
 adapter_recovery	AdapterOverlap	WizardBypassMessage	violates:NoMessageIntoRunning	102	-	accepted limitation: wizard turn beside a mention turn

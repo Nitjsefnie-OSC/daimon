@@ -214,20 +214,35 @@ set -eu
 : "${TLA2TOOLS_JAR:?Set TLA2TOOLS_JAR to the path of tla2tools.jar}"
 cd formal/adapter_recovery
 run() { java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "${TMPDIR:-/tmp}/daimon-adapter-overlap-tlc/$1" -config "$1.cfg" AdapterOverlap.tla; }
-for c in OverlapCASNoStale OverlapGated OrphanSweepInterrupts OrphanSendWaits WizardBypassRowsLocked SingleProcessRecovery; do run $c; done
-for c in OverlapPreCAS OverlapCASOnly OrphanedTurnReuse RollingOverlap WizardBypassMessage WizardBypassRows; do run $c || test $? -eq 12; done
+for c in OverlapCASNoStale OverlapGated OrphanSweepInterrupts OrphanInterruptFailedDetached OrphanSendWaits WizardBypassRowsLocked SingleProcessRecovery; do run $c; done
+for c in OverlapPreCAS OverlapCASOnly OrphanedTurnReuse OrphanInterruptFailedUnsafe RollingOverlap WizardBypassMessage WizardBypassRows; do run $c || test $? -eq 12; done
 ```
 
 | Model item | Implementation |
 | --- | --- |
 | `OldDies`, `StartNew` | container stop after the drain window (Slack 50 s, Discord 60 s; neither interrupts MA) or a crash; the replacement container boots |
-| `SweepSnap`, `SweepClear` | Slack `retire_orphaned_turns`, Discord `_retire_orphaned_turns_once` (list marked rows, retire the card, compare-and-clear) |
+| `SweepSnap`, `SweepClear` | Slack `retire_orphaned_turns`, Discord `_retire_orphaned_turns_once`, Teams `retire_orphaned_turns` (list marked rows, retire the card, compare-and-clear, interrupt MA) |
+| `SweepInterruptSucceeds`, `DetachOnFailedInterrupt` | `core/turn/bookkeeping.py:recover_orphan_marker` (Slack), `discord/bot.py:_retire_orphaned_turns_once`, and `teams/boot_sweep.py:retire_orphaned_turns` mark the mapping dead after an unconfirmed interrupt; `core/stores/thread_sessions.py:mark_dead` excludes it from the next bind. |
 | `Admit` | per-thread `_processing` and the recovery gate; `WizardBypass` is Discord's `wizard_submit` (documented to skip `_processing`) |
 | `Bind` | `prepare_session_for_turn` under `pg_advisory_xact_lock`; a plain reuse reads neither the marker nor MA's session status |
 | `Mark` | the adapter writes the active-turn marker after bind returns |
 | `Send`, `Observe` | driver opens the stream and sends `user.message`; MA answers 200 to a `user.*` event sent into a running session and ignores it ([`driver.py`](../../packages/core/daimon/core/turn/driver.py), measured 2026-08-26) |
 | `Rec1`–`Rec3` | [`run.py`](../../packages/core/daimon/core/turn/run.py) `mark_dead` → `create_fresh_session` → `link_replacement`; outside the bind lock before #238, and since #238 (`_replace_dead_session`) under it, adopting the thread's live row when another turn already replaced the session (`RecoveryUnderLock`, `RecoveryAdopts`) |
 | `Finish` | unconditional `clear_active_turn` on the turn's own row |
+
+`OrphanInterruptFailedUnsafe` keeps the MA session running after the marker is
+cleared; the next message binds that live mapping and violates
+`NoMessageIntoRunning` in 135 distinct states. `OrphanInterruptFailedDetached`
+marks that mapping dead and checks clean in 205 states. Both use one old and one
+new process, two turns, three mapping slots, and one sweep; the interrupt
+outcome is fixed per config. `SweepClear` treats the database CAS and failure
+detach as one commit; the MA call happens before that commit. The model does
+not cover a turn admitted while that transaction awaits MA. The boot admission
+gate excludes that interleaving. The counterexample is replayed by
+`test_orphan_interrupt_controls_session_reuse` and
+`test_failed_orphan_interrupt_detaches_busy_session_and_retires_card`; no
+upstream contract or production trace replay was run. The clean verdict is
+provisional within these bounds.
 
 Invariants: `AtMostOneLiveRow` (≤1 live thread_sessions row for the thread),
 `NoMessageIntoRunning` (no `user.message` into a session still running a turn),

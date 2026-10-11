@@ -141,6 +141,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     list_orphaned_turns,
     lock_orphaned_turn,
+    mark_dead,
     mark_turn_active,
     update_watermark,
 )
@@ -1440,11 +1441,13 @@ class DaimonBot(commands.Bot):
                 cleared = await clear_active_turn_if_message_id(
                     session, id=locked.id, expected_message_id=locked.active_turn_message_id
                 )
+                if cleared and not delivered:
+                    interrupted = await interrupt_orphaned_session(
+                        self.runtime.anthropic, session_id=locked.ma_session_id
+                    )
+                    if not interrupted:
+                        await mark_dead(session, id=locked.id)
                 await session.commit()
-            if cleared and not delivered:
-                await interrupt_orphaned_session(
-                    self.runtime.anthropic, session_id=locked.ma_session_id
-                )
 
         # Four rows progress independently; a slow provider or unreachable
         # thread cannot hold every restart notice behind it.

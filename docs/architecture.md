@@ -301,9 +301,13 @@ for replies over Discord's message length limit. It verifies the provider's
 latest user message belongs to the interrupted turn before recovering its
 answer. Other orphaned turns edit that card to explain the restart and invite
 a retry, then interrupt the old session. Both recovery edits use the same
-terminal card write sequencer as live turns, with no replacement post. Provider
-result reads are bounded to
-five seconds and card fetch/edit work to thirty seconds per row. Recovery
+terminal card write sequencer as live turns, with no replacement post. If the
+provider interrupt errors or times out, recovery marks the old thread-session
+mapping dead. The next turn creates a fresh session instead of reusing a
+possibly busy one.
+Marker cleanup and the dead mark commit together. The orphan card still shows
+the restart notice. Provider result reads are bounded to five seconds and card
+fetch/edit work to thirty seconds per row. Recovery
 serializes edits across workers and conditionally clears the original marker;
 a newer turn keeps its marker and its running session. Cards that are already
 terminal retain their formatted answer and feedback controls. A retryable

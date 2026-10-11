@@ -35,6 +35,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
+    get_thread_session_by_id,
     list_orphaned_turns,
     mark_turn_active,
 )
@@ -208,8 +209,12 @@ async def test_a_failed_interrupt_does_not_stop_the_sweep(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _make_orphan(db_session, thread_id="555", message_id="777", ma_session_id="sesn_gone")
-    await _make_orphan(db_session, thread_id="556", message_id="778", ma_session_id="sesn_alive")
+    failed_id = await _make_orphan(
+        db_session, thread_id="555", message_id="777", ma_session_id="sesn_gone"
+    )
+    interrupted_id = await _make_orphan(
+        db_session, thread_id="556", message_id="778", ma_session_id="sesn_alive"
+    )
     recorder = _InterruptRecorder(failing=frozenset({"sesn_gone"}))
     bot = _make_bot(db_session_factory, anthropic=build_fake_anthropic(recorder))
     bot.get_channel = MagicMock(return_value=_reachable_thread())  # pyright: ignore[reportAttributeAccessIssue]
@@ -221,6 +226,11 @@ async def test_a_failed_interrupt_does_not_stop_the_sweep(
         ("sesn_gone", "user.interrupt"),
     ], "one session's failed interrupt must not skip the other's"
     assert await list_orphaned_turns(db_session, platform="discord") == []
+    async with db_session_factory() as session:
+        failed = await get_thread_session_by_id(session, id=failed_id)
+        interrupted = await get_thread_session_by_id(session, id=interrupted_id)
+    assert failed is not None and failed.status == "dead"
+    assert interrupted is not None and interrupted.status == "live"
 
 
 async def test_sweep_marks_the_embed_failed_and_clears_the_row(
@@ -633,7 +643,7 @@ async def test_a_hung_interrupt_does_not_hold_the_sweep(
 
     monkeypatch.setattr(ma, "ORPHAN_INTERRUPT_TIMEOUT_S", 0.05, raising=False)
     monkeypatch.setattr("daimon.adapters.discord.startup_replay.ORPHAN_RESULT_READ_TIMEOUT_S", 0.05)
-    await _make_orphan(db_session, ma_session_id="sesn_hung")
+    hung_id = await _make_orphan(db_session, ma_session_id="sesn_hung")
 
     calls: list[str] = []
 
@@ -659,6 +669,9 @@ async def test_a_hung_interrupt_does_not_hold_the_sweep(
         "both the result read and interrupt must be bounded"
     )
     assert await list_orphaned_turns(db_session, platform="discord") == []
+    async with db_session_factory() as session:
+        hung = await get_thread_session_by_id(session, id=hung_id)
+    assert hung is not None and hung.status == "dead"
 
 
 async def test_boot_card_recovery_bounds_worker_fanout(
