@@ -116,7 +116,14 @@ factories never clear the process environment; explicit test keys prevent
 credential-chain fallback. Start tests in a clean environment or remove only
 the relevant variables with a scoped test fixture. Missing keys, routes or
 transports also fail before HTTP client construction. Generic proxy and certificate environment settings are
-ignored by the supplied clients.
+refused before construction. The names-only guard additionally rejects
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `SSLKEYLOGFILE`, `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, `NO_PROXY`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE`, including
+empty, lowercase and mixed-case variants. `trust_env=False` alone does not
+disable Python's `SSLKEYLOGFILE`; Gemini constructs its explicit SSL context
+only after this preflight, with no key-log filename. Existing owned clients
+retain their explicit TLS/HTTP configuration if ambient settings appear later;
+new OpenAI/Anthropic SDK copies repeat the admission guard.
 
 Close OpenAI and Anthropic clients with their normal async context manager.
 Gemini owns both clients: call `client.close()` and `await client.aio.aclose()`.

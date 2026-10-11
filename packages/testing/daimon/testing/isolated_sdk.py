@@ -20,6 +20,17 @@ if TYPE_CHECKING:
 
 # Explicit None still means "consult the environment" in several SDK fields.
 # Reject presence, including empty strings, before importing/constructing an SDK.
+TLS_PROXY_ENV_VARS = (
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "SSLKEYLOGFILE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+)
 SDK_ENV_VARS = (
     "OPENAI_API_KEY",
     "OPENAI_ADMIN_KEY",
@@ -59,6 +70,7 @@ SDK_ENV_VARS = (
     "GOOGLE_GENAI_CLIENT_MODE",
     "GOOGLE_GENAI_REPLAYS_DIRECTORY",
     "GOOGLE_GENAI_REPLAY_ID",
+    *TLS_PROXY_ENV_VARS,
 )
 
 TEST_API_KEY = "test-isolated-sdk"
@@ -76,7 +88,10 @@ def _require_clean_environment() -> None:
     # Future provider settings can contain secrets in their names as well as
     # values. Refuse all four prefixes, without reporting unknown names.
     if any(
-        name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_"))
+        (
+            name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_"))
+            or name.upper() in TLS_PROXY_ENV_VARS
+        )
         and name not in SDK_ENV_VARS
         for name in names
     ):
@@ -229,8 +244,9 @@ def build_gemini_client(
     from google import genai
     from google.genai import types
 
-    # Gemini's SSL setup otherwise reads SSL_CERT_FILE/DIR even with injected
-    # clients. Explicit contexts cover its HTTP and websocket initialization.
+    # trust_env=False still honors SSLKEYLOGFILE in native TLS construction.
+    # Shared names-only preflight refuses TLS/proxy overrides before this call.
+    # Explicit contexts cover Gemini's HTTP and websocket initialization.
     context = httpx.create_ssl_context(trust_env=False)
     client = genai.Client(
         api_key=api_key,

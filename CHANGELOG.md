@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind common QA catalog admin operations through product APIs on disposable lane databases, preserving scoped readback and typed pending resource/platform gaps across all three backends.
 
 - Refresh offline QA Gemini tapes for explicit interaction tools on current integration, retaining strict wire equality and separate expected-failure reporting.
+- Refuse nine ambient TLS/proxy settings by name before test SDK construction, preventing invented TLS key-log paths from being opened; owned clean Gemini contexts have no key-log filename.
 
 ### Added
 

@@ -13,6 +13,7 @@ import pytest
 from daimon.testing.isolated_sdk import (
     SDK_ENV_VARS,
     TEST_API_KEY,
+    TLS_PROXY_ENV_VARS,
     AmbientSDKConfigurationError,
     build_async_anthropic,
     build_async_openai,
@@ -37,6 +38,10 @@ UNKNOWN_PROVIDER_NAMES = tuple(
         "Gemini_",
     )
 )
+TLS_PROXY_CASE_NAMES = tuple(
+    variant for name in TLS_PROXY_ENV_VARS for variant in (name.lower(), name.title())
+)
+REFUSED_ENV_NAMES = (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES, *TLS_PROXY_CASE_NAMES)
 
 
 def _environment_snapshot() -> str:
@@ -47,13 +52,16 @@ def _environment_snapshot() -> str:
 @pytest.fixture(autouse=True)
 def clean_provider_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for name in tuple(os.environ):
-        if name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_")):
+        if (
+            name.upper().startswith(("ANTHROPIC_", "OPENAI_", "GOOGLE_", "GEMINI_"))
+            or name.upper() in TLS_PROXY_ENV_VARS
+        ):
             monkeypatch.delenv(name, raising=False)
     yield
 
 
 @pytest.mark.parametrize("factory", FACTORIES)
-@pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
+@pytest.mark.parametrize("name", REFUSED_ENV_NAMES)
 @pytest.mark.parametrize(
     "value", ["", "offline-secret-do-not-log", "X-Poison: sentinel\nX-Other: value"]
 )
@@ -65,6 +73,7 @@ def test_every_provider_variable_refuses_each_factory_before_construction(
     with (
         patch("httpx.AsyncClient") as asynchronous,
         patch("httpx.Client") as synchronous,
+        patch("httpx.create_ssl_context") as tls,
         pytest.raises(AmbientSDKConfigurationError) as error,
     ):
         factory(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
@@ -77,6 +86,7 @@ def test_every_provider_variable_refuses_each_factory_before_construction(
     assert _environment_snapshot() == before
     synchronous.assert_not_called()
     asynchronous.assert_not_called()
+    tls.assert_not_called()
 
 
 def test_multiple_variables_report_names_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,14 +131,9 @@ def test_missing_explicit_auth_route_or_transport_never_falls_back(factory, fiel
 
 @pytest.mark.parametrize("factory", [build_async_openai, build_async_anthropic])
 async def test_async_sdk_requests_have_explicit_auth_route_headers_and_no_ambient_scope(
-    factory, monkeypatch: pytest.MonkeyPatch
+    factory,
 ) -> None:
     calls: list[httpx.Request] = []
-    # Generic HTTP/TLS environment can exist, but must not configure the clients.
-    monkeypatch.setenv("HTTP_PROXY", "http://unusable.invalid:1")
-    monkeypatch.setenv("HTTPS_PROXY", "http://unusable.invalid:1")
-    monkeypatch.setenv("ALL_PROXY", "http://unusable.invalid:1")
-    monkeypatch.setenv("SSL_CERT_FILE", "/missing/test-certificate")
     headers = {"X-Explicit-Test": "owned"}
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -166,12 +171,7 @@ async def test_async_sdk_requests_have_explicit_auth_route_headers_and_no_ambien
     assert client.is_closed()
 
 
-async def test_gemini_sync_async_models_and_interactions_use_only_owned_http_clients(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("HTTPS_PROXY", "http://unusable.invalid:1")
-    monkeypatch.setenv("SSL_CERT_FILE", "/missing/test-certificate")
-    monkeypatch.setenv("SSL_CERT_DIR", "/missing/test-certificates")
+async def test_gemini_sync_async_models_and_interactions_use_only_owned_http_clients() -> None:
     calls: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -505,7 +505,7 @@ class _NamesOnlyEnvironment(Mapping[str, str]):
 
 
 @pytest.mark.parametrize("factory", FACTORIES)
-@pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
+@pytest.mark.parametrize("name", REFUSED_ENV_NAMES)
 def test_environment_preflight_reads_names_only_before_any_sdk_construction(
     monkeypatch: pytest.MonkeyPatch, factory, name: str
 ) -> None:
@@ -519,6 +519,7 @@ def test_environment_preflight_reads_names_only_before_any_sdk_construction(
         patch("google.genai.Client") as gemini_sdk,
         patch("httpx.Client") as synchronous,
         patch("httpx.AsyncClient") as asynchronous,
+        patch("httpx.create_ssl_context") as tls,
     ):
         with monkeypatch.context() as scoped:
             scoped.setattr(os, "environ", environment)
@@ -534,6 +535,7 @@ def test_environment_preflight_reads_names_only_before_any_sdk_construction(
     gemini_sdk.assert_not_called()
     synchronous.assert_not_called()
     asynchronous.assert_not_called()
+    tls.assert_not_called()
 
 
 @pytest.mark.parametrize("name", ["GOOGLE_FUTURE_ROUTE", "gemini_future_secret_name"])
@@ -636,7 +638,7 @@ def _owned_copy_client(entrypoint: str, handler):
 
 @pytest.mark.parametrize("entrypoint", COPY_ENTRYPOINTS)
 @pytest.mark.parametrize("method", ["copy", "with_options"])
-@pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
+@pytest.mark.parametrize("name", REFUSED_ENV_NAMES)
 async def test_every_owned_sdk_copy_refuses_late_environment_before_parent_construction(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, method: str, name: str
 ) -> None:
@@ -793,7 +795,7 @@ async def test_clean_real_driver_copy_keeps_single_attempt_and_original_client(
 
 
 @pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted", "no_retry"])
-@pytest.mark.parametrize("name", (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES))
+@pytest.mark.parametrize("name", REFUSED_ENV_NAMES)
 def test_shared_builder_preflight_never_fetches_environment_values(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, name: str
 ) -> None:
@@ -821,7 +823,7 @@ def test_shared_builder_preflight_never_fetches_environment_values(
                 build_no_retry_anthropic(lambda _: httpx.Response(500))
             else:
                 ScriptedTransport().client()
-    if name in UNKNOWN_PROVIDER_NAMES:
+    if name in (*UNKNOWN_PROVIDER_NAMES, *TLS_PROXY_CASE_NAMES):
         assert name not in str(error.value)
     assert environment.value_reads == 0
     parent.assert_not_called()
