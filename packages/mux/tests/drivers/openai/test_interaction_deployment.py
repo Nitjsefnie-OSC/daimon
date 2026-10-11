@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from email import message_from_bytes, policy
+from typing import cast
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import RequiresActionPayload, TextPart
 from mux.contracts.ids import ModelRef, Revision, Scope
@@ -24,12 +27,12 @@ from mux.contracts.resources import (
 )
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.default_capability import decode_upload
+from mux.drivers.openai.offline_sdk import refuse_inherited_settings
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ContinuityLost, UnsupportedCapability
-from openai import AsyncOpenAI
 
 SCOPE = Scope(tenant_id="tenant", account_id="account", principal_id="human", authorization_id="go")
 BUNDLE = SkillUpload(
@@ -51,7 +54,8 @@ ACTION: Object = {
 
 
 class Wire:
-    def __init__(self) -> None:
+    def __init__(self, spend_limit_usd_cents: int | None = 20) -> None:
+        self.spend_limit_usd_cents = spend_limit_usd_cents
         self.requests: list[httpx.Request] = []
         self.uploads: list[SkillUpload] = []
         self.files: list[bytes] = []
@@ -120,16 +124,21 @@ class Wire:
             return httpx.Response(200, json=self.agent)
         if path == "/agents/sessions" and request.method == "POST":
             body = object_json(json.loads(request.content))
+            if self.spend_limit_usd_cents is None:
+                assert "spend_control" not in body
+            else:
+                assert body["spend_control"] == {"limit": self.spend_limit_usd_cents}
             self.session = {
                 "id": "session",
                 "agent": {**self.agent, **object_json(body["agent"])},
                 "created_at": 0,
                 "metadata": body["metadata"],
                 "environment": {"id": "environment", **object_json(body["environment"])},
-                "spend_control": body["spend_control"],
                 "status": "idle",
                 "required_actions": [],
             }
+            if self.spend_limit_usd_cents is not None:
+                self.session["spend_control"] = body["spend_control"]
             return httpx.Response(200, json=self.session)
         if path == "/agents/sessions/session":
             return httpx.Response(
@@ -178,14 +187,16 @@ class Wire:
         raise AssertionError("unexpected native route")
 
 
-@pytest.fixture
-async def deployment() -> AsyncIterator[tuple[OpenAIDriver, Wire]]:
-    wire = Wire()
-    async with AsyncOpenAI(
+@asynccontextmanager
+async def deployment_adapter(
+    *, spend_limit_usd_cents: int | None = 20
+) -> AsyncIterator[tuple[OpenAIDriver, Wire]]:
+    refuse_inherited_settings()
+    wire = Wire(spend_limit_usd_cents)
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline",
         base_url="https://openai.invalid/v1",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -197,14 +208,22 @@ async def deployment() -> AsyncIterator[tuple[OpenAIDriver, Wire]]:
                 model="gpt-6-luna",
                 multi_agent_enabled=False,
                 container_size="small",
-                spend_limit_usd_cents=20,
+                spend_limit_usd_cents=spend_limit_usd_cents,
             ),
         )
         yield driver, wire
 
 
+@pytest.fixture(params=(None, 20), ids=("cap-omitted", "explicit-cap"))
+async def deployment(request: pytest.FixtureRequest) -> AsyncIterator[tuple[OpenAIDriver, Wire]]:
+    async with deployment_adapter(spend_limit_usd_cents=cast(int | None, request.param)) as ports:
+        yield ports
+
+
 @pytest.mark.asyncio
-async def test_skill_pin_mcp_and_uploaded_file_are_bound_before_unavailable_execution(deployment):
+async def test_skill_pin_mcp_and_uploaded_file_are_bound_before_unavailable_execution(
+    deployment: tuple[OpenAIDriver, Wire],
+) -> None:
     driver, wire = deployment
     skill = await driver.skills.create(SCOPE, BUNDLE, key="skill")
     assert wire.uploads == [BUNDLE]
@@ -257,7 +276,10 @@ async def test_skill_pin_mcp_and_uploaded_file_are_bound_before_unavailable_exec
     assert native["files"] == [
         {"type": "file_id", "file_id": "repository-archive", "path": "/workspace/repository.tar"}
     ]
-    assert wire.session["spend_control"] == {"limit": 20}
+    if wire.spend_limit_usd_cents is None:
+        assert "spend_control" not in wire.session
+    else:
+        assert wire.session["spend_control"] == {"limit": wire.spend_limit_usd_cents}
     receipt = await driver.events.send(
         SCOPE,
         session.ref,
@@ -280,7 +302,9 @@ async def test_skill_pin_mcp_and_uploaded_file_are_bound_before_unavailable_exec
 
 
 @pytest.mark.asyncio
-async def test_c11_distinct_title_and_native_repository_remain_explicit_gaps(deployment):
+async def test_c11_distinct_title_and_native_repository_remain_explicit_gaps(
+    deployment: tuple[OpenAIDriver, Wire],
+) -> None:
     driver, wire = deployment
     with pytest.raises(UnsupportedCapability, match="skill_display_title"):
         await driver.skills.create(

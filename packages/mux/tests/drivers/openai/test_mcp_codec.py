@@ -6,6 +6,7 @@ import json
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.events import Event, TextPart, ToolResultPayload, ToolUsePayload
 from mux.contracts.ids import PageRequest
 from mux.drivers.openai import OpenAIDriver
@@ -72,10 +73,10 @@ async def test_sdk_sse_done_only_mcp_item_produces_both_records() -> None:
             content="data: " + json.dumps(raw) + "\n\n",
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-fixture",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         events = [e async for e in driver_for(sdk).events.stream(SCOPE, REF)]
     assert_pair(events, authority="record")
@@ -92,10 +93,10 @@ async def test_sdk_history_overlap_refresh_and_cursor_preserve_both_mcp_records(
         # Overlapping items are a real pagination concern, not two executions.
         return httpx.Response(200, json=page(mcp(), mcp()))
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-fixture",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = driver_for(sdk)
         first = await driver.events.list(SCOPE, REF, page=PageRequest(limit=1))
@@ -159,10 +160,10 @@ async def test_sdk_malformed_mcp_item_is_owned_error_without_body(fault: str) ->
             content="data: " + json.dumps(raw) + "\n\n",
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-fixture",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         with pytest.raises(ProviderError) as caught:
             _ = [e async for e in driver_for(sdk).events.stream(SCOPE, REF)]
@@ -184,10 +185,10 @@ async def test_sdk_mcp_failed_tool_output_cannot_be_success_with_completed_item(
             content="data: " + json.dumps(raw) + "\n\n",
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-fixture",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         events = [e async for e in driver_for(sdk).events.stream(SCOPE, REF)]
     use, result = (e.typed_payload() for e in events)
@@ -217,10 +218,10 @@ async def test_sdk_native_command_missing_exit_code_never_proves_success() -> No
             content="data: " + json.dumps(raw) + "\n\n",
         )
 
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-fixture",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         events = [e async for e in driver_for(sdk).events.stream(SCOPE, REF)]
     use, result = (e.typed_payload() for e in events)
@@ -239,10 +240,10 @@ async def test_sdk_malformed_saved_mcp_item_is_redacted_and_never_published() ->
         return httpx.Response(200, json=page(item))
 
     journal = MemoryRecoveryJournal()
-    async with AsyncOpenAI(
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
         api_key="offline-fixture",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        base_url="https://openai.invalid/v1",
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),

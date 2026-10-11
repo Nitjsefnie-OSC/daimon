@@ -93,6 +93,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Record the OpenAI NEW27 native MCP-form prerequisite as source-bound PENDING under the opt-in profile; retain the frozen unused-request predicate and require real native submit/probe/readback before any verdict.
+- Align opt-in OpenAI GitHub-offer evidence assertions with the merged product card copy, retaining rendered-card mutation controls.
+- Use shared isolated SDK construction in OpenAI tests and inject it into offline conformance/F1 factories without adding a mux-to-host dependency. The explicit SDK component retains C06/C07/C09 mutation controls and honest C08 refusal.
+- Compose explicit OpenAI host conformance envelopes with actual SDK binding-retention and durable wake/journal proofs, queried supplemental accounting, typed selection findings, and honest missing coverage.
+- Add default-off OpenAI native credential-offer routing on an explicitly selected MCP endpoint, checking fresh caller, channel, session and catalog scope before sharing the existing GitHub/private-key cards. Offline GitHub offer proofs inspect the rendered product card and reject title/description mutations. Native delivery and interaction registration remain operator-supplied; OAuth, expiry and submission ordering are unchanged.
+- Admit native OpenAI credential-offer test databases before engine setup, refusing foreign URLs before any connection and preserving isolated CI and contributor-local skips. Qualify MCP proofs as identity-injected dispatch.
+- Add opt-in OpenAI C18 committed host termination snapshots and an independent reachable-reason inventory; partial native coverage remains PENDING. Snapshot admitted primary/routed binds across callbacks for queued writes and evidence reads.
+- Bind OpenAI D8 GitHub offers to the opt-in catalog observation path using the product-built card and actual Discord serialization; retain unavailable native roots and setup barriers as pending.
+
 - Add requester-only Discord cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.
 - Add requester-only Slack cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.
 - Add requester-only Teams cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.

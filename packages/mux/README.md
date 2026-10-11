@@ -655,6 +655,7 @@ The opt-in OpenAI offline adapter now exercises C04 through actual SDK delivery
 and a restartable fenced StateStore bridge. Ambiguous accepted input remains
 unknown without another POST or a guessed native input identity. Its seven
 offline passes do not certify live crash recovery or production host storage.
+
 OpenAI interaction preparation has an actual SDK proof composing exact skill
 upload, immutable hosted pin, remote MCP, an uploaded file and an unavailable
 function action. A file mount does not establish a repository checkout; canonical
@@ -822,3 +823,16 @@ actual-SDK offline crash and request-byte proofs. They preserve unknown delivery
 and required-action occupancy; C04/C11 remain typed PENDING in the shared matrix.
 See [driver conformance hooks](mux/drivers/gemini/CONFORMANCE-HOOKS.md). These hooks
 are not installed by the host factory and perform no live key discovery.
+OpenAI also provides the explicit
+`mux.drivers.openai.conformance_sdk.offline_sdk_adapter()` component. Its fixed
+SDK MockTransport executes the unchanged C06/C07/C09 oracles and tests C08
+conditional tool/file-mount refusal without update writes. Cancellation EOF
+retains occupancy, synthetic usage corrections survive memory-outbox restart,
+and binary artifacts/shared-vault retention use independent HTTP effects.
+This component changes neither the standard registry nor live certification;
+see [its scope and mutation controls](mux/drivers/openai/CONFORMANCE-SDK.md).
+
+OpenAI host tests use the shared isolated SDK factory for direct clients and
+inject it into offline C04/component and F1 replay factories. Standalone mux
+retains a guarded default without importing host testing; injected clients
+refuse ambient provider settings again when the SDK copies them.

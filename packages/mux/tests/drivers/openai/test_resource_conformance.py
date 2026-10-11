@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.conformance.fixtures import FIXTURES
 from mux.conformance.runner import ConformanceFailure
 from mux.contracts.ids import ResourceRef, Scope
@@ -16,7 +17,6 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
-from openai import AsyncOpenAI
 
 
 class Script(OpenAIScriptedTransport):
@@ -28,10 +28,10 @@ class Script(OpenAIScriptedTransport):
 @pytest.fixture
 async def ports() -> AsyncIterator[tuple[OpenAIDriver, Script]]:
     script = Script()
-    sdk = AsyncOpenAI(
+    sdk = build_async_openai(
+        transport=httpx.MockTransport(script.handle),
         api_key="offline-fixture",
         base_url="https://openai.invalid/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(script.handle)),
     )
     driver = OpenAIDriver(
         SDKTransport(sdk),

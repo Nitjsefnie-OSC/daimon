@@ -28,6 +28,7 @@ from mux.contracts.resources import ProviderBinding, SessionSpec, SkillUpload
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import Context
 from mux.drivers.openai.conformance_state import OpenAIConformanceEvents
+from mux.drivers.openai.offline_sdk import SDKFactory, build_offline_sdk, refuse_inherited_settings
 from mux.drivers.openai.transport import Object, SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
@@ -60,7 +61,8 @@ PENDING: Mapping[str, PendingReason] = MappingProxyType(
         ),
         "C11": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
-            "deployed repository/MCP bindings and separate display titles are unavailable",
+            "repository WorkspaceSource and separate skill display titles are unsupported; "
+            "the canonical fixture lacks a valid SKILL.md bundle",
         ),
         "C12": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
@@ -345,6 +347,7 @@ class OpenAIScriptedTransport:
         return httpx.Response(404, json={"error": {"message": "fixture path not seeded"}})
 
     async def arrange(self, fixture_id: str) -> Scenario:
+        refuse_inherited_settings()
         if fixture_id not in SCRIPTED_FIXTURES:
             raise ValueError("fixture is not scripted by this core adapter")
         self.fixture = fixture_id
@@ -448,12 +451,13 @@ class OpenAIScriptedTransport:
         return self.store
 
 
-def factory() -> Adapter:
+def factory(*, sdk_factory: SDKFactory = build_offline_sdk) -> Adapter:
+    refuse_inherited_settings()
     script = OpenAIScriptedTransport()
-    sdk = AsyncOpenAI(
+    sdk = sdk_factory(
         api_key="offline-fixture",
         base_url="https://openai.invalid/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(script.handle)),
+        transport=httpx.MockTransport(script.handle),
     )
     driver = OpenAIDriver(
         SDKTransport(sdk),
@@ -472,11 +476,12 @@ def factory() -> Adapter:
 class OpenAIOfflineFactory:
     """Fresh probes, with explicit SDK/stream cleanup for an offline run."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, sdk_factory: SDKFactory = build_offline_sdk) -> None:
+        self._sdk_factory = sdk_factory
         self._scripts: list[OpenAIScriptedTransport] = []
 
     def __call__(self) -> Adapter:
-        adapter = factory()
+        adapter = factory(sdk_factory=self._sdk_factory)
         if not isinstance(adapter.transport, OpenAIScriptedTransport):
             raise TypeError("invalid offline transport")
         self._scripts.append(adapter.transport)
@@ -496,7 +501,9 @@ class OpenAIOfflineFactory:
         self._scripts.clear()
 
 
-def register(registry: Registry) -> OpenAIOfflineFactory:
-    adapters = OpenAIOfflineFactory()
+def register(
+    registry: Registry, *, sdk_factory: SDKFactory = build_offline_sdk
+) -> OpenAIOfflineFactory:
+    adapters = OpenAIOfflineFactory(sdk_factory=sdk_factory)
     registry.register("openai.offline", adapters)
     return adapters

@@ -4,6 +4,7 @@ import json
 
 import httpx
 import pytest
+from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.ids import ModelRef, Revision, Scope, SkillRef
@@ -14,7 +15,6 @@ from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ContinuityLost
-from openai import AsyncOpenAI
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="human", authorization_id="grant"
@@ -110,10 +110,10 @@ class Wire:
 @pytest.mark.asyncio
 async def test_inline_skill_to_agent_to_hosted_session_pins_survive_two_turns() -> None:
     wire = Wire()
-    sdk = AsyncOpenAI(
+    sdk = build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
         api_key="offline-fixture",
         base_url="https://openai.invalid/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
     )
     driver = OpenAIDriver(
         SDKTransport(sdk),
