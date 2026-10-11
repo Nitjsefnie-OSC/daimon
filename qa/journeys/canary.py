@@ -11,6 +11,7 @@ import json
 import math
 import os
 import time
+from decimal import Decimal
 from pathlib import Path
 
 from qa.journeys.profile import DEFAULT_ROOT
@@ -19,10 +20,10 @@ from qa.live.cost import Ledger, estimate
 from qa.live.discord import DiscordBackend
 from qa.live.locking import live_run_lock
 from qa.live.models import BackendName, ModelPolicy
-from qa.live.report import report
+from qa.live.report import Result, report
 from qa.live.runner import Executor
-from qa.live.schema import Scenario, load_catalog
-from qa.live.types import Message, Usage
+from qa.live.schema import Scenario, Step, load_catalog
+from qa.live.types import Message, Pending, Usage
 
 MODEL = "claude-haiku-5-5"
 CATALOG = Path(__file__).parent / "canary_catalog"
@@ -51,6 +52,41 @@ class NoJudge:
 
     def evaluate(self, rubric: str, answer: str) -> tuple[bool, str]:
         raise RuntimeError("This canary uses deterministic assertions only")
+
+
+def next_turn_fits(usages: list[Usage], next_estimate: float, budget: float) -> bool:
+    """Unknown prior spend cannot fund another turn; no estimate is a refund."""
+    if any(
+        usage.source != "turn_outcomes"
+        or usage.usd is None
+        or not math.isfinite(usage.usd)
+        or usage.usd < 0
+        for usage in usages
+    ):
+        return False
+    charged = sum((Decimal(str(usage.usd)) for usage in usages), Decimal(0))
+    return charged + Decimal(str(next_estimate)) <= Decimal(str(budget))
+
+
+class CanaryExecutor(Executor):
+    budget_usd: float = 0.0
+
+    def step(self, step: Step, result: Result, channel: str) -> None:
+        if step.do in {"mention", "thread_reply"}:
+            if len(result.turns) >= 2:
+                raise Pending("Two-turn canary limit reached")
+            usages = [self.backend.usage(turn) for turn in result.turns]
+            if not next_turn_fits(usages, self.pricing.per_turn_usd, self.budget_usd):
+                raise Pending("Canary allowance insufficient or earlier usage unknown")
+            if any(
+                not usage.models
+                or any(
+                    not self.models.accepts("anthropic", model, "staging") for model in usage.models
+                )
+                for usage in usages
+            ):
+                raise Pending("Earlier turn lacks Haiku 5.5 model evidence")
+        super().step(step, result, channel)
 
 
 def scenario() -> Scenario:
@@ -124,7 +160,7 @@ def main() -> int:
     config.models = Haiku55Only()
     started = time.monotonic()
     with live_run_lock(Path(config.live_lock)):
-        executor = Executor(
+        executor = CanaryExecutor(
             CanaryBackend(config, "staging"),
             NoJudge(),
             Ledger(args.ledger),
@@ -132,6 +168,7 @@ def main() -> int:
             "staging",
             models=config.models,
         )
+        executor.budget_usd = args.budget_usd
         result = executor.run(scenario())
         result.notes.extend(
             [

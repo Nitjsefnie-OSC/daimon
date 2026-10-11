@@ -68,6 +68,8 @@ uv run python -m qa.journeys.canary --budget-usd 0.25 \
 
 This invokes one scenario once, with no automatic repeat or external alerts.
 It deletes only its own current-run channels and does not sweep older runs.
+Before the second turn, it requires the first turn's database usage receipt and
+enough remaining allowance for the next estimated turn. Unknown usage stops it.
 Token/runtime allocations are estimates, not provider-enforced billing caps;
 unknown usage retains the existing ledger's conservative reservation.
 The wrapper adds no new lock or reservation protocol.

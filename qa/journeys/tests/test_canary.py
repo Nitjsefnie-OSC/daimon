@@ -1,9 +1,22 @@
 import math
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
-from qa.journeys.canary import Haiku55Only, scenario, validate
+from qa.journeys.canary import (
+    CanaryExecutor,
+    Haiku55Only,
+    NoJudge,
+    next_turn_fits,
+    scenario,
+    validate,
+)
 from qa.live.config import Config, Pricing
+from qa.live.cost import Ledger
+from qa.live.report import Result
+from qa.live.schema import Step
+from qa.live.types import Pending, Turn, Usage
 
 
 def config():
@@ -48,3 +61,32 @@ def test_missing_probes_refused():
     value.staging.model_probe = []
     with pytest.raises(ValueError):
         validate(value, 0.25)
+
+
+def test_previous_spend_or_uncertain_usage_stops_next_turn():
+    assert next_turn_fits([], 0.1, 0.25)
+    assert next_turn_fits([Usage(usd=0.15, source="turn_outcomes")], 0.1, 0.25)
+    assert not next_turn_fits([Usage(usd=0.16, source="turn_outcomes")], 0.1, 0.25)
+    assert not next_turn_fits([Usage(usd=None, source="turn_outcomes")], 0.1, 0.25)
+    assert not next_turn_fits([Usage(usd=0.01, source="footer")], 0.1, 0.25)
+
+
+@pytest.mark.parametrize("cost", [None, 0.16])
+def test_executor_refuses_second_send_before_budget_is_exceeded(tmp_path, cost):
+    def unexpected_send(*args, **kwargs):
+        pytest.fail("second paid trigger escaped the allowance check")
+
+    backend = SimpleNamespace(
+        fallback_watch_s=180,
+        usage=lambda turn: Usage(usd=cost, source="turn_outcomes", models=["claude-haiku-5-5"]),
+        verify_model=lambda channel: None,
+        send=unexpected_send,
+    )
+    executor = CanaryExecutor(
+        backend, NoJudge(), Ledger(tmp_path / "ledger.jsonl"), config().pricing, "staging"
+    )
+    executor.budget_usd = 0.25
+    result = Result("test", "QA-JOURNEY-CONTEXT", "staging")
+    result.turns.append(Turn(1, "message", "channel", datetime.now(UTC), thread_id="thread"))
+    with pytest.raises(Pending, match="allowance"):
+        executor.step(Step(do="thread_reply", text="next", mention=True), result, "channel")
