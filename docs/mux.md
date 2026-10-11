@@ -705,8 +705,10 @@ backend selection, wake fencing and outcome persistence remain typed adapter
 dependencies until their genuine scenarios and hooks are connected.
 
 Gemini resource ports emulate a scoped skill catalogue and host artifact uploads.
-Skill bundles require a root `SKILL.md`, canonical relative paths and UTF-8
-contents, with at most 256 files and 2 MiB total. Agents use explicit immutable
+Skill bundles require a UTF-8 root `SKILL.md`, canonical relative paths and at
+most 256 files. Inline text mounts obey 1 MiB per file and 2 MiB combined;
+an explicitly injected full-byte GCS publisher supports binary assets and
+bundles up to the driver's 64 MiB bound. Agents use explicit immutable
 version pins; publishing changes future pins only. UTF-8 uploaded files mount
 as inline environment sources. Binary uploads are downloadable from host storage,
 but binary inline mounts are refused. Conflicting source targets are rejected.
@@ -1421,3 +1423,17 @@ Configured OpenAI runtimes refuse `OPENAI_CUSTOM_HEADERS` before constructing
 a client, including changes introduced after runtime preparation. This prevents
 ambient header injection from replacing the selected channel key or project;
 the refusal never includes header contents.
+Gemini can compile the complete eleven-skill default through an explicitly
+injected full-byte GCS bundle publisher. Its immutable receipts bind ownership,
+version and the complete file hash manifest, survive driver restart, and mount
+directories at `.agents/skills/<skill-id>`. Existing text-only inline mounts
+remain the default. Missing authorized publication is a typed deployment
+dependency; offline compiler proofs do not promote live F1/QA parity. The host
+supplies GCS access/retention and authenticated MCP separately. See the Gemini
+`packages/mux/mux/drivers/gemini/DEFAULT-CAPABILITY.md`.
+
+Gemini accepts a neutral MCP toolset selector only when it names a declared
+server; the server’s auth and policy checks remain mandatory. The F2 offline
+proof uses all original default skill bytes, one mapped code-execution tool,
+and two read-only MCP calls served by a disposable loopback host. Model/GCS
+execution stays replayed and the uninjected default adapter remains PENDING.

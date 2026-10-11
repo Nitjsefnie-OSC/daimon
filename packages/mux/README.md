@@ -165,7 +165,7 @@ continuity raises `ContinuityLost` instead of provisioning a fresh workspace.
 The scripted transport and memory storage are offline test tools, not a
 production persistence implementation or a live certification.
 
-Gemini skills are host-stored, immutable text bundle versions, deployed as inline
+Gemini skills are host-stored, immutable bundle versions; text deploys as inline
 `.agents/skills/<id>/` files when an interaction first creates its workspace.
 Existing pins do not follow later publications. Uploaded artifact bytes remain
 in the injected host storage; UTF-8 uploads can seed inline workspace files.
@@ -365,15 +365,15 @@ scripted offline evidence with fresh provisioning on replay; it makes no live,
 model-quality, tool-argument or atomic agent revision-pin claim. See the OpenAI
 driver README for the explicit mapping and supported boundaries.
 Gemini's supplementary F1 default-capability adapter is replay-only and returns
-typed PENDING before provisioning while complete binary skill deployment and
-authenticated MCP/session seams are unavailable. Ten complete text skill bundles
-are supported; that subset cannot certify the full authored default. See
+typed PENDING before provisioning until an authorized GCS bundle publisher and
+authenticated MCP/session adapters are supplied. All eleven full bundles have
+offline GCS compilation evidence; that does not certify a live default. See
 `mux/drivers/gemini/DEFAULT-CAPABILITY.md` for the explicit adapter entry.
 
 Gemini F1 maps bash, read, edit, grep, glob and write through its native
 `code_execution` tool. Native scripted records exercise each route in normalized
-replay; missing calls fail. The complete default remains typed PENDING for binary
-skill deployment and authenticated MCP/session adapters.
+replay; missing calls fail. The complete default remains typed PENDING for authorized
+skill publication and authenticated MCP/session adapters.
 
 The Gemini live smoke pins `gemini-3.8-flash` and advances to the two reviewed
 Flash fallbacks only after a definite create HTTP 503. Separate reservations,
@@ -678,3 +678,22 @@ digest. Credential environment references are revealed only after preparation's
 policy recheck; SDK construction remains private to the OpenAI driver. Default
 channels do not inspect the manifest or provider credentials. Durable host
 journal/usage adapters are used; unknown accounting stays pending.
+Gemini full skill bundles can explicitly use `skill_bundle_publisher` on
+`GeminiManagedAgents`. Its `SkillBundlePublisher` receives every original byte
+and returns a tenant/account/version-bound `GCSBundleDeployment` with the exact
+file digest manifest. Persisted receipts mount immutable directories at the
+original skill paths, including binary fonts/images, and retain old version
+pins after publication. The host owns authorized GCS publication/access and
+retention; no publisher or credentials are selected implicitly. Without that
+adapter, binary/oversize bundles refuse `skill_bundle_gcs_deployment`; normal
+text bundles retain inline mounts. See
+[the capability notes](mux/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
+offline evidence. A scripted publisher does not certify a live full default.
+
+The Gemini F2 offline proof retains the full default skill bundle and maps the
+logical toolset to one native code-execution tool plus its declared authenticated
+MCP server. N2’s loopback host serves both read-only tools; wrong/revoked bearers
+fail. Explicit deployment/auth adapters are required; no live/CAS claim is made.
+The full-byte bundle and F2 SDK proofs use the shared isolated test factory with
+explicit fixture keys and owned sync/async transports; ambient provider settings
+refuse before construction. Product client construction is unchanged.

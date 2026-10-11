@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Isolate Gemini full-byte bundle and F2 replay SDK clients with explicit fixture authentication and owned sync/async transports; refuse ambient provider settings before construction.
+
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.
 - Add an explicitly imported Discord C01 conformance probe over the existing per-thread mention queue and caller batching, with owner-controlled root barriers and raw platform evidence.
@@ -30,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add neutral output upload edges for Discord, Slack and Teams, preserving actual bytes and existing native delivery paths; keep provider event selection and host wiring as a separate slice.
 - Validate every Gemini MCP destination, including anonymous and unmarked native intent, before persistence or I/O; reject credential-bearing URLs and invalid server names, and prevent moving a scoped auth marker onto an adjacent function.
 - Re-admit Gemini session intent against owned agent/environment resources on every send; removed inline artifacts/skills and pre-explicit-tools saved requests require preparation again in this opt-in backend.
+- Map declared Gemini MCP toolset selectors to their native server once, with
+  an offline full-default skills/builtins/authenticated loopback MCP proof and
+  wrong/revoked bearer refusals; unconfigured adapters remain typed PENDING.
 
 - Add opt-in scoped single-server HTTPS MCP authentication to the Gemini driver, with closed native intent/policies, fresh SDK-dispatch resolution, secret-free persistence and DEBUG logs, and fail-closed replay/continuation admission.
 - Refuse ambient OpenAI custom headers before configured client construction so process headers cannot replace channel credentials or project routing.
@@ -46,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Retain scoped OpenAI/Gemini agent revisions, checked skill bundles and upload ownership in an additive host catalog.
 - Construct OpenAI turn runtimes for explicitly configured channels from scoped operator deployment plans, with deferred credential access and durable journal/usage state.
+- Support complete Gemini skill bundles through an explicitly injected, scoped GCS publisher with immutable version receipts; retain inline text mounts and refuse missing deployment dependencies explicitly.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.
