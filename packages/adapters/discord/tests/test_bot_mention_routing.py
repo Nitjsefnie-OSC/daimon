@@ -16,6 +16,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import daimon.adapters.discord.bot as discord_bot_module
 import discord
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -247,12 +248,13 @@ class TestNonReadySelfHealGate:
         self,
         mock_resolve_config: AsyncMock,
         mock_reconcile: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
+        db_clean: None,
+        db_nullpool_engine: AsyncEngine,
     ) -> None:
         from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
 
+        db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
         mock_reconcile.return_value = ApplyReport()
         guild_id = "700000004"
         result = await provision_tenant(
@@ -267,10 +269,60 @@ class TestNonReadySelfHealGate:
         bot._post_to_guild = AsyncMock()  # type: ignore[method-assign]
         message = _make_channel_message(guild_id=int(guild_id))
 
-        await bot.on_message(message)
-        await _drain_bg_tasks(bot)
+        status_update_open = asyncio.Event()
+        release_status_update = asyncio.Event()
+        background_connection_ids: set[int] = set()
+        foreground_connection_ids: set[int] = set()
+        original_execute = AsyncSession.execute
+        original_finish_messages = discord_bot_module.finish_messages
+
+        async def hold_background_status_commit(
+            session: AsyncSession, statement: object, *args: object, **kwargs: object
+        ) -> object:
+            result_ = await original_execute(session, statement, *args, **kwargs)  # type: ignore[arg-type]
+            if "UPDATE tenants SET provision_status" in str(statement):
+                connection = await session.connection()
+                background_connection_ids.add(id(connection.sync_connection))
+                status_update_open.set()
+                await release_status_update.wait()
+            return result_
+
+        async def wait_for_background_status(_text: str) -> None:
+            await asyncio.wait_for(status_update_open.wait(), timeout=2)
+
+        async def finish_messages_during_status_update(
+            session: AsyncSession, *, tenant_id: object, message_ids: object
+        ) -> None:
+            await asyncio.wait_for(status_update_open.wait(), timeout=2)
+            connection = await session.connection()
+            foreground_connection_ids.add(id(connection.sync_connection))
+            await original_finish_messages(
+                session,
+                tenant_id=tenant_id,  # type: ignore[arg-type]
+                message_ids=message_ids,  # type: ignore[arg-type]
+            )
+            release_status_update.set()
+
+        message.channel.send.side_effect = wait_for_background_status
+        with (
+            patch.object(AsyncSession, "execute", hold_background_status_commit),
+            patch.object(
+                discord_bot_module, "finish_messages", finish_messages_during_status_update
+            ),
+        ):
+            try:
+                await asyncio.wait_for(bot.on_message(message), timeout=5)
+                await asyncio.wait_for(_drain_bg_tasks(bot), timeout=5)
+            finally:
+                release_status_update.set()
+                await asyncio.wait_for(_drain_bg_tasks(bot), timeout=5)
 
         mock_resolve_config.assert_not_called()
+        assert len(background_connection_ids) == 1
+        assert len(foreground_connection_ids) == 1
+        assert background_connection_ids.isdisjoint(foreground_connection_ids), (
+            "background provisioning and foreground admission must use separate connections"
+        )
         mock_reconcile.assert_awaited(), "failed guild must trigger a background re-seed"  # pyright: ignore[reportUnusedExpression]
         message.channel.send.assert_awaited_once()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
         sent_text: str = message.channel.send.await_args[0][0]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
