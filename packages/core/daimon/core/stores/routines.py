@@ -38,6 +38,12 @@ log = structlog.get_logger(__name__)
 LAST_RESULT_TAIL_MAX = 1000
 """Maximum length of the stored preview; delivery keeps the complete reply."""
 
+FAILURE_NOTICE = "failure_notice"
+"""`delivery_note` of a pending post that tells the destination a run failed.
+
+The poster renders such a payload as a failure notice instead of a result.
+Settling replaces the note as for any post."""
+
 
 async def create_routine(
     session: AsyncSession,
@@ -471,6 +477,45 @@ async def record_result(
         )
     await session.execute(update(Routine).where(Routine.id == routine_id).values(**values))
     await session.flush()
+
+
+async def queue_failure_notice(
+    session: AsyncSession, routine_id: _uuid.UUID, *, notice: str
+) -> bool:
+    """Queue `notice` for the destination if this failure starts a failing streak.
+
+    Call it before `record_result` writes the failure, in the same transaction:
+    the notice is queued only while `last_error` is still null, so a routine
+    that keeps failing posts once and stays quiet until a run succeeds. It is
+    also never queued for a routine without a destination, and never replaces
+    a post already waiting or in flight, so an undelivered result still wins.
+    Returns whether a notice was queued.
+    """
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(Routine)
+            .where(
+                Routine.id == routine_id,
+                Routine.destination_kind.is_not(None),
+                Routine.last_error.is_(None),
+                or_(
+                    Routine.delivery_status.is_(None),
+                    Routine.delivery_status.not_in(("pending", "claimed")),
+                ),
+            )
+            .values(
+                delivery_status="pending",
+                delivery_note=FAILURE_NOTICE,
+                delivery_payload=notice,
+                delivery_lease_owner=None,
+                delivery_lease_expires_at=None,
+                delivered_at=None,
+            )
+        ),
+    )
+    await session.flush()
+    return result.rowcount == 1
 
 
 def _check_destination(kind: str | None, destination_id: str | None) -> None:
