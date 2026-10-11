@@ -392,3 +392,10 @@ or sealing is quarantined outside the accepted inventory. Its durable orphan
 receipt triggers scoped single-attempt retirement (session interrupt/archive),
 with no new session or second settlement. This bounded late cleanup is explicitly
 outside the expired run deadline and retains the hold for reconciliation.
+
+Live usage identities are keyed by the accepted session plus native request ID.
+Cross-session native ID collisions are quarantined and exported with both session
+provenances for reconciliation. Financial proof projections keep one original
+maximum-cost witness per collided native ID and independent maximum-token witnesses;
+they cannot count a collision twice, fabricate a native ID, or erase a verified
+floor or overrun latch. Actual usage and runtime remain incomplete and held.

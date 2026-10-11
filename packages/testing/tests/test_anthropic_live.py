@@ -275,7 +275,7 @@ def test_missing_counter_is_unknown_and_not_below_threshold(tmp_path, monkeypatc
     event["model_usage"]["input_tokens"] = None
     with pytest.raises(live.LiveStopped, match="unknown"):
         monitor.observe(event)
-    assert monitor.observations["partial"]["model_usage"]["input_tokens"] is None
+    assert monitor.observations[("monitor", "partial")]["model_usage"]["input_tokens"] is None
 
 
 @pytest.mark.parametrize(
@@ -986,7 +986,7 @@ async def test_sdk_decoded_fragmentation_never_bypasses_the_signed_stop(case):
         async for frame in AsyncStream.raw_events(downstream):
             consumed.append(frame)
     assert monitor.stop.is_set() and monitor.cost >= Decimal(".50")
-    assert list(monitor.observations) == [event["id"]]
+    assert list(monitor.observations) == [("accepted", event["id"])]
     assert all(frame.event != "span.model_request_end" for frame in consumed)
 
 
@@ -1166,3 +1166,101 @@ async def test_conflicting_more_expensive_walk_cannot_erase_stream_input_limit_l
     assert row.admission_blocked is True and len(receipts(guard)) == 2
     assert row.actual_evidence.requests[0].tokens.input_tokens == 190000
     assert row.overrun_evidence.requests[0].tokens.input_tokens == 200001
+
+
+@pytest.mark.parametrize("collision_source", ["walk", "stream", "cache_walk"])
+async def test_cross_session_native_id_collision_quarantines_provenance_and_keeps_floor_and_latch(
+    tmp_path, monkeypatch, collision_source
+):
+    from daimon.testing.ma import sse_response
+    from mux.conformance.usage_settlement import AnthropicSessionSpend
+    from mux.drivers.anthropic.usage import observation_from_event
+
+    args, guard, _ = admission(tmp_path, monkeypatch)
+    native = Native()
+    contexts = []
+    id_ = "same-native-request"
+
+    async def wire(request):
+        if request.url.path.endswith("/events/stream"):
+            return sse_response([usage(id_, 1000000, 1)])
+        return await native.handle(request)
+
+    async def invoke(context):
+        contexts.append(context)
+        prior = await create(context)
+        if collision_source == "stream":
+            context.transport.monitor.observe(usage(id_, 100, 1), prior.ref.id)
+        elif collision_source == "cache_walk":
+            context.transport.monitor.observe(usage(id_, 200001, 1), prior.ref.id)
+        await context.driver.session_admin.archive(SCOPE, prior.ref, key="prior-archive")
+        session = await create(context)
+        if collision_source == "cache_walk":
+            event = usage(id_, 0, 1)
+            event["model_usage"]["cache_creation_input_tokens"] = 190000
+            event["model_usage"]["cache_creation"] = {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 190000,
+            }
+            walk_ref = session.ref
+        else:
+            stream = await context.driver.events.open_stream(SCOPE, session.ref)
+            with pytest.raises(live.LiveStopped):
+                async for _ in stream:
+                    pass
+            event, walk_ref = usage(id_, 100, 1), prior.ref
+        context.evidence.append(
+            AnthropicSessionSpend(
+                walk_ref,
+                (
+                    observation_from_event(
+                        event, walk_ref, observed_at=datetime.now(UTC), model_id=live.MODEL
+                    ),
+                ),
+                None,
+            )
+        )
+        variants = live.verified_usage_variants(context)
+        assert set(variants) == {(prior.ref.id, id_), (session.ref.id, id_)}
+        selected = live.merged_usage(context)
+        assert sum(len(item.observations) for item in selected) == 1
+        assert selected[0].session == session.ref
+        assert selected[0].observations[0].id == id_
+        assert selected[0].runtime is None and selected[0].usage_complete is False
+        # The shared global duplicate guard remains intact and conversion accepts
+        # our one-witness lower-bound projection without manufacturing a new ID.
+        live.actual_from_anthropic_sessions(
+            context.reservation, selected, pricing_basis="standard-global"
+        )
+        return {"status": "fail"}
+
+    await live.run_live(
+        args,
+        invoke,
+        secret_loader=lambda _: "offline-key",
+        transport_factory=lambda: httpx.MockTransport(wire),
+    )
+    row = guard.report()[0]
+    assert row.actual_usd is None and row.admission_blocked is True
+    assert len(receipts(guard)) == 2
+    assert row.held_usd >= (
+        Decimal(".35") if collision_source == "cache_walk" else Decimal(".5000025")
+    )
+    assert len(row.actual_evidence.requests) == 1
+    assert row.actual_evidence.requests[0].id == id_
+    if collision_source == "cache_walk":
+        assert row.actual_evidence.requests[0].tokens.input_tokens == 190000
+        assert row.overrun_evidence.requests[0].tokens.input_tokens == 200001
+    else:
+        assert row.actual_evidence.requests[0].tokens.input_tokens == 1000000
+    context = contexts[0]
+    exported = json.loads((args.output / "receipt.json").read_text())
+    assert exported["quarantined_native_request_ids"] == [id_]
+    assert exported["reconciliation_required"] is True
+    assert {tuple(item.values()) for item in exported["quarantined_request_provenance"]} == {
+        (session, id_) for session in context.transport.session_ids
+    }
+    if collision_source == "stream":
+        assert set(context.transport.monitor.observations) == {
+            (session, id_) for session in context.transport.session_ids
+        }

@@ -301,29 +301,31 @@ class UsageMonitor:
     session_price: SessionPrice
     threshold: Decimal
     started: float = field(default_factory=time.monotonic)
-    observations: dict[str, dict[str, JsonValue]] = field(
-        default_factory=dict[str, dict[str, JsonValue]]
+    observations: dict[tuple[str, str], dict[str, JsonValue]] = field(
+        default_factory=dict[tuple[str, str], dict[str, JsonValue]]
     )
     observed_thresholds: list[str] = field(default_factory=list[str])
     stop_reason: str | None = None
     cost: Decimal | None = None
     stop: asyncio.Event = field(default_factory=asyncio.Event)
-    event_sessions: dict[str, str] = field(default_factory=dict[str, str])
-    observed_times: dict[str, datetime] = field(default_factory=dict[str, datetime])
+    observed_times: dict[tuple[str, str], datetime] = field(
+        default_factory=dict[tuple[str, str], datetime]
+    )
+    quarantined_ids: set[str] = field(default_factory=set[str])
     verified_models: dict[str, str] = field(default_factory=dict[str, str])
     threads: dict[str, str] = field(default_factory=dict[str, str])
 
     def threshold_receipts(self) -> list[dict[str, JsonValue]]:
         facts: list[dict[str, JsonValue]] = []
-        for id_, raw in self.observations.items():
-            session = self.event_sessions[id_]
+        for identity, raw in self.observations.items():
+            session, id_ = identity
             try:
                 obs = observation_from_event(
                     raw,
                     ResourceRef(
                         provider="anthropic", account_scope_id="monitor", kind="session", id=session
                     ),
-                    observed_at=self.observed_times[id_],
+                    observed_at=self.observed_times[identity],
                     model_id=MODEL,
                 )
                 input_, output_ = obs.input_tokens, obs.output_tokens
@@ -334,7 +336,7 @@ class UsageMonitor:
                     "id": id_,
                     "session_id": session,
                     "served_model_verified": self.verified_models.get(session) == MODEL,
-                    "observed_at": self.observed_times[id_].isoformat(),
+                    "observed_at": self.observed_times[identity].isoformat(),
                     "inclusive_input_tokens": input_,
                     "output_tokens": output_,
                     "input_threshold_status": "not_observed"
@@ -370,15 +372,22 @@ class UsageMonitor:
             previous = self.threads.setdefault(session_id, thread)
             if previous != thread:
                 self.halt("unexpected second native thread")
+        collision = False
         if raw.get("type") == "span.model_request_end":
             id_ = raw.get("id")
-            if not isinstance(id_, str) or id_ in self.observations:
-                self.halt("duplicate or unidentified usage")
-            self.observations[id_] = dict(raw)
-            self.event_sessions[id_] = session_id
-            self.observed_times[id_] = datetime.now(UTC)
-        total = Decimal(0)
-        for event in self.observations.values():
+            if not isinstance(id_, str):
+                self.halt("unidentified usage")
+            identity = (session_id, id_)
+            if identity in self.observations:
+                self.quarantined_ids.add(id_)
+                self.halt("duplicate usage quarantined")
+            collision = any(request == id_ for _, request in self.observations)
+            if collision:
+                self.quarantined_ids.add(id_)
+            self.observations[identity] = dict(raw)
+            self.observed_times[identity] = datetime.now(UTC)
+        costs: dict[str, Decimal] = {}
+        for (_, request_id), event in self.observations.items():
             ref = ResourceRef(
                 provider="anthropic", account_scope_id="monitor", kind="session", id="monitor"
             )
@@ -404,12 +413,15 @@ class UsageMonitor:
             amount = self.price.actual(tokens, datetime.now(UTC))
             if amount is None:
                 self.halt("usage cost is unknown")
-            total += amount
+            costs[request_id] = max(costs.get(request_id, Decimal(0)), amount)
+        total = sum(costs.values(), Decimal(0))
         # Wall time is a conservative monitoring estimate, never billed-runtime evidence.
         total += self.session_price.cost(Decimal(str(time.monotonic() - self.started)))
         self.cost = total
         if total >= self.threshold:
             self.halt("streamed cost reached the stop threshold")
+        if collision:
+            self.halt("cross-session native usage identity quarantined")
 
 
 class MonitoredStream(httpx.AsyncByteStream):
@@ -687,28 +699,40 @@ def verified_usage_variants(context: LiveContext) -> dict[tuple[str, str], list[
         for obs in evidence.observations:
             if obs.session == evidence.session:
                 retain(obs)
-    for id_, raw in monitor.observations.items():
-        session_id = monitor.event_sessions[id_]
+    for identity, raw in monitor.observations.items():
+        session_id, _ = identity
         try:
             retain(
                 observation_from_event(
                     raw,
                     context.ref(session_id, "session"),
-                    observed_at=monitor.observed_times[id_],
+                    observed_at=monitor.observed_times[identity],
                     model_id=MODEL,
                 )
             )
         except (ValueError, KeyError, TypeError):
             continue
+    owners: dict[str, set[str]] = {}
+    for session, request in variants:
+        owners.setdefault(request, set()).add(session)
+    monitor.quarantined_ids.update(
+        request for request, sessions in owners.items() if len(sessions) > 1
+    )
     return variants
 
 
 def selected_usage(
     context: LiveContext, key: Callable[[UsageObservation], Decimal | int]
 ) -> tuple[AnthropicSessionSpend, ...]:
+    # Quarantined collisions remain separate evidence. A lower-bound projection
+    # chooses ONE original witness per native ID; it never asserts disjoint billing.
+    by_request: dict[str, list[UsageObservation]] = {}
+    for (_, request), variants in verified_usage_variants(context).items():
+        by_request.setdefault(request, []).extend(variants)
     by_session: dict[str, list[UsageObservation]] = {}
-    for (session, _), variants in verified_usage_variants(context).items():
-        by_session.setdefault(session, []).append(max(variants, key=key))
+    for variants in by_request.values():
+        witness = max(variants, key=key)
+        by_session.setdefault(witness.session.id, []).append(witness)
     return tuple(
         AnthropicSessionSpend(
             context.ref(id_, "session"), tuple(observations), runtime=None, usage_complete=False
@@ -1033,6 +1057,18 @@ async def run_live(
                         )
                         > 1
                     ]
+                    facts["quarantined_native_request_ids"] = sorted(
+                        context.transport.monitor.quarantined_ids
+                    )
+                    facts["quarantined_request_provenance"] = [
+                        {"session_id": session, "native_request_id": request}
+                        for session, request in verified_usage_variants(context)
+                        if request in context.transport.monitor.quarantined_ids
+                    ]
+                    facts["reconciliation_required"] = bool(
+                        facts["reconciliation_required"]
+                        or context.transport.monitor.quarantined_ids
+                    )
                     facts["archived_sessions"] = sorted(context.transport.archived)
                     facts["observed_token_threshold_crossings"] = (
                         context.transport.monitor.observed_thresholds
