@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @pytest.mark.fresh_schema
 async def test_requested_repo_migration_round_trips(db_session: AsyncSession) -> None:
-    path = Path(__file__).parents[1] / "alembic/versions/0081_github_requested_repo.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0085_github_requested_repo.py"
     spec = importlib.util.spec_from_file_location("migration_github_connect_requested_repo", path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)
