@@ -46,6 +46,9 @@ class FakeDriver:
         if "/reactions/" in path and method == "GET":
             return [{"id": "1530628070405308456"}]
         if "/messages/" in path and method == "GET":
+            for message in self.current:
+                if path.endswith("/" + str(message.get("id"))):
+                    return message
             return self.trigger
         if path == "/channels/thread":
             return self.thread_metadata
@@ -690,16 +693,119 @@ def test_collect_records_distinct_running_edits_and_baseline_ids(
         "edited_timestamp": (started + timedelta(seconds=2)).isoformat(),
     }
     rows = iter([[working], [working], [second], [terminal]])
-    monkeypatch.setattr(driver, "turn_messages", lambda *args, **kwargs: next(rows, [terminal]))
+
+    def listed(*args: object, **kwargs: object) -> list[Message]:
+        driver.current = next(rows, [terminal])
+        return driver.current
+
+    monkeypatch.setattr(driver, "turn_messages", listed)
     turn = Turn(1, "123", "parent", started)
     backend.collect(turn, 0.1)
     assert turn.settled and turn.baseline_message_ids == ["old-card"]
-    assert len(turn.card_history) == 2
+    assert len(turn.card_history) == 3
     assert {e["edited_timestamp"] for e in turn.card_history} == {
         working["edited_timestamp"],
         second["edited_timestamp"],
     }
     assert all(e["phase"] == "running" for e in turn.card_history)
+    assert all(e["observed_at"] and e["message"] for e in turn.card_history)
+
+
+def test_running_card_samples_refresh_footer_and_keep_unchanged_samples(
+    backend: DiscordBackend, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend.owned.add("parent")
+    backend.threads.add("thread")
+    backend.thread_parents["thread"] = "parent"
+    turn = Turn(1, "123", "parent", utcnow(), thread_id="thread")
+    stale: Message = {"id": "card", "channel_id": "thread", "working": True}
+    refreshed: Message = {
+        **stale,
+        "embeds": [{"footer": {"text": "Working · 10s"}}],
+    }
+    monkeypatch.setattr(driver, "call", lambda *args, **kwargs: refreshed)
+    backend.sample_running_card(turn, stale)
+    backend.sample_running_card(turn, stale)
+    refreshed["embeds"] = [{"footer": {"text": "Working · 20s"}}]
+    backend.sample_running_card(turn, stale)
+    assert len(turn.card_history) == 3
+    assert all(e["edited_timestamp"] is None for e in turn.card_history)
+    assert turn.card_history[0]["message"] == {
+        **stale,
+        "embeds": [{"footer": {"text": "Working · 10s"}}],
+    }
+    assert turn.card_history[2]["message"] == refreshed
+
+
+def test_transient_card_readback_failure_is_unavailable_evidence_and_collection_settles(
+    backend: DiscordBackend, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend.owned.add("parent")
+    working: Message = {"id": "card", "channel_id": "parent", "working": True}
+    terminal: Message = {**working, "working": False, "content": "DONE"}
+    rows = iter([[working], [working], [terminal]])
+    failures = [1]
+    real_call = driver.call
+
+    def listed(*args: object, **kwargs: object) -> list[Message]:
+        driver.current = next(rows, [terminal])
+        return driver.current
+
+    def call(method: str, path: str, **kwargs: object) -> JsonValue:
+        if path == "/channels/parent/messages/card" and failures:
+            failures.pop()
+            raise SystemExit("HTTP 503 on GET " + path + ": unavailable")
+        return real_call(method, path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(driver, "turn_messages", listed)
+    monkeypatch.setattr(driver, "call", call)
+    turn = Turn(1, "123", "parent", utcnow())
+    backend.collect(turn, 0.1)
+    assert turn.settled
+    assert [("unavailable" in e, "message" in e) for e in turn.card_history] == [
+        (True, False),
+        (False, True),
+    ]
+    assert turn.card_history[0]["unavailable"] == "running card readback unavailable: SystemExit"
+    assert turn.card_history[0]["observed_at"] and turn.card_history[0]["poll_interval_s"]
+
+
+@pytest.mark.parametrize(
+    "readback",
+    [
+        {"id": "other", "channel_id": "parent", "working": True},
+        {"id": "card", "channel_id": "elsewhere", "working": True},
+    ],
+)
+def test_mismatched_card_readback_is_never_accepted_as_a_sample(
+    backend: DiscordBackend,
+    driver: FakeDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    readback: Message,
+) -> None:
+    backend.owned.add("parent")
+    monkeypatch.setattr(driver, "call", lambda *args, **kwargs: readback)
+    turn = Turn(1, "123", "parent", utcnow())
+    backend.sample_running_card(turn, {"id": "card", "channel_id": "parent", "working": True})
+    assert len(turn.card_history) == 1 and "message" not in turn.card_history[0]
+    assert "did not match" in str(turn.card_history[0]["unavailable"])
+
+
+def test_terminal_readback_race_is_excluded_and_unowned_card_refused(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    backend.owned.add("parent")
+    driver.current = [{"id": "card", "channel_id": "parent", "content": "SLEPT"}]
+    turn = Turn(1, "123", "parent", utcnow())
+    backend.sample_running_card(turn, {"id": "card", "channel_id": "parent", "working": True})
+    # The race is kept as the card's observed end, never as a payload or edit.
+    assert len(turn.card_history) == 1
+    race = turn.card_history[0]
+    assert race["ended"] is True and "message" not in race and race["listed_at"]
+    calls = len(driver.calls)
+    with pytest.raises(ValueError, match="outside a channel created by this run"):
+        backend.sample_running_card(turn, {"id": "card", "channel_id": "foreign", "working": True})
+    assert len(driver.calls) == calls and len(turn.card_history) == 1
 
 
 @pytest.mark.parametrize(
@@ -789,15 +895,21 @@ def test_unedited_working_card_converted_into_chunk_one_is_timed_from_its_edit(
         "timestamp": at(chunk2_s),
     }
     rows = iter([[working], [working], [chunk1, chunk2]])
-    monkeypatch.setattr(
-        driver, "turn_messages", lambda *args, **kwargs: next(rows, [chunk1, chunk2])
-    )
+
+    def listed(*args: object, **kwargs: object) -> list[Message]:
+        driver.current = next(rows, [chunk1, chunk2])
+        return driver.current
+
+    monkeypatch.setattr(driver, "turn_messages", listed)
     turn = Turn(1, "123", "parent", started)
     backend.collect(turn, 1)
     assert turn.settled
-    assert turn.card_history == [
-        {"message_id": "card", "edited_timestamp": None, "phase": "running"}
-    ]
+    # Both unedited working polls are sampled (per-poll sampling, #730).
+    assert len(turn.card_history) == 2
+    assert all(
+        e["message_id"] == "card" and e["phase"] == "running" and e["edited_timestamp"] is None
+        for e in turn.card_history
+    )
     gap = Assertion(kind="chunks_gap_max_s", turn=1, maximum=5)
     result = evaluate(gap, [turn], backend, FakeJudge())
     assert result.status == expected, result.reason
@@ -805,4 +917,145 @@ def test_unedited_working_card_converted_into_chunk_one_is_timed_from_its_edit(
         assert "0.237" in result.reason
     # An unedited running card is a working observation, not an edit.
     edits = Assertion(kind="card_edits_min", turn=1, minimum=1, during="running")
-    assert evaluate(edits, [turn], backend, FakeJudge()).status == "FAIL"
+    counted = evaluate(edits, [turn], backend, FakeJudge())
+    assert counted.status != "PASS"
+
+
+def latency_backend(driver: FakeDriver) -> DiscordBackend:
+    backend = DiscordBackend(
+        Config(
+            pricing=Pricing(
+                per_turn_usd=0.25, judge_input_per_million=1, judge_output_per_million=5
+            ),
+            staging=Target(enabled=True),
+            poll_interval_s=4,
+        ),
+        "staging",
+        driver=driver,
+    )
+    backend.owned.add("parent")
+    return backend
+
+
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_slow_first_read_keeps_the_known_running_start(
+    driver: FakeDriver, monkeypatch: pytest.MonkeyPatch, first_fails: bool
+) -> None:
+    """REVIEW-730-03a6bb7 P1: listed working at +0, direct read blocked until +30."""
+    from datetime import timedelta
+
+    import qa.live.discord as discord
+    from qa.live.evaluate import evaluate
+    from qa.live.tests.conftest import FakeBackend, FakeJudge
+
+    started = utcnow()
+    clock = [0.0]
+    backend = latency_backend(driver)
+    turn = Turn(1, "trigger", "parent", started, settled=True, done_s=50)
+    working: Message = {"id": "card", "channel_id": "parent", "working": True}
+    first = [True]
+
+    def read(*args: object, **kwargs: object) -> JsonValue:
+        if first:
+            first.pop()
+            clock[0] = 30.0
+            if first_fails:
+                raise SystemExit("offline simulated timeout")
+        footer = f"Working · {int(clock[0] // 10) * 10}s"
+        return {**working, "embeds": [{"footer": {"text": footer}}]}
+
+    monkeypatch.setattr(driver, "call", read)
+    monkeypatch.setattr(discord, "utcnow", lambda: started + timedelta(seconds=clock[0]))
+    backend.sample_running_card(turn, working)
+    for seconds in (34, 38, 42, 46):
+        clock[0] = seconds
+        backend.sample_running_card(turn, working)
+    first_entry = turn.card_history[0]
+    assert first_entry["listed_at"] == started.isoformat()
+    assert first_entry["observed_at"] == (started + timedelta(seconds=30)).isoformat()
+    turn.messages = [{"id": "card", "content": "SLEPT"}]
+    check = evaluate(
+        Assertion(kind="card_edits_min", turn=1, minimum=3, during="running"),
+        [turn],
+        FakeBackend(),
+        FakeJudge(),
+    )
+    assert check.status == "PENDING" and "capture gap" in check.reason, check.reason
+
+
+def test_later_read_in_same_poll_does_not_end_another_card(
+    driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-730-03a6bb7 P1: B's slow same-poll read must not end A's window."""
+    from datetime import timedelta
+
+    import qa.live.discord as discord
+    from qa.live.evaluate import evaluate
+    from qa.live.tests.conftest import FakeBackend, FakeJudge
+
+    started = utcnow()
+    clock = [0.0]
+    backend = latency_backend(driver)
+    turn = Turn(1, "trigger", "parent", started, settled=True, done_s=30)
+    cards: dict[str, Message] = {
+        i: {"id": i, "channel_id": "parent", "working": True} for i in ("a", "b")
+    }
+
+    def read(method: str, path: str, **kwargs: object) -> JsonValue:
+        identity = path.rsplit("/", 1)[1]
+        if identity == "a" and clock[0] == 26:
+            return {**cards[identity], "working": False, "content": "DONE"}
+        if identity == "b":
+            clock[0] += 6 if clock[0] == 12 else (0 if clock[0] == 26 else 1)
+            state = "initial" if clock[0] < 18 else "changed"
+        else:
+            state = f"Working · {int(clock[0] // 10) * 10}s"
+        return {**cards[identity], "embeds": [{"footer": {"text": state}}]}
+
+    monkeypatch.setattr(driver, "call", read)
+    monkeypatch.setattr(discord, "utcnow", lambda: started + timedelta(seconds=clock[0]))
+    for poll in (0, 4, 8, 12, 26):
+        clock[0] = poll
+        listed = started + timedelta(seconds=poll)
+        backend.sample_running_card(turn, cards["a"], listed_at=listed)
+        backend.sample_running_card(turn, cards["b"], listed_at=listed)
+    race = [e for e in turn.card_history if e.get("ended")]
+    assert [e["message_id"] for e in race] == ["a"]
+    turn.messages = [{"id": "a", "content": "DONE"}, {"id": "b", "content": "DONE"}]
+    check = evaluate(
+        Assertion(kind="card_edits_min", turn=1, minimum=3, during="running"),
+        [turn],
+        FakeBackend(),
+        FakeJudge(),
+    )
+    assert check.status == "PENDING" and "card a capture gap 14.0s" in check.reason, check.reason
+
+
+def test_collect_gives_every_card_in_a_poll_the_same_listing_time(
+    backend: DiscordBackend, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    backend.owned.add("parent")
+    cards: list[Message] = [{"id": i, "channel_id": "parent", "working": True} for i in ("a", "b")]
+    done: list[Message] = [{**c, "working": False} for c in cards]
+    rows = iter([cards])
+
+    def listed(*args: object, **kwargs: object) -> list[Message]:
+        driver.current = next(rows, done)
+        return driver.current
+
+    real_call = driver.call
+
+    def slow(method: str, path: str, **kwargs: object) -> JsonValue:
+        if path.endswith("/messages/a"):
+            time.sleep(0.05)  # a slow direct read inside the poll
+        return real_call(method, path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(driver, "turn_messages", listed)
+    monkeypatch.setattr(driver, "call", slow)
+    turn = Turn(1, "123", "parent", utcnow())
+    backend.collect(turn, 1)
+    a, b = turn.card_history
+    assert a["listed_at"] == b["listed_at"]
+    assert a["listed_at"] <= a["observed_at"] < b["observed_at"]

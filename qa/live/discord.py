@@ -409,6 +409,9 @@ class DiscordBackend:
                 after=turn.trigger_id,
                 daimon_id=self.target.daimon_id,
             )
+            # Poll membership: every card listed working in this poll shares
+            # this listing time, taken before any slow direct card read.
+            listed_at = utcnow()
             turn.baseline_message_ids = sorted(self.baseline_ids.get(turn.trigger_id, set()))
             raw = self.driver.messages(turn.channel_id, after=None, limit=100)
             if self.driver.exists(turn.trigger_id):
@@ -485,18 +488,11 @@ class DiscordBackend:
                     self.thread_parents[turn.thread_id] = parent
             turn.verdicts = [self.classify(m) for m in messages]
             for message, verdict in zip(messages, turn.verdicts, strict=True):
-                # Record positively classified working cards even before their
-                # first edit: a card later converted into an answer chunk needs
-                # proof it ran this turn. card_edits_min counts only entries
-                # carrying a real edit timestamp.
+                # Every positively classified working card is sampled on every
+                # poll, edited or not: a card later converted into an answer
+                # chunk needs proof it ran this turn (chunks_gap_max_s).
                 if verdict == "working":
-                    edit: Message = {
-                        "message_id": message.get("id"),
-                        "edited_timestamp": message.get("edited_timestamp"),
-                        "phase": "running",
-                    }
-                    if edit not in turn.card_history:
-                        turn.card_history.append(edit)
+                    self.sample_running_card(turn, message, listed_at=listed_at)
             if "working" in turn.verdicts and turn.progress_seen_s is None:
                 turn.progress_seen_s = elapsed
             terminal = bool(messages) and all(v in self.driver.TERMINAL for v in turn.verdicts)
@@ -517,6 +513,59 @@ class DiscordBackend:
             time.sleep(min(self.config.poll_interval_s, max(0, deadline - time.monotonic())))
         turn.ended_at = utcnow()
         raise WatchTimeout("watch timed out; collected last messages, no terminal proof")
+
+    def sample_running_card(
+        self, turn: Turn, message: Message, *, listed_at: datetime | None = None
+    ) -> None:
+        """Read the actual card each poll, including unchanged and never-edited cards.
+
+        `listed_at` is when the poll's listing showed the card working; it is
+        recorded separately from the snapshot time so a slow direct read can't
+        erase the known running start, and it identifies poll membership. A
+        failed or mismatched readback is kept as card-specific unavailable
+        evidence, and a card that raced to terminal before its direct read is
+        kept as its observed end; neither carries a payload or counts as an edit.
+        """
+        listed = listed_at or utcnow()
+        channel = str(message.get("channel_id") or turn.thread_id or turn.channel_id)
+        self._owned(channel)
+        identity = str(message.get("id") or "")
+        if not identity:
+            raise Pending("running card has no message identity")
+        unavailable: str | None = None
+        row: Message = {}
+        try:
+            row = obj(self.driver.call("GET", f"/channels/{channel}/messages/{identity}"))
+        except (Exception, SystemExit) as exc:
+            unavailable = "running card readback unavailable: " + type(exc).__name__
+        if unavailable is None and (
+            str(row.get("id")) != identity or str(row.get("channel_id")) != channel
+        ):
+            unavailable = "running card readback did not match the owned message"
+        observed = utcnow()
+        sample: Message = {
+            "message_id": identity,
+            "phase": "running",
+            "listed_at": listed.isoformat(),
+            "observed_at": observed.isoformat(),
+            "elapsed_s": (observed - turn.started_at).total_seconds(),
+            "poll_interval_s": self.config.poll_interval_s,
+        }
+        if unavailable is not None:
+            turn.card_history.append({**sample, "unavailable": unavailable})
+            return
+        # A card can become terminal between the list read and this direct read:
+        # it was running at `listed_at` and had ended by `observed_at`.
+        if self.classify(row) != "working":
+            turn.card_history.append({**sample, "ended": True})
+            return
+        turn.card_history.append(
+            {
+                **sample,
+                "edited_timestamp": row.get("edited_timestamp"),
+                "message": json.loads(json.dumps(row)),
+            }
+        )
 
     def current_messages(self, turn: Turn) -> list[Message]:
         """Refresh only recorded bot messages inside this run's owned channels."""
