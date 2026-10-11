@@ -6,9 +6,12 @@ call, the `thread_sessions` mapping write, and recorder binding.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
+import types
 import uuid
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -49,6 +52,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     mark_turn_active,
 )
+from daimon.core.turn import prepare as prepare_mod
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError
@@ -828,6 +832,7 @@ async def test_bind_session_fresh_bind_raises_ceiling_error_when_deadline_alread
 async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -838,14 +843,34 @@ async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
     create_started = asyncio.Event()
 
     async def _stalled_session_create(request: httpx.Request) -> httpx.Response:
-        # The ceiling must fire here, between statements. A deadline already
-        # in the past fires 1 ms in, often mid-statement, and cancelling a
-        # query wedges the one connection every session in this test shares,
-        # so the check below failed with "another operation is in progress".
         if request.method == "POST" and request.url.path == "/v1/sessions":
             create_started.set()
             await asyncio.Event().wait()
         return router.dispatch(request)
+
+    async def _ceiling_at_session_create(aw: Awaitable[PreparedTurn], timeout: float) -> object:
+        # Time out exactly when the bind is parked in the session create. A
+        # real timer can fire mid-statement, and cancelling a query wedges
+        # the one connection every session in this test shares, so the check
+        # below failed with "another operation is in progress".
+        del timeout
+        bind = asyncio.ensure_future(aw)
+        started = asyncio.ensure_future(create_started.wait())
+        await asyncio.wait({bind, started}, return_when=asyncio.FIRST_COMPLETED)
+        started.cancel()
+        if bind.done():
+            return bind.result()
+        bind.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await bind
+        raise TimeoutError
+
+    # Swap `wait_for` only as `prepare` sees it; asyncpg and httpx keep the real one.
+    monkeypatch.setattr(
+        prepare_mod,
+        "asyncio",
+        types.SimpleNamespace(**{**vars(asyncio), "wait_for": _ceiling_at_session_create}),
+    )
 
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
@@ -861,7 +886,7 @@ async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    deadline = datetime.now(UTC) + timedelta(seconds=1)
+    deadline = datetime.now(UTC) + timedelta(minutes=5)
 
     with pytest.raises(TurnError) as exc_info:
         await bind_session(
