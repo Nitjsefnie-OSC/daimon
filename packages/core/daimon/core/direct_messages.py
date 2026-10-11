@@ -10,12 +10,14 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import anthropic
+import structlog
 from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
 )
 from daimon.core.errors import UserFacingError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
+from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.permissions import dm_source_limited, limited_ids
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy
@@ -24,6 +26,7 @@ from daimon.core.stores.direct_messages import (
     claim_message,
     dm_enabled,
     finish_message,
+    holds_claim,
     quarantine_conversation,
     start_conversation,
 )
@@ -35,6 +38,7 @@ from daimon.core.stores.slack_turn_contexts import (
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.stores.thread_sessions import get_live_thread_session, mark_dead
 from daimon.core.turn.admission import Admission, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -45,6 +49,8 @@ from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from sqlalchemy.exc import SQLAlchemyError
+
+_log = structlog.get_logger(__name__)
 
 
 def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
@@ -286,6 +292,7 @@ async def reply_to_dm(
     if conversation is None:
         return None
     history: list[dict[str, str]] | None = None
+    bound = False
     try:
         await require_dm_enabled(deps, tenant_id=conversation.tenant_id)
         async with deps.sessionmaker() as session:
@@ -346,6 +353,7 @@ async def reply_to_dm(
             # The source was sealed after admission: same quarantine as above.
             await _quarantine(deps, conversation)
             raise
+        bound = True
         previous = [
             TranscriptTurn(role="user" if item["role"] == "user" else "agent", text=item["text"])
             for item in conversation.history
@@ -412,9 +420,57 @@ async def reply_to_dm(
         )
         history = [{"role": turn.role, "text": turn.text} for turn in turns]
         return answer
+    except asyncio.CancelledError:
+        if bound and deps.running_turns.shutting_down:
+            await _settle_shutdown_cancelled_dm(deps, conversation)
+        raise
     finally:
         async with deps.sessionmaker.begin() as session:
             await finish_message(session, conversation=conversation, history=history)
+
+
+#: A shutdown drain gives each cancelled turn's cleanup 5 s in total.
+_SHUTDOWN_INTERRUPT_TIMEOUT_S = 3.0
+
+
+async def _settle_shutdown_cancelled_dm(deps: TurnDeps, conversation: DirectMessageRow) -> None:
+    """Stop the MA turn a shutdown cancelled; a DM has no marker for recovery.
+
+    Nothing will read the session again, so it is interrupted, and marked dead
+    when the interrupt is unconfirmed, so the next DM starts a fresh session
+    instead of sending into a busy one. Only while this delivery still holds
+    the conversation's claim (`active_until`, as `finish_message` compares):
+    the claim serializes the scope, so the live mapping is this turn's own,
+    including a replacement made by dead-session recovery. Best effort: a
+    database failure is logged and the claim expires on its own.
+    """
+    try:
+        async with deps.sessionmaker.begin() as session:
+            if not await holds_claim(session, conversation=conversation):
+                return
+            mapping = await get_live_thread_session(
+                session,
+                tenant_id=conversation.tenant_id,
+                platform=conversation.platform,
+                thread_id=conversation.scope_id,
+                account_id=conversation.account_id,
+            )
+            if mapping is None:
+                return
+            interrupted = await interrupt_orphaned_session(
+                deps.anthropic,
+                session_id=mapping.ma_session_id,
+                timeout_s=_SHUTDOWN_INTERRUPT_TIMEOUT_S,
+            )
+            if not interrupted:
+                await mark_dead(session, id=mapping.id)
+            _log.info(
+                "dm.shutdown_turn_settled",
+                session_id=mapping.ma_session_id,
+                interrupted=interrupted,
+            )
+    except SQLAlchemyError as err:
+        _log.warning("dm.shutdown_settle_failed", error_type=type(err).__name__)
 
 
 async def require_dm_enabled(deps: TurnDeps, *, tenant_id: uuid.UUID) -> None:

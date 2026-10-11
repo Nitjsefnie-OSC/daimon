@@ -132,6 +132,25 @@ async def claim_message(
     return DirectMessageRow.model_validate(row)
 
 
+async def holds_claim(session: AsyncSession, *, conversation: DirectMessageRow) -> bool:
+    """Lock the conversation and report whether `conversation`'s claim still holds it.
+
+    The same comparison `finish_message` makes: a later delivery's claim, or
+    a cleared one, means this delivery no longer owns the scope.
+    """
+    row = await session.get(
+        DirectMessageConversation,
+        (conversation.platform, conversation.route_key, conversation.external_user_id),
+        with_for_update=True,
+    )
+    return (
+        row is not None
+        and row.scope_id == conversation.scope_id
+        and row.active_until is not None
+        and row.active_until == conversation.active_until
+    )
+
+
 async def finish_message(
     session: AsyncSession,
     *,

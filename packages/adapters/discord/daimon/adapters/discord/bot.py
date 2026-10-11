@@ -805,13 +805,51 @@ class DaimonBot(commands.Bot):
         self._output_sweeps[session_id] = task
         task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
 
+    def _running_turn_tasks(self) -> set[asyncio.Task[object]]:
+        """Every task running a turn: per-thread claims plus `run_prepared_turn`'s registry.
+
+        The registry covers turns inside `run_prepared_turn` and the whole
+        accepted operation of entry points that never claim a thread here (a
+        wizard submit or a direct message, from its slot wait to its cleanup);
+        the claims cover mention-path turns before `run_prepared_turn`
+        (queued, preparing). The calling task is excluded,
+        so the drain never counts or cancels itself.
+        """
+        tasks = set(self.runtime.turn_deps.running_turns.tasks())
+        tasks.update(
+            task
+            for thread_id in self._processing
+            if (task := self._processing_tasks.get(thread_id)) is not None and not task.done()
+        )
+        if (current := asyncio.current_task()) is not None:
+            tasks.discard(current)
+        return tasks
+
+    def _keeps_turn_for_recovery(self) -> bool:
+        """Whether the current task is unwinding from the shutdown drain's cancel.
+
+        Such a turn's MA session is still running and nothing in this process
+        will read it again, so its cleanup must not clear the thread marker:
+        the next process's orphan sweep needs it to deliver a finished answer
+        or interrupt the session, and it only acts once this owner is gone.
+        """
+        task = asyncio.current_task()
+        return (
+            self.runtime.turn_deps.running_turns.shutting_down is True
+            and task is not None
+            and task.cancelling() > 0
+        )
+
     async def _drain_and_close(self) -> None:
         """Graceful shutdown drain.
 
-        Flips draining=True so on_message rejects new mentions, then polls the
-        existing _processing set until it empties or the grace window elapses.
-        Cancels turns left after the grace period, waits for their cleanup and
-        retained card writes, then closes the client.
+        Flips draining=True so on_message rejects new mentions, then waits
+        until no turn is running -- no claimed thread, no held turn slot and no
+        turn inside `run_prepared_turn`, whichever entry point started it -- or
+        the grace window elapses. Then it stops granting turn slots, cancels
+        what is left, waits for their cleanup and retained card writes, and
+        closes the client. A cancelled turn's provider session is left for
+        recovery, not abandoned: see `docs/architecture.md`.
         """
         self.draining = True
         # Pending auto batches are unasked-for turns that have not started;
@@ -819,26 +857,38 @@ class DaimonBot(commands.Bot):
         # admit a new turn the drain is trying to stop.
         for thread_id in list(self._participation_pending):
             self._cancel_participation_batch(thread_id)
-        log.info("discord.draining", inflight_threads=len(self._processing))
+        log.info(
+            "discord.draining",
+            inflight_threads=len(self._processing),
+            running_turns=len(self._running_turn_tasks()),
+            turn_slots=self.turn_queue.in_flight(),
+        )
         deadline = asyncio.get_running_loop().time() + _DRAIN_GRACE_S
         while (
-            self._processing or self.turn_queue.in_flight()
+            self._processing or self.turn_queue.in_flight() or self._running_turn_tasks()
         ) and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.5)
-        log.info("discord.drain_complete", remaining=len(self._processing))
+        log.info(
+            "discord.drain_complete",
+            remaining=len(self._processing),
+            running_turns=len(self._running_turn_tasks()),
+            turn_slots=self.turn_queue.in_flight(),
+        )
         # Before close(): it closes the HTTP session a notice still DMs through.
         notices = asyncio.ensure_future(drain_budget_notices())
         _, late = await asyncio.wait({notices}, timeout=_DRAIN_NOTICES_S)
         if late:
             log.warning("discord.drain_notices_timed_out", budget_s=_DRAIN_NOTICES_S)
-        tasks = {
-            task
-            for thread_id in self._processing
-            if (task := self._processing_tasks.get(thread_id)) is not None and not task.done()
-        }
-        current = asyncio.current_task()
-        if current is not None:
-            tasks.discard(current)
+        # Cancellation phase. Grant no further slot first, so releasing a
+        # cancelled turn's slot cannot start a queued one this snapshot missed.
+        # Cancelled turns leave their provider sessions recoverable: the thread
+        # marker stays for the next process's orphan sweep, and a DM interrupts
+        # its own session (`RunningTurns.shutting_down`).
+        self.turn_queue.stop_dispatch()
+        self.runtime.turn_deps.running_turns.begin_shutdown()
+        tasks = self._running_turn_tasks()
+        if tasks:
+            log.info("discord.drain_cancelling", turns=len(tasks))
         for task in tasks:
             task.cancel()
         if tasks:
@@ -1482,8 +1532,20 @@ class DaimonBot(commands.Bot):
         ):
             return
         self._turn_card_recovery_started = True
+        # A card whose marker the sweep deferred (a live or not-yet-expired
+        # owner, or a retryable failure) belongs to marker recovery, which
+        # reads the provider result and interrupts the session. Retiring it
+        # here first would make that retry see a terminal card and skip both.
+        # Periodic recovery picks the intent up once its marker is gone.
+        deferred = {row.active_turn_message_id for row in self._orphan_retry_rows}
         self._boot_card_recovery_task = self._spawn(
-            self._reconcile_boot_turn_cards(self._boot_turn_card_intents)
+            self._reconcile_boot_turn_cards(
+                [
+                    intent
+                    for intent in self._boot_turn_card_intents
+                    if intent.message_id is None or intent.message_id not in deferred
+                ]
+            )
         )
         if not self._turn_card_periodic_started:
             self._turn_card_periodic_started = True
@@ -3288,7 +3350,9 @@ class DaimonBot(commands.Bot):
         )
         watch.session_id = prepared.ma_session_id
 
+        marked_message_id: str | None = None
         if prepared.mapping_id is not None and lifecycle.final_message_id is not None:
+            marked_message_id = lifecycle.final_message_id
             async with self.runtime.sessionmaker() as session:
                 await mark_turn_active(
                     session,
@@ -3449,6 +3513,7 @@ class DaimonBot(commands.Bot):
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
+                    active_turn_message_id=marked_message_id,
                 )
                 archive_after = await self._archive_requested(origin.id)
         finally:
@@ -3460,6 +3525,9 @@ class DaimonBot(commands.Bot):
             done_ids = {prepared.mapping_id}
             if outcome is not None:
                 done_ids.add(outcome.mapping_id)
+            if self._keeps_turn_for_recovery():
+                # Cancelled by the shutdown drain: leave the marker for recovery.
+                done_ids.clear()
             for done_id in done_ids - {None}:
                 if done_id is None:  # pragma: no cover - set difference guarantees this
                     continue
@@ -4228,7 +4296,9 @@ class DaimonBot(commands.Bot):
         # if the container is recreated mid-turn the embed freezes forever while
         # MA completes and bills the answer server-side. Recording the embed's
         # id is what lets the next boot find it and say so.
+        marked_message_id: str | None = None
         if prepared.mapping_id is not None and lifecycle.final_message_id is not None:
+            marked_message_id = lifecycle.final_message_id
             async with self.runtime.sessionmaker() as _at_session:
                 await mark_turn_active(
                     _at_session,
@@ -4549,6 +4619,7 @@ class DaimonBot(commands.Bot):
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
+                    active_turn_message_id=marked_message_id,
                 )
                 # The run ended the card itself (answer, or red error card).
                 surface.end_card = None
@@ -4556,9 +4627,11 @@ class DaimonBot(commands.Bot):
         finally:
             # Runs on any exception, not just the happy path: whatever else
             # went wrong, the thread must not be left holding its active_turn
-            # marker. Both ids are cleared -- recovery moves the turn to a new
-            # mapping row and leaves the marker behind on the old one, which
-            # is still pointing at this same message. A ceiling breach is not
+            # marker -- except when the shutdown drain cancelled the turn, whose
+            # still-running session the next process's orphan sweep recovers
+            # through that marker. Both ids are cleared -- a dead-session
+            # recovery moves the marker onto its replacement mapping, which
+            # `outcome` names. A ceiling breach is not
             # a special case here: run_prepared_turn already marked the
             # active mapping dead and returns a normal RunOutcome, so it takes
             # this same path.
@@ -4570,6 +4643,9 @@ class DaimonBot(commands.Bot):
             _done_ids = {prepared.mapping_id}
             if outcome is not None:
                 _done_ids.add(outcome.mapping_id)
+            if self._keeps_turn_for_recovery():
+                # Cancelled by the shutdown drain: leave the marker for recovery.
+                _done_ids.clear()
             for _done_id in _done_ids - {None}:
                 if _done_id is None:  # pragma: no cover - set difference guarantees this
                     continue

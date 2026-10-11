@@ -460,6 +460,54 @@ async def clear_active_turn_if_message_id(
     return rowcount == 1
 
 
+async def transfer_active_turn(
+    session: AsyncSession,
+    *,
+    from_id: _uuid.UUID,
+    to_id: _uuid.UUID,
+    expected_message_id: str,
+) -> bool:
+    """Move a turn's in-flight marker onto the mapping its turn continues on.
+
+    Dead-session recovery moves a running turn onto a replacement mapping. The
+    marker must follow before the replacement's turn is sent, or a restart
+    leaves boot recovery pointing at the dead session while the replacement
+    runs unwatched. Moves only the marker that still names `expected_message_id`
+    (the caller's own card), owner and start time included, and never over a
+    different turn's marker on the target: another turn adopted first and its
+    marker already covers that session. Returns whether it moved.
+    """
+    if from_id == to_id:
+        return False
+    source = await session.scalar(
+        select(ThreadSession)
+        .where(
+            ThreadSession.id == from_id,
+            ThreadSession.active_turn_message_id == expected_message_id,
+        )
+        .with_for_update()
+    )
+    target = await session.scalar(
+        select(ThreadSession).where(ThreadSession.id == to_id).with_for_update()
+    )
+    if (
+        source is None
+        or target is None
+        or target.active_turn_message_id not in (None, expected_message_id)
+    ):
+        return False
+    target.active_turn_message_id = source.active_turn_message_id
+    target.active_turn_owner_key = source.active_turn_owner_key
+    target.active_turn_started_at = source.active_turn_started_at
+    target.active_turn_channel_id = source.active_turn_channel_id
+    source.active_turn_message_id = None
+    source.active_turn_owner_key = None
+    source.active_turn_started_at = None
+    source.active_turn_channel_id = None
+    await session.flush()
+    return True
+
+
 async def list_orphaned_turns(
     session: AsyncSession,
     *,
