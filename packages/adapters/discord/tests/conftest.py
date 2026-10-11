@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from daimon.testing.db import db_clean as db_clean
@@ -11,6 +13,25 @@ from daimon.testing.db import db_schema as db_schema
 from daimon.testing.db import db_session as db_session
 from daimon.testing.db import db_session_factory as db_session_factory
 from daimon.testing.factories import make_tenant as make_tenant
+
+
+def _active_test_file() -> Path | None:
+    """Leave the current xdist test ID for CI to collect after a hung step."""
+    directory = os.environ.get("DAIMON_PYTEST_HANG_DIR")
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if not directory or not worker:
+        return None
+    return Path(directory) / f"discord-pytest-current-{worker}.txt"
+
+
+def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
+    if path := _active_test_file():
+        path.write_text(f"{nodeid}\n", encoding="utf-8")
+
+
+def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str]) -> None:
+    if path := _active_test_file():
+        path.unlink(missing_ok=True)
 
 
 @pytest.fixture(autouse=True)

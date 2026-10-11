@@ -21,6 +21,7 @@ from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_external
 from daimon.core.stores.domain import Role, TurnCardIntentRow
@@ -31,7 +32,7 @@ from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_inte
 from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied, ExternalFinding
-from daimon.core.turn.errors import AdmissionDenialReason
+from daimon.core.turn.errors import AdmissionDenialReason, MissingTurnConfigError
 from daimon.core.turn.notices import admission_refusal_text
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.slots import holding, wait_for_slot
@@ -506,8 +507,7 @@ async def test_a_denied_turn_says_why_without_a_card(
     with patch.object(app_module, "admit", denied):
         await teams._run_turn(make_inbound(), TENANT)
     assert [a.text for a in sender.activities] == [
-        "This organisation's credit is depleted. "
-        "An admin can top up with `billing` in a 1:1 chat with me."
+        "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
     ], "the refusal says why, in the organisation's nouns"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
 
@@ -658,7 +658,10 @@ async def test_an_external_participant_outside_an_isolated_channel_is_told_where
         "admission is told how each is treated, and that nothing placed them"
     )
     refusal = admission_refusal_text("external_participant", app_module.TEAMS_REFUSAL_NOUNS)
-    assert [a.text for a in sender.activities] == [refusal] * 2, "the shared refusal copy"
+    dm_refusal = admission_refusal_text(
+        "external_participant", app_module.TEAMS_REFUSAL_NOUNS, in_dm=True
+    )
+    assert [a.text for a in sender.activities] == [refusal, dm_refusal]
 
 
 @dataclasses.dataclass
@@ -752,8 +755,27 @@ async def test_a_queued_turn_posts_its_card_then_waits_behind_it(
                 await task
             if depleted:
                 run.assert_not_called()
-                assert "credit is depleted" in sender.activities[-1].model_dump_json()
+                assert "credit has run out" in sender.activities[-1].model_dump_json()
             else:
                 run.assert_awaited_once()
     assert await _open_intents(db_session_factory) == [], "the card's intent is retired"
     assert teams.turn_queue.in_flight() == 0 and teams.turn_queue.depth() == 0
+
+
+@pytest.mark.parametrize("missing", [("agent",), ("environment",), ("agent", "environment")])
+def test_a_channel_without_setup_gets_one_plain_notice(missing: tuple[str, ...]) -> None:
+    err = MissingTurnConfigError(
+        missing=missing,  # pyright: ignore[reportArgumentType]
+        agent_name_tier=None,
+        environment_name_tier=None,
+    )
+    assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
+        "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `setup`."
+    )
+
+
+def test_a_stale_setup_says_it_is_out_of_date() -> None:
+    err = MAResolverMissError(kind="agent", tenant_id=uuid.uuid4(), daimon_tag="gone")
+    assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
+        "This channel's setup is out of date.\n\nAsk an admin to check `setup`."
+    )

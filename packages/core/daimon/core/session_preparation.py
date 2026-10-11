@@ -33,14 +33,17 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import hashlib
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 import anthropic as anthropic_pkg
 import structlog
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
+from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_compat import (
@@ -96,7 +99,12 @@ from daimon.core.stores.thread_session_lineage import (
     mark_retired,
     mark_superseded,
 )
-from daimon.core.stores.thread_sessions import get_thread_session_by_id, update_mutable_fingerprint
+from daimon.core.stores.thread_sessions import (
+    get_live_thread_session,
+    get_thread_session_by_id,
+    set_budget_channel_stamp,
+    update_mutable_fingerprint,
+)
 from daimon.core.thread_handoff import destination_may_read
 from daimon.core.turn.admission import (
     Admission,
@@ -382,8 +390,16 @@ async def _run_replacement(
     answer governs exactly one replacement.
     """
     async with deps.sessionmaker() as session, session.begin():
+        # A failed replacement for B must not put a later C replacement on
+        # B's retry schedule when the frozen agent configuration is unchanged.
+        target_fingerprint = fingerprint_identity(desired)
+        if "budget_channel" in reasons:
+            target = f"{target_fingerprint}:{admission.budget_channel_id!r}"
+            target_fingerprint = hashlib.sha256(target.encode()).hexdigest()
         preparation = await upsert_preparation(
-            session, mapping_id=row.id, target_fingerprint=fingerprint_identity(desired)
+            session,
+            mapping_id=row.id,
+            target_fingerprint=target_fingerprint,
         )
 
     if preparation.stage == "failed":
@@ -399,6 +415,12 @@ async def _run_replacement(
         if transfer is not None and recorded is not None and not fresh_start:
             stage = "checkpoint"
             await _advance(deps, preparation.id, "checkpointed", now)
+            # A checkpoint executes the predecessor, whose MA stamp is also
+            # what recovery uses if the live recorder misses an event.
+            from daimon.core.workspace_transfer import WorkspaceTransferRunner
+
+            if isinstance(transfer, WorkspaceTransferRunner):
+                transfer = replace(transfer, channel_id=row.budget_channel_id)
             replacement = await transfer(
                 old_session_id=row.ma_session_id,
                 old_snapshot=recorded,
@@ -557,6 +579,41 @@ async def prepare_session_for_turn(
     return await retry_fences(attempt)
 
 
+async def _resolve_legacy_budget_stamp(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    account_id: uuid.UUID,
+) -> tuple[uuid.UUID, BetaManagedAgentsSession] | None:
+    """Commit the MA stamp before preparation can lock the mapping row."""
+    async with deps.sessionmaker() as session:
+        row = await get_live_thread_session(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=account_id,
+        )
+    if row is None or row.budget_channel_id != "":
+        return None
+    try:
+        observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+    except anthropic_pkg.APIError as error:
+        # A transient read leaves the unknown marker for the next bind.
+        log.warning(
+            "session_preparation.budget_stamp_unreadable",
+            session_id=row.ma_session_id,
+            error=type(error).__name__,
+        )
+        return None
+    stamp = observed.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
+    async with deps.sessionmaker() as session, session.begin():
+        await set_budget_channel_stamp(session, id=row.id, budget_channel_id=stamp)
+    return row.id, observed
+
+
 async def _prepare_session_for_turn_locked(
     deps: TurnDeps,
     admission: Admission,
@@ -623,6 +680,17 @@ async def _prepare_session_for_turn_locked(
             decided=fresh.admission,
         )
 
+    stamp_observation = (
+        await _resolve_legacy_budget_stamp(
+            deps,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=session_account_id,
+        )
+        if reuse_existing
+        else None
+    )
     async with deps.sessionmaker() as db, db.begin():
         await lock_preparation(
             db,
@@ -677,11 +745,27 @@ async def _prepare_session_for_turn_locked(
             recorded = row.effective_config
         else:
             source_exists = identity.session_exists
+            observed = identity.observed
+            if (
+                observed is None
+                and stamp_observation is not None
+                and stamp_observation[0] == row.id
+            ):
+                observed = stamp_observation[1]
             if identity.session_exists:
-                recorded = await recorded_snapshot(
-                    deps.anthropic, deps.sessionmaker, existing=row, observed=identity.observed
-                )
-            if recorded is None and not admission.memory_read_only:
+                if row.budget_channel_id == "" and stamp_observation is None:
+                    # The pre-lock MA read failed. A second read of the same
+                    # legacy session must not prevent its turn from running.
+                    recorded = row.effective_config
+                else:
+                    recorded = await recorded_snapshot(
+                        deps.anthropic, deps.sessionmaker, existing=row, observed=observed
+                    )
+            if (
+                recorded is None
+                and not admission.memory_read_only
+                and row.budget_channel_id in ("", admission.budget_channel_id)
+            ):
                 # No readable configuration to compare: the session is gone or
                 # unreadable, which the turn's own recovery handles. Bind it as
                 # every pre-continuity turn did.
@@ -731,6 +815,10 @@ async def _prepare_session_for_turn_locked(
         fresh_start = row.fresh_start_requested_at is not None
         if handed_over:
             decision = ReplaceSession(reasons=("agent_identity",))
+        elif row.budget_channel_id not in ("", admission.budget_channel_id):
+            # The sweep attributes missed events from the immutable MA session
+            # stamp. A new budget channel needs a new stamped session.
+            decision = ReplaceSession(reasons=("budget_channel",))
         elif recorded is None:
             # A restricted turn must get a new read-only session when the
             # previous mount cannot be established, never reuse unknown access.
@@ -760,11 +848,15 @@ async def _prepare_session_for_turn_locked(
         )
         if (
             isinstance(decision, ReplaceSession)
-            and ("agent_identity" in decision.reasons or tightening_memory)
+            and (
+                "agent_identity" in decision.reasons
+                or "budget_channel" in decision.reasons
+                or tightening_memory
+            )
             and turn_is_active(row, now=moment)
         ):
-            # Neither a different responder nor stricter memory access may
-            # execute against the old session while replacement is deferred.
+            # A changed billing channel, responder, or memory restriction
+            # cannot run against the old session while replacement is deferred.
             log.info(
                 "session_preparation.busy",
                 mapping_id=str(row.id),

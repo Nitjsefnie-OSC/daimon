@@ -249,10 +249,15 @@ async def test_handle_billing_command_replaces_loading_modal_with_error_on_failu
     assert update_calls, "the Loading… modal must be replaced after the load fails"
     body: dict[str, Any] = update_calls[-1].kwargs["json"]
     assert body["view"]["title"]["text"] == "Billing"
-    text = body["view"]["blocks"][0]["text"]["text"]
-    assert "Database error" in text
-    assert "xoxb-leak" not in text, "bound parameters must never reach the modal"
-    assert "rid:" in text
+    blocks = body["view"]["blocks"]
+    assert blocks[0]["text"]["text"] == (
+        "Something went wrong on our side.\n\nTry again. If it keeps happening, tell an admin."
+    )
+    assert blocks[1]["type"] == "context", "the ref is drawn small"
+    assert blocks[1]["elements"][0]["text"].startswith("Ref ")
+    assert len(blocks[1]["elements"][0]["text"]) == len("Ref ") + 6
+    assert "xoxb-leak" not in str(body["view"]), "exception text stays in the logs"
+    assert "SELECT" not in str(body["view"]), "the statement must never reach the modal"
 
 
 def _budget(channel_id: str, spent: str, limit: str = "10") -> ChannelBudgetStatus:
@@ -434,7 +439,7 @@ def test_no_rendered_panel_has_a_dot_separator_or_a_user_label() -> None:
         )
         assert "·" not in text and "≈" not in text and "User " not in text, text
     options = json.dumps(_make_admin_view_options())
-    assert "about " in options and "turns" in options
+    assert "about " not in options and "turns" not in options
 
 
 def _make_admin_view_options() -> list[dict[str, Any]]:
@@ -450,7 +455,7 @@ def _make_admin_view_options() -> list[dict[str, Any]]:
     )
     for option in select["options"]:
         assert option["text"]["text"] == f"${option['value']}", "the amount alone"
-        assert option["description"]["text"].startswith("about "), option
+        assert "description" not in option, option
     return select["options"]
 
 

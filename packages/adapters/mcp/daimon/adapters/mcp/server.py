@@ -67,7 +67,9 @@ from daimon.adapters.mcp.tools.credential_requests import register_credential_re
 from daimon.adapters.mcp.tools.enable_files import register_enable_files_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
+from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
 from daimon.adapters.mcp.tools.github_requests import register_github_request_tools
+from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
@@ -457,6 +459,8 @@ def create_mcp_app(
     register_github_app_tools(mcp, runtime)
     register_github_connect_tools(mcp, runtime)
     register_github_request_tools(mcp, runtime)
+    register_github_working_repo_tools(mcp, runtime)
+    register_github_remove_repo_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
     register_skill_upload_tools(mcp, runtime)
@@ -633,6 +637,9 @@ def create_mcp_app(
             settings=effective_settings,
             sessionmaker=effective_sessionmaker,
             fernet=fernet,
+            deployment_default=deployment_default,
+            anthropic=effective_anthropic,
+            group_members=group_lookups.live_members,
         )
         personal_start, personal_platform_callback, personal_github_callback = (
             build_personal_link_routes(

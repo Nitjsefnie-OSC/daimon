@@ -9,13 +9,20 @@ Use the daimon MCP server's `get_cli_token(service)` tool to obtain access
 tokens for external CLIs. Export the result under the appropriate name
 before running CLI commands.
 
-For a GitHub App session, use its mounted repository and session-scoped
-`GH_TOKEN` instead. Check the repos available to this agent with
-`gh api installation/repositories --jq '.repositories[].full_name'` when a
-repo list is needed. Do not name a private repo to someone who cannot see it.
+For a GitHub App session, the filesystem has at most one working repo at
+`/workspace/<owner>/<repo>`. Other repos granted to this agent are reached by
+token: clone one with `gh repo clone owner/repo` (gh reads `GH_TOKEN`). If gh
+fails, use `git clone https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git`.
+Plain `git clone` or `git ls-remote` without the token only reaches the
+mounted repo and public repos, so never conclude you have no access from them.
+If a repo is granted but none is the working repo, say how to set one: "To put
+it in my workspace, ask me to make it the working repo." Inspect only this
+agent's granted repos when a list is needed. Do not name a private repo to
+someone who cannot see it.
 The `get_cli_token("github")` tool is unavailable in App mode. Never ask for a
-token in App mode. If `gh` is not installed, use `curl` for GitHub API calls
-or the GitHub Copilot MCP tools for repository operations.
+token in App mode. If `gh` is not
+installed, use `curl` for GitHub API calls or the GitHub Copilot MCP tools for
+repository operations.
 
 | Service                  | Tool call                  | Name to export                |
 |--------------------------|----------------------------|-------------------------------|
@@ -33,9 +40,9 @@ The tool requires:
   that agent's token. Ordinary chat currently uses account-only identity, so
   `request_repo_binding` saving a target agent's token does not make it
   available to this tool. A GitHub App installation alone does not supply it
-  either. If access is missing, call `github_connect` to offer the private
-  agent-bound App setup link. Use a private PAT form only if the person asks
-  for that fallback; do not repeatedly ask them for a token.
+  either. If access is missing, call `github_connect` to post the Connect
+  GitHub link. Never ask for, suggest or mention a GitHub token, personal
+  access token or pasted credential.
 - For `gcloud`: the operator must configure deployment Google access and bind
   the agent to a Google identity with `daimon agents bind-google <agent>
   <email> --scopes <scope>`, repeating `--scopes` for additional scopes.

@@ -8,13 +8,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
-from daimon.adapters.discord.vision import (
-    MAX_VISION_IMAGE_DIMENSION,
-    is_oversized_image,
-    is_vision_image_attachment,
-)
+from daimon.adapters.discord.vision import is_oversized_image, is_vision_image_attachment
+from daimon.core.media.vision import MAX_VISION_IMAGE_DIMENSION
 from daimon.core.turn_keys import render_keys_element
 from daimon.core.untrusted import untrusted_block
 
@@ -23,6 +21,11 @@ import discord
 # Number of parent-channel messages fetched when a channel mention creates a new thread.
 # Bot replies are included so the agent sees the full conversational context.
 CHANNEL_BACKFILL_LIMIT = 25
+# A bounded second scan keeps recent uploads visible after channel chatter
+# pushes them outside the conversational window. Discord history is newest first.
+CHANNEL_FILE_SCAN_LIMIT = 200
+CHANNEL_FILE_MAX_AGE = timedelta(hours=24)
+CHANNEL_FILE_LIMIT = 10
 
 # Replayed messages come from everyone in the conversation, not only the
 # person asking, so they ride in the shared untrusted envelope. Only the
@@ -74,6 +77,26 @@ def _render_location(thread: discord.Thread) -> list[str]:
         f" role={quoteattr('current_thread')} hint={quoteattr(thread_hint)}"
         f" name={quoteattr(thread.name)}/>",
     ]
+
+
+#: Why the agent may not see a message someone says they sent. Without it the
+#: agent, asked about an earlier mention answered in a sibling thread, reads
+#: the gap in its own context as a delivery failure and tells the user the
+#: message "never reached me", which is false: every thread is its own session.
+_DELIVERY_HINT = (
+    "a turn starts when someone addresses you (an @mention or a reply to one of your posts) "
+    "or, in a thread you follow, when you choose to answer; you see this thread's earlier "
+    "messages as history, but every thread is a separate conversation with its own session, "
+    "so you cannot see what was said or answered in other threads. If asked about an earlier "
+    "message you have no record of, explain that it may be in another thread or was not "
+    "addressed to you, and that other threads are separate conversations; never say it did "
+    "not reach you or that you did not receive it"
+)
+
+
+def _render_delivery() -> str:
+    """The trusted note on what reaches the agent, emitted on every thread turn."""
+    return f"<delivery hint={quoteattr(_DELIVERY_HINT)}/>"
 
 
 def _render_message(
@@ -147,6 +170,7 @@ def _render_user_query(
     bot_display_name: str,
     is_admin: bool,
     unprompted: bool = False,
+    query_text: str | None = None,
 ) -> str:
     """Render the ``<user_query>`` element for a turn's trigger message.
 
@@ -163,7 +187,11 @@ def _render_user_query(
         + (' unprompted="true"' if unprompted else "")
     )
     content = escape(
-        _strip_bot_mention(trigger.content, bot_user_id, bot_display_name=bot_display_name)
+        _strip_bot_mention(
+            trigger.content if query_text is None else query_text,
+            bot_user_id,
+            bot_display_name=bot_display_name,
+        )
     )
     return f"<user_query{attrs}>{content}</user_query>"
 
@@ -179,6 +207,8 @@ async def build_context_xml(
     is_admin: bool = False,
     unprompted: bool = False,
     key_names: Sequence[str] = (),
+    query_text: str | None = None,
+    query_message_ids: Sequence[int] = (),
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from thread history for the turn driver.
 
@@ -197,10 +227,13 @@ async def build_context_xml(
 
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
+    ``query_text`` replaces only the active query text; ``trigger`` still
+    supplies identity and remains excluded from history.
     """
     messages = [m async for m in thread.history(limit=limit)]
     messages.sort(key=lambda m: m.created_at)
-    messages = [m for m in messages if m.id != trigger.id]
+    excluded_ids = {trigger.id, *query_message_ids}
+    messages = [m for m in messages if m.id not in excluded_ids]
 
     # Prepend the thread-starter message once if it exists, is not the trigger,
     # and is not already present in the fetched history.  thread.history() omits
@@ -217,7 +250,7 @@ async def build_context_xml(
             starter = None
     if (
         starter is not None
-        and starter.id != trigger.id
+        and starter.id not in excluded_ids
         and starter.id not in {m.id for m in messages}
     ):
         messages.insert(0, starter)
@@ -229,6 +262,7 @@ async def build_context_xml(
     lines: list[str] = [
         "<context>",
         *_render_location(thread),
+        _render_delivery(),
         render_keys_element(key_names),
     ]
     lines = [line for line in lines if line]
@@ -254,6 +288,7 @@ async def build_context_xml(
             bot_display_name=bot_display_name,
             is_admin=is_admin,
             unprompted=unprompted,
+            query_text=query_text,
         )
     )
 
@@ -271,6 +306,9 @@ async def build_delta_xml(
     is_admin: bool = False,
     unprompted: bool = False,
     key_names: Sequence[str] = (),
+    excluded_message_ids: Sequence[str] = (),
+    query_text: str | None = None,
+    query_message_ids: Sequence[int] = (),
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -280,7 +318,8 @@ async def build_delta_xml(
     element identical to the one ``build_context_xml`` emits, and
     ``image_attachments`` is the list of image-type attachments found in the
     delta (for the caller to pass as vision content blocks).  The trigger is
-    excluded from the delta; the bot's own messages are NOT excluded.
+    excluded from the delta. Bot replies remain visible unless their IDs are
+    explicitly listed as answer chunks already delivered to this session.
 
     Q1→(b) (SCOPING §3/§9): bot replies ARE included in the cross-speaker
     delta.  When a caller resumes after other participants spoke, their
@@ -298,6 +337,8 @@ async def build_delta_xml(
 
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
+    ``query_text`` replaces only the active query text, preserving the
+    original trigger's identity and history exclusion.
     """
     if after_message_id is None:
         return await build_context_xml(
@@ -308,6 +349,8 @@ async def build_delta_xml(
             is_admin=is_admin,
             unprompted=unprompted,
             key_names=key_names,
+            query_text=query_text,
+            query_message_ids=query_message_ids,
         )
 
     after_obj = discord.Object(id=after_message_id)
@@ -317,7 +360,12 @@ async def build_delta_xml(
     # No backfill, no thread-starter prepend, no coalescing — the reused MA session
     # already holds prior context server-side; re-injecting it duplicates tokens and
     # re-triggers image replay from earlier turns.
-    messages = [m for m in messages if m.id != trigger.id]
+    excluded_ids = {
+        trigger.id,
+        *query_message_ids,
+        *(int(msg_id) for msg_id in excluded_message_ids),
+    }
+    messages = [m for m in messages if m.id not in excluded_ids]
     messages.sort(key=lambda m: m.created_at)
 
     image_atts: list[discord.Attachment] = [
@@ -327,6 +375,7 @@ async def build_delta_xml(
     lines: list[str] = [
         "<context>",
         *_render_location(thread),
+        _render_delivery(),
         render_keys_element(key_names),
     ]
     lines = [line for line in lines if line]
@@ -351,6 +400,7 @@ async def build_delta_xml(
             bot_display_name=bot_display_name,
             is_admin=is_admin,
             unprompted=unprompted,
+            query_text=query_text,
         )
     )
 
@@ -389,7 +439,50 @@ async def build_channel_context_xml(
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
     """
-    messages = [m async for m in channel.history(limit=limit)]
+    try:
+        recent = [m async for m in channel.history(limit=limit)]
+    except discord.HTTPException:
+        recent = []
+
+    # The first page is the conversational context. Scan only older messages
+    # for files, using the same channel visibility as that first read. Neither
+    # older message text nor history images are added to the conversation.
+    older_files: list[str] = []
+    cutoff = trigger.created_at - CHANNEL_FILE_MAX_AGE
+    if (
+        0 < limit < CHANNEL_FILE_SCAN_LIMIT
+        and len(recent) == limit
+        and recent[-1].created_at >= cutoff
+    ):
+        seen_ids = {m.id for m in recent}
+        try:
+            async for msg in channel.history(
+                limit=CHANNEL_FILE_SCAN_LIMIT - len(recent),
+                before=discord.Object(id=recent[-1].id),
+            ):
+                if msg.created_at < cutoff:
+                    break
+                if msg.id == trigger.id or msg.id in seen_ids:
+                    continue
+                for att in msg.attachments:
+                    older_files.append(
+                        f"<attachment filename={quoteattr(att.filename)}"
+                        f" url={quoteattr(att.url)}"
+                        f" uploader={quoteattr(msg.author.display_name)}"
+                        f" uploaded_at={quoteattr(msg.created_at.isoformat())}"
+                        f" jump_url={quoteattr(msg.jump_url)}/>"
+                    )
+                    if len(older_files) == CHANNEL_FILE_LIMIT:
+                        break
+                if len(older_files) == CHANNEL_FILE_LIMIT:
+                    break
+        except Exception:
+            # The file list is optional: any failed or dropped read (an HTTP
+            # error, a timeout, a reset connection) keeps the conversation and
+            # leaves the section out. Cancellation still propagates.
+            older_files = []
+
+    messages = recent
     messages.sort(key=lambda m: m.created_at)
     messages = [m for m in messages if m.id != trigger.id]
 
@@ -399,6 +492,7 @@ async def build_channel_context_xml(
 
     lines: list[str] = [
         *_render_location(thread),
+        _render_delivery(),
         render_keys_element(key_names),
     ]
     lines = [line for line in lines if line]
@@ -415,6 +509,8 @@ async def build_channel_context_xml(
     lines.extend(
         untrusted_block("channel_context", body, {"count": str(len(messages)), **_HISTORY_SOURCE})
     )
+    if older_files:
+        lines.extend(untrusted_block("recent_channel_files", older_files, _HISTORY_SOURCE))
 
     lines.append("")
     lines.append(

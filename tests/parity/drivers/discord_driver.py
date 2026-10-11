@@ -85,10 +85,8 @@ from .cards import CapturedCard, read_discord_card, walk_components
 from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_discord_modal, read_discord_view
 
-_BALANCE_BLOCKED_TEXT = (
-    "This server's daimon credit is depleted. A server admin can top up with `/billing`."
-)
-_CAP_BLOCKED_TEXT = "You've reached your monthly usage cap. An operator can raise it."
+_BALANCE_BLOCKED_TEXT = "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
+_CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 
 #: The message id the faked REST POST hands back for a posted card. The row
 #: records it, and every later edit and validity check is matched against it.
@@ -272,6 +270,15 @@ def _patched_discord_rest(
         yield
 
 
+class _ParityBotUser(SimpleNamespace):
+    """The concrete bot identity used by mention and reaction fixture calls."""
+
+    id: int
+
+    def mentioned_in(self, _message: discord.Message) -> bool:
+        return True
+
+
 @dataclass
 class DiscordDriver:
     """Drives turns through `DaimonBot.on_message`, the real Discord entry point."""
@@ -341,9 +348,7 @@ class DiscordDriver:
         intents = discord.Intents.default()
         intents.message_content = True
         bot = DaimonBot(runtime=runtime, intents=intents)
-        bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
-        bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
-        bot._connection.user.mentioned_in = MagicMock(return_value=True)  # pyright: ignore[reportPrivateUsage]
+        bot._connection.user = cast(discord.ClientUser, _ParityBotUser(id=999))  # pyright: ignore[reportPrivateUsage]
         return bot
 
     def _make_message(

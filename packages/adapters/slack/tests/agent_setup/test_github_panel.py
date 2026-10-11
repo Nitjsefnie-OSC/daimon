@@ -2,64 +2,36 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack.agent_setup import actions as panel_actions
-from daimon.adapters.slack.agent_setup import github_add_repos as add_module
-from daimon.adapters.slack.agent_setup import (
-    github_manage,
-    github_repos,
-    github_waiting,
-)
 from daimon.adapters.slack.agent_setup import github_new_repo as notice_module
+from daimon.adapters.slack.agent_setup import (
+    github_repos,
+)
 from daimon.adapters.slack.agent_setup import github_repos_actions as actions_module
-from daimon.adapters.slack.agent_setup.github_add_repos import build_view as build_add_view
 from daimon.adapters.slack.agent_setup.github_link import send_link
-from daimon.adapters.slack.agent_setup.github_manage import build_view as build_manage_view
 from daimon.adapters.slack.agent_setup.github_repos import build_view
 from daimon.adapters.slack.agent_setup.github_waiting import build_view as build_waiting_view
 from daimon.adapters.slack.agent_setup.panel_views import build_github_home_view
 from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
-    decode_panel_metadata,
-    encode_panel_metadata,
 )
-from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.github_panel import GrantsPanel, RepoChoice
-from daimon.core.stores.github_access import AuthorizedRepo
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_new_repo_notices import NewRepoNotice, NewRepoNoticeGroup
 
 
-def test_github_panel_actions_and_steps_are_registered() -> None:
-    emitted = (
-        add_module.ACTIONS
-        | github_manage.ACTIONS
-        | github_waiting.ACTIONS
-        | actions_module._ACTIONS  # pyright: ignore[reportPrivateUsage]
-    )
-    assert emitted <= panel_actions.PANEL_ACTION_IDS
-    assert github_repos.ACTION_SETTINGS in emitted
-    assert github_repos.ACTION_SETTINGS_CHOICE in emitted
-    root = Path(panel_actions.__file__).parent
-    written: set[str] = set()
-    for path in [root / "actions.py", *root.glob("github_*.py")]:
-        written.update(re.findall(r"github_step\s*=\s*['\"]([a-z_]+)", path.read_text()))
-    for step in written:
-        meta = PanelMetadata(
-            team_id="T",
-            channel_id="C",
-            view="github_home",
-            github_step=cast(Any, step),
-        )
-        assert decode_panel_metadata(encode_panel_metadata(meta)) == meta, step
+def test_github_panel_registers_only_read_actions() -> None:
+    assert github_repos.ACTION_OPEN in panel_actions.PANEL_ACTION_IDS
+    assert github_repos.ACTION_BACK in panel_actions.PANEL_ACTION_IDS
+    assert github_repos.ACTION_CONNECT_LINK in panel_actions.PANEL_ACTION_IDS
+    assert actions_module._ACTIONS <= panel_actions.PANEL_ACTION_IDS  # pyright: ignore[reportPrivateUsage]
 
 
 def _request() -> AccessRequest:
@@ -153,12 +125,29 @@ async def test_slack_connect_link_uses_ephemeral_actions() -> None:
     assert actions["elements"][0]["url"] == "https://example.test/link"
 
 
-def test_slack_grants_view_shows_staged_and_live_values() -> None:
+def _section_text(view: dict[str, Any]) -> str:
+    return "\n".join(
+        block["text"]["text"]
+        for block in view["blocks"]
+        if block["type"] == "section" and "text" in block
+    )
+
+
+def _button_labels(view: dict[str, Any]) -> list[str]:
+    return [
+        element["text"]["text"]
+        for block in view["blocks"]
+        if block["type"] == "actions"
+        for element in block["elements"]
+        if element["type"] == "button"
+    ]
+
+
+def test_slack_github_panels_are_read_only() -> None:
     panel = GrantsPanel(
         mode="app",
         working_repo="example/work",
         has_pat=False,
-        has_pending=True,
         repos=(
             RepoChoice(
                 repo_id=1,
@@ -171,301 +160,51 @@ def test_slack_grants_view_shows_staged_and_live_values() -> None:
                 live_baseline="write",
                 live_ceiling="write",
             ),
-            RepoChoice(
-                repo_id=2,
-                full_name="example/other",
-                max_access="read",
-                baseline="read",
-                ceiling="read",
-                staged=True,
-                working=False,
-            ),
         ),
     )
-    view = build_view(
-        PanelMetadata(
-            team_id="T",
-            channel_id="C",
-            view="github_repos",
-            agent_name="helper",
-        ),
-        panel,
+    meta = PanelMetadata(team_id="T", channel_id="C", view="github_repos", agent_name="helper")
+    view = build_view(meta, panel, connect_url="https://example.invalid/connect")
+    text = _section_text(view)
+    assert "helper's repos" in text and "example/work" in text
+    assert "Working repo: example/work" in text
+    assert (
+        "Open Connect GitHub to add or remove repos and choose a working repo, or ask helper in chat."
+        in text
     )
-    text = "\n".join(
-        block["text"]["text"] for block in view["blocks"] if block["type"] == "section"
-    )
-    actions = [
-        element["text"]["text"]
-        for block in view["blocks"]
-        if block["type"] == "actions"
-        for element in block["elements"]
-        if element["type"] == "button"
-    ]
-    assert "example/work — Read and write" in text
-    assert "Settings" in actions and "Save changes" not in actions
-    settings = build_view(
-        PanelMetadata(
-            team_id="T",
-            channel_id="C",
-            view="github_repos",
-            agent_name="helper",
-            github_settings=True,
-        ),
-        panel,
-    )
-    assert "Save changes" in str(settings["blocks"])
-    assert "Turn off GitHub for helper" in str(settings["blocks"])
-    assert "Change what it can do" in str(settings["blocks"])
-    assert "Read only" not in str(settings["blocks"])
-    for choice, expected in (
-        ("settings_ability", "Read only"),
-        ("settings_remove", "Remove repos"),
-    ):
-        chosen = build_view(
-            PanelMetadata(
-                team_id="T",
-                channel_id="C",
-                view="github_repos",
-                agent_name="helper",
-                github_settings=True,
-                github_step=choice,  # type: ignore[arg-type]
-            ),
-            panel,
-        )
-        assert expected in str(chosen["blocks"])
-    assert "Change who can use these" not in str(settings["blocks"])
-    assert "Used by:" not in str(settings["blocks"])
-
-
-def test_slack_github_home_and_confirmations() -> None:
-    meta = PanelMetadata(team_id="T", channel_id="C", view="agents", agent_name="helper")
-    home = build_github_home_view(meta, connected_count=2)
-    home_text = str(home["blocks"])
-    assert "Choose agent" in home_text and "Connect more repos" in home_text
-    assert "Manage connected repos" in home_text
-    pending = build_github_home_view(
-        meta, connected_count=2, pending_url="https://example.invalid/connect"
-    )
-    pending_text = str(pending["blocks"])
-    assert "Connect GitHub" in pending_text and "Start over" in pending_text
-    assert "Choose agent" not in pending_text
-    no_admin = build_github_home_view(meta, connected_count=0, is_admin=False)
-    assert "Workspace admins connect repos here" in str(no_admin["blocks"])
-    panel = GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=True, saved_state=True)
-    refused = build_view(meta, panel)
-    assert "This agent uses a saved GitHub key" in str(refused["blocks"])
-
-
-def test_slack_manage_connected_repos_requires_confirmation() -> None:
-    repo = AuthorizedRepo(
-        tenant_id=uuid.uuid4(),
-        repo_id=101,
-        owner_id=1,
-        installation_id=9,
-        repo_full_name="example/work",
-        max_access="write",
-        authorized_by_github_user_id=2,
-        authorized_by_account_id=None,
-        authorized_at=datetime.now(UTC),
-        status="active",
-        status_reason=None,
-        version=1,
-    )
-    meta = PanelMetadata(team_id="T", channel_id="C", view="github_manage")
-    listing = build_manage_view(meta, [repo])
-    assert "Change" in str(listing["blocks"])
-    assert "Disconnect" in str(listing["blocks"])
-    confirm = build_manage_view(
-        PanelMetadata(
-            team_id="T",
-            channel_id="C",
-            view="github_manage",
-            repo_id=101,
-            github_step="manage_disconnect",
-        ),
-        [repo],
-    )
-    assert "Disconnect example/work? Agents using it lose it." in str(confirm["blocks"])
-    assert "◀ Back" in str(confirm["blocks"])
-
-
-def test_slack_member_github_home_shows_only_personal_link() -> None:
-    from daimon.adapters.slack.agent_setup.panel_views import build_github_home_view
-
-    view = build_github_home_view(
-        PanelMetadata(team_id="T", channel_id="C", view="github_home"),
-        connected_count=0,
-        is_admin=False,
-        linked_login="carlos",
-    )
-    blocks = str(view["blocks"])
-    assert "Linked as @carlos" in blocks
-    assert "Use another account" in blocks and "Unlink" in blocks
-    assert "Connect GitHub" not in blocks
-    admin = build_github_home_view(
-        PanelMetadata(team_id="T", channel_id="C", view="github_home"),
-        connected_count=0,
-        is_admin=True,
-    )
-    assert "Connect GitHub" in str(admin["blocks"])
-    branded = build_github_home_view(
-        PanelMetadata(team_id="T", channel_id="C", view="github_home"),
-        connected_count=0,
-        is_admin=True,
-        public_base_url="https://mcp.test",
-    )
-    assert branded["blocks"][0]["elements"][0]["image_url"] == (
-        "https://mcp.test/web/daimon-face.png"
-    )
-    assert branded["blocks"][1]["text"]["text"] == "Connect GitHub"
-    assert branded["blocks"][2]["accessory"]["image_url"] == (
-        "https://mcp.test/web/github-mark.png"
-    )
-    connect = next(
-        element
-        for block in admin["blocks"]
-        if block["type"] == "actions"
-        for element in block["elements"]
-        if element["action_id"] == "agent_setup__github_start"
-    )
-    assert connect["text"] == {"type": "plain_text", "text": "🔗 Connect GitHub", "emoji": True}
+    assert " · " not in text
+    assert _button_labels(view) == ["Connect GitHub", "◀ Back"]
+    assert "https://example.invalid/connect" in str(view)
+    empty = build_view(meta, GrantsPanel(mode="app", repos=(), working_repo=None, has_pat=False))
+    assert "No working repo" in _section_text(empty)
+    home = build_github_home_view(meta, agent_counts=(("helper", 1),), can_choose_agent=True)
+    assert "helper: 1 repo" in _section_text(home)
+    assert "Add repos" not in str(home) and "Unlink" not in str(home)
 
 
 @pytest.mark.asyncio
-async def test_slack_agent_setup_shows_saved_key_refusal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    message = "This agent uses a saved GitHub key. Ask your Daimon operator to switch it."
-    monkeypatch.setattr(actions_module, "sync_connect_admin", AsyncMock())
-    monkeypatch.setattr(actions_module, "connect_link", AsyncMock(side_effect=ValueError(message)))
-    post = AsyncMock()
-    monkeypatch.setattr(actions_module, "post_ephemeral", post)
-    await actions_module._handle_add(
-        MagicMock(),
-        MagicMock(),
-        {},
-        action={},
-        action_id=add_module.ACTION_CONNECT_MORE,
-        meta=PanelMetadata(team_id="T", channel_id="C", view="github_add", agent_name="Helper"),
-        panel=GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False),
-        tenant_id=uuid.uuid4(),
-        agent_id=uuid.uuid4(),
-        user_id="U123",
-        channel_id="C",
-        push=False,
-        is_admin=True,
-    )
-    assert post.await_args.kwargs["text"] == message
-
-
-def test_slack_add_repos_keeps_selection_on_one_screen() -> None:
-    panel = GrantsPanel(
-        mode="legacy",
-        working_repo="example/work",
-        has_pat=False,
-        repos=(
-            RepoChoice(1, "example/work", "write", None, None, False, True),
-            RepoChoice(2, "example/readme", "read", None, None, False, False),
-        ),
-    )
-    meta = PanelMetadata(
-        team_id="T",
-        channel_id="C",
-        view="github_add",
-        agent_name="helper",
-        channel_name="readme",
-    )
-    pick = build_add_view(meta, panel)
-    selector = next(
-        item
-        for block in pick["blocks"]
-        if block["type"] == "actions"
-        for item in block["elements"]
-        if item["type"] == "multi_static_select"
-    )
-    assert selector["initial_options"] == []
-    assert "Add repos" in str(pick["blocks"])
-    assert "Review repos" not in str(pick["blocks"])
-    assert "Suggested: example/readme" in str(pick["blocks"])
-    chosen = PanelMetadata(
-        team_id="T",
-        channel_id="C",
-        view="github_add",
-        agent_name="helper",
-        selected_repo_ids=(1, 2),
-    )
-    saved = decode_panel_metadata(encode_panel_metadata(chosen))
-    assert saved == chosen
-    assert "Add repos" in str(build_add_view(saved, panel)["blocks"])
-    empty = build_add_view(
-        meta, GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False), is_admin=True
-    )
-    empty_actions = [
-        element["text"]["text"]
-        for block in empty["blocks"]
-        if block["type"] == "actions"
-        for element in block["elements"]
-        if element["type"] == "button"
-    ]
-    assert "🔗 Connect GitHub" in empty_actions
-    assert "Add repos" not in empty_actions
-    branded_empty = build_add_view(
-        meta,
-        GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False),
-        is_admin=True,
-        connect_card=build_connect_card(
-            agent_name="ResearchBot",
-            identity_enabled=True,
-            avatar_url="https://mcp.test/avatars/research.png",
-            public_base_url="https://mcp.test",
-        ),
-    )
-    assert branded_empty["blocks"][0]["elements"][0]["image_url"] == (
-        "https://mcp.test/avatars/research.png"
-    )
-    assert branded_empty["blocks"][1]["text"]["text"] == "Connect GitHub"
-    saved_key = build_add_view(
-        PanelMetadata(team_id="T", channel_id="C", view="github_add", agent_name="helper"),
-        GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=True, saved_state=True),
-    )
-    assert "This agent uses a saved GitHub key" in str(saved_key["blocks"])
-
-
-@pytest.mark.asyncio
-async def test_slack_repo_open_refuses_unauthorized_viewer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = MagicMock()
-    context.__aenter__ = AsyncMock(return_value=object())
-    context.__aexit__ = AsyncMock(return_value=None)
-    runtime = SimpleNamespace(
-        sessionmaker=lambda: context, anthropic=object(), deployment_default=MagicMock()
-    )
+async def test_stale_slack_edit_action_does_not_reach_a_handler() -> None:
+    runtime = MagicMock()
     client = MagicMock()
-    client.views_push = AsyncMock()
-    monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=False))
-    monkeypatch.setattr(
-        actions_module,
-        "load_panel_roster",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                rows=[SimpleNamespace(name="helper", ma_agent_id="ag_helper")]
-            )
-        ),
-    )
-    refusal = AsyncMock(return_value=True)
-    monkeypatch.setattr(actions_module, "refuse_unless_allowed_for_agent_name", refusal)
-    handled = await actions_module.handle(
-        runtime,
-        client,
-        {"trigger_id": "trigger"},
-        action={"action_id": "agent_setup__github_repos", "value": "helper"},
-        meta=PanelMetadata(team_id="T", channel_id="C", view="details"),
-        team_id="T",
-        user_id="U",
-    )
-    assert handled and refusal.await_count == 1
-    client.views_push.assert_not_awaited()
+    for action_id in (
+        "agent_setup__github_remove",
+        "agent_setup__github_deactivate",
+        "agent_setup__github_add_commit",
+        "agent_setup__github_manage_write",
+        "agent_setup__github_confirm_remove",
+    ):
+        assert action_id not in panel_actions.PANEL_ACTION_IDS
+        assert not await actions_module.handle(
+            runtime,
+            client,
+            {},
+            action={"action_id": action_id},
+            meta=PanelMetadata(team_id="T", channel_id="C", view="github_repos"),
+            team_id="T",
+            user_id="U",
+        )
+    runtime.sessionmaker.assert_not_called()
+    client.views_update.assert_not_called()
+    client.views_push.assert_not_called()
 
 
 @pytest.mark.asyncio

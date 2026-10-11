@@ -14,6 +14,7 @@ from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.domain import Role, TransferKind, TurnOriginRow
+from daimon.core.stores.github_grant_proposals import resolve as resolve_github_grant_proposals
 from daimon.core.stores.pending_skill_adds import resolve_pending_skill_adds
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from pydantic import BaseModel, ConfigDict
@@ -166,6 +167,7 @@ async def turn_origin(
     is_setup: bool = False,
     is_external: bool = False,
     message_text: str | None = None,
+    queued_message: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -174,6 +176,8 @@ async def turn_origin(
     `message_text` is the person's own message that started this turn, as the
     adapter received it; it settles their open skill-add previews in this
     thread (`resolve_pending_skill_adds`). None for a turn no message started.
+    `queued_message` means the message arrived during another turn in this
+    thread. It runs as a turn, but cannot settle a skill-add preview.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -195,9 +199,14 @@ async def turn_origin(
             is_external=is_external,
         )
         if message_text is not None:
-            await resolve_pending_skill_adds(
-                session, origin=origin, message_text=message_text, now=now
-            )
+            if not queued_message:
+                await resolve_pending_skill_adds(
+                    session,
+                    origin=origin,
+                    message_text=message_text,
+                    now=now,
+                )
+            await resolve_github_grant_proposals(session, origin=origin, message_text=message_text)
     origin_context = current_origin_id.set(origin.id)
     try:
         yield origin

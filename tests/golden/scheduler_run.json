@@ -74,6 +74,7 @@
                 "cache_read": 0.3,
                 "cache_write": 3.75,
                 "input": 3.0,
+                "long_context": null,
                 "output": 15.0
               },
               "sessionmaker": "<sessionmaker>",

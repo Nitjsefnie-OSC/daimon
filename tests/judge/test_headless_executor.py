@@ -452,7 +452,7 @@ async def test_mux_headless_return_binds_only_actual_final_text_to_oracle(tmp_pa
     row["surface"] = "headless"
     row["assert"] = [
         {"kind": "text_present", "turn": 1, "pattern": "^FINAL"},
-        {"kind": "text_absent", "turn": 1, "pattern": "HIDDEN|TRUNCATED"},
+        {"kind": "text_absent", "turn": 1, "pattern": "HIDDEN"},
         {"kind": "no_preamble", "turn": 1},
         {"kind": "card_finalized", "turn": 1},
         {"kind": "tool_succeeded", "turn": 1, "tool_name": "bash"},
@@ -471,7 +471,7 @@ async def test_mux_headless_return_binds_only_actual_final_text_to_oracle(tmp_pa
     ]
     first = result.evidence.turns[0]
     assert first.text_capture_complete and len(first.texts) == 1
-    assert first.texts[0].text == "FINAL" + "a" * 995
+    assert first.texts[0].text == "FINAL" + "a" * 995 + "TRUNCATED"
     assert first.texts[0].evidence_id == result.headless_outputs[0].evidence_id
     assert first.terminals[0].observed_s <= first.texts[0].observed_s
     assert first.texts[0].observed_s == result.headless_outputs[0].returned_s

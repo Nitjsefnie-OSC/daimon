@@ -9,6 +9,7 @@ Per `guideline:architecture` "Functional core, imperative shell".
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, localcontext
@@ -76,6 +77,31 @@ class ModelRates:
     output: float
     cache_write: float
     cache_read: float
+    # Rates for a request whose prompt is over LONG_CONTEXT_PROMPT_TOKENS, for
+    # models priced by prompt length (Haiku 5.5). None: one rate at any length.
+    long_context: ModelRates | None = None
+
+
+# Haiku 5.5's long-context threshold. The pricing page counts a request's
+# prompt as all its input tokens, cache reads and cache writes included, and
+# prices each request on its own.
+LONG_CONTEXT_PROMPT_TOKENS = 100_000
+
+
+class UsageCounts(Protocol):
+    """Token fields shared by SDK request usage and turn totals."""
+
+    @property
+    def input_tokens(self) -> int: ...
+
+    @property
+    def output_tokens(self) -> int: ...
+
+    @property
+    def cache_creation_input_tokens(self) -> int: ...
+
+    @property
+    def cache_read_input_tokens(self) -> int: ...
 
 
 # Agent models — what an agent's `model` may be set to. List price in USD per
@@ -85,7 +111,7 @@ class ModelRates:
 # provider cost. `test_pricing.py` pins every row and has an opt-in live check
 # (`pytest -m contract packages/core/tests/test_pricing.py`) against the page.
 AGENT_PRICING_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing"
-AGENT_PRICING_CHECKED_ON = "2026-10-08"
+AGENT_PRICING_CHECKED_ON = "2026-10-10"
 AGENT_MODEL_PRICING: dict[str, ModelRates] = {
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
@@ -94,6 +120,13 @@ AGENT_MODEL_PRICING: dict[str, ModelRates] = {
     "claude-sonnet-5-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.10),
     "claude-sonnet-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.20),
     "claude-sonnet-4-6": ModelRates(input=3.0, output=15.0, cache_write=3.75, cache_read=0.30),
+    "claude-haiku-5-5": ModelRates(
+        input=0.10,
+        output=0.50,
+        cache_write=0.125,
+        cache_read=0.01,
+        long_context=ModelRates(input=0.50, output=2.50, cache_write=0.625, cache_read=0.05),
+    ),
     "claude-haiku-4-5": ModelRates(input=1.0, output=5.0, cache_write=1.25, cache_read=0.10),
 }
 
@@ -116,19 +149,44 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
 }
 
+_SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
+
+
+class _ModelPricing(dict[str, ModelRates]):
+    """Price table that also prices a dated snapshot id at its alias's row.
+
+    Managed Agents echoes snapshot ids such as `claude-haiku-4-5-20251001`;
+    the table lists aliases (`claude-haiku-4-5`). Without this fallback a
+    turn on a snapshot id priced at None and went unbilled.
+    """
+
+    def __missing__(self, key: str) -> ModelRates:
+        alias = _SNAPSHOT_SUFFIX.sub("", key)
+        if alias != key and super().__contains__(alias):
+            return super().__getitem__(alias)
+        raise KeyError(key)
+
+    def get(self, key: str, default: ModelRates | None = None) -> ModelRates | None:  # type: ignore[override]
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
 # Every metered model, for cost lookups. Agent selectability comes from
 # AGENT_MODEL_PRICING alone (see `constants.ALLOWED_MODEL_IDS`).
-MODEL_PRICING: dict[str, ModelRates] = {**AGENT_MODEL_PRICING, **TOOL_MODEL_PRICING}
+MODEL_PRICING: dict[str, ModelRates] = _ModelPricing({**AGENT_MODEL_PRICING, **TOOL_MODEL_PRICING})
 
 
 def cost_of(
     usage: UsageObservation | LegacyUsage,
     rates: ModelRates | None,
 ) -> float | None:
-    """Compute USD cost for a neutral measurement against `rates`.
+    """Compute USD cost for one reported request at its prompt-length tier.
 
-    Returns None for unknown rates or an unreported token stage. The float
-    operation order is retained verbatim for historical debit parity.
+    Neutral observations project to disjoint counts first. Unknown rates or
+    token stages stay unknown; float operation order retains historical parity.
+    Multiple requests use cost_of_totals or an explicitly selected tier bucket.
     """
     if rates is None:
         return None
@@ -137,12 +195,58 @@ def cost_of(
         if tokens is None:
             return None
         usage = tokens
+    prompt_tokens = (
+        usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
+    )
+    return cost_of_bucket(usage, rates, long_prompt=prompt_tokens > LONG_CONTEXT_PROMPT_TOKENS)
+
+
+def cost_of_bucket(
+    usage: UsageCounts,
+    rates: ModelRates | None,
+    *,
+    long_prompt: bool,
+) -> float | None:
+    """USD cost of usage summed over requests that all sit on one side of the threshold.
+
+    `long_prompt` says which side: each request's prompt was over
+    LONG_CONTEXT_PROMPT_TOKENS. Ignored for models with a single rate.
+    """
+    if rates is None:
+        return None
+    if long_prompt and rates.long_context is not None:
+        rates = rates.long_context
     return (
         usage.input_tokens * rates.input / 1_000_000
         + usage.output_tokens * rates.output / 1_000_000
         + usage.cache_creation_input_tokens * rates.cache_write / 1_000_000
         + usage.cache_read_input_tokens * rates.cache_read / 1_000_000
     )
+
+
+def cost_of_totals(
+    all_usage: UsageCounts,
+    long_usage: UsageCounts,
+    rates: ModelRates | None,
+) -> float | None:
+    """Price a turn's totals: `long_usage` is the subset from long-prompt requests.
+
+    The rest is priced at the base rates and the subset at the long-context
+    rates, so the sum equals pricing each request on its own.
+    """
+    short = UsageTokens(
+        input_tokens=all_usage.input_tokens - long_usage.input_tokens,
+        output_tokens=all_usage.output_tokens - long_usage.output_tokens,
+        cache_creation_input_tokens=all_usage.cache_creation_input_tokens
+        - long_usage.cache_creation_input_tokens,
+        cache_read_input_tokens=all_usage.cache_read_input_tokens
+        - long_usage.cache_read_input_tokens,
+    )
+    short_cost = cost_of_bucket(short, rates, long_prompt=False)
+    long_cost = cost_of_bucket(long_usage, rates, long_prompt=True)
+    if short_cost is None or long_cost is None:
+        return None
+    return short_cost + long_cost
 
 
 def format_cost(amount: float | None) -> str | None:

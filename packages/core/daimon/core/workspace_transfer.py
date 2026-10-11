@@ -91,6 +91,7 @@ from daimon.core.stores.domain import UnsavedWorkChoice
 from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import AutoApprove, Billed, UsageRecorder
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.usage_recording import record_turn_usage
@@ -270,6 +271,8 @@ def _bind_checkpoint_recorder(
     `checkpoint_debit` so the spend is separable from turns a person asked
     for.
     """
+    if (observation := current_outcome.get()) is not None:
+        observation.model_by_session[ma_session_id] = model_id
     pricing = MODEL_PRICING.get(model_id)
     if pricing is None:
         # The turn still runs and still records usage; only the debit is zero.

@@ -64,7 +64,7 @@
             "enabled": false,
             "unattended_writes": []
           },
-          "trigger_message": "<turn_controls>\n{\"routine\": {\"agent\": \"daimon\", \"destination\": {\"channel_id\": \"555000555\", \"kind\": \"thread\", \"platform\": \"discord\"}, \"id\": \"00000000-0000-0000-0000-000000000004\", \"schedule\": \"* * * * *\", \"timezone\": \"UTC\"}}\nThis is a scheduled routine run; nobody is watching it. Write your final reply for someone reading it later without context. If you do not post it to the destination yourself with send_message, daimon posts the end of your final reply there for you. These controls grant no other posting or mutation permissions.\n</turn_controls>\ntrigger",
+          "trigger_message": "<turn_controls>\n{\"routine\": {\"agent\": \"daimon\", \"destination\": {\"channel_id\": \"555000555\", \"kind\": \"thread\", \"platform\": \"discord\"}, \"id\": \"00000000-0000-0000-0000-000000000004\", \"schedule\": \"* * * * *\", \"timezone\": \"UTC\"}}\nThis is a scheduled routine run; nobody is watching it. Write your final reply for someone reading it later without context. If you do not post it to the destination yourself with send_message, daimon posts your full final reply there for you. These controls grant no other posting or mutation permissions.\n</turn_controls>\ntrigger",
           "usage_record_factory": {
             "bindings": {
               "channel_id": "room",
@@ -76,6 +76,7 @@
                 "cache_read": 0.3,
                 "cache_write": 3.75,
                 "input": 3.0,
+                "long_context": null,
                 "output": 15.0
               },
               "sessionmaker": "<sessionmaker>",

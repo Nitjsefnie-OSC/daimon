@@ -11,13 +11,20 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import httpx
 import pytest
-from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
+from daimon.adapters.discord.continuation_dispatch import (
+    _HISTORY_MAX_PAGES,
+    _HISTORY_PAGE_SIZE,
+    _latest_human_message_at,
+    dispatch_pending_continuations,
+)
 from daimon.core.continuity.continuation import ContinuationDecision
+from daimon.core.continuity.dispatch import ContinuationContextUnavailable
 from daimon.core.continuity.wakes import (
     WAKE_CLAIM_LEASE,
     WAKE_RETRY_DELAY,
@@ -65,11 +72,100 @@ def _make_thread(*, thread_id: int = 42) -> MagicMock:
     return thread
 
 
+async def test_superseding_human_message_found_behind_six_bot_posts() -> None:
+    """A busy bot must not hide a human reply that superseded a queued handoff."""
+    created = datetime.now(UTC) - timedelta(minutes=1)
+    human_at = created + timedelta(seconds=1)
+    posts = [
+        SimpleNamespace(
+            author=SimpleNamespace(bot=True), created_at=human_at + timedelta(seconds=i)
+        )
+        for i in range(6, 0, -1)
+    ]
+    posts.append(SimpleNamespace(author=SimpleNamespace(bot=False), created_at=human_at))
+    thread = _make_thread()
+    thread.history.side_effect = lambda *, limit, before=None: _AsyncIter(posts[:limit])
+
+    assert await _latest_human_message_at(thread, after=created) == human_at
+
+
+async def test_superseding_human_message_found_on_second_history_page() -> None:
+    created = datetime.now(UTC) - timedelta(minutes=10)
+    human_at = created + timedelta(seconds=1)
+    posts = [
+        SimpleNamespace(
+            author=SimpleNamespace(bot=i != 100),
+            created_at=human_at + timedelta(seconds=101 - i),
+        )
+        for i in range(101)
+    ]
+    thread = _make_thread()
+
+    def history(*, limit: int, before: object = None) -> _AsyncIter:
+        start = 0 if before is None else posts.index(before) + 1
+        return _AsyncIter(posts[start : start + limit])
+
+    thread.history.side_effect = history
+    assert await _latest_human_message_at(thread, after=created) == posts[-1].created_at
+    assert thread.history.call_count == 2
+
+
+async def test_history_scan_stops_at_continuation_timestamp() -> None:
+    created = datetime.now(UTC) - timedelta(minutes=1)
+    posts = [
+        SimpleNamespace(
+            author=SimpleNamespace(bot=True), created_at=created + timedelta(seconds=1)
+        ),
+        SimpleNamespace(author=SimpleNamespace(bot=False), created_at=created),
+    ]
+    thread = _make_thread()
+    thread.history.side_effect = lambda *, limit, before=None: _AsyncIter(posts)
+
+    assert await _latest_human_message_at(thread, after=created) is None
+    assert thread.history.call_count == 1
+
+
+async def test_history_scan_cap_counts_as_superseded() -> None:
+    created = datetime.now(UTC) - timedelta(days=1)
+    thread = _make_thread()
+    calls = 0
+
+    def history(*, limit: int, before: object = None) -> _AsyncIter:
+        nonlocal calls
+        calls += 1
+        posts = [
+            SimpleNamespace(
+                author=SimpleNamespace(bot=True),
+                created_at=created + timedelta(hours=1, seconds=-(calls * limit + i)),
+            )
+            for i in range(limit)
+        ]
+        return _AsyncIter(posts)
+
+    thread.history.side_effect = history
+    # Retrying would rescan the same pages, so the cap resolves the row instead:
+    # a time after the continuation, which decide_continuation reads as superseded.
+    latest = await _latest_human_message_at(thread, after=created)
+    assert latest is not None and latest > created
+    assert calls == _HISTORY_MAX_PAGES
+    assert thread.history.call_args.kwargs["limit"] == _HISTORY_PAGE_SIZE
+
+
+async def test_failed_history_read_is_unknown() -> None:
+    thread = _make_thread()
+    thread.history.side_effect = discord.HTTPException(
+        SimpleNamespace(status=503, reason="Unavailable"), "history unavailable"
+    )
+    with pytest.raises(ContinuationContextUnavailable):
+        await _latest_human_message_at(thread, after=datetime.now(UTC) - timedelta(minutes=1))
+
+
 async def _seed_pending_row(
     db_session_factory: async_sessionmaker[AsyncSession],
     *,
     requested_work: str | None,
     available_at: datetime | None = None,
+    reason: str = "task_handoff",
 ) -> tuple[uuid.UUID, uuid.UUID, str, uuid.UUID]:
     """Seed one pending continuation row; return (tenant_id, account_id, thread_id, key)."""
     async with db_session_factory() as session, session.begin():
@@ -88,7 +184,7 @@ async def _seed_pending_row(
             requester_external_user_id="555",
             target_ma_agent_id="ag_target",
             target_name="target-agent",
-            reason="task_handoff",
+            reason=reason,
             idempotency_key=idempotency_key,
             requested_work=requested_work,
             available_at=available_at,
@@ -144,6 +240,134 @@ async def test_dispatches_exactly_once_and_settles_delivered(
         may_post=_may_post_open,
     )
     run_follow_up.assert_not_awaited()
+
+
+async def test_unreadable_history_defers_handoff(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _account_id, _thread_id, key = await _seed_pending_row(
+        db_session_factory, requested_work="continue"
+    )
+    thread = _make_thread()
+    thread.history.side_effect = discord.HTTPException(
+        SimpleNamespace(status=503, reason="Unavailable"), "history unavailable"
+    )
+    run_follow_up = AsyncMock()
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        MagicMock(),
+        tenant_id=tenant_id,
+        thread=thread,
+        run_follow_up=run_follow_up,
+        may_post=_may_post_open,
+    )
+
+    run_follow_up.assert_not_awaited()
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status == "pending"
+    assert row.available_at is not None
+
+
+async def test_history_cap_settles_handoff_instead_of_retrying_forever(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _account_id, _thread_id, key = await _seed_pending_row(
+        db_session_factory, requested_work="continue"
+    )
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    newest = row.created_at + timedelta(days=1)
+    thread = _make_thread()
+    thread.history.side_effect = lambda *, limit, before=None: _AsyncIter(
+        [SimpleNamespace(author=SimpleNamespace(bot=True), created_at=newest) for _ in range(limit)]
+    )
+    run_follow_up = AsyncMock()
+    anthropic = build_stub_anthropic(_reachable_agent_handler(tenant_id, ma_agent_id="ag_target"))
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        tenant_id=tenant_id,
+        thread=thread,
+        run_follow_up=run_follow_up,
+        may_post=_may_post_open,
+    )
+
+    run_follow_up.assert_not_awaited()
+    async with db_session_factory() as session:
+        settled = await get_continuation(session, idempotency_key=key)
+    assert settled is not None and settled.status == "skipped"
+    assert settled.skip_reason == "skip_superseded"
+
+
+async def test_timer_dispatches_without_reading_thread_history(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _account_id, _thread_id, key = await _seed_pending_row(
+        db_session_factory,
+        requested_work="check the build",
+        available_at=datetime.now(UTC) - timedelta(seconds=1),
+        reason="timer",
+    )
+    thread = _make_thread()
+    thread.history.side_effect = discord.HTTPException(
+        SimpleNamespace(status=503, reason="Unavailable"), "history unavailable"
+    )
+    run_follow_up = AsyncMock()
+    anthropic = build_stub_anthropic(_reachable_agent_handler(tenant_id, ma_agent_id="ag_target"))
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        tenant_id=tenant_id,
+        thread=thread,
+        run_follow_up=run_follow_up,
+        may_post=_may_post_open,
+    )
+
+    thread.history.assert_not_called()
+    run_follow_up.assert_awaited_once()
+
+
+async def test_newer_human_behind_bot_posts_skips_handoff(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _account_id, _thread_id, key = await _seed_pending_row(
+        db_session_factory, requested_work="continue"
+    )
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    human_at = row.created_at + timedelta(seconds=1)
+    posts = [
+        SimpleNamespace(
+            author=SimpleNamespace(bot=True), created_at=human_at + timedelta(seconds=i)
+        )
+        for i in range(6, 0, -1)
+    ]
+    posts.append(SimpleNamespace(author=SimpleNamespace(bot=False), created_at=human_at))
+    thread = _make_thread()
+    thread.history.side_effect = lambda *, limit, before=None: _AsyncIter(posts[:limit])
+    run_follow_up = AsyncMock()
+    anthropic = build_stub_anthropic(_reachable_agent_handler(tenant_id, ma_agent_id="ag_target"))
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        tenant_id=tenant_id,
+        thread=thread,
+        run_follow_up=run_follow_up,
+        may_post=_may_post_open,
+    )
+
+    run_follow_up.assert_not_awaited()
+    async with db_session_factory() as session:
+        settled = await get_continuation(session, idempotency_key=key)
+    assert settled is not None and settled.status == "skipped"
+    assert settled.skip_reason == "skip_superseded"
 
 
 async def test_skips_save_only_continuation_without_dispatch(

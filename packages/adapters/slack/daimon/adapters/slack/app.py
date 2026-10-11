@@ -111,7 +111,12 @@ from daimon.adapters.slack.direct_messages import (
     handle_dm_command,
     is_direct_message_event,
 )
-from daimon.adapters.slack.errors import generate_request_id, render_error
+from daimon.adapters.slack.errors import (
+    NOT_SET_UP_NOTICE,
+    SETUP_OUT_OF_DATE_NOTICE,
+    generate_request_id,
+    render_error_payload,
+)
 from daimon.adapters.slack.feedback import (
     FEEDBACK_DETAILS_ACTION_ID,
     FeedbackTextDecision,
@@ -139,7 +144,7 @@ from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.names import remember_payload_names
-from daimon.adapters.slack.output_delivery import deliver_session_outputs
+from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
     handle_privacy_command,
@@ -208,7 +213,7 @@ from daimon.core.continuity.messages import (
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -395,14 +400,14 @@ class SlackApp:
 
     def __init__(self, *, runtime: SlackRuntime) -> None:
         self.runtime = with_budget_notifier(runtime)
-        # Per-thread concurrency state (keys are Slack thread_ts strings).
-        self._processing: set[str] = set()
-        self._pending: dict[str, list[dict[str, Any]]] = {}
-        # Continuation dispatches skipped because the thread was processing,
-        # keyed by thread_ts: re-run when the thread is released (see
+        # Slack timestamps are unique only within a workspace conversation.
+        self._processing: set[tuple[str, str, str]] = set()
+        self._pending: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        # Continuation dispatches skipped because the conversation was processing,
+        # keyed by team, channel, and thread ts: re-run when it is released (see
         # `_release_thread`). Last writer wins; a dispatch reads every pending
         # row for the thread, so one entry is enough.
-        self._deferred_dispatch: dict[str, dict[str, Any]] = {}
+        self._deferred_dispatch: dict[tuple[str, str, str], dict[str, Any]] = {}
         # Per-tenant turn slots, with the queue a turn waits in at the cap.
         self.turn_queue = TurnQueue.from_settings(runtime.settings.turn_queue, platform="slack")
         # Background task references (prevent GC before done-callbacks fire).
@@ -412,8 +417,8 @@ class SlackApp:
         # pre-orchestration gap without changing crash recovery semantics.
         self._mention_tasks: set[asyncio.Task[None]] = set()
         self._mention_acks_pending: int = 0
-        # Cancel registry: status_ts -> (cancel Event, author_id).
-        self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
+        # UUID action keys are global; status timestamps need conversation scope.
+        self._cancel_registry: dict[str | tuple[str, str, str], tuple[asyncio.Event, str]] = {}
         # Bot user id per workspace, resolved lazily via auth.test. The id is
         # immutable for a given app+workspace, so the cache never invalidates.
         self._bot_user_ids: dict[str, str] = {}
@@ -421,8 +426,8 @@ class SlackApp:
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
         self._provider_actions = SlackProviderActions()
-        # Output-delivery abort-notice dedup, keyed "{team_id}:{error_code}".
-        self._delivery_notice_keys: set[str] = set()
+        # Output-delivery notice dedup per thread and warning log dedup per workspace.
+        self._delivery_notice_keys = NoticeKeys()
         # Chains output sweeps per MA session so two never overlap.
         self._output_sweeps: dict[str, asyncio.Task[None]] = {}
         # Drain flag — set on SIGTERM; blocks new mention handling.
@@ -703,7 +708,9 @@ class SlackApp:
             view_vs: dict[str, Any] = payload.get("view") or {}
             cb_id: str = str(view_vs.get("callback_id") or "")
             if cb_id == "privacy_delete":
-                decision = evaluate_delete_submission(payload)
+                decision = evaluate_delete_submission(
+                    payload, delete_enabled=self.runtime.settings.privacy.delete_enabled
+                )
                 await (
                     client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
                         SocketModeResponse(
@@ -1268,13 +1275,34 @@ class SlackApp:
             # confirmed or corrected from staging logs (T-82-20).
             log.debug("slack.on_request.unrecognised_envelope_type", req_type=req.type)
 
-    def _register_cancel(self, status_ts: str, cancel: asyncio.Event, author_id: str) -> None:
-        """Register a turn's cancel Event in the status_ts-keyed registry."""
-        self._cancel_registry[status_ts] = (cancel, author_id)
+    @staticmethod
+    def _cancel_registry_key(
+        key: str, *, team_id: str = "", channel: str = ""
+    ) -> str | tuple[str, str, str]:
+        # Lifecycle's temporary action key is a UUID; only Slack message ts
+        # values need conversation scope. Empty context supports bare lifecycle
+        # callbacks used by unit tests.
+        return (team_id, channel, key) if team_id and channel and "." in key else key
 
-    def _deregister_cancel(self, status_ts: str) -> None:
+    def _register_cancel(
+        self,
+        status_ts: str,
+        cancel: asyncio.Event,
+        author_id: str,
+        *,
+        team_id: str = "",
+        channel: str = "",
+    ) -> None:
+        """Register a turn's cancel Event under its action or scoped status key."""
+        self._cancel_registry[
+            self._cancel_registry_key(status_ts, team_id=team_id, channel=channel)
+        ] = (cancel, author_id)
+
+    def _deregister_cancel(self, status_ts: str, *, team_id: str = "", channel: str = "") -> None:
         """Remove a turn's cancel registry entry on turn completion."""
-        self._cancel_registry.pop(status_ts, None)
+        self._cancel_registry.pop(
+            self._cancel_registry_key(status_ts, team_id=team_id, channel=channel), None
+        )
 
     async def _handle_teardown(self, *, team_id: str, event_time: datetime | None = None) -> None:
         """Archive the install: soft-archive the tenant, delete the bot token.
@@ -1315,7 +1343,13 @@ class SlackApp:
         user_info: dict[str, Any] | None = payload.get("user")
         clicker: str = (user_info.get("id") if user_info is not None else "") or ""
         action_key = str(actions[0].get("value") or "")
-        entry = self._cancel_registry.get(action_key) or self._cancel_registry.get(status_ts)
+        team: dict[str, Any] = payload.get("team") or {}
+        channel_info: dict[str, Any] = payload.get("channel") or {}
+        team_id = str(team.get("id") or "")
+        channel = str(channel_info.get("id") or (container or {}).get("channel_id") or "")
+        entry = self._cancel_registry.get(action_key) or self._cancel_registry.get(
+            (team_id, channel, status_ts)
+        )
         if entry is None:
             await self._refuse_cancel(payload, clicker=clicker, text=_CANCEL_TURN_ENDED)
             return
@@ -1337,6 +1371,8 @@ class SlackApp:
         channel_info: dict[str, Any] = payload.get("channel") or {}
         container: dict[str, Any] = payload.get("container") or {}
         channel = str(channel_info.get("id") or container.get("channel_id") or "")
+        message: dict[str, Any] = payload.get("message") or {}
+        parent_thread_ts = message.get("thread_ts")
         if not (team_id and channel and clicker):
             return
         try:
@@ -1347,6 +1383,7 @@ class SlackApp:
                 channel=channel,
                 user=clicker,
                 text=text,
+                **({"thread_ts": parent_thread_ts} if parent_thread_ts else {}),
             )
         except (SlackApiError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.cancel_refusal_notice_failed", team_id=team_id, exc_info=exc)
@@ -1523,7 +1560,7 @@ class SlackApp:
                     await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                         channel=channel,
                         thread_ts=event.get("thread_ts") or event_ts,
-                        text=render_error(exc, request_id=request_id),
+                        **render_error_payload(exc, request_id=request_id),
                     )
 
     async def _bot_user_id(self, team_id: str, client: AsyncWebClient) -> str:
@@ -1631,6 +1668,7 @@ class SlackApp:
         if not thread_id:
             log.warning("slack.event_dropped.no_ts", team_id=team_id, channel=channel)
             return
+        thread_key = (team_id, channel, thread_id)
 
         # Setup instructions mention this bot inside the thread. Its own echoed
         # app_mention must not run a turn; other bots may still address Daimon.
@@ -1659,10 +1697,10 @@ class SlackApp:
         )
 
         # (1) Per-thread queue check — queued mentions don't consume a slot.
-        if thread_id in self._processing:
+        if thread_key in self._processing:
             # Append before awaiting reactions_add so a Slack API error on the
             # reaction call does not drop the enqueued event (WR-05).
-            self._pending.setdefault(thread_id, []).append(event)
+            self._pending.setdefault(thread_key, []).append(event)
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
                 await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
@@ -1719,7 +1757,7 @@ class SlackApp:
 
         # (3) Run turn + (4) drain loop, (5) finally release.
         with holding(ticket):
-            self._processing.add(thread_id)
+            self._processing.add(thread_key)
             try:
                 # A protected channel hears nothing from the agent: no reply, no
                 # acknowledgement, role, refusal or error notice. Checked right after
@@ -1777,14 +1815,14 @@ class SlackApp:
                     team_id=team_id,
                 )
             finally:
-                self._release_thread(thread_id)
-                still_pending = self._pending.pop(thread_id, [])
+                self._release_thread(thread_key)
+                still_pending = self._pending.pop(thread_key, [])
                 await self._notify_undrained_mentions(
                     still_pending, channel=channel, web_client=web_client, thread_id=thread_id
                 )
 
     @property
-    def _thread_queue(self) -> ThreadQueue[str, dict[str, Any]]:
+    def _thread_queue(self) -> ThreadQueue[tuple[str, str, str], dict[str, Any]]:
         return ThreadQueue(self._processing, self._pending)
 
     async def _drain_pending_mentions(
@@ -1858,7 +1896,7 @@ class SlackApp:
                 )
 
         try:
-            await self._thread_queue.drain(thread_id, compose=compose, run=run)
+            await self._thread_queue.drain((team_id, channel, thread_id), compose=compose, run=run)
         finally:
             await self._clear_pending_reactions(
                 list(unsettled.values()), channel=channel, web_client=web_client
@@ -2035,23 +2073,10 @@ class SlackApp:
                 channel_id=channel,
                 missing=list(err.missing),
             )
-            hints: list[str] = []
-            if "agent" in err.missing:
-                hints.append(
-                    "Ask a workspace admin to tell Daimon which agent should answer here "
-                    "(/agent-setup shows who answers where)."
-                )
-            if "environment" in err.missing:
-                hints.append(
-                    "A workspace admin, or an admin of this channel, can pick an environment "
-                    "in /agent-setup → Who answers where."
-                )
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=(
-                    f"No {' or '.join(err.missing)} configured for this channel. " + " ".join(hints)
-                ),
+                text=NOT_SET_UP_NOTICE,
             )
             return
         except MAResolverMissError as err:
@@ -2064,10 +2089,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=(
-                    "The configured agent or environment no longer exists. A workspace "
-                    "admin, or an admin of this channel, can pick another in /agent-setup."
-                ),
+                text=SETUP_OUT_OF_DATE_NOTICE,
             )
             return
         except AdmissionDenied as err:
@@ -2198,10 +2220,14 @@ class SlackApp:
             agent_name=_lc_agent_name,
             model_id=_lc_model_id,
             markup=self.runtime.turn_deps.markup,
-            register=self._register_cancel,
-            deregister=self._deregister_cancel,
-            register_pending=self._register_cancel,
-            deregister_pending=self._deregister_cancel,
+            register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
+            deregister=functools.partial(self._deregister_cancel, team_id=team_id, channel=channel),
+            register_pending=functools.partial(
+                self._register_cancel, team_id=team_id, channel=channel
+            ),
+            deregister_pending=functools.partial(
+                self._deregister_cancel, team_id=team_id, channel=channel
+            ),
             intent_id=card_intent.id,
             identity=turn_identity,
             ma_agent_id=str(agent.id),
@@ -2229,7 +2255,7 @@ class SlackApp:
                 raise RuntimeError("Slack initial card intent could not record its message ID")
         except BaseException:
             if lifecycle.status_ts is not None:
-                self._deregister_cancel(lifecycle.status_ts)
+                self._deregister_cancel(lifecycle.status_ts, team_id=team_id, channel=channel)
             raise
 
         # Mapping-row ids the turn marker has been written against, tracked
@@ -2273,8 +2299,12 @@ class SlackApp:
             # Over the cap the turn waits here, behind its ordinary card: the
             # queue is never shown. Before the ceiling clock starts, so the
             # wait does not eat the turn's budget.
+            assert self.runtime.settings.slack is not None
             slot = await wait_for_slot(
-                cancel_event, sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id
+                cancel_event,
+                sessionmaker=self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                default_cap=self.runtime.settings.slack.max_concurrent_turns_per_tenant,
             )
             if slot != "started":
                 await lifecycle.end_unstarted(
@@ -2423,7 +2453,7 @@ class SlackApp:
             # the outcome is known.
             replacement_summary: str | None = None
             if (
-                prepared.continuity.state == "replaced"
+                prepared.continuity.announces_replacement()
                 and prepared.continuity.transfer_kind is not None
             ):
                 # Not a separate message: the answer is an in-place edit of the
@@ -2640,7 +2670,7 @@ class SlackApp:
                         now=datetime.now(UTC),
                     )
                 if recovery_origin is None:
-                    raise DaimonError(
+                    raise UserFacingError(
                         "This turn's setup context expired. Please retry your message."
                     )
                 return (
@@ -2677,10 +2707,18 @@ class SlackApp:
                     agent_name=_lc_agent_name,
                     model_id=_lc_model_id,
                     markup=self.runtime.turn_deps.markup,
-                    register=self._register_cancel,
-                    deregister=self._deregister_cancel,
-                    register_pending=self._register_cancel,
-                    deregister_pending=self._deregister_cancel,
+                    register=functools.partial(
+                        self._register_cancel, team_id=team_id, channel=channel
+                    ),
+                    deregister=functools.partial(
+                        self._deregister_cancel, team_id=team_id, channel=channel
+                    ),
+                    register_pending=functools.partial(
+                        self._register_cancel, team_id=team_id, channel=channel
+                    ),
+                    deregister_pending=functools.partial(
+                        self._deregister_cancel, team_id=team_id, channel=channel
+                    ),
                     # Take over the failed attempt's card so it is edited into
                     # this turn's answer rather than left standing beside a
                     # second, successful card.
@@ -2706,7 +2744,13 @@ class SlackApp:
                 # overwrites in place, and it lands before the recovery turn's
                 # first flush, not after it.
                 if lifecycle.status_ts is not None:
-                    self._register_cancel(lifecycle.status_ts, cancel, str(event.get("user") or ""))
+                    self._register_cancel(
+                        lifecycle.status_ts,
+                        cancel,
+                        str(event.get("user") or ""),
+                        team_id=team_id,
+                        channel=channel,
+                    )
                 return new_lifecycle
 
             async with self.runtime.sessionmaker() as s:
@@ -2915,7 +2959,7 @@ class SlackApp:
             # row it could be stranded on, each id suppressed independently
             # so one failed clear cannot skip the other row.
             if lifecycle.status_ts is not None:
-                self._deregister_cancel(lifecycle.status_ts)
+                self._deregister_cancel(lifecycle.status_ts, team_id=team_id, channel=channel)
             intent_terminal = intent_terminal or lifecycle_holder[0].final_ts is not None
             if intent_terminal and lifecycle_holder[0].status_ts is not None:
                 try:
@@ -3125,10 +3169,14 @@ class SlackApp:
             agent_name=follow_admission.agent.name,
             model_id=follow_admission.agent.model.id,
             markup=self.runtime.turn_deps.markup,
-            register=self._register_cancel,
-            deregister=self._deregister_cancel,
-            register_pending=self._register_cancel,
-            deregister_pending=self._deregister_cancel,
+            register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
+            deregister=functools.partial(self._deregister_cancel, team_id=team_id, channel=channel),
+            register_pending=functools.partial(
+                self._register_cancel, team_id=team_id, channel=channel
+            ),
+            deregister_pending=functools.partial(
+                self._deregister_cancel, team_id=team_id, channel=channel
+            ),
             intent_id=card_intent.id,
             identity=follow_identity,
             ma_agent_id=str(follow_admission.agent.id),
@@ -3147,7 +3195,9 @@ class SlackApp:
                 raise RuntimeError("Slack continuation card intent could not record its message ID")
         except BaseException:
             if follow_lifecycle.status_ts is not None:
-                self._deregister_cancel(follow_lifecycle.status_ts)
+                self._deregister_cancel(
+                    follow_lifecycle.status_ts, team_id=team_id, channel=channel
+                )
             raise
         if follow_prepared.mapping_id is not None and follow_lifecycle.status_ts is not None:
             async with self.runtime.sessionmaker() as _at_session:
@@ -3183,7 +3233,9 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
             if recovery_origin is None:
-                raise DaimonError("This turn's setup context expired. Please retry your message.")
+                raise UserFacingError(
+                    "This turn's setup context expired. Please retry your message."
+                )
             return (
                 render_turn_origin(
                     recovery_origin,
@@ -3214,10 +3266,16 @@ class SlackApp:
                 agent_name=follow_admission.agent.name,
                 model_id=follow_admission.agent.model.id,
                 markup=self.runtime.turn_deps.markup,
-                register=self._register_cancel,
-                deregister=self._deregister_cancel,
-                register_pending=self._register_cancel,
-                deregister_pending=self._deregister_cancel,
+                register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
+                deregister=functools.partial(
+                    self._deregister_cancel, team_id=team_id, channel=channel
+                ),
+                register_pending=functools.partial(
+                    self._register_cancel, team_id=team_id, channel=channel
+                ),
+                deregister_pending=functools.partial(
+                    self._deregister_cancel, team_id=team_id, channel=channel
+                ),
                 adopt_status_ts=follow_lifecycle.status_ts,
                 header_customized=(
                     follow_lifecycle.header_customized
@@ -3230,7 +3288,11 @@ class SlackApp:
             lifecycle_holder[0] = new_lifecycle
             if follow_lifecycle.status_ts is not None:
                 self._register_cancel(
-                    follow_lifecycle.status_ts, cancel, row.requester_external_user_id
+                    follow_lifecycle.status_ts,
+                    cancel,
+                    row.requester_external_user_id,
+                    team_id=team_id,
+                    channel=channel,
                 )
             return new_lifecycle
 
@@ -3305,7 +3367,7 @@ class SlackApp:
         finally:
             final_lifecycle = lifecycle_holder[0]
             if final_lifecycle.status_ts is not None:
-                self._deregister_cancel(final_lifecycle.status_ts)
+                self._deregister_cancel(final_lifecycle.status_ts, team_id=team_id, channel=channel)
             if final_lifecycle.final_ts is not None and final_lifecycle.status_ts is not None:
                 try:
                     async with self.runtime.sessionmaker() as intent_session:
@@ -3396,11 +3458,12 @@ class SlackApp:
             account_id=account_id,
             team_id=team_id,
         )
+        thread_key = (team_id, channel, thread_id)
         if not claim_dispatch(
             self._processing,
-            thread_id,
+            thread_key,
             self._deferred_dispatch,
-            thread_id,
+            thread_key,
             request,
         ):
             return
@@ -3423,20 +3486,20 @@ class SlackApp:
                 ),
             )
         finally:
-            self._release_thread(thread_id)
+            self._release_thread(thread_key)
             await self._notify_undrained_mentions(
-                self._pending.pop(thread_id, []),
+                self._pending.pop(thread_key, []),
                 channel=channel,
                 web_client=web_client,
                 thread_id=thread_id,
             )
 
-    def _release_thread(self, thread_id: str) -> None:
+    def _release_thread(self, thread_key: tuple[str, str, str]) -> None:
         release_thread(
             self._processing,
-            thread_id,
+            thread_key,
             self._deferred_dispatch,
-            dispatch_keys=lambda: [thread_id],
+            dispatch_keys=lambda: [thread_key],
             draining=self.draining,
             resume=lambda _key, request: self._spawn(
                 self.dispatch_continuations_in_thread(**request)

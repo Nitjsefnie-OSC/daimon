@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -89,6 +90,7 @@ def _build_router(
     *,
     sent_events: list[dict[str, Any]],
     stream_hits: list[str],
+    session_retrieve_error: bool = False,
 ) -> MARouter:
     """The shared turn router (agent/environment resolution plus a turn SSE
     stream whose `span.model_request_end` the billing chokepoint metering
@@ -108,6 +110,11 @@ def _build_router(
     )
 
     def _handle_session_retrieve(_request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        if session_retrieve_error:
+            return httpx.Response(
+                400,
+                json={"type": "error", "error": {"type": "api_error", "message": "unavailable"}},
+            )
         # A mapping row written before sessions recorded their configuration
         # makes the bind read the session once, to learn what it is running.
         session = ma_session(
@@ -238,8 +245,11 @@ async def _seed_review_row(
 # --- session reuse -----------------------------------------------------------
 
 
+@pytest.mark.parametrize("legacy_read_error", [False, True], ids=["stamped", "legacy-unreadable"])
 async def test_submitting_a_form_resumes_the_threads_existing_session(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    legacy_read_error: bool,
 ) -> None:
     tenant = await _seed_funded_tenant(db_session, workspace_id="800001001")
     row = await _seed_review_row(db_session_factory, tenant=tenant)
@@ -260,11 +270,22 @@ async def test_submitting_a_form_resumes_the_threads_existing_session(
             thread_id=str(channel.id),
             ma_session_id=existing_session_id,
             ma_agent_id=_AGENT_ID,
+            budget_channel_id=str(channel.parent_id),
         )
+        if legacy_read_error:
+            await session.execute(
+                sql_text("UPDATE thread_sessions SET budget_channel_id = '' WHERE id = :id"),
+                {"id": existing.id},
+            )
 
     sent_events: list[dict[str, Any]] = []
     stream_hits: list[str] = []
-    router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
+    router = _build_router(
+        str(tenant.id),
+        sent_events=sent_events,
+        stream_hits=stream_hits,
+        session_retrieve_error=legacy_read_error,
+    )
     runtime = _make_runtime(db_session_factory, router)
     bot = _make_bot(runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
@@ -606,11 +627,20 @@ async def _queued_submit(
     workspace_id: str,
     thread_id: int,
     max_wait_s: float = 300.0,
+    before_card_send: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[DaimonBot, TurnTicket, MagicMock, list[str], MagicMock]:
     """A submit over its tenant's cap (another turn holds the only slot)."""
     tenant = await _seed_funded_tenant(db_session, workspace_id=workspace_id)
     row = await _seed_review_row(db_session_factory, tenant=tenant)
     channel = _make_channel(thread_id=thread_id, parent_id=thread_id - 1000)
+    if before_card_send is not None:
+        message_ref = channel.send.return_value
+
+        async def gated_send(*args: Any, **kwargs: Any) -> MagicMock:
+            await before_card_send()
+            return message_ref
+
+        channel.send = AsyncMock(side_effect=gated_send)
     stream_hits: list[str] = []
     router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
     runtime = _make_runtime(db_session_factory, router)
@@ -625,15 +655,26 @@ async def _queued_submit(
     return bot, held, channel, stream_hits, interaction
 
 
-async def _until_queued_with_card(bot: DaimonBot, channel: MagicMock) -> None:
+def _observe_wait_for_ticket() -> tuple[asyncio.Event, Callable[..., Awaitable[Any]]]:
+    """Expose the real ticket wait, which follows initial-card persistence."""
+    entered = asyncio.Event()
+    wait_for_ticket = wizard_submit_module.wait_for_ticket
+
+    async def observed_wait_for_ticket(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        return await wait_for_ticket(*args, **kwargs)
+
+    return entered, observed_wait_for_ticket
+
+
+async def _until_waiting_for_ticket(entered: asyncio.Event) -> None:
     async with asyncio.timeout(5):
-        while not (bot.turn_queue.depth() and channel.send.await_count):
-            await asyncio.sleep(0.01)
-    await asyncio.sleep(0.05)
+        await entered.wait()
 
 
 async def test_a_queued_submit_shows_its_card_and_binds_only_once_it_has_a_slot(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Same UX as a queued mention: the card (with Stop) and its durable intent
     go up at once; the session is bound only once the slot is granted, so
@@ -644,26 +685,46 @@ async def test_a_queued_submit_shows_its_card_and_binds_only_once_it_has_a_slot(
         bound_while.append((bot.turn_queue.depth(), bot.turn_queue.in_flight()))
         return await bind_session(*args, **kwargs)
 
+    card_send_started = asyncio.Event()
+    release_card_send = asyncio.Event()
+
+    async def delay_card_send() -> None:
+        card_send_started.set()
+        await release_card_send.wait()
+
+    wait_entered, observed_wait = _observe_wait_for_ticket()
     with (
         patch("daimon.core.turn.prepare.create_session") as mock_create_session,
         patch("daimon.adapters.discord.wizard_submit.bind_session", side_effect=_recording_bind),
+        patch.object(wizard_submit_module, "wait_for_ticket", new=observed_wait),
     ):
         mock_create_session.return_value = ma_session(
             id="sess_queued_submit", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
         )
         bot, held, channel, stream_hits, _ = await _queued_submit(
-            db_session, db_session_factory, workspace_id="800007003", thread_id=5027
+            db_session,
+            db_session_factory,
+            workspace_id="800007003",
+            thread_id=5027,
+            before_card_send=delay_card_send,
         )
-        await _until_queued_with_card(bot, channel)
-        card_kwargs = channel.send.await_args.kwargs
-        assert isinstance(card_kwargs["view"], CancelView), "the card carries Stop"
-        assert bound_while == [], "no session is bound while the submit waits"
-        assert stream_hits == [], "no turn runs while it waits"
-        async with db_session_factory() as session:
-            (intent,) = await list_recoverable_turn_card_intents(session, platform="discord")
-        assert intent.message_id == "42", "a restart now would retire this card"
-        held.release()
-        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+        try:
+            async with asyncio.timeout(5):
+                await card_send_started.wait()
+            assert not wait_entered.is_set(), "card persistence is still delayed"
+            release_card_send.set()
+            await _until_waiting_for_ticket(wait_entered)
+            card_kwargs = channel.send.await_args.kwargs
+            assert isinstance(card_kwargs["view"], CancelView), "the card carries Stop"
+            assert bound_while == [], "no session is bound while the submit waits"
+            assert stream_hits == [], "no turn runs while it waits"
+            async with db_session_factory() as session:
+                (intent,) = await list_recoverable_turn_card_intents(session, platform="discord")
+            assert intent.message_id == "42", "a restart now would retire this card"
+        finally:
+            release_card_send.set()
+            held.release()
+            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
 
     assert bound_while == [(0, 1)], "bound once, holding the slot, with nobody queued"
     assert stream_hits, "the queued submit turn ran once the slot freed"
@@ -677,9 +738,11 @@ async def test_a_queued_submit_that_never_runs_collapses_its_card_and_leaves_not
     """Stop while it waits, or the max wait: no session is bound, the card
     ends as Stopped or with the ordinary error, its intent is retired, no
     marker is left, and the other turn keeps its slot."""
+    wait_entered, observed_wait = _observe_wait_for_ticket()
     with (
         patch("daimon.core.turn.prepare.create_session") as mock_create_session,
         patch("daimon.adapters.discord.wizard_submit.bind_session") as mock_bind,
+        patch.object(wizard_submit_module, "wait_for_ticket", new=observed_wait),
     ):
         workspace = "800007004" if ending == "stopped" else "800007005"
         bot, held, channel, stream_hits, _ = await _queued_submit(
@@ -689,29 +752,32 @@ async def test_a_queued_submit_that_never_runs_collapses_its_card_and_leaves_not
             thread_id=5037,
             max_wait_s=300.0 if ending == "stopped" else 0.05,
         )
-        if ending == "stopped":
-            await _until_queued_with_card(bot, channel)
-            view = channel.send.await_args.kwargs["view"]
-            view._cancel.set()  # pyright: ignore[reportPrivateUsage]  # the Stop click
-        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
-        mock_bind.assert_not_called()
-        mock_create_session.assert_not_called()
+        try:
+            await _until_waiting_for_ticket(wait_entered)
+            if ending == "stopped":
+                view = channel.send.await_args.kwargs["view"]
+                view._cancel.set()  # pyright: ignore[reportPrivateUsage]  # the Stop click
+            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+            mock_bind.assert_not_called()
+            mock_create_session.assert_not_called()
 
-    assert stream_hits == []
-    card = channel.send.return_value
-    expected = (
-        "Stopped.\nSend a message to start again."
-        if ending == "stopped"
-        else "Something went wrong. Mention me to try again."
-    )
-    assert [c.kwargs.get("content") for c in card.edit.await_args_list] == [expected]
-    assert await list_orphaned_turns(db_session, platform="discord") == []
-    async with db_session_factory() as session:
-        intents = await list_recoverable_turn_card_intents(session, platform="discord")
-    assert intents == [], "the card's intent is retired"
-    assert bot.turn_queue.depth() == 0
-    assert bot.turn_queue.in_flight() == 1, "only the other turn holds a slot"
-    held.release()
+            assert stream_hits == []
+            card = channel.send.return_value
+            expected = (
+                "Stopped.\nSend a message to start again."
+                if ending == "stopped"
+                else "Something went wrong. Mention me to try again."
+            )
+            assert [c.kwargs.get("content") for c in card.edit.await_args_list] == [expected]
+            assert await list_orphaned_turns(db_session, platform="discord") == []
+            async with db_session_factory() as session:
+                intents = await list_recoverable_turn_card_intents(session, platform="discord")
+            assert intents == [], "the card's intent is retired"
+            assert bot.turn_queue.depth() == 0
+            assert bot.turn_queue.in_flight() == 1, "only the other turn holds a slot"
+        finally:
+            held.release()
+            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_mention_claiming_last_slot_during_submit_cap_read_sheds_submit(
@@ -797,7 +863,7 @@ async def test_a_submitter_over_balance_is_told_and_no_turn_runs(
     assert any("recorded" in text for text in posted_texts), (
         f"the refusal must say the answers were recorded, got: {posted_texts}"
     )
-    assert any("credit is depleted" in text for text in posted_texts), (
+    assert any("Your team's Daimon credit has run out." in text for text in posted_texts), (
         f"the refusal must reuse the existing credit-depleted copy, got: {posted_texts}"
     )
 
@@ -851,9 +917,10 @@ async def test_a_demoted_admin_outside_the_allowlist_is_refused_on_submit(
         for call in channel.send.call_args_list
         if call.args and isinstance(call.args[0], str)
     ]
-    assert any("recorded" in t and "can start a turn" in t for t in posted_texts), (
-        f"the refusal must say the answers were recorded and why, got: {posted_texts}"
-    )
+    assert any(
+        "Your answers were recorded.\n\nDaimon can't accept your request here." in t
+        for t in posted_texts
+    ), f"the refusal must say the answers were recorded and why, got: {posted_texts}"
     async with db_session_factory() as session:
         account = await get_account(session, principal.account_id)
     assert account is not None and account.role is Role.USER, (

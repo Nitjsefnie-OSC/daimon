@@ -49,6 +49,12 @@
               "message": "upstream: Error code: 429 - {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'rate limited'}}"
             },
             "finished_tool_ids": [],
+            "long_prompt_usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
             "mcp_failures": [],
             "rate_limit_until": "<time:anchor-14731170s>",
             "retrying_error": null,
@@ -93,6 +99,12 @@
               "message": "upstream: Error code: 429 - {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'rate limited'}}"
             },
             "finished_tool_ids": [],
+            "long_prompt_usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
             "mcp_failures": [],
             "rate_limit_until": "<time:anchor-14731170s>",
             "retrying_error": null,

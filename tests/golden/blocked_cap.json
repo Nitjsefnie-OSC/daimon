@@ -363,7 +363,7 @@
         },
         "json": {
           "channel": "100002",
-          "text": "You've reached your monthly usage cap. An operator can raise it.",
+          "text": "You've used your monthly limit.\n\nAsk the team running Daimon to raise it.",
           "thread_ts": "1791504000.000000"
         },
         "method": "POST",

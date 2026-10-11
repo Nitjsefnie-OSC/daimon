@@ -429,6 +429,17 @@ def _send_kind(inputs: Sequence[InputEvent]) -> str:
     return "actions:" + request_digest(action_ids)
 
 
+class _SubscribedCancel(Protocol):
+    async def wait_stopped_before_cancel(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        *,
+        cancel: Callable[[], Awaitable[CancelReceipt]],
+        deadline: datetime,
+    ) -> tuple[CancelReceipt, StopObservation]: ...
+
+
 class MuxTurnIO:
     def __init__(
         self,
@@ -582,7 +593,7 @@ class MuxTurnIO:
                 self._scope, self._session, turn_id=turn_id, key=key
             )
 
-        try:
+        async def request_cancel() -> CancelReceipt:
             receipt = await _native_error_edge(
                 deliver(str(uuid4()))
                 if self._persistence is None
@@ -597,18 +608,40 @@ class MuxTurnIO:
                     ),
                 )
             )
+            if receipt.session != self._session:
+                raise ProviderError(
+                    "upstream", retryable=False, native_code="foreign_cancel_receipt"
+                )
+            return receipt
+
+        try:
+            # Only the native Anthropic adapter needs main's pre-POST SSE
+            # subscription. Class lookup avoids inventing a capability on mocks.
+            subscribed = getattr(type(self._backend.events), "wait_stopped_before_cancel", None)
+            if self._session.provider == "anthropic" and callable(subscribed):
+                deadline = datetime.now(UTC) + timedelta(seconds=timeout_s)
+                receipt, stopped = await _native_error_edge(
+                    cast(_SubscribedCancel, self._backend.events).wait_stopped_before_cancel(
+                        self._scope, self._session, cancel=request_cancel, deadline=deadline
+                    )
+                )
+            else:
+                receipt = await request_cancel()
+                deadline = datetime.now(UTC) + timedelta(seconds=timeout_s)
+                stopped = await _native_error_edge(
+                    self._backend.events.wait_stopped(
+                        self._scope,
+                        receipt,
+                        deadline=deadline,
+                    )
+                )
         except UncertainSend as error:
             raise TurnConnectionLost(str(error)) from error
-        if receipt.session != self._session:
-            raise ProviderError("upstream", retryable=False, native_code="foreign_cancel_receipt")
-        deadline = datetime.now(UTC) + timedelta(seconds=timeout_s)
-        stopped = await _native_error_edge(
-            self._backend.events.wait_stopped(
-                self._scope,
-                receipt,
-                deadline=deadline,
-            )
-        )
+        except TimeoutError as error:
+            raise TurnError(
+                kind="interrupt_timeout",
+                message=f"MA did not acknowledge interrupt within {timeout_s}s",
+            ) from error
         if stopped.receipt_operation_id != receipt.operation_id:
             raise ProviderError("upstream", retryable=False, native_code="foreign_stop_observation")
         if not stopped.stopped:

@@ -28,6 +28,8 @@ CONSTANTS
     AdmitBeforeRecovery,   \* turns admitted before this process's orphan sweep finished
     SweepCAS,              \* sweep clears a marker only if unchanged since its snapshot
     SweepInterrupts,       \* #232 (merged): the sweep interrupts the orphan's MA session
+    SweepInterruptSucceeds, \* the interrupt call confirms delivery
+    DetachOnFailedInterrupt, \* a failed interrupt makes the old mapping dead
     SendWaitsForIdle,      \* proposed alternative: never send user.message into a running session
     WizardBypass,          \* Discord wizard turns skip the per-thread _processing guard
     RecoveryUnderLock,     \* #238 (merged): dead-session recovery holds the bind lock ...
@@ -121,11 +123,15 @@ SweepClear(p) ==
     \* The narrower loss compare-and-clear prevents: the marker was written after
     \* this sweep's snapshot (it no longer names what the sweep read).
     /\ staleClear' = (staleClear \/ \E r \in cleared : marker[r] # snap[r] /\ LiveOwner(marker[r]))
-    /\ ma' = [r \in Rows |-> IF SweepInterrupts /\ r \in cleared /\ ma[r] = "running"
+    /\ ma' = [r \in Rows |-> IF SweepInterrupts /\ SweepInterruptSucceeds
+                                  /\ r \in cleared /\ ma[r] = "running"
                                 THEN "idle" ELSE ma[r]]
+    /\ rows' = [r \in Rows |-> IF SweepInterrupts /\ ~SweepInterruptSucceeds
+                                     /\ DetachOnFailedInterrupt /\ r \in cleared
+                                  THEN "dead" ELSE rows[r]]
     /\ sweepPc' = [sweepPc EXCEPT ![p] = "done"]
     /\ recovered' = [recovered EXCEPT ![p] = TRUE]
-    /\ UNCHANGED <<alive, started, processing, lock, rows, replacedBy, pc, tproc, tsrc,
+    /\ UNCHANGED <<alive, started, processing, lock, replacedBy, pc, tproc, tsrc,
                    trow, deaths, sentIntoRunning, sweepSnap>>
 
 (* ---------------- turns ---------------- *)

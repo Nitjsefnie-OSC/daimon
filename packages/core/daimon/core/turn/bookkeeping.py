@@ -10,6 +10,7 @@ from typing import Protocol
 from uuid import UUID
 
 from daimon.core.stores.domain import ThreadSessionRow
+from daimon.core.stores.thread_sessions import mark_dead
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -42,18 +43,19 @@ async def recover_orphan_marker(
     clear: CompareClearMarker,
     interrupt: InterruptSession,
 ) -> bool:
-    """Commit the snapshot CAS before interrupting its MA session.
+    """Clear the snapshot marker only with an interrupt or a dead mapping.
 
     Callers edit the card first. A moved marker keeps its new owner and its
-    session running. Database errors propagate into the existing boot retry.
+    session running. If the interrupt is unconfirmed, mark the old mapping
+    dead so the next turn prepares a fresh MA session. Database errors
+    propagate into the existing boot retry.
     """
     if row.active_turn_message_id is None:
         return False
-    async with sessionmaker() as session:
+    async with sessionmaker.begin() as session:
         cleared = await clear(session, id=row.id, expected_message_id=row.active_turn_message_id)
-        await session.commit()
-    if cleared:
-        await interrupt(session_id=row.ma_session_id)
+        if cleared and not await interrupt(session_id=row.ma_session_id):
+            await mark_dead(session, id=row.id)
     return cleared
 
 

@@ -33,7 +33,7 @@ from mux.drivers.anthropic.resources._authorization import (
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.transport import mutation_client
-from mux.errors import ProviderError, UnsupportedCapability
+from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 
 
 class EventHistoryWalk(Protocol):
@@ -276,6 +276,47 @@ class AnthropicEvents:
             turn_id=turn_id,
             status="requested",
             requested_at=requested_at,
+        )
+
+    async def wait_stopped_before_cancel(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        *,
+        cancel: Callable[[], Awaitable[CancelReceipt]],
+        deadline: datetime,
+    ) -> tuple[CancelReceipt, StopObservation]:
+        """Main's instant-ack fix, with the host retaining mutation-claim ownership."""
+        self._check(scope, session)
+        receipt: CancelReceipt | None = None
+        stream: _NormalizedStream | None = None
+        try:
+            async with asyncio.timeout(max(0.0, (deadline - datetime.now(UTC)).total_seconds())):
+                native = await provider_call(
+                    self._client.beta.sessions.events.stream(session_id=session.id)
+                )
+                stream = _NormalizedStream(native, session, False)
+                receipt = await cancel()
+                if receipt.session != session:
+                    raise ScopeViolation(
+                        receipt.session.id, "cancel receipt belongs to another session"
+                    )
+                async for event in stream:
+                    if self._on_stop_event is not None:
+                        await self._on_stop_event(event)
+                    if (stop := observed_stop(event, receipt)) is not None:
+                        return receipt, stop
+        except TimeoutError:
+            if receipt is None:
+                raise
+        finally:
+            if stream is not None:
+                await stream.aclose()
+        return receipt, StopObservation(
+            receipt_operation_id=receipt.operation_id,
+            stopped=False,
+            outcome=None,
+            observed_at=datetime.now(UTC),
         )
 
     async def wait_stopped(

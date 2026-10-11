@@ -18,12 +18,14 @@ from __future__ import annotations
 import datetime as dt
 import os
 import uuid
+from collections.abc import Iterator
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
+import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
@@ -60,6 +62,17 @@ from daimon.testing import ma_agent, ma_environment, ma_model_config
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+
+@pytest.fixture(autouse=True)
+def reset_structlog() -> Iterator[None]:
+    """`scheduler_run` configures structlog for the whole process; restore the
+    defaults so a later debug-level `capture_logs` in the same worker still sees
+    its events."""
+    yield
+    structlog.reset_defaults()
+    structlog.contextvars.clear_contextvars()
+
 
 # Reuse the conftest fake-anthropic builder shape — but inline here to avoid
 # depending on tests/integration/conftest.py importing private package internals.

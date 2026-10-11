@@ -21,7 +21,13 @@ import uuid
 from typing import Any
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
-from daimon.core.privacy import PurgePreview, summary_line
+from daimon.core.privacy import (
+    DELETE_PAUSED,
+    PRIVACY_TITLE,
+    PurgePreview,
+    delete_scope_lines,
+    privacy_lines,
+)
 from daimon.core.purge import AccountPurgeResult
 
 # ---------------------------------------------------------------------------
@@ -32,79 +38,74 @@ from daimon.core.purge import AccountPurgeResult
 def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     """Build cascade preview section blocks.
 
-    Port of privacy_panel/cascade.py:25-75 (Discord) — three groups:
-    what-will-be-deleted / what-stays-in-MA / what-is-kept-elsewhere.
+    Port of privacy_panel/cascade.py (Discord) — two groups:
+    what-will-be-deleted / what-is-kept-elsewhere.
     """
     will_happen_lines: list[str] = []
+
+    def amount(count: int, singular: str, plural: str | None = None) -> str:
+        return f"*{count}* {singular if count == 1 else plural or singular + 's'}"
+
     if preview.linked_principals.count > 0:
         ex = escape_mrkdwn(preview.linked_principals.example or "—")
-        will_happen_lines.append(
-            f"• 🔑 Remove *{preview.linked_principals.count}* linked principal(s) (e.g. `{ex}`)"
-        )
+        n = amount(preview.linked_principals.count, "linked account")
+        will_happen_lines.append(f"• 🔑 Remove {n}, for example `{ex}`")
     if preview.routines.count > 0:
-        ex = escape_mrkdwn(preview.routines.example or "—")
-        will_happen_lines.append(
-            f"• ⏰ Cancel *{preview.routines.count}* scheduled routine(s) (e.g. `{ex}`)"
-        )
+        will_happen_lines.append(f"• ⏰ Cancel {amount(preview.routines.count, 'routine')}")
     if preview.principal_links.count > 0:
-        will_happen_lines.append(f"• 🔗 Remove *{preview.principal_links.count}* principal link(s)")
+        will_happen_lines.append(
+            f"• 🔗 Remove {amount(preview.principal_links.count, 'link')} between your accounts"
+        )
     if preview.user_configs.count > 0:
-        will_happen_lines.append(f"• ⚙ Remove *{preview.user_configs.count}* user config row(s)")
+        will_happen_lines.append("• ⚙ Remove your saved settings")
     if preview.user_skills.count > 0:
         ex = escape_mrkdwn(preview.user_skills.example or "—")
-        will_happen_lines.append(
-            f"• 🧰 Remove *{preview.user_skills.count}* synced skill ledger row(s) (e.g. `{ex}`)"
-        )
+        n = amount(preview.user_skills.count, "skill")
+        will_happen_lines.append(f"• 🧰 Forget {n} you synced, for example `{ex}`")
     if preview.github_credentials.count > 0:
         ex = escape_mrkdwn(preview.github_credentials.example or "—")
         n = preview.github_credentials.count
-        will_happen_lines.append(f"• 🔑 Delete *{n}* stored GitHub token(s) (`{ex}`)")
+        will_happen_lines.append(
+            f"• 🔑 Delete {amount(n, 'saved GitHub key')}, for example the one for `{ex}`"
+        )
     if preview.github_user_links.count > 0:
         will_happen_lines.append(
-            f"• 🔗 Remove *{preview.github_user_links.count}* GitHub user link(s)"
+            f"• 🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}"
         )
     if preview.github_oauth_states.count > 0:
         will_happen_lines.append(
-            f"• 🤝 Remove *{preview.github_oauth_states.count}* GitHub OAuth handshake record(s)"
+            f"• 🤝 Delete {amount(preview.github_oauth_states.count, 'GitHub sign-in record')}"
         )
     if preview.mcp_tokens.count > 0:
-        will_happen_lines.append(f"• 🎫 Revoke *{preview.mcp_tokens.count}* per-agent MCP token(s)")
+        will_happen_lines.append(
+            f"• 🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}"
+        )
     if preview.agent_github_binding.count > 0:
         n = preview.agent_github_binding.count
-        will_happen_lines.append(f"• 🤖 Remove *{n}* per-agent GitHub token link(s)")
+        will_happen_lines.append(f"• 🤖 Remove {amount(n, 'link')} from agents to your GitHub keys")
     if preview.slack_user_tokens.count > 0:
         will_happen_lines.append(
-            f"• 🔐 Remove *{preview.slack_user_tokens.count}* Slack user token(s)"
+            f"• 🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
         )
     if preview.slack_turn_contexts.count > 0:
-        will_happen_lines.append(
-            f"• 💬 Remove *{preview.slack_turn_contexts.count}* Slack turn context(s)"
-        )
+        n = amount(preview.slack_turn_contexts.count, "temporary Slack request record")
+        will_happen_lines.append(f"• 💬 Delete {n}")
     if preview.direct_message_conversations.count > 0:
-        will_happen_lines.append(
-            f"• Remove *{preview.direct_message_conversations.count}* private conversation(s)"
-        )
+        n = amount(preview.direct_message_conversations.count, "private conversation")
+        will_happen_lines.append(f"• 💬 Delete Daimon's saved data for {n}")
     if preview.channel_admins.count > 0:
         will_happen_lines.append(
-            f"• Remove you from the admins of *{preview.channel_admins.count}* channel(s)"
+            f"• Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
         )
     if preview.account.count > 0:
-        will_happen_lines.append("• 🪪 Remove the account row itself")
+        will_happen_lines.append("• 🪪 Remove your account")
 
-    will_happen_text = "⚡ *What will happen*\n" + (
-        "\n".join(will_happen_lines) if will_happen_lines else "_(nothing to delete)_"
-    )
-
-    stays_text = (
-        "🔐 *What stays in Managed Agents*\n"
-        "• Agent definitions, system prompts, MCP tokens\n"
-        "• Session transcripts, turn message content\n"
-        "• Skill repo references — the repos themselves stay on GitHub\n"
-        "• Retention is governed by Anthropic's Managed Agents policy."
+    will_happen_text = "⚡ *What will happen*\n\n" + (
+        "\n".join(will_happen_lines) if will_happen_lines else "_Nothing to delete._"
     )
 
     kept_text = (
-        "📋 *What is intentionally kept elsewhere*\n"
+        "📋 *What is intentionally kept elsewhere*\n\n"
         "• Usage records are retained for service integrity and cannot be erased on request.\n"
         "• Uploaded skill files stay in Managed Agents; guild agents may keep using them.\n"
         "• The GitHub-side OAuth authorization stays on your GitHub account"
@@ -113,8 +114,6 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
 
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": will_happen_text}},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": stays_text}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": kept_text}},
     ]
@@ -139,17 +138,35 @@ def build_loading_view() -> dict[str, Any]:
     }
 
 
+def build_delete_paused_view() -> dict[str, Any]:
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Privacy"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": DELETE_PAUSED,
+                },
+            }
+        ],
+    }
+
+
 def build_privacy_main_container(
-    preview: PurgePreview,
     *,
     is_slack_connected: bool,
     slack_connect_url: str | None,
     policy_url: str,
     display_name: str = "daimon",
+    delete_enabled: bool = True,
 ) -> dict[str, Any]:
-    """Main privacy view: held-data summary + three trust-model groups + action buttons.
+    """Main privacy view: the title, two lines on who stores what, then the buttons.
 
-    Port of privacy_panel/panel.py:38-73 (Discord) adapted to Block Kit.
+    Port of privacy_panel/panel.py (Discord) adapted to Block Kit. The detail
+    categories live in the policy behind the Policy button.
 
     The slack-token button reflects connection state: Disconnect when a user
     token is stored, a Connect url button (signed connect link) when not.
@@ -162,29 +179,6 @@ def build_privacy_main_container(
 
     Returned dict is passed directly to views.update(view=...).
     """
-    summary = escape_mrkdwn(summary_line(preview))
-
-    body_text = (
-        "🪪 *What we hold (our DB)*\n"
-        "• Identity links (Slack/CLI principals under your account)\n"
-        "• Routines you scheduled\n"
-        "• User config rows\n"
-        "• Synced skill ledger rows\n"
-        "• Encrypted GitHub tokens (stored encrypted-at-rest)\n"
-        "• GitHub OAuth handshake records\n"
-        "• The account row itself\n"
-        "\n"
-        "🔐 *What lives in Managed Agents*\n"
-        "• Agent definitions, system prompts, MCP tokens\n"
-        "• Session transcripts, turn message content\n"
-        "• Skill repo references (repos themselves stay on GitHub)\n"
-        "• Retention governed by Anthropic's Managed Agents policy.\n"
-        "\n"
-        "🚫 *What we don't hold*\n"
-        "• Plaintext keys or tokens (GitHub tokens are encrypted-at-rest)\n"
-        "• Message content (we only log structural events)"
-    )
-
     action_elements: list[dict[str, Any]] = [
         {
             "type": "button",
@@ -197,13 +191,16 @@ def build_privacy_main_container(
             "action_id": "privacy_export",
             "text": {"type": "plain_text", "text": "📤 Export"},
         },
-        {
-            "type": "button",
-            "action_id": "privacy_delete_open",
-            "text": {"type": "plain_text", "text": "🗑 Delete…"},
-            "style": "danger",
-        },
     ]
+    if delete_enabled:
+        action_elements.append(
+            {
+                "type": "button",
+                "action_id": "privacy_delete_open",
+                "text": {"type": "plain_text", "text": "🗑 Delete…"},
+                "style": "danger",
+            }
+        )
     if is_slack_connected:
         action_elements.append(
             {
@@ -215,19 +212,10 @@ def build_privacy_main_container(
     elif slack_connect_url is not None:
         action_elements.append(_connect_button(slack_connect_url))
 
+    body = "\n\n".join(escape_mrkdwn(line) for line in privacy_lines(display_name))
     blocks: list[dict[str, Any]] = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*🔒 Privacy*\n{escape_mrkdwn(display_name)} holds: {summary}",
-            },
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": body_text},
-        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{PRIVACY_TITLE}*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": body}},
         {"type": "actions", "elements": action_elements},
     ]
 
@@ -244,10 +232,12 @@ def build_delete_modal(
     account_id: uuid.UUID,
     user_name: str,
     view_id: str,
+    display_name: str = "daimon",
 ) -> dict[str, Any]:
     """Single delete confirmation modal.
 
-    Combines the cascade preview (what-will-be-deleted / stays-in-MA / kept-elsewhere)
+    Opens on what Delete removes and leaves (`delete_scope_lines`), then
+    combines the cascade preview (what-will-be-deleted / kept-elsewhere)
     with a plain_text_input for typed-username confirmation in ONE modal.
 
     callback_id = "privacy_delete"; private_metadata carries account_id + user_name +
@@ -263,7 +253,12 @@ def build_delete_modal(
         separators=(",", ":"),  # minimal whitespace to stay well under 3000 chars
     )
 
-    blocks: list[dict[str, Any]] = _cascade_blocks(preview)
+    scope = "\n\n".join(escape_mrkdwn(line) for line in delete_scope_lines(display_name))
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": scope}},
+        {"type": "divider"},
+        *_cascade_blocks(preview),
+    ]
     blocks.append({"type": "divider"})
     blocks.append(
         {
@@ -343,16 +338,17 @@ def build_post_delete_view(
         rows.append("• ✓ Account row removed")
     if result.sessions.deleted > 0:
         rows.append(f"• ✓ {result.sessions.deleted} session transcript(s) deleted from Anthropic")
-    if result.sessions.failed > 0:
-        rows.append(
-            f"• ⚠ {result.sessions.failed} transcript(s) could not be deleted"
-            " — re-run /privacy to retry"
-        )
     if result.sessions.upstream_error:
+        rows.append("• We could not confirm deletion of all chat transcripts from Anthropic.")
         rows.append(
-            "• ⚠ Session transcripts could not be deleted from Anthropic"
-            " — contact the operator if you need them removed"
+            f"• Ask the person who runs {escape_mrkdwn(display_name)} "
+            "to check and help remove them."
         )
+    elif result.sessions.failed > 0:
+        count = result.sessions.failed
+        noun = "chat transcript" if count == 1 else "chat transcripts"
+        rows.append(f"• We could not delete {count} {noun} from Anthropic.")
+        rows.append(f"• You do not need to retry while {escape_mrkdwn(display_name)} keeps trying.")
     # Carve-out disclosures — always shown.
     rows += [
         "",
@@ -361,20 +357,32 @@ def build_post_delete_view(
         "• The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
     ]
+    incomplete = result.sessions.failed > 0 or result.sessions.upstream_error
+    if incomplete:
+        introduction = (
+            "*⚠ Deletion incomplete*\n"
+            f"Your {escape_mrkdwn(display_name)} account was deleted, "
+            "but chat transcript deletion is incomplete."
+        )
+    else:
+        introduction = (
+            "*✅ Account deleted*\n"
+            f"Your {escape_mrkdwn(display_name)} account has been deleted.\n"
+            f"You can start again by using {escape_mrkdwn(display_name)}."
+        )
 
     return {
         "type": "modal",
-        "title": {"type": "plain_text", "text": "Deleted"},
+        "title": {
+            "type": "plain_text",
+            "text": "⚠ Deletion incomplete" if incomplete else "✅ Account deleted",
+        },
         "blocks": [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (
-                        "*✅ Deleted*\n"
-                        f"Your {escape_mrkdwn(display_name)} data has been deleted. "
-                        "Re-onboarding starts from scratch."
-                    ),
+                    "text": introduction,
                 },
             },
             {"type": "divider"},
@@ -407,7 +415,7 @@ def build_export_result_view(
     posted as an ephemeral channel message. ``summary=None`` means no account.
     """
     if summary is None:
-        text = f"📤 *Privacy export*\nYou have no data on file with {escape_mrkdwn(display_name)}."
+        text = f"📤 *Privacy export*\nYou have no {escape_mrkdwn(display_name)} account."
     else:
         text = (
             "📤 *Privacy export (summary)*\n"

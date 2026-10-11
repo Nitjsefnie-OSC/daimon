@@ -444,6 +444,7 @@ async def _add_skill_impl(
         )
 
     await recheck(agent)
+    chat_confirms = False
     try:
         no_card = await _no_card_reason(runtime, auth, origin, origin_context_id=origin_context_id)
         if no_card is not None:
@@ -504,7 +505,8 @@ async def _add_skill_impl(
                 agent_name=agent_name,
                 preview=preview,
                 summary=(
-                    f"Nothing is added yet. Show the person '{preview.name}': its description, "
+                    f"Nothing is added yet. Show the person '{preview.name}' for agent "
+                    f"'{agent_name}': its description, "
                     f"files and runnable files.{scripts} {then}"
                 ),
             )
@@ -527,8 +529,8 @@ async def _add_skill_impl(
                 raise ToolError(
                     "Nothing was added: this turn did not start with the person replying "
                     "`yes` to this preview (they have not replied yet, replied something "
-                    "else, it expired, or it was already used). Do not retry; preview it "
-                    "again only if they ask."
+                    "else, it expired, a newer preview replaced it, or it was already used). "
+                    "Do not retry this confirmation; preview it again if they ask."
                 )
         added = await add_agent_skill(
             runtime.client,
@@ -545,9 +547,16 @@ async def _add_skill_impl(
         raise ToolError(str(exc)) from exc
     except anthropic.APIError as exc:
         status = getattr(exc, "status_code", None)
+        # A chat approval was used up above; only a card approval can be retried as is.
+        recovery = (
+            "Ask the person to preview again and reply `yes` to the new preview before "
+            "trying again."
+            if chat_confirms
+            else "Try again later."
+        )
         raise ToolError(
             f"Adding the skill failed upstream{f' (HTTP {status})' if status else ''}; it is "
-            "not attached. Try again later."
+            f"not attached. {recovery}"
         ) from exc
     done = {
         "created": f"Added '{preview.name}' to '{agent_name}'",

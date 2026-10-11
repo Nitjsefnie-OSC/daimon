@@ -25,6 +25,7 @@ from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.thread_sessions import (
     clear_active_turn_if_message_id,
     list_orphaned_turns,
+    mark_dead,
 )
 from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
@@ -76,8 +77,7 @@ async def retire_orphaned_turns(
             cleared = await clear_active_turn_if_message_id(
                 session, id=row.id, expected_message_id=message_id
             )
-        if cleared:
-            await interrupt_orphaned_session(
+            if cleared and not await interrupt_orphaned_session(
                 anthropic,
                 session_id=row.ma_session_id,
                 scope=Scope(
@@ -88,7 +88,8 @@ async def retire_orphaned_turns(
                 )
                 if row.account_id is not None
                 else None,
-            )
+            ):
+                await mark_dead(session, id=row.id)
         started = row.active_turn_started_at
         log.info(
             "teams.turn.orphan_retired",

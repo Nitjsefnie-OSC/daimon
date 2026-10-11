@@ -7,6 +7,7 @@ Postgres (last-write-wins), and that non-admin callers are rejected with no writ
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -310,7 +311,9 @@ async def test_explain_is_readable_by_a_non_admin(
 
     result = await _explain_agent_resolution_impl(
         _runtime_with_default(committing_sessionmaker, "daimon"),
-        _non_admin_auth(tenant_id=tenant_id),
+        replace(
+            _non_admin_auth(tenant_id=tenant_id), agent_id=uuid.uuid4(), bound_channel_id="chan-1"
+        ),
         "chan-1",
     )
 
@@ -329,7 +332,11 @@ async def test_explain_says_so_when_nothing_resolves(
     )
 
     result = await _explain_agent_resolution_impl(
-        runtime, _non_admin_auth(tenant_id=tenant_id), "chan-1"
+        runtime,
+        replace(
+            _non_admin_auth(tenant_id=tenant_id), agent_id=uuid.uuid4(), bound_channel_id="chan-1"
+        ),
+        "chan-1",
     )
 
     assert result.effective_agent_name is None, "nothing set at any tier means no agent"
@@ -376,7 +383,11 @@ async def test_explanation_separates_setup_responder_target_and_parent_defaults(
             responder_name="Daimon",
         )
     auth = AuthIdentity(
-        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        is_admin=True,
     )
     explained = await _explain_agent_resolution_impl(runtime, auth, "parent", "thread-0")
     assert explained.effective_agent_name == "Daimon", "thread binding determines who answers"
@@ -427,7 +438,11 @@ async def test_explanation_reports_deleted_setup_without_parent_fallback(
         )
     runtime = _runtime_with_default(committing_sessionmaker, "parent-responder")
     auth = AuthIdentity(
-        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform=platform
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform=platform,
+        is_admin=True,
     )
     with pytest.raises(ToolError, match="deleted-thread.*was deleted") as error:
         await _explain_agent_resolution_impl(runtime, auth, "parent", "deleted-thread")
@@ -468,7 +483,11 @@ async def test_explanation_calls_a_handed_over_thread_a_handoff_not_a_setup(
             kind="handoff",
         )
     auth = AuthIdentity(
-        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        is_admin=True,
     )
 
     explained = await _explain_agent_resolution_impl(runtime, auth, "parent", "handed-over")
@@ -485,3 +504,40 @@ async def test_explanation_calls_a_handed_over_thread_a_handoff_not_a_setup(
     assert explained.recent_setup_conversations == (), (
         "a handoff binding is not a setup conversation and must not be listed as one"
     )
+
+
+@pytest.mark.parametrize("has_repos", [True, False])
+async def test_set_agent_default_says_the_agents_repos_come_too(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    has_repos: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools import propagation
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.github_connected_repos import AgentRepoSummary
+
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+
+    async def find(_client: object, *, tenant_id: uuid.UUID, name: str) -> object:
+        return SimpleNamespace(id="ag_writer", metadata={})
+
+    async def summary(_session: object, *, tenant_id: uuid.UUID) -> AgentRepoSummary:
+        agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_writer")
+        return AgentRepoSummary(
+            pairs=int(has_repos),
+            agents=int(has_repos),
+            by_agent={agent_id: ("ana/thesis",)} if has_repos else {},
+        )
+
+    monkeypatch.setattr(propagation, "find_agent_by_daimon_tag", find)
+    monkeypatch.setattr(propagation, "agent_repo_summary", summary)
+    result = await _set_agent_default_impl(
+        _runtime(committing_sessionmaker),
+        _admin_auth(tenant_id=tenant_id, account_id=account_id),
+        "writer",
+        None,
+    )
+    base = build_set_default_note(agent_name="writer", scope_label="workspace")
+    assert result.routing_note == (f"{base} writer's repos come too." if has_repos else base)

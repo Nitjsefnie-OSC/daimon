@@ -71,7 +71,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
-from daimon.core.ma import terminal_stop_reason
+from daimon.core.ma import SessionEvent, terminal_stop_reason
 from daimon.core.mux_backend import TurnBackendRequest
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.approvals import (
@@ -90,7 +90,7 @@ from daimon.core.turn.io import (
     TurnStream,
     turn_io,
 )
-from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
+from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge, stop_rendering
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.posture import (
@@ -941,6 +941,7 @@ async def _pump(
     render_task = asyncio.create_task(_render_loop(), name="turn.render_loop")
 
     async def _cancel_render() -> None:
+        stop_rendering(lifecycle)
         render_task.cancel()
         with _suppress_task_exc():
             await render_task
@@ -1228,6 +1229,7 @@ async def _pump(
             # leave: `_render_loop` can only exit via CancelledError (its
             # per-tick `_render_once` catches Exception), so nothing goes
             # unretrieved, and the task reaps within a loop turn.
+            stop_rendering(lifecycle)
             render_task.cancel()
 
 
@@ -1325,6 +1327,11 @@ def _events_since_last_turn_boundary(
         if _ends_turn(ev):
             return current_events[: i + 1]
     return current_events
+
+
+def current_turn_events(events: list[SessionEvent]) -> list[SessionEvent]:
+    """Select the latest turn for startup recovery without replaying old answers."""
+    return _events_since_last_turn_boundary(events, tool_confirmation=_DEFAULT_TOOL_CONFIRMATION)
 
 
 def _note_accepted(events: Sequence[object], accepted: set[str]) -> None:

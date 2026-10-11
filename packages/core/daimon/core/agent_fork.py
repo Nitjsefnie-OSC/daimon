@@ -45,7 +45,7 @@ from daimon.core.defaults.metadata import (
     strip_tenant_prefix,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.errors import DaimonError
+from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_agent, retrieve_agent
@@ -227,7 +227,9 @@ async def copy_agent(
         try:
             policy = await load_access_policy(session, tenant_id=tenant_id)
         except AccessPolicyUnreadable as exc:
-            raise DaimonError("The access policy can't be read.") from exc
+            raise UserFacingError(
+                "The access policy can't be read. Ask an admin to check it."
+            ) from exc
     source_name = source.metadata.get(MA_METADATA_KEY_NAME) or source.name
     decision = authorize(
         policy,
@@ -237,11 +239,11 @@ async def copy_agent(
     )
     if decision.reason == "agent_has_rule":
         # The copy would run anywhere with the prompt and skills of one that may not.
-        raise DaimonError(
-            f"{source_name} has an agent rule limiting where it runs, so it can't be copied."
+        raise UserFacingError(
+            "This agent has an agent rule limiting where it runs, so it can't be copied."
         )
     if not decision:
-        raise DaimonError("Only a workspace or server admin can copy an agent.")
+        raise UserFacingError("Only a workspace or server admin can copy an agent.")
     source_ma = await retrieve_agent(
         anthropic, source.id, scope=resource_scope(tenant_id=str(tenant_id))
     )
@@ -332,10 +334,10 @@ async def fork_agent(
 ) -> AgentCopy:
     """Copy the agent named `source_name` to `new_name`; raise `DaimonError` if either is wrong."""
     if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=new_name):
-        raise DaimonError(f"An agent named {new_name} already exists. Pick another name.")
+        raise AgentNameCollision(f"An agent named {new_name} already exists. Pick another name.")
     source = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=source_name)
     if source is None:
-        raise DaimonError(f"There is no agent named {source_name} to copy.")
+        raise UserFacingError("The agent you want to copy is missing. Choose another agent.")
     return await copy_agent(
         anthropic,
         sessionmaker,
@@ -364,14 +366,16 @@ async def fork_host_agent(
     tenant_id = uuid.UUID(host.scope.tenant_id)
     source = await host.find(source_name)
     if source is None:
-        raise DaimonError(f"There is no agent named {source_name} to copy.")
+        raise UserFacingError("The agent you want to copy is missing. Choose another agent.")
 
     async def recheck(agent: Agent) -> None:
         async with sessionmaker() as session:
             try:
                 policy = await load_access_policy(session, tenant_id=tenant_id)
             except AccessPolicyUnreadable as exc:
-                raise DaimonError("The access policy can't be read.") from exc
+                raise UserFacingError(
+                    "The access policy can't be read. Ask an admin to check it."
+                ) from exc
         decision = authorize(
             policy,
             subject=subject,
@@ -379,11 +383,11 @@ async def fork_host_agent(
             agent=build_agent_ref(agent.spec.name, agent.spec.metadata or {}),
         )
         if decision.reason == "agent_has_rule":
-            raise DaimonError(
-                f"{source_name} has an agent rule limiting where it runs, so it can't be copied."
+            raise UserFacingError(
+                "This agent has an agent rule limiting where it runs, so it can't be copied."
             )
         if not decision:
-            raise DaimonError("Only a workspace or server admin can copy an agent.")
+            raise UserFacingError("Only a workspace or server admin can copy an agent.")
 
     await recheck(source.revision.agent)
     made = await host.fork(

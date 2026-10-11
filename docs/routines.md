@@ -9,7 +9,7 @@ the agent's baseline repository grants.
 
 A routine may name a **destination**: a channel or a thread. With one, the run
 is told where its result goes, and if the agent does not post there itself,
-Daimon posts the tail of its final reply there after the run (see
+Daimon posts its full final reply there after the run (see
 [Delivery](#delivery)). Without one — every routine created before this
 existed, and any created without it — nothing is delivered anywhere: the
 result is only recorded on the row, and if it should land in a channel the
@@ -135,7 +135,9 @@ Each tick, 30 seconds apart by default:
    behavior even when a slow sibling runs past the freshness window. Additional
    unclaimed work remains in PostgreSQL when the bounded batch is full.
 
-The [usage sweep](billing.md#the-tables) runs on its own loop with the same
+The [usage sweep](billing.md#the-tables), when switched on
+(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`, off by default; `--once` honours the
+same switch), runs on its own loop with the same
 pause between passes, so a long pass no longer blocks claims. Shutdown cancels a
 pass in flight; the next process starts a full pass.
 
@@ -198,7 +200,7 @@ A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in
 `packages/core/daimon/core/routine_delivery.py`): the routine's id, agent,
 schedule, timezone and destination, and one line saying that nobody is
-watching and that Daimon posts the end of the final reply to the destination
+watching and that Daimon posts the full final reply to the destination
 unless the agent posts there itself. If the destination's rule has since
 become `writers: none`, the controls say so and tell
 the agent not to post there (the result goes to the creator instead). The
@@ -212,8 +214,9 @@ SYS-048's), so the controls err on the side of not inviting a post. The
 controls grant nothing else. A routine without a destination sends its
 trigger message byte-for-byte as before.
 
-On success the runner returns the tail of the final message, truncated to
-1000 characters, and that is what lands in `last_result_tail`.
+On success the runner returns the complete final message. `last_result_tail`
+keeps a preview of its last 1000 characters, with a truncation marker when
+shortened. The outbox keeps the full reply for delivery.
 
 ## Delivery
 
@@ -224,7 +227,10 @@ the MCP search interface's `call_tool(name="send_message", arguments=…)` —
 whose `channel_id` is exactly the destination (a Slack thread counts only as
 `<channel>:<ts>`; a top-level post in its channel is not the thread). If the
 agent posted there, the outbox is `skipped` with note `agent_posted`.
-Otherwise it is `pending`, with the result copied into `delivery_payload`. A
+Otherwise it is `pending`, with the complete reply copied into `delivery_payload`.
+Discord, Slack and Teams split long results across messages at word or line
+boundaries and preserve code fences. Creator fallback messages also keep the
+complete result. A
 failed fire leaves the outbox alone and records `last_error` as always, so a
 result still pending from an earlier successful fire stays pending.
 
@@ -275,15 +281,28 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
   the text the way agent replies are escaped, so `<!channel>` and `<!here>`
   stay literal.
 
-The post reads `Routine result from <agent> (<cron>, <timezone>):` followed by
-the result. With agent identity on for the workspace, Slack and Discord post it
-as the agent, with its name and face. Discord then drops the agent's name from
-the line, `Routine result (<cron>, <timezone>):`, because the webhook or, without
-one, the bot's subtext name label already carries it. Slack keeps the original
-line, since a workspace without `chat:write.customize` accepts the post but
-silently drops the agent's header. The built-in agent and Teams keep the
-original line. The fallback direct message to the creator stays Daimon's own
-notice. An empty result is `skipped/no_result`.
+The post reads `Result from <agent>'s <schedule>:` followed by the result, for
+example `Result from team-020-analyst's daily routine at 09:00 UTC:`. The
+schedule is in words only for the cron shapes that say exactly one thing (every
+day, weekdays or one weekday at a time, and every hour on the hour, as
+`daily`, `weekday`, `Monday` and `hourly`); any other expression stays cron
+text, `routine (<cron>, <timezone>)`. The timezone is always kept
+(`daimon.core.cron_words`). With agent identity on for the workspace, Slack and
+Discord post it as the agent, with its name and face. Discord then drops the
+agent's name from the line, `Result from the <schedule>:`, because the webhook
+or, without one, the bot's subtext name label already carries it. Slack keeps
+the original line, since a workspace without `chat:write.customize` accepts the
+post but silently drops the agent's header. The built-in agent and Teams keep
+the original line. An empty result is `skipped/no_result`.
+
+The fallback direct message to the creator stays Daimon's own notice: the
+agent and schedule (`team-020-analyst, every day at 09:00 UTC`), then why the
+result came by DM, then the result, a blank line between each. The reason
+reads `Your routine couldn't post to its channel. Here's the result.` with
+`Ask the agent to change where it posts.` for a destination that could not be
+reached; `Your routine couldn't post: you no longer have permission there.`
+for `creator_cannot_post`; and `Your routine couldn't post: posting is blocked
+there.` for `protected_channel`, each ending `Here's the result.`
 
 The outbox is a small at-most-once queue on the routine row rather than a wake
 (`daimon.core.continuity.wakes`): a wake runs an agent turn in a thread,

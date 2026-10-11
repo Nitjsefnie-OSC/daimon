@@ -35,6 +35,7 @@ from daimon.core.session_snapshot import SessionSnapshot
 
 type ChangeReason = Literal[
     "agent_identity",
+    "budget_channel",
     "model",
     "system_prompt",
     "skills",
@@ -156,7 +157,11 @@ def identity_change_reasons(
         (recorded.skills_sha256 != desired.skills_sha256, "skills"),
         (recorded.environment_id != desired.environment_id, "environment"),
         (recorded.github_mode != desired.github_mode, "github_mode"),
-        (recorded.repo_urls != desired.repo_urls, "repo_set"),
+        (
+            recorded.repo_urls != desired.repo_urls
+            or recorded.token_repo_urls != desired.token_repo_urls,
+            "repo_set",
+        ),
         (recorded.repo_url != desired.repo_url, "repo_url"),
         (recorded.repo_branch != desired.repo_branch, "repo_branch"),
         (recorded.memory_store_id != desired.memory_store_id, "memory_store"),
@@ -214,7 +219,10 @@ def decide_session_compatibility(
         else:
             must_replace = True
 
-    if recorded.github_mode == "app" and recorded.repo_urls:
+    # App tokens live in the vault whether or not a working repo is mounted.
+    if recorded.github_mode == "app" and (
+        recorded.repo_urls or recorded.token_repo_urls or recorded.repo_token_issued_at is not None
+    ):
         issued_at = recorded.repo_token_issued_at
         # Installation tokens are recorded with a conservative 55-minute life.
         # Refresh at 40 minutes, leaving 15 minutes for vault propagation.

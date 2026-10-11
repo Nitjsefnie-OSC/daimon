@@ -5,15 +5,20 @@ call, the `thread_sessions` mapping write, and recorder binding.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import json
+import types
 import uuid
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
@@ -29,6 +34,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.session_compat import ChangeReason
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     fingerprint_identity,
@@ -38,7 +44,7 @@ from daimon.core.session_snapshot import (
     hash_tools,
 )
 from daimon.core.stores import tenant_ledger, usage_events
-from daimon.core.stores.domain import AccountRow, TenantRow, ThreadSessionRow
+from daimon.core.stores.domain import AccountRow, TenantRow, ThreadSessionRow, TransferKind
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
@@ -46,10 +52,11 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     mark_turn_active,
 )
+from daimon.core.turn import prepare as prepare_mod
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError
-from daimon.core.turn.prepare import PreparedTurn, bind_session
+from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_session
 from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
@@ -829,6 +836,7 @@ async def test_bind_session_fresh_bind_raises_ceiling_error_when_deadline_alread
 async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -836,12 +844,53 @@ async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
 
     session_bodies: list[dict[str, object]] = []
     router = _router_with_session_create(session_bodies=session_bodies)
-    deps = _deps(sessionmaker=db_session_factory, router=router)
+    create_started = asyncio.Event()
+
+    async def _stalled_session_create(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            create_started.set()
+            await asyncio.Event().wait()
+        return router.dispatch(request)
+
+    async def _ceiling_at_session_create(aw: Awaitable[PreparedTurn], timeout: float) -> object:
+        # Time out exactly when the bind is parked in the session create. A
+        # real timer can fire mid-statement, and cancelling a query wedges
+        # the one connection every session in this test shares, so the check
+        # below failed with "another operation is in progress".
+        del timeout
+        bind = asyncio.ensure_future(aw)
+        started = asyncio.ensure_future(create_started.wait())
+        await asyncio.wait({bind, started}, return_when=asyncio.FIRST_COMPLETED)
+        started.cancel()
+        if bind.done():
+            return bind.result()
+        bind.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await bind
+        raise TimeoutError
+
+    # Swap `wait_for` only as `prepare` sees it; asyncpg and httpx keep the real one.
+    monkeypatch.setattr(
+        prepare_mod,
+        "asyncio",
+        types.SimpleNamespace(**{**vars(asyncio), "wait_for": _ceiling_at_session_create}),
+    )
+
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        anthropic=AsyncAnthropic(
+            api_key="test",
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(_stalled_session_create),
+                base_url="https://api.anthropic.com",
+            ),
+        ),
+    )
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+    deadline = datetime.now(UTC) + timedelta(minutes=5)
 
     with pytest.raises(TurnError) as exc_info:
         await bind_session(
@@ -853,10 +902,11 @@ async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
             thread_id="thread-ceiling-no-orphan",
             session_account_id=account.id,
             reuse_existing=True,
-            deadline=past_deadline,
+            deadline=deadline,
         )
 
     assert exc_info.value.kind == "ceiling"
+    assert create_started.is_set(), "the ceiling must fire during the session create"
 
     async with db_session_factory() as s:
         live = await get_live_thread_session(
@@ -1291,3 +1341,36 @@ async def test_bind_session_raises_session_busy_when_a_handoff_lands_mid_turn(
     assert untouched is not None and untouched.status == "live", (
         "the source agent's session keeps running its own turn"
     )
+
+
+@pytest.mark.parametrize(
+    ("applied", "transfer_kind", "announced"),
+    [
+        # The prod cases: MA echoing a resolved skill version, and the person
+        # connecting GitHub (rid 01M4J0N1QH5HBFK4V36MZ2XQZ5), both carried in full.
+        (("skills",), "full", False),
+        (("repo_set",), "full", False),
+        (("github_mode", "repo_set", "repo_url", "repo_branch"), "full", False),
+        (("system_prompt", "tools", "mcp_servers", "env_file", "repo_token_age"), "full", False),
+        (("memory_store", "memory_access", "vault", "environment"), "full", False),
+        ((), "full", False),
+        # A different agent or model answering is noticed, so it is said.
+        (("model",), "full", True),
+        (("agent_identity",), "full", True),
+        (("skills", "model"), "full", True),
+        # Anything lost is always said, whatever the reason.
+        (("skills",), "transcript", True),
+        (("repo_set",), "history", True),
+    ],
+)
+def test_replacement_notice_is_only_for_changes_a_person_notices(
+    applied: tuple[ChangeReason, ...], transfer_kind: TransferKind, announced: bool
+) -> None:
+    outcome = ContinuityOutcome(state="replaced", applied=applied, transfer_kind=transfer_kind)
+
+    assert outcome.announces_replacement() is announced
+
+
+def test_no_replacement_notice_without_a_replacement_or_a_transfer() -> None:
+    assert not ContinuityOutcome().announces_replacement()
+    assert not ContinuityOutcome(state="replaced", applied=("model",)).announces_replacement()

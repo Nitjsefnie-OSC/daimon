@@ -56,6 +56,7 @@
           "schema_version": 1,
           "skills_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "system_sha256": null,
+          "token_repo_urls": [],
           "tools_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "vault_id": null
         },
@@ -843,14 +844,15 @@
         "method": "POST",
         "params": {
           "channel": "C100000",
-          "name": "white_check_mark",
+          "name": "eyes",
           "timestamp": "1791504000.000000"
         },
-        "url": "https://slack.com/api/reactions.add"
+        "url": "https://slack.com/api/reactions.remove"
       },
       "platform": "platform_http",
       "result": {
-        "status": 200
+        "error_kind": "ClientConnectionError",
+        "message": "Connection refused: POST https://slack.com/api/reactions.remove?channel=C100000&name=eyes&timestamp=1791504000.000000"
       }
     },
     {
@@ -864,15 +866,14 @@
         "method": "POST",
         "params": {
           "channel": "C100000",
-          "name": "eyes",
+          "name": "white_check_mark",
           "timestamp": "1791504000.000000"
         },
-        "url": "https://slack.com/api/reactions.remove"
+        "url": "https://slack.com/api/reactions.add"
       },
       "platform": "platform_http",
       "result": {
-        "error_kind": "ClientConnectionError",
-        "message": "Connection refused: POST https://slack.com/api/reactions.remove?channel=C100000&name=eyes&timestamp=1791504000.000000"
+        "status": 200
       }
     }
   ],

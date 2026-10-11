@@ -120,8 +120,24 @@ selectable by an agent. Every agent-model row is the provider's list price.
 Put any margin in `DAIMON_BILLING__MARKUP` (below), not in the table, because
 reports read the table as provider cost.
 
+A lookup for a dated snapshot id such as `claude-haiku-4-5-20251001` (Managed
+Agents echoes these) falls back to its alias row (`claude-haiku-4-5`) when the
+id itself has no row: only an eight-digit `-YYYYMMDD` suffix is stripped, an
+id whose alias is not priced still prices at `None`, and agent selection still
+reads `AGENT_MODEL_PRICING` keys only, so snapshot ids do not become
+selectable. Before this fallback, turns on a snapshot id recorded no cost and
+debited nothing; usage reports and cap reads now price those saved rows, but
+the zero ledger debits and null turn outcomes already written are not repaired.
+
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
 $0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.10.
+Haiku 5.5 is priced by prompt length: $0.10, $0.50, $0.125 and $0.01 for a
+request whose prompt is up to 100,000 tokens, and $0.50, $2.50, $0.625 and
+$0.05 above that. The prompt counts input, cache reads and cache writes, and
+each request is priced on its own (`ModelRates.long_context`,
+`LONG_CONTEXT_PROMPT_TOKENS`). Turn cards also split the turn's token totals by
+request prompt length before pricing, so a turn spanning both tiers displays
+the sum of its request costs.
 `AGENT_PRICING_CHECKED_ON` records the day every row was last checked against
 `AGENT_PRICING_SOURCE`. `test_pricing.py` pins each row, so a price edit fails
 until the test table and the date move with it, and
@@ -216,10 +232,13 @@ Two boundaries of the design worth stating plainly:
   `max_concurrent_turns_per_tenant`, default 3, or the tenant's `turn-cap`
   override) times one turn's cost. A turn over that cap waits in the turn
   queue after `admit()`; it runs the balance gate again once it holds a slot,
-  so queued turns do not widen the bound. An MCP `start_turn` session is
-  worse. Its spend
-  reaches the ledger only when the scheduler's usage sweep next reads the
-  session: up to two sweep passes plus one tick interval later.
+  so queued turns do not widen the bound. Follow-up turns read the tenant's
+  current turn cap before taking a new queue ticket. Once the adapter observes
+  a lower cap, running turns finish, but new turns wait until enough slots are
+  free. An MCP `start_turn` session is worse. Its spend reaches the ledger only
+  when the scheduler's usage sweep next reads the
+  session: up to two sweep passes plus one tick interval later, and not at
+  all while the sweep is switched off (its default, see "The sweep" below).
   Until then the gate reads a balance that leaves out earlier headless turns,
   and MCP turns have no concurrency cap. The overdraft is therefore bounded
   by what a tenant can start between two sweeps, not by N concurrent turns.
@@ -268,6 +287,17 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
   reads; it is kept apart from `daimon_channel`, where the conversation runs,
   so a DM counts toward its source channel without being placed in it.
+  If the channel charged by policy changes between turns, Daimon replaces the
+  session before the next turn. A running old session must finish first. This
+  keeps the sweep's session stamp aligned with that turn's admission even when
+  its live usage event was missed. The immutable stamp is also kept in
+  `thread_sessions.budget_channel_id`; older mappings read their stamp from MA
+  on the next bind and replace only if it differs. If MA cannot be read, the
+  mapping stays unknown and the read is retried on a later bind. A replacement
+  checkpoint runs on the old session, so its live debit and any recovered
+  debit both count against the old session's stamped channel. The new turn's
+  admission gates still apply before replacement; the checkpoint does not
+  independently gate the old channel's balance or budget.
 - **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
   or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
   budget with a `starts_at` gates nothing before it, and a fixed one nothing
@@ -281,8 +311,11 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   their last turn match a granted role, a Slack user group or Teams team
   only if a live lookup still lists them), or the server admins when the
   channel has none, at most ten people, on Discord, Slack and Teams
-  (`daimon.core.channel_budget_notice`). A monthly budget's window is the
-  month; any other budget's is the budget itself. Setting or raising the
+  (`daimon.core.channel_budget_notice`). It reads "#team-020 has used its
+  $5.00 monthly budget." then "Raise the budget to resume now, or wait until
+  next month."; a budget that never resets drops "monthly" and the wait. A
+  monthly budget's window is the month; any other budget's is the budget
+  itself. Setting or raising the
   budget re-arms it (`channel_budgets.exhausted_notice_key`), and so does a
   notice no admin received, so a later refusal tries again. It is sent in
   the background, follows the tenant's DM policy, never changes or delays
@@ -499,7 +532,21 @@ beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 
-**The sweep.** An MCP `start_turn` creates a session and sends a message but
+**The sweep.** The sweep is **off by default**
+(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=false`): the current implementation
+lists every session in the Managed Agents workspace and reads their events,
+which drained the workspace request rate limit and stalled turn admission.
+While it is off, three things pause: usage from MCP `start_turn` sessions
+(and other headless sessions with no live recorder) is not debited; usage a
+live adapter missed (a crashed adapter, an interrupted turn) is not
+recovered; and absorbed spend for exempt sessions is not logged. Turning it
+back on replays what was missed, because recording is idempotent and the
+startup pass reads every stamped session, but only for sessions and events
+still present in the workspace. A scoped replacement that reads only recently
+active sessions is planned; until it ships, the rest of this section
+describes the sweep when it is switched on.
+
+An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
 `packages/core/daimon/core/usage_sweep.py` closes that hole. On its own
 scheduler loop, pausing the tick interval between passes, it lists Managed
@@ -672,6 +719,12 @@ under it. The best-effort outcome writer never
 changes a balance, cap, price or ledger debit, and a missing diagnostic row does
 not mean no model work was billed. See the turn-outcome contract in
 [architecture](architecture.md#durable-turn-outcomes).
+For a session replacement, the checkpoint's outcome sample is priced at the
+predecessor session's model. Its `checkpoint_debit` counts against that
+session's budget channel; the successor's calls use the admitted channel.
+An outcome's `unpriced_calls` describes diagnostic price coverage, not whether
+the live recorder inserted a debit. Check `usage_events` and `tenant_ledger`
+by `(managed_session_id, event_id)` to establish the money consequence.
 
 
 ## Per-turn usage telemetry

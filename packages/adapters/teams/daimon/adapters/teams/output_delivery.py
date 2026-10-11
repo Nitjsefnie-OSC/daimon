@@ -15,8 +15,9 @@ answer). A failed, oversize or declined file is only logged: status text
 around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
-Either way the listing entry, the delivery ledger, is deleted; the sandbox
-keeps its copy, so the agent can still read or paste it later.
+Transient channel upload failures leave the listing entry for a later sweep.
+Otherwise the listing entry, the delivery ledger, is deleted; the sandbox keeps
+its copy, so the agent can still read or paste it later.
 """
 
 from __future__ import annotations
@@ -212,6 +213,12 @@ class TeamsOutputDelivery:
                     status=err.status,
                     reason=err.reason,
                 )
+                # No status covers token/transport failures; 408, 423 (a locked
+                # file or folder), 429 and 5xx can clear on a later sweep. Keep
+                # 401/403 and other permanent responses on the existing skip path
+                # rather than repeatedly retrying denied access.
+                if err.status is None or err.status in (408, 423, 429) or 500 <= err.status < 600:
+                    raise
                 return
             links.append(file_link(sanitize_title(item.name or name), item.web_url))
 
@@ -388,7 +395,7 @@ class TeamsOutputDelivery:
             self._neutral_claimed_bytes.pop(file_id, None)
 
     async def _upload(self, offer: _Offer, info: FileUploadInfo) -> None:
-        """PUT the bytes to the upload session, delete the output, show the file."""
+        """PUT the bytes, show the file, then remove its output listing."""
         client = self._runtime.anthropic
         try:
             content = offer.content
@@ -402,11 +409,11 @@ class TeamsOutputDelivery:
                 offer.conversation_id, offer.service_url, _UPLOAD_FAILED.format(name=offer.filename)
             )
             return
-        if offer.content is None:
-            await delete_output_file(client, session_id=offer.session_id, file_id=offer.file_id)
         await self._sender.send(
             offer.conversation_id, file_info_message(info), service_url=offer.service_url
         )
+        if offer.content is None:
+            await delete_output_file(client, session_id=offer.session_id, file_id=offer.file_id)
 
     async def _put(self, info: FileUploadInfo, content: bytes) -> None:
         """PUT `content` to the person's OneDrive upload session; `FetchRefused` on failure."""

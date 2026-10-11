@@ -1,10 +1,10 @@
 """Non-interactive turn execution.
 
 Open a fresh MA session, then delegate the drain to the core turn driver
-(`daimon.core.turn.driver.run_turn`), returning the truncated final-message
-tail. A routine turn inherits the driver's full liveness story — status-
-checked eventless-cycle reconnect, the per-call read timeout, the cancel
-race, the hardened render error policy — instead of a bespoke bare drain
+(`daimon.core.turn.driver.run_turn`), returning the complete final message.
+A routine turn inherits the driver's full liveness story — status-checked
+eventless-cycle reconnect, the per-call read timeout, the cancel race,
+the hardened render error policy — instead of a bespoke bare drain
 loop, and answers tool confirmations via `headless_tool_confirmation`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
@@ -35,7 +35,9 @@ the `daimon_tenant`/`daimon_account` metadata stamp that
 `run_turn` keeps its string `agent_id`/`environment_id` signature (the
 scheduler only has ids) and bridges to `create_session`'s SDK-object
 signature via neutral agent/environment retrieval ports and the M0 SDK codecs
-(mirrors `daimon.adapters.cli.sessions_bootstrap`).
+(mirrors `daimon.adapters.cli.sessions_bootstrap`). An optional
+`model_override` applies only to the new session; it never updates the stored
+agent.
 
 Per `guideline:architecture` "Error propagation" the runner does not
 swallow exceptions: `httpx.HTTPError`, `anthropic.APIError`, and a failed
@@ -82,9 +84,6 @@ from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
-
-LAST_RESULT_TAIL_MAX = 1000
-"""Final-message tail is truncated to at most this many characters."""
 
 
 class _NoOpLifecycle(TurnLifecycle):
@@ -146,6 +145,7 @@ async def run_turn(
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
+    model_override: str | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -174,6 +174,7 @@ async def run_turn(
             on_state=on_state,
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
+            model_override=model_override,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -202,6 +203,7 @@ async def run_turn(
                 on_state=on_state,
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
+                model_override=model_override,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -234,8 +236,9 @@ async def run_turn_impl(
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
+    model_override: str | None = None,
 ) -> str:
-    """Run a single non-interactive turn end-to-end and return its tail.
+    """Run a single non-interactive turn end-to-end and return its complete final reply.
 
     Flow:
 
@@ -272,9 +275,9 @@ async def run_turn_impl(
        eventless-cycle reconnect, the per-call read timeout, the cancel race,
        the hardened render error policy — instead of a bespoke bare drain
        loop with no reconnect and stream-end-as-success.
-    4. After the driver returns: ``extract_final_response(state.content)[:1000]``.
+    4. After the driver returns: ``extract_final_response(state.content)``.
        ``on_state``, when given, is called first with the final ``TurnState``
-       of a successful turn, for a caller that needs more than the tail (the
+       of a successful turn, for a caller that needs the tool trail too (the
        scheduler checks whether the agent posted a routine's result itself).
 
     Errors:
@@ -378,6 +381,7 @@ async def run_turn_impl(
             origin_thread_id=origin_place.thread_id if origin_place is not None else None,
             origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
+            model_override=model_override,
         )
 
     try:
@@ -445,7 +449,7 @@ async def run_turn_impl(
 
         if on_state is not None:
             on_state(state)
-        return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]
+        return extract_final_response(state.content)
     finally:
         if session_factory is not None:
             try:

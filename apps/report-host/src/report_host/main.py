@@ -4,8 +4,8 @@
   - the single SQLite connection (``reports_store.connect``, applying both
     ``reports_store``'s and ``threads_store``'s schema, once, at construction)
   - a ``SeamClient`` over one ``httpx.AsyncClient`` owned by the app
-  - the reader router (which also mounts the viewer's static assets — see
-    ``routes.build_reader_router``), the admin router and the uploads router
+  - the reader router, the viewer's static assets at ``/viewer`` (see
+    ``routes.mount_viewer_assets``), the admin router and the uploads router
   - ``GET /health``, requiring no credential — the compose/reverse-proxy probe
   - a ``lifespan`` that, on entry, resumes every thread the host left running
     across a restart and starts one background task looping the deadline-cancel,
@@ -32,7 +32,7 @@ from report_host import reports_store, turns
 from report_host.admin import build_admin_router
 from report_host.config import Settings
 from report_host.mcp_client import SeamClient
-from report_host.routes import build_reader_router
+from report_host.routes import build_reader_router, mount_viewer_assets
 from report_host.sweeps import (
     archive_idle_threads,
     cancel_expired_turns,
@@ -124,6 +124,7 @@ def create_app(settings: Settings) -> FastAPI:
             settings=settings, conn_factory=lambda: conn, seam=seam, now=now, run_turn=_run_turn
         )
     )
+    mount_viewer_assets(app)
     app.include_router(build_admin_router(settings=settings, conn_factory=lambda: conn, now=now))
     app.include_router(
         build_uploads_router(settings=settings, conn_factory=lambda: conn, seam=seam)

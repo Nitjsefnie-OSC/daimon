@@ -29,7 +29,7 @@ from daimon.adapters.mcp.tools.skill_uploads import (
     _add_skill_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
@@ -37,7 +37,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.session_snapshot import SessionSnapshot, desired_snapshot
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.slack_file_token import mint_file_token
-from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
@@ -67,6 +67,7 @@ from daimon.testing.ma import (
 )
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ROOM = "111111111111111111"
@@ -191,6 +192,34 @@ async def _live_session(
         )
     frozen = ma_session_agent(id=responder, tools=[_daimon_toolset(gated=gated)])
     world.sessions[session_id] = ma_session(id=session_id, agent=frozen).model_dump(mode="json")
+
+
+async def _grant_team_member(world: _World) -> None:
+    async with world.runtime.session_factory.begin() as session:
+        policy = await load_access_policy(session, tenant_id=world.tenant_id)
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=policy.model_copy(
+                update={"agent_rules": {**policy.agent_rules, "helper": AgentRule(runs_in=(ROOM,))}}
+            ),
+        )
+        await set_channel_admins(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=ROOM,
+            role_ids=[],
+            user_ids=[USER],
+            actor_account_id=None,
+        )
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=world.tenant_id, channel_id=ROOM),
+            tenant_id=world.tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
 
 
 async def _chat_turn(
@@ -495,15 +524,15 @@ async def test_a_built_in_agent_is_refused_even_for_an_admin(
         )
 
 
-async def test_a_member_may_change_an_agent_that_answers_nowhere_but_not_a_default(
+async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory)
     member = world.auth(admin=False)
-    result = await _add_skill_impl(
-        world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
-    )
-    assert result.status == "preview"
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _add_skill_impl(
+            world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
+        )
 
     async with db_session_factory.begin() as session:
         await set_fields(
@@ -545,13 +574,19 @@ async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
     async def add() -> object:
         return await _add_skill_impl(
             world.runtime,
-            world.auth(admin=False, platform="discord"),
+            dataclasses.replace(
+                world.auth(admin=False, platform="discord"),
+                chat_agent_id=derive_agent_uuid(
+                    tenant_id=world.tenant_id, ma_agent_id="agent_helper"
+                ),
+                administered_channel_ids=frozenset({ROOM}),
+            ),
             agent_name="helper",
             expected_ma_agent_id="agent_helper",
             skill_md=_MD,
         )
 
-    with pytest.raises(ToolError, match="not made for, limited by its rule to or given to"):
+    with pytest.raises(ToolError, match="not limited by a channel rule"):
         await add()
     async with db_session_factory.begin() as session:
         await record_creation_channel(
@@ -560,6 +595,14 @@ async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
             ma_agent_id="agent_helper",
             platform="discord",
             channel_id=ROOM,
+        )
+    with pytest.raises(ToolError, match="not limited by a channel rule"):
+        await add()
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(agent_rules={"helper": AgentRule(runs_in=(ROOM,))}),
         )
     result = await add()
     assert getattr(result, "status", None) == "preview", "one made for their channel is theirs"
@@ -783,6 +826,7 @@ async def test_an_isolated_channels_agent_takes_skills_only_from_inside_the_chan
                 agent_channel_pins={"helper": (ROOM,)},
             ),
         )
+    await _grant_team_member(world)
     origin = await _setup_thread_origin(world, db_session_factory)
 
     def member_run_by(agent_id: str) -> AuthIdentity:
@@ -858,6 +902,7 @@ async def test_a_pinned_agent_takes_a_chat_add_only_from_its_own_channels(
 
     with pytest.raises(ToolError, match="No card was posted"):
         await preview()
+    await _grant_team_member(world)
     origin = await _setup_thread_origin(world, db_session_factory)
     assert (await preview(origin_context_id=origin)).status == "preview", "inside the pin"
 
@@ -866,6 +911,8 @@ async def _preview_then_confirm(
     world: _World, *, admin: bool = True, gated: bool = True, **source: Any
 ) -> AddSkillResult:
     """Preview, then confirm, from one chat turn whose session is gated (or not)."""
+    if not admin:
+        await _grant_team_member(world)
     auth, origin = await _chat_turn(world, admin=admin, gated=gated)
     preview = await _add_skill_impl(
         world.runtime,
@@ -1055,11 +1102,14 @@ async def test_a_repo_skill_uses_stored_github_access_only_for_an_admin(
     url = "https://someone:ghp_secret@github.com/o/r.git?x=1"
     source = {"repo_url": url, "path": "skills/notes"}
 
+    await _grant_team_member(world)
+    member, origin = await _chat_turn(world, admin=False)
     await _add_skill_impl(
         world.runtime,
-        world.auth(admin=False),
+        member,
         agent_name="helper",
-        expected_ma_agent_id=None,
+        expected_ma_agent_id="agent_helper",
+        origin_context_id=origin,
         **source,
     )
     assert (resolved, tokens) == ([], [None]), "a member fetches without the stored access"
@@ -1087,8 +1137,33 @@ async def test_an_upstream_failure_is_a_tool_error(
         raise anthropic.APIStatusError("boom", response=response, body=None)
 
     monkeypatch.setattr(skill_uploads, "add_agent_skill", failing)
-    with pytest.raises(ToolError, match=r"failed upstream \(HTTP 500\)"):
+    with pytest.raises(ToolError, match=r"failed upstream \(HTTP 500\)") as failure:
         await _preview_then_confirm(world, skill_md=_MD)
+    # A card approval was not used up, so the agent may simply retry.
+    assert "Try again later." in str(failure.value)
+    assert "preview again" not in str(failure.value)
+
+
+async def test_failed_upload_after_chat_approval_asks_for_new_preview_and_yes(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+
+    async def failing(*_args: object, **_kwargs: object) -> None:
+        response = httpx.Response(500, request=httpx.Request("POST", "https://api.example"))
+        raise anthropic.APIStatusError("boom", response=response, body=None)
+
+    monkeypatch.setattr(skill_uploads, "add_agent_skill", failing)
+    async with _reply(world, auth, "yes") as reply:
+        with pytest.raises(ToolError) as failure:
+            await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
+        message = str(failure.value).lower()
+        assert "preview again" in message and "reply `yes`" in message
+        assert "try again later" not in message
+        with pytest.raises(ToolError, match="already used"):
+            await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
 
 
 async def test_an_attachment_of_the_wrong_kind_is_refused_before_download(
@@ -1133,10 +1208,15 @@ async def _reply(
         yield str(origin.id)
 
 
-async def _cards_off_turn(world: _World) -> tuple[AuthIdentity, str]:
+async def _cards_off_turn(world: _World, *, owned: bool = True) -> tuple[AuthIdentity, str]:
     """A member's chat turn in ROOM on a deployment with approval cards off."""
     world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
-    return await _chat_turn(world, admin=False)
+    if owned:
+        await _grant_team_member(world)
+    auth, origin = await _chat_turn(world, admin=False)
+    if owned:
+        auth = dataclasses.replace(auth, administered_channel_ids=frozenset({ROOM}))
+    return auth, origin
 
 
 async def _add_from(
@@ -1163,6 +1243,7 @@ async def test_with_cards_off_a_yes_as_the_next_message_confirms_once(
     preview = await _add_from(world, auth, origin)
     content_hash = preview.preview.content_hash
     assert f"content_hash='{content_hash}'" in preview.summary
+    assert "'notes' for agent 'helper'" in preview.summary
     assert "`yes`" in preview.summary and "/agent-setup" not in preview.summary
 
     async with _reply(world, auth, text) as reply:
@@ -1241,8 +1322,9 @@ async def test_with_cards_off_only_the_latest_preview_can_be_confirmed(
     second = await _add_from(world, auth, origin, skill_md=other_md)
 
     async with _reply(world, auth, "yes") as reply:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="a newer preview replaced it") as failure:
             await _add_from(world, auth, reply, content_hash=first.preview.content_hash)
+        assert "preview it again" in str(failure.value)
         assert world.created == []
         added = await _add_from(
             world, auth, reply, skill_md=other_md, content_hash=second.preview.content_hash
@@ -1315,6 +1397,144 @@ async def test_with_cards_off_concurrent_previews_leave_one_to_confirm(
     assert sorted(outcomes) == [False, True], "the newer preview is consumed exactly once"
 
 
+async def test_cards_off_one_yes_does_not_approve_two_agents(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin_id = await _cards_off_turn(world)
+    async with world.runtime.session_factory() as session:
+        origin = await get_active_origin(
+            session,
+            origin_id=uuid.UUID(origin_id),
+            tenant_id=world.tenant_id,
+            account_id=auth.account_id,
+            platform="discord",
+            now=datetime.now(UTC),
+        )
+    assert origin is not None
+    async with world.runtime.session_factory.begin() as session:
+        await record_pending_skill_add(
+            session,
+            origin=origin,
+            ma_agent_id="agent_a",
+            content_hash="hash-a",
+            now=datetime.now(UTC),
+        )
+        await record_pending_skill_add(
+            session,
+            origin=origin,
+            ma_agent_id="agent_b",
+            content_hash="hash-b",
+            now=datetime.now(UTC),
+        )
+
+    async with _reply(world, auth, "yes") as reply_id:
+        async with world.runtime.session_factory() as session:
+            reply = await get_active_origin(
+                session,
+                origin_id=uuid.UUID(reply_id),
+                tenant_id=world.tenant_id,
+                account_id=auth.account_id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert reply is not None
+        async with world.runtime.session_factory.begin() as session:
+            first = await consume_pending_skill_add(
+                session,
+                origin=reply,
+                ma_agent_id="agent_a",
+                content_hash="hash-a",
+                now=datetime.now(UTC),
+            )
+            second = await consume_pending_skill_add(
+                session,
+                origin=reply,
+                ma_agent_id="agent_b",
+                content_hash="hash-b",
+                now=datetime.now(UTC),
+            )
+    assert first is False, "the older agent's preview must be superseded"
+    assert second is True, "one yes authorizes only the active agent's preview"
+
+
+async def test_cards_off_concurrent_previews_for_two_agents_leave_one_open(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin_id = await _cards_off_turn(world)
+    async with world.runtime.session_factory() as session:
+        origin = await get_active_origin(
+            session,
+            origin_id=uuid.UUID(origin_id),
+            tenant_id=world.tenant_id,
+            account_id=auth.account_id,
+            platform="discord",
+            now=datetime.now(UTC),
+        )
+    assert origin is not None
+
+    async def preview(agent_id: str, content_hash: str) -> None:
+        async with world.runtime.session_factory.begin() as session:
+            await record_pending_skill_add(
+                session,
+                origin=origin,
+                ma_agent_id=agent_id,
+                content_hash=content_hash,
+                now=datetime.now(UTC),
+            )
+
+    async with world.runtime.session_factory.begin() as first:
+        await record_pending_skill_add(
+            first,
+            origin=origin,
+            ma_agent_id="agent_a",
+            content_hash="hash-a",
+            now=datetime.now(UTC),
+        )
+        second = asyncio.create_task(preview("agent_b", "hash-b"))
+        await asyncio.sleep(0.3)
+    await second
+
+    async with world.runtime.session_factory() as session:
+        open_count = await session.scalar(
+            text(
+                "SELECT count(*) FROM pending_skill_adds WHERE tenant_id = :tenant_id "
+                "AND account_id = :account_id AND platform = 'discord' "
+                "AND thread_id = :thread_id AND consumed_at IS NULL"
+            ),
+            {"tenant_id": world.tenant_id, "account_id": auth.account_id, "thread_id": CHAT_THREAD},
+        )
+    assert open_count == 1
+
+    async with _reply(world, auth, "yes") as reply_id:
+        async with world.runtime.session_factory() as session:
+            reply = await get_active_origin(
+                session,
+                origin_id=uuid.UUID(reply_id),
+                tenant_id=world.tenant_id,
+                account_id=auth.account_id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert reply is not None
+        async with world.runtime.session_factory.begin() as session:
+            assert not await consume_pending_skill_add(
+                session,
+                origin=reply,
+                ma_agent_id="agent_a",
+                content_hash="hash-a",
+                now=datetime.now(UTC),
+            )
+            assert await consume_pending_skill_add(
+                session,
+                origin=reply,
+                ma_agent_id="agent_b",
+                content_hash="hash-b",
+                now=datetime.now(UTC),
+            )
+
+
 async def test_with_cards_off_a_changed_skill_needs_a_fresh_preview(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1359,7 +1579,7 @@ async def test_with_cards_off_a_member_still_cannot_add_to_a_shared_agent(
             agent_name="helper",
             mode="agent",
         )
-    auth, origin = await _cards_off_turn(world)
+    auth, origin = await _cards_off_turn(world, owned=False)
 
     with pytest.raises(ToolError, match="needs a workspace or server admin"):
         await _add_from(world, auth, origin)

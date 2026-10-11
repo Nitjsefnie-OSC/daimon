@@ -37,6 +37,18 @@
   },
   "effects": [
     {
+      "operation": "add_reaction",
+      "payload": {
+        "args": [
+          "\ud83d\udc40"
+        ],
+        "kwargs": {},
+        "receiver": null
+      },
+      "platform": "platform_client",
+      "result": null
+    },
+    {
       "operation": "request",
       "payload": {
         "body": null,
@@ -274,7 +286,7 @@
       "operation": "send",
       "payload": {
         "args": [
-          "This server's daimon credit is depleted. A server admin can top up with `/billing`."
+          "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
         ],
         "kwargs": {},
         "receiver": {
@@ -285,6 +297,21 @@
       "result": {
         "message_id": "<id:3>"
       }
+    },
+    {
+      "operation": "remove_reaction",
+      "payload": {
+        "args": [
+          "\ud83d\udc40",
+          {
+            "id": 999
+          }
+        ],
+        "kwargs": {},
+        "receiver": null
+      },
+      "platform": "platform_client",
+      "result": null
     }
   ],
   "requests": null

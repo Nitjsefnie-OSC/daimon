@@ -110,10 +110,13 @@ async def test_new27_a_rejected_token_through_the_real_modal(
     assert receipt.probe_statuses == (401,)
     assert receipt.outcome == "token_rejected"
     assert not any(r.startswith("POST") for r in receipt.ma_requests), receipt.ma_requests
-    assert any("did not accept" in reply for reply in receipt.replies), receipt.replies
+    assert any("token didn't work. Nothing was saved" in reply for reply in receipt.replies), (
+        receipt.replies
+    )
     assert NEW27_TOKEN not in " ".join(receipt.replies)
 
-    assert receipt.used, "the rejected token still spent the request (friction NEW-27)"
+    # Since main's form-retry fix (#611) a rejected token releases the request.
+    assert not receipt.used, "the rejected token spent the request (friction NEW-27)"
 
     # The frozen check, run exactly as the catalog writes it, cannot execute:
     # `credential_requests` has no `id` column (it is keyed by its secret token).
@@ -121,9 +124,9 @@ async def test_new27_a_rejected_token_through_the_real_modal(
     with pytest.raises(DbCheckInvalid, match="SQLSTATE 42703"):
         await db_check(db_session_factory, NEW27_SQL, receipt.values)
     # Diagnostic only, not the catalog's check: the same fact keyed by the
-    # request's UUID identity is False, so a corrected check would FAIL today.
+    # request's UUID identity is True, so a corrected check would PASS today.
     diagnostic = NEW27_SQL.replace("where id =", "where idempotency_key =")
-    assert await db_check(db_session_factory, diagnostic, receipt.values) is False
+    assert await db_check(db_session_factory, diagnostic, receipt.values) is True
 
 
 def test_placeholders_bind_only_known_uuid_values() -> None:

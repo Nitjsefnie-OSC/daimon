@@ -1,7 +1,7 @@
 """Platform-neutral model of a posted control card and its final copy.
 
 A posted control is the public card the agent drops in a channel when it needs
-a private value: "🔑 Add TOGGL_TOKEN to research-bot", with a button that opens
+a private value: "🔑 research-bot needs `TOGGL_TOKEN`", with a button that opens
 a private form. The same card is later edited in place to show what happened.
 
 Discord and Slack render that card with entirely different primitives (V2
@@ -35,7 +35,11 @@ from datetime import datetime
 from typing import Final, Literal, Self, cast
 
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
-from daimon.core.credential_requests import build_custom_id, split_skill_repo_target
+from daimon.core.credential_requests import (
+    build_custom_id,
+    mcp_permission_message,
+    split_skill_repo_target,
+)
 from daimon.core.env_file import env_shadow_phrase
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.stores.domain import CredentialRequestRow
@@ -46,6 +50,7 @@ __all__ = [
     "CardButton",
     "CardKind",
     "CardState",
+    "ENV_FILE_KEPT_LINE",
     "EXPIRED_HEADLINE",
     "FOOTER_TEMPLATE",
     "NO_LONGER_VALID_MESSAGE",
@@ -77,6 +82,7 @@ CardKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo"]
 RefusalReason = Literal[
     "admin_required",
     "replacement_admin_required",
+    "mcp_permission_required",
     "env_file_invalid",
     #: Nothing was saved because the thing being configured is gone or
     #: misconfigured — the agent no longer resolves, or the request row lost
@@ -93,7 +99,9 @@ RefusalReason = Literal[
 
 #: `requested` footer, with the two placeholders each renderer fills from
 #: `requester_platform_user_id` and `expires_at_unix`.
-FOOTER_TEMPLATE: Final[str] = "Only {requester} can open this form. Expires {expires}."
+FOOTER_TEMPLATE: Final[str] = "Only {requester} can fill this in. Expires {expires}."
+#: What an `env_file` card says it keeps; Teams swaps the noun for a pasted file.
+ENV_FILE_KEPT_LINE: Final[str] = "We save the keys, not the file."
 RECEIVED_FOOTER: Final[str] = "Received. Saving…"
 EXPIRED_HEADLINE: Final[str] = "⌛ This form expired."
 #: `replaced` is the one state nobody asked for: the requester asked again in
@@ -233,40 +241,27 @@ def _requested_content(
 ) -> tuple[str, tuple[str, ...]]:
     if kind == "env":
         return (
-            f"🔑 Add {target} to {agent_name}",
-            (
-                f"Anyone who talks to {agent_name} can use it.",
-                "The value is not shown in chat.",
-            ),
+            f"🔑 {agent_name} needs `{target}`",
+            (f"Anyone using {agent_name} can use it. The value isn't shown in chat.",),
         )
     if kind == "env_file":
         return (
-            f"🔑 Add keys to {agent_name} from a .env file",
-            (
-                "One KEY=VALUE per line.",
-                "Daimon stores the keys, not a retained copy of your uploaded file.",
-                f"Anyone who talks to {agent_name} can use them.",
-            ),
+            f"🔑 {agent_name} needs keys from a .env file",
+            (f"{ENV_FILE_KEPT_LINE} Anyone using {agent_name} can use them.",),
         )
     if kind == "mcp":
         if mcp_server_url is None:
             raise ValueError("kind='mcp' requires mcp_server_url")
         return (
             f"🔌 Connect {agent_name} to {target}",
-            (
-                f"{mcp_server_url} needs a token.",
-                f"Anyone who talks to {agent_name} can use this connection.",
-            ),
+            (f"{mcp_server_url} needs a token. Anyone using {agent_name} can use it.",),
         )
     if kind == "mcp_oauth":
         if mcp_server_url is None:
             raise ValueError("kind='mcp_oauth' requires mcp_server_url")
         return (
-            f"🔌 Connect {agent_name} to {target} with your account",
-            (
-                f"{mcp_server_url} signs you in through your browser.",
-                "Only you can use your connection; others connect their own.",
-            ),
+            f"🔌 Connect {agent_name} to {target}",
+            (f"Sign in through {mcp_server_url}. Only you can use this connection.",),
         )
     if branch is None:
         raise ValueError(f"kind={kind!r} requires branch")
@@ -357,6 +352,12 @@ def _refusal_content(
     refusal_lines: Sequence[str],
     replaces: str | None = None,
 ) -> tuple[str, ...]:
+    if refusal == "mcp_permission_required":
+        return (
+            f"🛡️ {target} was not connected to {agent_name}.",
+            mcp_permission_message(agent_name),
+            "Nothing was saved.",
+        )
     if refusal == "admin_required":
         return (
             f"🛡️ {agent_name}'s working repo was not changed.",
@@ -426,6 +427,8 @@ def build_posted_card(
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
+    retry_reason: str | None = None,
+    saving_notice: str | None = None,
 ) -> PostedCard:
     """Build the card for one posted control in one state.
 
@@ -447,6 +450,10 @@ def build_posted_card(
     if refusal_lines and refusal != "env_file_invalid":
         raise ValueError("refusal_lines belong to refusal='env_file_invalid' only")
 
+    if retry_reason is not None and state != "requested":
+        raise ValueError("retry_reason belongs to state=requested only")
+    if saving_notice is not None and state != "received":
+        raise ValueError("saving_notice belongs to state=received only")
     repo_display = repo or target
 
     if state in ("requested", "received"):
@@ -461,7 +468,11 @@ def build_posted_card(
         )
         if state == "received":
             return PostedCard(
-                kind=kind, state=state, headline=headline, facts=facts, footer=RECEIVED_FOOTER
+                kind=kind,
+                state=state,
+                headline=headline,
+                facts=facts,
+                footer=saving_notice or RECEIVED_FOOTER,
             )
         if expires_at.tzinfo is None:
             raise ValueError("expires_at must be timezone-aware")
@@ -471,8 +482,8 @@ def build_posted_card(
         return PostedCard(
             kind=kind,
             state=state,
-            headline=headline,
-            facts=facts,
+            headline=f"⚠️ {retry_reason.splitlines()[0]}" if retry_reason else headline,
+            facts=(*retry_reason.splitlines()[1:], *facts) if retry_reason else facts,
             buttons=(button,),
             footer=FOOTER_TEMPLATE,
             requester_platform_user_id=requester_platform_user_id,
@@ -522,6 +533,8 @@ def card_for_request(
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
+    retry_reason: str | None = None,
+    saving_notice: str | None = None,
 ) -> PostedCard:
     """The card for one request row in `state`, rebuilt from the row alone.
 
@@ -548,4 +561,6 @@ def card_for_request(
         refusal=refusal,
         refusal_lines=refusal_lines,
         replaces=replaces,
+        retry_reason=retry_reason,
+        saving_notice=saving_notice,
     )

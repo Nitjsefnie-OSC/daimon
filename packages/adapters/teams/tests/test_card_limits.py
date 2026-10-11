@@ -45,7 +45,6 @@ from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_repo_auth import RepoAccess
-from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX
 from daimon.core.here_card import assemble_here_card
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.mcp_auth import coding_tool_config
@@ -65,6 +64,7 @@ from daimon.core.routines import PANEL_CAP
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import build_setup_opener
 from daimon.core.stores.domain import ChannelBudgetRow, CredentialRequestRow, RoutineRow
+from daimon.core.stores.routines import LAST_RESULT_TAIL_MAX
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.notices import TerminationNotice
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState
@@ -131,9 +131,7 @@ def _answer() -> MessageActivityInput:
 def _termination() -> MessageActivityInput:
     notice = TerminationNotice(
         reason=TerminationReason.UPSTREAM,
-        headline=EMOJI * 10_000,
-        cause=EMOJI * 10_000,
-        survived=EMOJI * 10_000,
+        title=EMOJI * 10_000,
         next_step=EMOJI * 10_000,
         in_flight=tuple(f"{index}{'t' * 127}" for index in range(20)),
         finished_tools=10**6,
@@ -398,7 +396,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
         10**6,
         user_id="u",
         is_admin=True,
-        notice=routines_card.created_notice(NAME, _routine().cron_expr),
+        notice=routines_card.created_notice(NAME, _routine().cron_expr, _routine().timezone),
     ),
     "routine_output": lambda: routines_card.output_card(_routine()),
     "routine_error": lambda: routines_card.output_card(
@@ -406,7 +404,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     ),
     "routine_delete": lambda: routines_card.confirm_delete_card(_routine()),
     "privacy_none": lambda: privacy_card.no_data_card(NAME),
-    "privacy": lambda: privacy_card.panel_card(_preview(), bot=NAME, policy_url=URL),
+    "privacy": lambda: privacy_card.panel_card(bot=NAME, policy_url=URL),
     "privacy_export": lambda: privacy_card.export_card(_preview(), bot=NAME),
     "privacy_confirm": lambda: privacy_card.confirm_card(
         _preview(), account_id=uuid.UUID(int=0), name=EMOJI * 256, error=NAME_MISMATCH
@@ -417,7 +415,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "billing_checkout": lambda: checkout_card(URL, 100),
     "memory": lambda: memory._card(f"/memories/{EMOJI * 100}.md", EMOJI * 100_000),  # pyright: ignore[reportPrivateUsage]  # what show_memory sends
     "memory_missing": lambda: memory._card(  # pyright: ignore[reportPrivateUsage]
-        f"No memory at /memories/{EMOJI * 10_000}.md.", hint="Send memory to list paths."
+        f"No memory file called /memories/{EMOJI * 10_000}.md.", hint="Send memory to see them all."
     ),
     "help": lambda: help_card(COMMAND_HELP, bot=NAME),
     "here": lambda: here_card(

@@ -179,7 +179,8 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                             web_client=envelope.web_client,
                             tenant_id=envelope.tenant_id,
                         )
-                    pending = app._pending.get(thread_id, [])  # pyright: ignore[reportPrivateUsage]
+                    thread_key = (envelope.team_id, envelope.channel, thread_id)
+                    pending = app._pending.get(thread_key, [])  # pyright: ignore[reportPrivateUsage]
                     threads.append(
                         {
                             "thread_id": thread_id,
@@ -187,7 +188,7 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
                                 str(e["ts"]) for e in (inputs.first, *inputs.queued)
                             ),
                             "queued_message_ids": tuple(str(e["ts"]) for e in pending),
-                            "claimed_while_queued": thread_id in app._processing,  # pyright: ignore[reportPrivateUsage]
+                            "claimed_while_queued": thread_key in app._processing,  # pyright: ignore[reportPrivateUsage]
                             "first_callback_finished_while_queued": first_ts in finished_callbacks,
                         }
                     )

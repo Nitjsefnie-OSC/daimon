@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 118 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 120 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -77,7 +77,7 @@ Agent tools: list / get / create / update / fork / archive.
 | `create_agent` | all callers | Create an agent called, for example, churn-explorer. |
 | `fork_agent` | all callers | Make a copy of Daimon or another agent that you can edit under a new name. |
 | `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
-| `list_agents` | all callers | List agents in the tenant pool, including each agent's attached ``mcp_servers`` and ``skills``. |
+| `list_agents` | all callers | List agents visible here, including their attached ``mcp_servers`` and ``skills``. |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
 
 ## `channel_admins`
@@ -173,7 +173,7 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear or GitHub through an MCP endpoint with a bearer token, not browser OAuth. |
-| `request_repo_binding` | Discord callers, Slack callers, Teams callers | Let an agent read a GitHub working repo or repository, public or private. |
+| `request_repo_binding` | Discord callers, Slack callers, Teams callers | Legacy: save a GitHub token for an agent that already uses one. |
 | `request_skill_repo_token` | Discord callers, Slack callers, Teams callers | The skills repo is private: collect a GitHub token to import its skills. |
 
 ## `enable_files`
@@ -210,7 +210,15 @@ Private, agent-bound GitHub setup from an active conversation.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `github_connect` | Discord callers, Slack callers | Connect this agent to GitHub when someone asks to set up GitHub. |
+| `github_connect` | Discord callers, Slack callers | Give this agent token access to more repos, such as a private GitHub repo. |
+
+## `github_remove_repo`
+
+Remove one repository from one agent after confirmation in chat.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `remove_repo` | Discord callers, Slack callers | Remove owner/repo from this agent only. |
 
 ## `github_requests`
 
@@ -218,7 +226,15 @@ Turn-bound GitHub access requests and private admin delivery.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `request_github_access` | Discord callers, Slack callers, Teams callers | Ask for GitHub access needed to finish this person's current request. |
+| `request_github_access` | Discord callers, Slack callers, Teams callers | Ask for token access to a repo needed for this agent's current request. |
+
+## `github_working_repo`
+
+Conversational selection of an agent's one filesystem repository.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_working_repo` | Discord callers, Slack callers | Choose the one repo in this agent's filesystem, or pass 'none' to clear it. |
 
 ## `here`
 
@@ -353,8 +369,8 @@ Skill tools: sync / list / get / delete.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `delete_skill` | admin only | Delete a skill such as eda from the workspace, destroying all versions for every agent. |
-| `get_skill` | all callers | Look up a skill by name. |
-| `list_skills` | all callers | List all custom skills. |
+| `get_skill` | all callers | Look up a visible skill by name, including version count. |
+| `list_skills` | all callers | List visible custom skills. |
 | `sync_skills` | admin only | Install skills from a GitHub repo into the workspace's shared skill library. |
 
 ## `task_continuity`

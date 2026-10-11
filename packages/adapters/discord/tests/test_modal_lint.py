@@ -264,3 +264,17 @@ def test_non_literal_label_text_is_not_a_failing_rule() -> None:
         "an unmeasurable Label text is information, not a build failure -- the failing set "
         "must not list it"
     )
+
+
+def test_label_wrapped_text_input_with_its_own_label_flagged() -> None:
+    source = """
+class Both(discord.ui.Modal, title="Both"):
+    def __init__(self) -> None:
+        self.add_item(
+            discord.ui.Label(text="Name", component=discord.ui.TextInput(label="Name"))
+        )
+"""
+    assert _rules(source) == ["discord/label-inside-label"], (
+        "Discord answers 400 'Cannot set label on a TextInput in a Label component', "
+        "so a wrapped input that also sets label= makes the modal unopenable"
+    )

@@ -10,13 +10,17 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._rule_view import load_caller_view
+from daimon.adapters.mcp.tools._rule_view import load_caller_view, load_isolation_view
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import CHAT_PLATFORMS, TurnOriginRow
 from daimon.core.stores.thread_agent_bindings import get_binding, update_target
-from daimon.core.stores.turn_origins import get_active_origin, update_origin_target
+from daimon.core.stores.turn_origins import (
+    get_active_origin,
+    list_active_origins,
+    update_origin_target,
+)
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -26,8 +30,14 @@ async def require_turn_origin(
     auth: AuthIdentity,
     origin_context_id: str | None,
 ) -> TurnOriginRow:
-    if not origin_context_id or auth.platform not in CHAT_PLATFORMS:
+    if auth.platform not in CHAT_PLATFORMS:
         raise ToolError("Use the origin_context_id from this active platform turn.")
+    if not origin_context_id:
+        # Smaller models sometimes drop the argument. The caller's own single
+        # running turn for this responder is unambiguous; anything else refuses.
+        origin_context_id = await _sole_running_origin_id(runtime, auth)
+        if origin_context_id is None:
+            raise ToolError("Use the origin_context_id from this active platform turn.")
     try:
         origin_id = uuid.UUID(origin_context_id)
     except ValueError as exc:
@@ -55,6 +65,28 @@ async def require_turn_origin(
     return origin
 
 
+async def _sole_running_origin_id(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
+    """The id of the caller's one running turn with this responder, or None."""
+    executing_agent = auth.agent_id or auth.chat_agent_id
+    if executing_agent is None or auth.platform is None:
+        return None
+    async with runtime.session_factory() as session:
+        running = await list_active_origins(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            now=datetime.now(UTC),
+        )
+    mine = [
+        origin
+        for origin in running
+        if derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+        == executing_agent
+    ]
+    return str(mine[0].id) if len(mine) == 1 else None
+
+
 async def resolve_setup_agent(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -62,7 +94,9 @@ async def resolve_setup_agent(
     name: str,
     expected_ma_agent_id: str | None = None,
     require_identity: bool = True,
+    discovery: bool = False,
     location_channel_id: str | None = None,
+    location_thread_id: str | None = None,
 ) -> BetaManagedAgentsAgent:
     """Resolve a name without adopting an ambiguous or recreated namesake.
 
@@ -77,7 +111,12 @@ async def resolve_setup_agent(
             "Which current agent should I configure? Nothing was changed."
         )
     agents = await find_agents_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    caller = await load_caller_view(runtime, auth, location_channel_id=location_channel_id)
+    caller = await (load_caller_view if discovery else load_isolation_view)(
+        runtime,
+        auth,
+        location_channel_id=location_channel_id,
+        location_thread_id=location_thread_id,
+    )
     agents = [agent for agent in agents if caller.sees_agent(agent)]
     if expected_ma_agent_id is not None:
         for agent in agents:
@@ -120,7 +159,11 @@ async def _set_setup_target_impl(
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     caller = await load_caller_view(
-        runtime, auth, agents=agents, location_channel_id=origin.parent_channel_id
+        runtime,
+        auth,
+        agents=agents,
+        location_channel_id=origin.parent_channel_id,
+        location_thread_id=origin.thread_id,
     )
     target = next((agent for agent in agents if agent.id == agent_id), None)
     if target is None or not caller.sees_agent(target):

@@ -106,6 +106,9 @@ class SessionSnapshot(BaseModel):
     environment_id: str
     github_mode: Literal["legacy", "app"] = "legacy"
     repo_urls: tuple[str, ...] = ()
+    # Every repo the session's App tokens cover, mounted or not. A new grant
+    # changes this set, and the session must be replaced to receive the token.
+    token_repo_urls: tuple[str, ...] = ()
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None
@@ -196,6 +199,7 @@ def snapshot_from_created_session(
     env_file_id: str | None,
     repo_token_issued_at: int | None,
     vault_id: str | None,
+    sent_skills: Sequence[MaSkill],
     github_mode: Literal["legacy", "app"] = "legacy",
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
@@ -203,9 +207,15 @@ def snapshot_from_created_session(
     `env_sha256` and `repo_token_issued_at` are not readable back off the
     session — only the creator knows the bytes it uploaded and when it minted
     the clone token — so the caller supplies them.
+
+    `sent_skills` are hashed instead of the session's own: MA echoes a skill
+    sent as `version="latest"` back at the version it resolved, which the
+    desired snapshot (built from the agent's `"latest"`) would read as drift
+    on every turn after.
     """
     return _snapshot_from_session(
         session,
+        skills_sha256=hash_skills(sent_skills),
         env_sha256=env_sha256,
         env_file_id=env_file_id,
         repo_token_issued_at=repo_token_issued_at,
@@ -229,6 +239,7 @@ def snapshot_from_retrieved_session(
     """
     return _snapshot_from_session(
         session,
+        skills_sha256=hash_skills(session.agent.skills),
         env_sha256=env_sha256,
         env_file_id=None,
         repo_token_issued_at=repo_token_issued_at,
@@ -239,6 +250,7 @@ def snapshot_from_retrieved_session(
 def _snapshot_from_session(
     session: BetaManagedAgentsSession,
     *,
+    skills_sha256: str,
     env_sha256: str | None,
     env_file_id: str | None,
     repo_token_issued_at: int | None,
@@ -280,7 +292,7 @@ def _snapshot_from_session(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
         system_sha256=hash_system(agent.system),
-        skills_sha256=hash_skills(agent.skills),
+        skills_sha256=skills_sha256,
         environment_id=session.environment_id,
         github_mode=github_mode,
         repo_urls=tuple(sorted(repo_urls)) if github_mode == "app" else (),
@@ -365,6 +377,7 @@ def desired_snapshot(
     repo_url: str | None,
     github_mode: Literal["legacy", "app"] = "legacy",
     repo_urls: tuple[str, ...] = (),
+    token_repo_urls: tuple[str, ...] = (),
     repo_branch: str | None,
     memory_store_id: str | None,
     vault_id: str | None,
@@ -400,6 +413,7 @@ def desired_snapshot(
         environment_id=environment_id,
         github_mode=github_mode,
         repo_urls=repo_urls if github_mode == "app" else (),
+        token_repo_urls=token_repo_urls if github_mode == "app" else (),
         repo_url=repo_url,
         repo_branch=repo_branch,
         memory_store_id=memory_store_id,

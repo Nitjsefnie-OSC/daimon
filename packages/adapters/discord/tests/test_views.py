@@ -105,6 +105,22 @@ class TestGuardedView:
 
 class TestCancelView:
     @pytest.mark.asyncio
+    async def test_stale_stop_only_cancels_its_original_turn(self) -> None:
+        """A dead turn's leftover card must not stop the next turn in its thread."""
+        old_cancel = asyncio.Event()
+        new_cancel = asyncio.Event()
+        old_turn_id = UUID("12345678-1234-5678-1234-567812345678")
+        new_turn_id = UUID("87654321-4321-8765-4321-876543218765")
+        old_view = CancelView(allowed_user_id=123, cancel=old_cancel, turn_id=old_turn_id)
+        new_view = CancelView(allowed_user_id=123, cancel=new_cancel, turn_id=new_turn_id)
+
+        assert _find_button(old_view, "Stop").custom_id != _find_button(new_view, "Stop").custom_id
+        await _find_button(old_view, "Stop").callback(_mock_interaction(user_id=123))
+
+        assert old_cancel.is_set()
+        assert not new_cancel.is_set(), "a stale Stop must not affect the newer turn"
+
+    @pytest.mark.asyncio
     async def test_cancel_sets_event_and_finalizes(self) -> None:
         cancel = asyncio.Event()
         view = CancelView(allowed_user_id=123, cancel=cancel)
@@ -168,3 +184,22 @@ class TestCancelView:
         assert cancel.is_set(), "adding a custom ID must preserve cancellation behavior"
         assert view._handled is True, "the existing handler should still finalize the view"
         interaction.response.edit_message.assert_called_once_with(view=view)
+
+
+@pytest.mark.parametrize("code", [10008, 10015])
+async def test_cancel_on_deleted_card_only_ignores_unknown_message(code):
+    cancel = asyncio.Event()
+    view = CancelView(allowed_user_id=123, cancel=cancel)
+    interaction = _mock_interaction(user_id=123)
+    interaction.response.edit_message.side_effect = discord.NotFound(
+        MagicMock(status=404, reason="Not Found"), {"code": code, "message": "Gone"}
+    )
+    button = _find_button(view, "Stop")
+    if code == 10008:
+        await button.callback(interaction)
+    else:
+        with pytest.raises(discord.NotFound):
+            await button.callback(interaction)
+    assert cancel.is_set()
+    assert view._handled
+    interaction.response.send_message.assert_not_awaited()

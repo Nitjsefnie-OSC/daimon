@@ -30,7 +30,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.slots import wait_for_slot
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .harness import make_bot
 
@@ -148,17 +148,31 @@ def test_compose_empty_list_returns_empty_string() -> None:
 
 @pytest_asyncio.fixture
 async def queued_bot(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_engine: AsyncEngine,
+    db_clean: None,
 ):
     """Bot with tenant provisioned. _handle_mention is left intact; tests
     install per-test stubs."""
+    # Parallel mentions need separate connections, as in production. Keep
+    # db_clean from the former db_session_factory dependency: this engine and
+    # the next test share one xdist worker schema.
+    db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Funded: a turn that queued re-checks the balance once it holds a slot.
     result = await provision_tenant(
         db_session_factory, platform="discord", workspace_id="123456", signup_credit=Decimal("10")
     )
 
     runtime = _make_runtime(result.tenant_id, db_session_factory)
-    return make_bot(runtime)
+    bot = make_bot(runtime)
+    try:
+        yield bot
+    finally:
+        tasks = tuple(bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=5)
+            assert not pending, "queued bot left background tasks running"
 
 
 @pytest.mark.asyncio
@@ -174,6 +188,7 @@ async def test_no_queueing_when_serial_mentions(queued_bot: DaimonBot) -> None:
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
 
@@ -341,6 +356,7 @@ async def test_overlapping_channel_mentions_run_in_parallel(queued_bot: DaimonBo
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append(message)
         entered.set()
@@ -379,6 +395,7 @@ async def test_one_queued_mention_runs_one_composite_followup(queued_bot: Daimon
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -422,6 +439,7 @@ async def test_three_queued_mentions_merge_into_single_composite_turn(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -468,6 +486,7 @@ async def test_queue_drains_repeatedly_if_new_mention_during_drain(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -529,6 +548,7 @@ async def test_multi_author_queue_partitions_into_per_author_turns(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -584,7 +604,7 @@ async def test_handle_mention_catches_sqlalchemy_error_from_orchestrate(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "boundary should render the error via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 @pytest.mark.asyncio
@@ -613,7 +633,7 @@ async def test_handle_mention_catches_unexpected_exception_from_orchestrate(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "catch-all boundary should also render via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 @pytest.mark.asyncio
@@ -641,7 +661,7 @@ async def test_on_message_prologue_failure_never_escapes_and_sends_error(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "prologue boundary should also render via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +705,7 @@ async def test_channel_mention_thread_registers_and_followup_queues(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append(message)
         if created_thread_ids is not None:
@@ -742,6 +763,7 @@ async def test_queued_followup_after_channel_mention_drains_with_content_overrid
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         if created_thread_ids is not None:
@@ -796,6 +818,7 @@ async def test_channel_branch_processing_registration_does_not_leak_on_exception
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         if created_thread_ids is not None:
             queued_bot._processing.add(thread_id)  # pyright: ignore[reportPrivateUsage]
@@ -840,7 +863,9 @@ async def test_queued_followup_drains_even_when_originating_turn_fails(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
         unprompted: bool = False,
+        failure_surface: object = None,
     ) -> None:
         orchestrate_calls.append(content_override)
         if created_thread_ids is not None:
@@ -905,6 +930,7 @@ async def test_drain_merges_attachments_from_all_of_authors_queued_messages(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override, attachments_override))
         entered.set()
@@ -956,6 +982,7 @@ def _recording_stub(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -1005,6 +1032,8 @@ async def test_queued_mention_survives_turn_ending_during_reaction(
     reaction_release.set()
     await queued
 
+    q1.remove_reaction.assert_awaited_with("⌛", queued_bot.user)
+    assert not queued_bot._queued_reactions
     assert [c[0] for c in calls] == [m1, q1], "queued mention was stranded, not drained"
     assert calls[1][1] == "queued"
     assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
@@ -1066,6 +1095,7 @@ async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
 
@@ -1122,6 +1152,7 @@ async def test_mention_queued_during_a_raising_continuation_dispatch_still_gets_
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
 
@@ -1198,3 +1229,123 @@ async def test_a_drained_follow_up_re_queues_behind_another_tenants_waiting_turn
         await first
     assert order == ["A-first", "A-follow-up"]
     assert queued_bot.turn_queue.in_flight() == 0 and queued_bot.turn_queue.depth() == 0
+
+
+@pytest.mark.parametrize("outcome", ["done", "failed", "cancelled"])
+async def test_queue_markers_clear_for_every_message_on_settle(queued_bot, outcome):
+    messages = [_make_thread_message(author_id=111), _make_thread_message(author_id=111)]
+    queued_bot._processing.add(789)
+    for message in messages:
+        await queued_bot._queue_behind_inflight_turn(789, message)
+
+    async def turn(*args, **kwargs):
+        for message in messages:
+            message.remove_reaction.assert_not_awaited()
+        if outcome == "failed":
+            raise RuntimeError("turn failed")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+
+    queued_bot._handle_mention = turn
+    if outcome == "done":
+        await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    else:
+        with pytest.raises(RuntimeError if outcome == "failed" else asyncio.CancelledError):
+            await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    for message in messages:
+        message.add_reaction.assert_awaited_once_with("⌛")
+        message.remove_reaction.assert_awaited_once_with("⌛", queued_bot.user)
+    assert not queued_bot._queued_reactions
+
+
+async def test_queue_cleanup_failure_does_not_skip_other_messages(queued_bot):
+    messages = [_make_thread_message(), _make_thread_message()]
+    messages[0].remove_reaction.side_effect = ConnectionResetError("disconnected")
+    queued_bot._pending[789] = messages
+    queued_bot._handle_mention = AsyncMock()
+    await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    messages[1].remove_reaction.assert_awaited_once_with("⌛", queued_bot.user)
+
+
+@pytest.mark.parametrize("contents", [("yes", "also do this"), ("do this", "yes")])
+async def test_queued_yes_runs_alone_among_instructions(
+    queued_bot: DaimonBot, contents: tuple[str, str]
+) -> None:
+    """A yes must settle its preview from its own message, not a merged turn."""
+    messages = [
+        _make_thread_message(content=contents[0]),
+        _make_thread_message(content=contents[1]),
+    ]
+    messages[0].id = 101
+    messages[1].id = 102
+    queued_bot._pending[789] = messages
+    queued_bot._handle_mention = AsyncMock()  # type: ignore[method-assign]
+
+    await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+
+    calls = queued_bot._handle_mention.await_args_list
+    assert [call.args[0] for call in calls] == messages
+    assert [call.kwargs["content_override"] for call in calls] == list(contents)
+    assert [call.kwargs["admitted_message_ids"] for call in calls] == [("101",), ("102",)]
+
+
+async def test_early_eyes_precede_admission_and_clear_on_failure(queued_bot):
+    message = _make_thread_message()
+    admission_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def admission(*args, **kwargs):
+        message.add_reaction.assert_awaited_once_with("👀")
+        message.remove_reaction.assert_not_awaited()
+        admission_entered.set()
+        await release.wait()
+        raise RuntimeError("admission unavailable")
+
+    with patch("daimon.adapters.discord.bot.admit", side_effect=admission):
+        queued_bot._render_turn_error = AsyncMock()
+        task = asyncio.create_task(queued_bot._handle_mention(message, "123456", uuid.uuid4()))
+        await asyncio.wait_for(admission_entered.wait(), timeout=5)
+        assert not task.done()
+        release.set()
+        await task
+    message.remove_reaction.assert_awaited_once_with("👀", queued_bot.user)
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_early_eyes_clear_after_orchestration_and_add_failure_is_cosmetic(
+    queued_bot, cancelled
+):
+    message = _make_thread_message()
+    message.add_reaction.side_effect = ConnectionResetError("disconnected")
+    queued_bot._orchestrate = AsyncMock(side_effect=asyncio.CancelledError if cancelled else None)
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await queued_bot._handle_mention(message, "123456", uuid.uuid4())
+    else:
+        await queued_bot._handle_mention(message, "123456", uuid.uuid4())
+    queued_bot._orchestrate.assert_awaited_once()
+    message.remove_reaction.assert_awaited_once_with("👀", queued_bot.user)
+
+
+@pytest.mark.parametrize("unprompted,override", [(True, None), (False, "queued")])
+async def test_unprompted_and_queued_turns_do_not_add_eyes(queued_bot, unprompted, override):
+    message = _make_thread_message()
+    queued_bot._orchestrate = AsyncMock()
+    await queued_bot._handle_mention(
+        message, "123456", uuid.uuid4(), content_override=override, unprompted=unprompted
+    )
+    message.add_reaction.assert_not_awaited()
+    message.remove_reaction.assert_not_awaited()
+
+
+async def test_cancelled_drain_clears_unrun_authors_in_popped_batch(queued_bot):
+    messages = [_make_thread_message(author_id=111), _make_thread_message(author_id=222)]
+    for message in messages:
+        await queued_bot._queue_behind_inflight_turn(789, message)
+    queued_bot._handle_mention = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    assert queued_bot._handle_mention.await_count == 1
+    for message in messages:
+        message.remove_reaction.assert_awaited_with("⌛", queued_bot.user)
+    assert not queued_bot._queued_reactions

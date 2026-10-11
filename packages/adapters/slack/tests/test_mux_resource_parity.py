@@ -109,7 +109,7 @@ async def test_imported_skill_attachment_keeps_requests_retry_limit_and_notice(
         )
     assert result.attached is (status != "exhausted")
     assert result.note == (
-        "Attaching them did not finish. Ask again to retry."
+        "Attaching them did not finish. Try again using the same form."
         if status == "exhausted"
         else "Attached 1 to `project`."
     )

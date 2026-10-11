@@ -132,8 +132,9 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
-        del created_thread_ids
+        del created_thread_ids, admitted_message_ids
         thread_id = message.channel.id
         active[thread_id] = active.get(thread_id, 0) + 1
         peak[thread_id] = max(peak.get(thread_id, 0), active[thread_id])
