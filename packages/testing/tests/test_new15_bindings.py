@@ -732,6 +732,89 @@ async def test_frozen_new15_real_metered_then_budget_denial(
         ).outcome.status
         == "PENDING"
     )
+    # Decode-time integrity: leave pending=() while altering each actual fact.
+    admission = run.admission
+    assert (
+        replace(
+            run, admission=replace(admission, effects=replace(admission.effects, complete=False))
+        ).outcome.status
+        == "PENDING"
+    )
+    with pytest.raises(ValueError, match="current capture window"):
+        _ = replace(
+            run, admission=replace(admission, observed_s=admission.started_s + 0.001)
+        ).outcome
+    # A shortened window containing every actual effect still lacks the authored wait.
+    last_effect = max(e.observed_s for e in (*admission.effects.notices, *admission.effects.logs))
+    assert last_effect - admission.started_s < 20
+    assert (
+        replace(
+            run,
+            admission=replace(admission, observed_s=max(last_effect, admission.decision_s or 0)),
+        ).outcome.status
+        == "PENDING"
+    )
+    assert admission.decision is not None
+    for mutation in (
+        replace(admission, thread_id="unrelated-thread"),
+        replace(admission, external_user_id="unrelated-caller"),
+        replace(
+            admission,
+            thread_id="unrelated-thread",
+            decision=replace(admission.decision, thread_id="unrelated-thread"),
+        ),
+        replace(
+            admission,
+            external_user_id="unrelated-caller",
+            decision=replace(admission.decision, external_user_id="unrelated-caller"),
+        ),
+        replace(admission, decision=replace(admission.decision, account_id=uuid.UUID(int=99))),
+        replace(admission, decision=replace(admission.decision, channel_id="unrelated-channel")),
+        replace(admission, decision_s=admission.started_s - 1),
+    ):
+        with pytest.raises(ValueError):
+            _ = replace(run, admission=mutation).outcome
+    for time_s in (admission.started_s - 1, admission.observed_s + 1, float("nan")):
+        notices = tuple(
+            n.model_copy(update={"observed_s": time_s}) for n in admission.effects.notices
+        )
+        with pytest.raises(ValueError, match="current capture window"):
+            _ = replace(
+                run,
+                admission=replace(admission, effects=replace(admission.effects, notices=notices)),
+            ).outcome
+    # A real capture-window notice after the authored 15-second deadline is late.
+    late = tuple(
+        n.model_copy(update={"observed_s": admission.started_s + 16})
+        for n in admission.effects.notices
+    )
+    assert (
+        replace(
+            run, admission=replace(admission, effects=replace(admission.effects, notices=late))
+        ).outcome.status
+        == "FAIL"
+    )
+    # The full 20-second window also catches an answer appearing after the notice deadline.
+    answer = admission.effects.notices[0].model_copy(
+        update={"text": "TINY-AGAIN", "observed_s": admission.started_s + 16}
+    )
+    assert (
+        replace(
+            run,
+            admission=replace(
+                admission,
+                effects=replace(admission.effects, notices=(*admission.effects.notices, answer)),
+            ),
+        ).outcome.status
+        == "FAIL"
+    )
+    assert replace(run, admission=replace(admission, native_sends=None)).outcome.status == "PENDING"
+    with pytest.raises(ValueError):
+        _ = replace(
+            run, first_surface=run.first_surface.model_copy(update={"post_capture_complete": False})
+        ).outcome
+    with pytest.raises(ValueError, match="capture window is invalid"):
+        _ = replace(run, admission=replace(admission, observed_s=float("nan"))).outcome
     silent = replace(run.admission, effects=replace(run.admission.effects, notices=()))
     assert replace(run, admission=silent).outcome.status == "FAIL"
     with pytest.raises(ValueError, match="owned channel/session"):

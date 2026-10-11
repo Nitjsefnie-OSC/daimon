@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import re
 import uuid
 from collections.abc import Awaitable, Callable
@@ -252,6 +253,7 @@ class New15Bindings:
 
 def new15_outcome(run: New15Run) -> OutcomeReport:
     """Pinned predicates, recalculated from independent captures and readback."""
+    DiscordSurfaceCapture.model_validate(run.first_surface.model_dump())
     if run.source_sha256 != SOURCE_SHA256:
         raise ValueError("NEW15 source identity is not the independently pinned original")
     if not run.admin:
@@ -323,12 +325,102 @@ def new15_outcome(run: New15Run) -> OutcomeReport:
         or (None if run.first_surface.text_capture_complete else "NEW15_FIRST_SURFACE_INCOMPLETE"),
     )
     admission = run.admission
-    gap = metered_gap or (
-        "NEW15_SECOND_ADMISSION_UNBOUND"
-        if admission is None
-        else "NEW15_SECOND_CAPTURE_INCOMPLETE"
-        if admission.pending
-        else None
+    capture_gaps: list[str] = []
+    valid_notices = ()
+    if admission is None:
+        capture_gaps.append("NEW15_SECOND_ADMISSION_UNBOUND")
+    else:
+        if admission.effects.complete is not True:
+            capture_gaps.append("NEW15_SECOND_EFFECT_COVERAGE_MISSING")
+        if admission.native_sends is None:
+            capture_gaps.append("NEW15_SECOND_NATIVE_SEND_COVERAGE_MISSING")
+        elif type(admission.native_sends) is not int or admission.native_sends < 0:
+            raise ValueError("NEW15 native send count is invalid")
+        if (
+            not math.isfinite(admission.started_s)
+            or not math.isfinite(admission.observed_s)
+            or admission.started_s < 0
+            or admission.observed_s < admission.started_s
+        ):
+            raise ValueError("NEW15 admission capture window is invalid")
+        # Authored wait is required independently of the stored capture gaps.
+        if admission.observed_s - admission.started_s < 20:
+            capture_gaps.append("NEW15_AUTHORED_TWENTY_SECOND_OBSERVATION_MISSING")
+        for effect in (
+            *admission.effects.notices,
+            *admission.effects.logs,
+            *admission.effects.reactions,
+        ):
+            if (
+                not math.isfinite(effect.observed_s)
+                or not admission.started_s <= effect.observed_s <= admission.observed_s
+            ):
+                raise ValueError("NEW15 adapter effect is outside the current capture window")
+        decision = admission.decision
+        if decision is None:
+            capture_gaps.append("NEW15_SECOND_HOST_ADMISSION_UNBOUND")
+        else:
+            if (
+                str(decision.tenant_id) != run.scope.tenant_id
+                or decision.platform != admission.platform
+                or decision.channel_id != admission.channel_id
+                or decision.thread_id != admission.thread_id
+                or decision.external_user_id != admission.external_user_id
+                or (
+                    decision.account_id is not None
+                    and str(decision.account_id) != run.scope.account_id
+                )
+            ):
+                raise ValueError("NEW15 admission decision differs from the owned attempt")
+            if (
+                admission.decision_s is None
+                or not math.isfinite(admission.decision_s)
+                or not admission.started_s <= admission.decision_s <= admission.observed_s
+            ):
+                raise ValueError("NEW15 decision is outside the current capture window")
+        # Join second attempt to the independently captured first Discord thread
+        # and persisted first-turn usage caller; neither receipt copy is authority.
+        first_threads = {m.channel_id for m in run.first_surface.messages} | {
+            e.message.channel_id for e in run.first_surface.events
+        }
+        first_callers = {
+            row.platform_user_id
+            for row in run.metered.after.usage
+            if row.managed_session_id == run.metered.outcome.ma_session_id
+            and row.tenant_id == before.tenant_id
+            and row.channel_id == before.channel_id
+        }
+        readback_callers = {
+            row.platform_user_id
+            for row in run.readback.usage
+            if row.managed_session_id == run.metered.outcome.ma_session_id
+            and row.tenant_id == before.tenant_id
+            and row.channel_id == before.channel_id
+        }
+        if not first_threads or not first_callers or not readback_callers:
+            capture_gaps.append("NEW15_FIRST_ATTEMPT_IDENTITY_CAPTURE_MISSING")
+        elif (
+            first_threads != {admission.thread_id}
+            or first_callers != {admission.external_user_id}
+            or readback_callers != first_callers
+        ):
+            raise ValueError("NEW15 admission thread/caller differs from the first owned attempt")
+        valid_notices = tuple(
+            n
+            for n in admission.effects.notices
+            if admission.started_s <= n.observed_s <= admission.observed_s
+            and n.observed_s <= admission.started_s + 15
+        )
+    # Stored gaps are conservative hints only. Empty stored gaps cannot certify
+    # current facts whose coverage, duration or identity has been lost.
+    gap = (
+        metered_gap
+        or (capture_gaps[0] if capture_gaps else None)
+        or (
+            "NEW15_SECOND_CAPTURE_INCOMPLETE"
+            if admission is not None and admission.pending
+            else None
+        )
     )
     denied = (
         admission is not None
@@ -337,9 +429,7 @@ def new15_outcome(run: New15Run) -> OutcomeReport:
         and admission.native_sends == 0
     )
     notices = admission.effects.notices if admission is not None else ()
-    visible = admission is not None and any(
-        n.text.strip() and n.observed_s <= admission.started_s + 15 for n in notices
-    )
+    visible = any(n.text.strip() for n in valid_notices)
     check("no_silent_drop", 2, denied and visible, "REAL_DENIAL_NOTICE_AND_ZERO_NATIVE_SENDS", gap)
     check(
         "text_present",

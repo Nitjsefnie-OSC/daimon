@@ -621,3 +621,11 @@ local editable installation, set `PYTEST_PLUGINS=daimon.testing.pytest_plugin`
 until its pytest entry point is refreshed; the environment setting also reaches
 the immutable golden runner's child processes. No production SDK builder or
 pytest runner source needs changing for this local installation detail.
+
+NEW15 outcomes revalidate current evidence at decode time: complete adapter and
+native-send coverage, the authored 20-second observation, finite effect timestamps
+inside the capture window, the 15-second notice deadline, and matching receipt /
+decision identity joined to the first Discord thread and persisted usage caller.
+Stored pending gaps cannot certify an incomplete or altered capture. Late answers
+are still checked across the full observation window. Contradictory identities or
+out-of-window effects refuse; missing coverage/duration remains typed pending.
