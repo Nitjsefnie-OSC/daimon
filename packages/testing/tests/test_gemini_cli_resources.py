@@ -554,6 +554,7 @@ async def test_mixed_gemini_runtime_keeps_existing_anthropic_agent_get_bytes(
                     written = await clear_channel_backend(session, channel)
                 async with target.sessions() as session:
                     read = await current_backend(session, channel)
+                assert read is not None
                 assert read == written and read.profile == "anthropic.managed_agents"
             native_before = len(run.trace.requests)
             requests: list[tuple[RecordedRequest, ...]] = []
