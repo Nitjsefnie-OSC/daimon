@@ -163,7 +163,12 @@ async def test_update_watermark_persists(
     )
     assert row.watermark_message_id is None, "freshly created row must have watermark=None"
 
-    await update_watermark(db_session, id=row.id, watermark_message_id="999")
+    await update_watermark(
+        db_session,
+        id=row.id,
+        watermark_message_id="999",
+        delivered_answer_chunk_ids=("1001", "1002"),
+    )
 
     fetched = await get_live_thread_session(
         db_session,
@@ -176,6 +181,18 @@ async def test_update_watermark_persists(
     assert fetched.watermark_message_id == "999", (
         "update_watermark must persist the supplied watermark_message_id"
     )
+    assert fetched.delivered_answer_chunk_ids == ("1001", "1002")
+
+    await update_watermark(db_session, id=row.id, watermark_message_id="1003")
+    refreshed = await get_live_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id="333",
+        account_id=account_id,
+    )
+    assert refreshed is not None
+    assert refreshed.delivered_answer_chunk_ids == (), "a later short answer clears prior chunks"
 
 
 async def test_restart_resume_reads_same_live_row(

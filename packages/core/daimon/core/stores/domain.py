@@ -266,6 +266,7 @@ class ThreadSessionRow(BaseModel):
     budget_channel_id: str | None = None
     seal_ids: tuple[str, ...] | None = None
     watermark_message_id: str | None
+    delivered_answer_chunk_ids: tuple[str, ...] | None = None
     status: str
     created_at: datetime
     updated_at: datetime

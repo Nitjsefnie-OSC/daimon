@@ -31,6 +31,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
+from daimon.adapters.discord.context import build_delta_xml
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.errors import TurnError, UserFacingError
@@ -855,6 +856,93 @@ class TestCleanReplace:
         assert lc.final_message_id == "1", "the answer still starts on the card"
         assert lc.feedback_message_id == "3", "the vote emoji go on the last chunk"
 
+    async def test_long_answer_keeps_card_watermark_and_records_overflow(self) -> None:
+        """Keep the consumed-input boundary and filter delivered chunks separately."""
+        sent = iter(range(1, 10))
+
+        async def send(**kwargs: Any) -> object:
+            return types.SimpleNamespace(id=next(sent))
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            pass
+
+        lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+        await lc.post_initial()
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x" * 4000)]))
+
+        assert lc.final_message_id == "1", "active-turn and recovery bookkeeping keep the card"
+        assert lc.watermark_message_id == "1", "unread human replies may precede overflow"
+        assert lc.delivered_answer_chunk_ids == ("2", "3")
+
+    async def test_single_chunk_watermark_stays_on_the_card(self) -> None:
+        async def send(**kwargs: Any) -> object:
+            return types.SimpleNamespace(id=1)
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            pass
+
+        lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+        await lc.post_initial()
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+
+        assert lc.final_message_id == lc.watermark_message_id == "1"
+
+    async def test_human_correction_between_card_and_overflow_survives_next_delta(self) -> None:
+        """Card 1, human 2, answer chunks 3/4, next trigger 5."""
+        history: list[discord.Message] = []
+
+        def message(msg_id: int, content: str, *, is_bot: bool) -> discord.Message:
+            msg = MagicMock(spec=discord.Message)
+            msg.id = msg_id
+            msg.content = content
+            msg.author = types.SimpleNamespace(
+                display_name="bot" if is_bot else "person", id=7 if is_bot else 8, bot=is_bot
+            )
+            msg.created_at = datetime(2026, 10, 11, tzinfo=UTC)
+            msg.attachments = []
+            return msg
+
+        async def send(**kwargs: Any) -> discord.Message:
+            if len(history) == 1:
+                history.append(message(2, "CRITICAL_HUMAN_CORRECTION", is_bot=False))
+            msg = message(len(history) + 1, kwargs.get("content", ""), is_bot=True)
+            history.append(msg)
+            return msg
+
+        async def edit(ref: discord.Message, **kwargs: Any) -> None:
+            ref.content = kwargs.get("content", ref.content)
+
+        lifecycle = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+        await lifecycle.post_initial()
+        await lifecycle.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text="x" * 4000)])
+        )
+        assert lifecycle.watermark_message_id == "1", "the answer must not skip human message 2"
+        assert lifecycle.delivered_answer_chunk_ids == ("3", "4")
+        trigger = message(5, "Please use the correction above", is_bot=False)
+        history.append(trigger)
+
+        async def after_history(after: discord.Object, oldest_first: bool) -> Any:
+            for item in history:
+                if item.id > after.id:
+                    yield item
+
+        thread = MagicMock(spec=discord.Thread)
+        thread.history.side_effect = after_history
+        thread.id = 9
+        thread.parent_id = 10
+        thread.parent = None
+        thread.name = "test"
+        xml, _ = await build_delta_xml(
+            thread,
+            trigger,
+            after_message_id=int(lifecycle.watermark_message_id or "0"),
+            bot_user_id=7,
+            excluded_message_ids=lifecycle.delivered_answer_chunk_ids,
+        )
+        assert "CRITICAL_HUMAN_CORRECTION" in xml
+        assert "x" * 100 not in xml
+
     async def test_short_answer_keeps_the_summary_on_its_one_message(self) -> None:
         lc, _sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
@@ -897,6 +985,8 @@ class TestCleanReplace:
         footer = sends[-1]["embeds"][0].footer.text
         assert footer is not None and footer.startswith("test-agent"), "the answer has it"
         assert deleted == [card], "the card above the answer is removed"
+        assert lc.watermark_message_id == "1"
+        assert lc.delivered_answer_chunk_ids == ("2",)
 
     async def test_final_answer_with_everyone_disables_all_mention_channels(self) -> None:
         """T-22-01: a final answer containing ``@everyone`` (reachable via prompt
