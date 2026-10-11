@@ -1437,17 +1437,6 @@
       "response_access": []
     },
     {
-      "file": "packages/core/daimon/core/defaults/backfill_guidance.py",
-      "line": 65,
-      "end": 65,
-      "scope": "backfill_credential_guidance",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "client.beta.agents.update(agent.id, version=agent.version, system=system)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/core/daimon/core/session_preparation.py",
       "line": 602,
       "end": 602,
@@ -3616,6 +3605,31 @@
         "event.id",
         "event.type"
       ]
+    },
+    {
+      "file": "packages/core/tests/defaults/test_backfill_guidance.py",
+      "line": 168,
+      "end": 168,
+      "scope": "test_backfill_port_preserves_actual_sdk_requests_and_conflict_attempts",
+      "category": "test",
+      "resource": "agents.list",
+      "call": "client.beta.agents.list(include_archived=False)",
+      "request_keys": [],
+      "response_access": [
+        "agent.metadata",
+        "agent.metadata.get"
+      ]
+    },
+    {
+      "file": "packages/core/tests/defaults/test_backfill_guidance.py",
+      "line": 173,
+      "end": 173,
+      "scope": "test_backfill_port_preserves_actual_sdk_requests_and_conflict_attempts",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "client.beta.agents.update(agents[0].id, version=agents[0].version, system=system)",
+      "request_keys": [],
+      "response_access": []
     },
     {
       "file": "packages/core/tests/defaults/test_concurrent_reconcile.py",
@@ -6100,8 +6114,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 276,
-      "end": 276,
+      "line": 129,
+      "end": 129,
+      "scope": "update_agent_ignored",
+      "category": "production",
+      "resource": "agents.update",
+      "call": "client.beta.agents.update(agent_id, **cast(AgentUpdateParams, kwargs))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
+      "line": 293,
+      "end": 293,
       "scope": "walk",
       "category": "production",
       "resource": "agents.list",
@@ -6111,8 +6136,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 201,
-      "end": 201,
+      "line": 218,
+      "end": 218,
       "scope": "create",
       "category": "production",
       "resource": "agents.create",
@@ -6122,8 +6147,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 209,
-      "end": 209,
+      "line": 226,
+      "end": 226,
       "scope": "retrieve",
       "category": "production",
       "resource": "agents.retrieve",
@@ -6133,8 +6158,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 224,
-      "end": 224,
+      "line": 241,
+      "end": 241,
       "scope": "list",
       "category": "production",
       "resource": "agents.list",
@@ -6144,8 +6169,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 245,
-      "end": 245,
+      "line": 262,
+      "end": 262,
       "scope": "update",
       "category": "production",
       "resource": "agents.update",
@@ -6155,8 +6180,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 253,
-      "end": 253,
+      "line": 270,
+      "end": 270,
       "scope": "archive",
       "category": "production",
       "resource": "agents.archive",
@@ -13554,7 +13579,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 52,
+      "line": 56,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsVault"
@@ -13563,7 +13588,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 53,
+      "line": 57,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -13572,7 +13597,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 565,
+      "line": 590,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsVault"
@@ -13581,7 +13606,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 575,
+      "line": 600,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsVault"
@@ -13590,7 +13615,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 592,
+      "line": 617,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -13599,7 +13624,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 608,
+      "line": 633,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -13608,7 +13633,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 660,
+      "line": 685,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -17881,7 +17906,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 222,
+      "line": 239,
       "module": "anthropic.types.beta.agent_list_params",
       "names": [
         "AgentListParams"

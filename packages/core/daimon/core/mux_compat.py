@@ -40,7 +40,11 @@ from mux.contracts.resources import (
     SkillUpload,
     SkillUploadFile,
 )
+from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources._secrets import CredentialFileUpload
+from mux.drivers.anthropic.resources.agents import (
+    update_agent_ignored as native_update_agent_ignored,
+)
 from mux.drivers.anthropic.resources.artifacts import Artifacts as NativeArtifacts
 from mux.drivers.anthropic.resources.environments import EnvironmentReads
 from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
@@ -291,6 +295,27 @@ async def update_agent(
                 expected=Revision(local=version, native=str(version)),
                 key=str(uuid4()),
             )
+        )
+    )
+
+
+async def update_agent_ignored(
+    client: AsyncAnthropic,
+    agent_id: str,
+    *,
+    version: int,
+    payload: Mapping[str, object],
+    scope: Scope,
+) -> None:
+    """Preserve SDK leniency when the old mutation caller ignored its reply."""
+    await legacy_call(
+        native_update_agent_ignored(
+            client,
+            scope,
+            agent_id,
+            agent_patch(payload),
+            expected=Revision(local=version, native=str(version)),
+            authorization=ResourceAuthorization(scope, frozenset({("agent", agent_id)})),
         )
     )
 

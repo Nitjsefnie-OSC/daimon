@@ -767,3 +767,4 @@ transport only.
 
 OpenAI also refuses ambient TLS/proxy settings before context creation, including
 `SSLKEYLOGFILE`, so configured channels cannot enable TLS session-key files.
+Credential-guidance backfills use the existing tenant-authorized agent update port. The host keeps its version check, prompt-only patch and best-effort boot behavior.
