@@ -683,6 +683,12 @@ under it. The best-effort outcome writer never
 changes a balance, cap, price or ledger debit, and a missing diagnostic row does
 not mean no model work was billed. See the turn-outcome contract in
 [architecture](architecture.md#durable-turn-outcomes).
+For a session replacement, the checkpoint's outcome sample is priced at the
+predecessor session's model. Its `checkpoint_debit` counts against that
+session's budget channel; the successor's calls use the admitted channel.
+An outcome's `unpriced_calls` describes diagnostic price coverage, not whether
+the live recorder inserted a debit. Check `usage_events` and `tenant_ledger`
+by `(managed_session_id, event_id)` to establish the money consequence.
 
 
 ## Per-turn usage telemetry

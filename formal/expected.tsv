@@ -102,6 +102,8 @@ metering	BudgetChannelRecovery	BudgetChannelLegacyChanged	clean	6	-	legacy stamp
 metering	BudgetChannelRecovery	BudgetChannelLegacyUnsafe	violates:NoSpuriousReplacement	3	-	pre-fix unknown stamp replaces an unchanged legacy session
 metering	BudgetChannelRecovery	BudgetChannelCheckpointUnsafe	violates:CheckpointDebit	6	-	pre-fix checkpoint live debit uses new channel while recovery uses old stamp
 metering	BudgetChannelRecovery	BudgetChannelReadFailure	clean	6	-	transient MA stamp read failure leaves legacy mapping unknown and reusable
+metering	ReplacementUsage	ReplacementUsageSafe	clean	6	-	checkpoint and successor observations priced; live rows use old and admission channels without double debit
+metering	ReplacementUsage	ReplacementUsageUnpriced	violates:PricedObservation	3	-	pre-fix checkpoint debit succeeds but its outcome sample has no model price
 billing	Clawback	ClawbackUnlocked	violates:NeverOverClawback	11	-	pre-lock: concurrent clawbacks both read zero and over-debit
 billing	Clawback	ClawbackLocked	clean	13	-	credit-row lock serializes clawbacks
 billing	OutOfOrder	OutOfOrderUnlocked	violates:NoOrphanPending	12	-	pre-lock: refund before credit leaves an orphan pending event
