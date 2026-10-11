@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 from daimon.adapters.discord import bot as discord
+from daimon.adapters.discord.thread_gone import ThreadStops
 from daimon.adapters.slack import app as slack
 from daimon.adapters.teams import app as teams
 from daimon.adapters.teams.identity import TeamsInbound
@@ -44,6 +45,7 @@ class Replay:
             _processing=set(),
             _pending={},
             _queued_reactions=set(),
+            _thread_stops=ThreadStops(),
             user=SimpleNamespace(id=999),
             _deferred_dispatch={},
             _inflight={},
@@ -78,7 +80,13 @@ class Replay:
             "teams": ["_orchestrate", "_holding", "_run_turns", "_release", "dispatch_after_input"],
         }[platform]
         if platform == "discord" and not old:
-            names += ["_remove_mention_reaction", "_clear_queued_reactions"]
+            names += [
+                "_remove_mention_reaction",
+                "_clear_queued_reactions",
+                "_thread_lost",
+                "_drop_queued",
+                "_release_and_clear",
+            ]
         for name in names:
             setattr(self.obj, name, MethodType(getattr(cls, name), self.obj))
         self.obj._dispatch_continuations = self.dispatch
@@ -208,6 +216,7 @@ class Replay:
                 add_reaction=react,
                 remove_reaction=unreact,
                 guild=SimpleNamespace(me=self.obj.user),
+                channel=SimpleNamespace(id=self.key),
             )
         if self.platform == "slack":
             return dict(
