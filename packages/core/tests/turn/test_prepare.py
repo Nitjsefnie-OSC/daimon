@@ -64,7 +64,8 @@ from daimon.testing.ma_models import (
     ma_session_agent,
 )
 from pydantic import HttpUrl, SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
     make_account,
@@ -824,16 +825,21 @@ async def test_bind_session_fresh_bind_raises_ceiling_error_when_deadline_alread
 
 
 async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_engine: AsyncEngine,
+    db_clean: None,
 ) -> None:
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
+    # The timed-out bind may still be closing its session in a shielded task.
+    # Give each session its own engine checkout so that cleanup cannot race the
+    # assertion on the fixture's single shared AsyncConnection.
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with session_factory() as setup:
+        tenant = await make_tenant(setup)
+        account = await make_account(setup, tenant=tenant)
+        await setup.commit()
 
     session_bodies: list[dict[str, object]] = []
     router = _router_with_session_create(session_bodies=session_bodies)
-    deps = _deps(sessionmaker=db_session_factory, router=router)
+    deps = _deps(sessionmaker=session_factory, router=router)
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
@@ -855,7 +861,11 @@ async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
 
     assert exc_info.value.kind == "ceiling"
 
-    async with db_session_factory() as s:
+    async with session_factory() as s, s.begin():
+        # Wait for any mapping transaction that the cancelled bind reached.
+        # The following read then checks committed state after that transaction
+        # either committed or rolled back.
+        await s.execute(text("LOCK TABLE thread_sessions IN ACCESS EXCLUSIVE MODE"))
         live = await get_live_thread_session(
             s,
             tenant_id=tenant.id,
