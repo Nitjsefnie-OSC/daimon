@@ -2190,6 +2190,7 @@ class TestDrainLoopDeCoalescing:
             created_thread_ids: list[int] | None = None,
             attachments_override: list[discord.Attachment] | None = None,
             admitted_message_ids: tuple[str, ...] = (),
+            query_messages: tuple[discord.Message, ...] = (),
         ) -> None:
             # Record the call then return immediately (no DB work needed).
             handle_calls.append((message, content_override))

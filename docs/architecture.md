@@ -1110,6 +1110,17 @@ search tools return JSON rows, so their results carry the same marker as
 block (`packages/core/daimon/core/agent_guidance.py`) tells every agent what
 the marker means. Only the `<user_query>` is the request.
 
+Discord turns say which message a reply points at. Each replayed message carries
+its `id`, plus `reply_to` when it is a reply, and the `<user_query>` carries
+`reply_to` when its single trigger is one. When the target is not among the
+replayed messages (before the delta's watermark, a delivered answer chunk the
+delta leaves out, or an older channel post), an untrusted `reply_targets` block
+holds it, cut at 2,000 characters, with the embed's title and description when
+the message has no text. A merged queued query lists one entry per reply, each
+with the replying message's id, author and a short excerpt. A deleted target is
+marked `deleted="true"`, and an unavailable one leaves only the id. The turn's
+own status card, posted before the context is built, is kept out of the history.
+
 For a new Discord thread started by a channel mention, the channel backfill
 keeps 25 messages. A separate untrusted `recent_channel_files` block lists up
 to 10 attachments older than that window, from at most 200 channel messages
