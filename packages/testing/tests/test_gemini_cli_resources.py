@@ -463,3 +463,129 @@ async def test_gemini_unbound_grant_never_copies_on_another_backend(
             )
         assert len(run.trace.requests) == native_before
         assert len(run.binding.trace.requests) == anthropic_before
+
+
+@pytest.mark.parametrize("target", ["neighboring-channel", "tenant-b"])
+async def test_mixed_gemini_runtime_leaves_unconfigured_copy_on_existing_dispatch(
+    run: _Run, tmp_path: Path, target: str
+) -> None:
+    from dataclasses import replace
+
+    from daimon.adapters.cli.commands.channels import (
+        _copy_resource_host,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    other = None
+    try:
+        async with opt_in_operator_profile(
+            run.binding, run.driver, workspace="project", root=tmp_path, fallback=run.resources
+        ) as edge:
+            await edge.authorize(CHANNEL)
+            rt = edge.runtime()
+            if target == "neighboring-channel":
+                tenant_id = uuid.UUID(run.binding.scope.tenant_id)
+                channel = "223456789012345679"
+            else:
+                other = await provision_admin_run(
+                    run.binding.sessions,
+                    workspace_id="123456789012345679",
+                    backend="anthropic",
+                    channels=frozenset({CHANNEL}),
+                    trace=ScriptedTransport(),
+                )
+                tenant_id = uuid.UUID(other.scope.tenant_id)
+                channel = CHANNEL
+            native_before = len(run.trace.requests)
+            anthropic_before = len(run.binding.trace.requests)
+            baseline = await _copy_resource_host(
+                replace(rt, gemini_resource_hosts=None, gemini_resource_grants=()),
+                tenant_id=tenant_id,
+                platform="discord",
+                channel=channel,
+            )
+            mixed = await _copy_resource_host(
+                rt, tenant_id=tenant_id, platform="discord", channel=channel
+            )
+            assert baseline is None and mixed is None
+            assert len(run.trace.requests) == native_before
+            assert len(run.binding.trace.requests) == anthropic_before
+    finally:
+        if other is not None:
+            await other.close()
+
+
+async def test_mixed_gemini_runtime_keeps_existing_anthropic_agent_get_bytes(
+    run: _Run, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+    from io import StringIO
+
+    from daimon.adapters.cli.commands.agents import agents_get
+    from daimon.adapters.cli.tenant import TenantSelector
+    from daimon.testing import ma_agent
+    from daimon.testing.ma import list_response
+    from daimon.testing.ma_transport import RecordedRequest, ScriptedReply
+    from rich.console import Console
+
+    trace = ScriptedTransport()
+    other = await provision_admin_run(
+        run.binding.sessions,
+        workspace_id="123456789012345679",
+        backend="anthropic",
+        channels=frozenset({CHANNEL}),
+        trace=trace,
+    )
+    agent = ma_agent(id="agent_existing", name="existing", tenant_id=other.scope.tenant_id)
+    try:
+        async with opt_in_operator_profile(
+            run.binding, run.driver, workspace="project", root=tmp_path, fallback=run.resources
+        ) as edge:
+            await edge.authorize(CHANNEL)
+            rt = replace(edge.runtime(), anthropic=other.anthropic)
+            native_before = len(run.trace.requests)
+            requests: list[tuple[RecordedRequest, ...]] = []
+            outputs: list[str] = []
+            for candidate in (
+                replace(rt, gemini_resource_hosts=None, gemini_resource_grants=()),
+                rt,
+            ):
+                trace.queue(
+                    ScriptedReply(
+                        "GET",
+                        "/v1/agents",
+                        list_response([agent.model_dump(mode="json")]),
+                    )
+                )
+                before = len(trace.requests)
+                output = StringIO()
+                await agents_get(
+                    rt=candidate,
+                    console=Console(file=output, force_terminal=False, width=200),
+                    name="existing",
+                    as_json=True,
+                    selector=TenantSelector(guild_id=other.workspace_id),
+                )
+                requests.append(tuple(trace.requests[before:]))
+                outputs.append(output.getvalue())
+            trace.assert_consumed()
+            assert requests[0] and requests[0] == requests[1]
+            assert outputs[0] == outputs[1] and "agent_existing" in outputs[1]
+            assert len(run.trace.requests) == native_before
+            (tmp_path / "mixed-anthropic-get-bytes.json").write_text(
+                json.dumps(
+                    {
+                        "baseline": [
+                            {**asdict(r), "body": r.body.hex(), "body_encoding": "hex"}
+                            for r in requests[0]
+                        ],
+                        "gemini_factory_installed": [
+                            {**asdict(r), "body": r.body.hex(), "body_encoding": "hex"}
+                            for r in requests[1]
+                        ],
+                        "byte_identical": requests[0] == requests[1],
+                    },
+                    indent=2,
+                )
+            )
+    finally:
+        await other.close()

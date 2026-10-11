@@ -243,9 +243,6 @@ async def _hosted_agent(
                 model=spec.model.id,
                 skills=tuple(skill.id for skill in spec.skills or ()),
             )
-        if selected_grants:
-            return None
-        raise ResourceHostMismatch("no Gemini resource grant authorizes this tenant")
     factory = rt.resource_hosts
     if factory is None:
         return None

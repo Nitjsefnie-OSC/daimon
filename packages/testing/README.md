@@ -635,7 +635,11 @@ Gemini's C6 operator profile is explicit: `opt_in_gemini_operator_profile` insta
 owned `AdminBindings` sessionmaker. Its immutable CLI grants bind tenant,
 account, channel, current config digest and provider workspace; native copy/get
 validate the returned host before catalog/provider access. Missing opt-in keeps
-the default paths unchanged. The edge runs the literal channel-copy and agent-get
+the default paths unchanged. An installed Gemini factory leaves unconfigured
+neighboring channels and tenants on the existing dispatch; a configured Gemini
+channel still requires its exact current grant. Mixed-runtime controls compare
+the existing Anthropic agent-get SDK request bytes and output with factory-off.
+The edge runs the literal channel-copy and agent-get
 CLI functions and returns their actual table output. Independent native catalog
 readback cannot replace the frozen CLI assertion: D14 currently fails its two
 skill/model checks because the table omits those fields, despite retained copied
