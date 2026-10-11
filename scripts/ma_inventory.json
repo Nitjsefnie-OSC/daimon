@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2500,
+  "files_scanned": 2536,
   "parse_errors": [],
   "calls": [
     {
@@ -19297,6 +19297,15 @@
         "AsyncAnthropic"
       ],
       "category": "test-support"
+    },
+    {
+      "file": "packages/testing/tests/test_admission_evidence.py",
+      "line": 18,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
     },
     {
       "file": "packages/testing/tests/test_anthropic_fixtures.py",
