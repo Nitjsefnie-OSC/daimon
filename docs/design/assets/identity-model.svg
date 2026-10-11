@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1510" viewBox="0 0 1200 1510"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#3a7e78"/></marker></defs><rect width="1200" height="1510" fill="#f5f7fb"/>
+<text x="60" y="56" font-family="DejaVu Sans,sans-serif" font-size="18" fill="#577088" font-weight="700" text-anchor="start">DAIMON / IDENTITY MODEL</text>
+<text x="60" y="112" font-family="DejaVu Sans,sans-serif" font-size="46" fill="#172c42" font-weight="700" text-anchor="start">One thread. Shared work.</text>
+<text x="60" y="154" font-family="DejaVu Sans,sans-serif" font-size="25" fill="#172c42" font-weight="400" text-anchor="start">People come and go. The agent’s approved access stays fixed.</text>
+<rect x="60" y="186" width="320" height="36" rx="10" fill="#e4eaf3" stroke="none" stroke-width="2"/>
+<text x="76" y="211" font-family="DejaVu Sans,sans-serif" font-size="16" fill="#46617b" font-weight="700" text-anchor="start">PROPOSAL · NOT IMPLEMENTED</text>
+<rect x="50" y="251" width="1100" height="707" rx="28" fill="#eaf5f2" stroke="#c8e4dc" stroke-width="2"/>
+<text x="82" y="297" font-family="DejaVu Sans,sans-serif" font-size="18" fill="#247469" font-weight="700" text-anchor="start">TEAM WORK</text>
+<text x="82" y="334" font-family="DejaVu Sans,sans-serif" font-size="26" fill="#172c42" font-weight="700" text-anchor="start">Audience: everyone permitted to read the thread</text>
+<rect x="82" y="364" width="316" height="93" rx="16" fill="#ffffff" stroke="#c8e4dc" stroke-width="2"/>
+<text x="240" y="401" font-family="DejaVu Sans,sans-serif" font-size="26" fill="#172c42" font-weight="700" text-anchor="middle">Alice</text>
+<text x="240" y="431" font-family="DejaVu Sans,sans-serif" font-size="18" fill="#536f7b" font-weight="400" text-anchor="middle">Starts today</text>
+<rect x="442" y="364" width="316" height="93" rx="16" fill="#ffffff" stroke="#c8e4dc" stroke-width="2"/>
+<text x="600" y="401" font-family="DejaVu Sans,sans-serif" font-size="26" fill="#172c42" font-weight="700" text-anchor="middle">Bob</text>
+<text x="600" y="431" font-family="DejaVu Sans,sans-serif" font-size="18" fill="#536f7b" font-weight="400" text-anchor="middle">Joins tomorrow</text>
+<rect x="802" y="364" width="316" height="93" rx="16" fill="#ffffff" stroke="#c8e4dc" stroke-width="2"/>
+<text x="960" y="401" font-family="DejaVu Sans,sans-serif" font-size="26" fill="#172c42" font-weight="700" text-anchor="middle">Future members</text>
+<text x="960" y="431" font-family="DejaVu Sans,sans-serif" font-size="18" fill="#536f7b" font-weight="400" text-anchor="middle">Admitted by the access rule</text>
+<path d="M240 457 L240 476" fill="none" stroke="#3a7e78" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M600 457 L600 497" fill="none" stroke="#3a7e78" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M960 457 L960 476" fill="none" stroke="#3a7e78" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M240 476 H960" fill="none" stroke="#3a7e78" stroke-width="3"/>
+<rect x="160" y="503" width="880" height="110" rx="20" fill="#ffffff" stroke="#a6cdc1" stroke-width="2"/>
+<text x="600" y="545" font-family="DejaVu Sans,sans-serif" font-size="29" fill="#172c42" font-weight="700" text-anchor="middle">One shared thread workspace</text>
+<text x="600" y="581" font-family="DejaVu Sans,sans-serif" font-size="23" fill="#536f7b" font-weight="400" text-anchor="middle">Files + working state persist as participants change</text>
+<path d="M600 613 L600 647" fill="none" stroke="#3a7e78" stroke-width="3" marker-end="url(#arrow)"/>
+<rect x="160" y="653" width="880" height="118" rx="20" fill="#173f53" stroke="none" stroke-width="2"/>
+<text x="600" y="699" font-family="DejaVu Sans,sans-serif" font-size="29" fill="#ffffff" font-weight="700" text-anchor="middle">Agent uses its approved connections</text>
+<text x="600" y="736" font-family="DejaVu Sans,sans-serif" font-size="22" fill="#d2e5ee" font-weight="400" text-anchor="middle">Fixed accounts, resources and operations for this audience</text>
+<path d="M600 771 L600 803" fill="none" stroke="#3a7e78" stroke-width="3" marker-end="url(#arrow)"/>
+<rect x="160" y="809" width="274" height="54" rx="13" fill="#d4e9e2" stroke="none" stroke-width="2"/>
+<text x="297" y="844" font-family="DejaVu Sans,sans-serif" font-size="21" fill="#215c51" font-weight="700" text-anchor="middle">Project repository</text>
+<rect x="463" y="809" width="274" height="54" rx="13" fill="#d4e9e2" stroke="none" stroke-width="2"/>
+<text x="600" y="844" font-family="DejaVu Sans,sans-serif" font-size="21" fill="#215c51" font-weight="700" text-anchor="middle">Shared data</text>
+<rect x="766" y="809" width="274" height="54" rx="13" fill="#d4e9e2" stroke="none" stroke-width="2"/>
+<text x="903" y="844" font-family="DejaVu Sans,sans-serif" font-size="21" fill="#215c51" font-weight="700" text-anchor="middle">Service account</text>
+<text x="600" y="903" font-family="DejaVu Sans,sans-serif" font-size="21" fill="#345e61" font-weight="400" text-anchor="middle">Each action records its connection, requester and any approver.</text>
+<text x="600" y="934" font-family="DejaVu Sans,sans-serif" font-size="21" fill="#345e61" font-weight="400" text-anchor="middle">Joining adds a participant, not their personal credentials.</text>
+<rect x="50" y="992" width="1100" height="324" rx="28" fill="#fff4df" stroke="#ead7ad" stroke-width="2"/>
+<text x="82" y="1035" font-family="DejaVu Sans,sans-serif" font-size="18" fill="#956219" font-weight="700" text-anchor="start">OPTIONAL PERSONAL WORK</text>
+<text x="82" y="1073" font-family="DejaVu Sans,sans-serif" font-size="26" fill="#172c42" font-weight="700" text-anchor="start">Only when the task needs that person’s service access</text>
+<rect x="82" y="1103" width="457" height="92" rx="16" fill="#ffffff" stroke="#ead7ad" stroke-width="2"/>
+<text x="310" y="1140" font-family="DejaVu Sans,sans-serif" font-size="23" fill="#172c42" font-weight="700" text-anchor="middle">Alice’s own Slack / MCP access</text>
+<text x="310" y="1171" font-family="DejaVu Sans,sans-serif" font-size="19" fill="#74654b" font-weight="400" text-anchor="middle">Resources the agent cannot access</text>
+<path d="M547 1149 L632 1149" fill="none" stroke="#3a7e78" stroke-width="3" marker-end="url(#arrow)"/>
+<rect x="647" y="1103" width="471" height="92" rx="16" fill="#ffffff" stroke="#ead7ad" stroke-width="2"/>
+<text x="882" y="1140" font-family="DejaVu Sans,sans-serif" font-size="24" fill="#172c42" font-weight="700" text-anchor="middle">Separate personal work</text>
+<text x="882" y="1171" font-family="DejaVu Sans,sans-serif" font-size="19" fill="#74654b" font-weight="400" text-anchor="middle">Private by default is still a proposal</text>
+<text x="82" y="1236" font-family="DejaVu Sans,sans-serif" font-size="22" fill="#74654b" font-weight="400" text-anchor="start">Sharing personal results needs permission for the receiving audience.</text>
+<text x="82" y="1273" font-family="DejaVu Sans,sans-serif" font-size="22" fill="#74654b" font-weight="400" text-anchor="start">Personal logins never follow someone into shared work automatically.</text>
+<text x="60" y="1363" font-family="DejaVu Sans,sans-serif" font-size="26" fill="#172c42" font-weight="700" text-anchor="start">What makes personal access necessary?</text>
+<text x="60" y="1400" font-family="DejaVu Sans,sans-serif" font-size="23" fill="#172c42" font-weight="400" text-anchor="start">A required task depends on a person’s rights or a provider’s user login.</text>
+<text x="60" y="1438" font-family="DejaVu Sans,sans-serif" font-size="23" fill="#577088" font-weight="400" text-anchor="start">Supported paths exist. Actual customer demand is still unverified.</text>
+<text x="60" y="1481" font-family="DejaVu Sans,sans-serif" font-size="17" fill="#6a7d90" font-weight="400" text-anchor="start">Discussion draft · 11 October 2026 · Shared-action approval remains open</text>
+</svg>

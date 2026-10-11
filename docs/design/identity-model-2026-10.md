@@ -24,6 +24,10 @@ Discussion draft, 2026-10-11. This proposes an identity model; it does not autho
 
 **What does removing access do?** Proposed promise: stop new dispatch when removal takes effect. Already-dispatched work may finish; issued credentials may remain usable until confirmed revocation or expiry. Show that remaining access and its bound; unknown or unbounded access needs resolution before sharing. Removal preserves the workspace and cannot erase disclosed results.
 
+## Proposal diagram
+
+![Proposed shared thread workspace with agent connections and an optional, separate personal-work path. Participants may join later; personal access policy remains open.](assets/identity-model.svg)
+
 ## How do people join, and which features need personal access?
 
 People need not be registered as a fixed participant list when a session starts. Proposed shared work follows an approved channel/thread access rule and checks the actual person when they interact. Someone arriving tomorrow continues the same shared files; someone stopping participation does not destroy them. A public Discord thread is visible to everyone who can view its parent channel, including people who have never posted. Thread subscription is not a confidentiality boundary. A change to channel access can expose history already there; approval must cover the people administrators are allowed to admit. [Discord thread permissions and membership](https://docs.discord.com/developers/topics/threads), checked 2026-10-11.
@@ -31,6 +35,8 @@ People need not be registered as a fixed participant list when a session starts.
 For example, an agent approved for a project channel can use that project's repo and shared data connection. Alice starts an analysis; Bob joins later and asks for a chart change. In the proposed shared mode Bob uses the same workspace and approved agent access, without loading his own service accounts. This does not authorize broadening the channel beyond the resources' approved audience. The multiplayer proposal's private-thread-first restriction is still a proposed rollout limit, not a need for a fixed roster; ordinary public-channel threads must be evaluated against their full channel audience.
 
 Workspace sharing and credential ownership are independent. Existing agent-wide keys already serve separate per-caller sessions. "Team connection" means access intentionally shared through an agent; it need not be another account, team object or setup flow. Importing reviewed files transfers data, not another user's browser cookies, credentials or authority; copying is not continuous synchronization.
+
+Personal access becomes necessary only if a required workflow depends on a person's service rights or a provider requires that person's login, and an approved agent connection cannot satisfy it. Examples include searching material only that person can read or performing an operation the service requires them to authorize personally. Recording who requested or approved an action does not by itself require their external credentials. If the product only promises work through approved agent connections, personal access is optional; removing existing features still needs a usage and migration decision.
 
 The following are supported code paths, not a deployment usage inventory:
 
