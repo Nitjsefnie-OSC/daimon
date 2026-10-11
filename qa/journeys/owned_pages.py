@@ -40,6 +40,7 @@ async def github_connect_journey(
     artifact_dir: Path,
     browser_version: str,
     viewport: dict[str, int],
+    outcome: str = "connect",
 ) -> RunReport:
     """Run and always retain a report, including browser evidence on failure."""
     started = datetime.now(UTC)
@@ -53,6 +54,7 @@ async def github_connect_journey(
             artifact_dir=artifact_dir,
             browser_version=browser_version,
             viewport=viewport,
+            outcome=outcome,
         )
     except Exception as exc:
         screenshot = artifact_dir / "github-failure.png"
@@ -74,7 +76,7 @@ async def github_connect_journey(
                 pass  # The report still identifies the missing observation.
         report = RunReport(
             run_id=artifact_dir.name,
-            journey="github-connect-owned-page",
+            journey=f"github-{outcome}-owned-page",
             layer="owned_page_browser",
             started_at=started,
             finished_at=datetime.now(UTC),
@@ -116,15 +118,16 @@ async def _github_connect_journey(
     artifact_dir: Path,
     browser_version: str,
     viewport: dict[str, int],
+    outcome: str,
 ) -> RunReport:
-    """Select one repo in the rendered picker and verify its persisted grant."""
+    """Select one repo, then verify the chosen browser outcome and store."""
     from playwright.async_api import expect
 
     started = datetime.now(UTC)
     browser = {"engine": "Chromium", "version": browser_version, "viewport": viewport}
     report = RunReport(
         run_id=artifact_dir.name,
-        journey="github-connect-owned-page",
+        journey=f"github-{outcome}-owned-page",
         layer="owned_page_browser",
         started_at=started,
     )
@@ -202,6 +205,63 @@ async def _github_connect_journey(
         )
     )
 
+    if outcome == "cancel":
+        await page.get_by_role("link", name="Cancel").click()
+        await expect(page.get_by_role("heading", name="No changes saved.")).to_be_visible()
+        await expect(page.locator("body")).to_contain_text("You can close this tab.")
+        cancelled_png = artifact_dir / "github-cancelled.png"
+        cancelled_dom = artifact_dir / "github-cancelled-dom.json"
+        await page.screenshot(path=str(cancelled_png), full_page=True)
+        cancelled_dom.write_text(
+            json.dumps(
+                {"browser": browser, "heading": await page.locator("h1").inner_text()},
+                indent=2,
+            )
+            + "\n"
+        )
+        async with sessionmaker() as session:
+            grants = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
+            events = await list_events(session, tenant_id=tenant_id)
+        cancelled_backend = artifact_dir / "github-cancelled-backend.json"
+        cancelled_backend.write_text(
+            json.dumps(
+                {
+                    "authorized_repos": [grant.repo_id for grant in grants],
+                    "github_connect_events": [
+                        event.operation for event in events if event.operation == "github_connect"
+                    ],
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        assert grants == []
+        assert [event for event in events if event.operation == "github_connect"] == []
+        report.checks.append(
+            Check(
+                name="cancel leaves no grant or connect audit event",
+                status="PASS",
+                observations=[
+                    Observation("browser_dom", True, True, "No changes saved", cancelled_dom.name),
+                    Observation(
+                        "browser_pixel", True, True, "rendered cancellation", cancelled_png.name
+                    ),
+                    Observation(
+                        "backend_effect",
+                        True,
+                        True,
+                        "empty grants and connect events",
+                        cancelled_backend.name,
+                    ),
+                ],
+            )
+        )
+        report.finished_at = datetime.now(UTC)
+        write_report(report, artifact_dir)
+        return report
+
+    assert outcome == "connect", outcome
+
     await page.locator("#connect-repos").click()
     await expect(page.get_by_role("heading", name="Connected 1 repo")).to_be_visible()
     await expect(page.locator("body")).to_contain_text("You can close this tab.")
@@ -263,13 +323,66 @@ async def _github_connect_journey(
             ],
         )
     )
+    # Reopening a consumed invitation is a real browser route. It must show
+    # the used-link outcome without adding another grant or audit event.
+    reused_response = await page.goto(f"{base_url}/oauth/github/connect/{invitation_token}")
+    assert reused_response is not None and reused_response.ok
+    await expect(page.get_by_role("heading", name="Already connected: 1 repo.")).to_be_visible()
+    reused_png = artifact_dir / "github-used-link.png"
+    reused_dom = artifact_dir / "github-used-link-dom.json"
+    await page.screenshot(path=str(reused_png), full_page=True)
+    reused_dom.write_text(
+        json.dumps({"browser": browser, "body": await page.locator("body").inner_text()}, indent=2)
+        + "\n"
+    )
+    async with sessionmaker() as session:
+        reused_grants = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
+        reused_events = await list_events(session, tenant_id=tenant_id)
+    reused_backend = artifact_dir / "github-used-link-backend.json"
+    reused_backend.write_text(
+        json.dumps(
+            {
+                "authorized_repos": [grant.repo_id for grant in reused_grants],
+                "github_connect_events": [
+                    event.operation
+                    for event in reused_events
+                    if event.operation == "github_connect"
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    assert [grant.repo_id for grant in reused_grants] == [101]
+    assert [event.operation for event in reused_events if event.operation == "github_connect"] == [
+        "github_connect"
+    ]
+    report.checks.append(
+        Check(
+            name="used invitation shows existing connection without another write",
+            status="PASS",
+            observations=[
+                Observation(
+                    "browser_dom", True, True, "Already connected: 1 repo", reused_dom.name
+                ),
+                Observation("browser_pixel", True, True, "rendered used link", reused_png.name),
+                Observation(
+                    "backend_effect",
+                    True,
+                    True,
+                    "one unchanged grant and event",
+                    reused_backend.name,
+                ),
+            ],
+        )
+    )
     # Test the image comparator against a deliberate browser-only mutation.
     # The unmodified screenshot is a test control, not a human accepted baseline.
     await page.locator("h1").evaluate("heading => heading.textContent = 'Changed test heading'")
     changed_png = artifact_dir / "github-deliberate-change.png"
     await page.screenshot(path=str(changed_png), full_page=True)
     comparison = compare_screenshots(
-        changed_png, done_png, artifact_dir, "github-deliberate-change"
+        changed_png, reused_png, artifact_dir, "github-deliberate-change"
     )
     assert comparison.status == "FAIL" and comparison.changed is True
     assert comparison.changed_pixels is not None and comparison.changed_pixels > 0

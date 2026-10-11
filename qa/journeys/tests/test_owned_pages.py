@@ -52,14 +52,16 @@ if TYPE_CHECKING:
         ("mobile", {"width": 390, "height": 844}),
     ],
 )
+@pytest.mark.parametrize("outcome", ["connect", "cancel"])
 @pytest.mark.asyncio
-async def test_github_connect_real_page_matches_committed_grant(
+async def test_github_connect_real_page_matches_committed_outcome(
     db_engine: AsyncEngine,
     db_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     viewport_name: str,
     viewport: dict[str, int],
+    outcome: str,
 ) -> None:
     playwright = pytest.importorskip("playwright.async_api")
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -199,7 +201,7 @@ async def test_github_connect_real_page_matches_committed_grant(
                 await asyncio.sleep(0.02)
 
         run_id = (
-            f"github-connect-{viewport_name}-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+            f"github-{outcome}-{viewport_name}-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
             f"-{uuid.uuid4().hex[:8]}"
         )
         artifact_root = (
@@ -239,6 +241,7 @@ async def test_github_connect_real_page_matches_committed_grant(
                     artifact_dir=artifact_dir,
                     browser_version=browser.version,
                     viewport=viewport,
+                    outcome=outcome,
                 )
                 assert report.finalize() == "PASS"
                 assert blocked == [], blocked
@@ -246,8 +249,12 @@ async def test_github_connect_real_page_matches_committed_grant(
                 await browser.close()
         assert "DELETE /applications/client/token" in github_calls
         assert (artifact_dir / "github-picker.png").stat().st_size > 0
-        assert (artifact_dir / "github-connected.png").stat().st_size > 0
-        assert (artifact_dir / "github-deliberate-change-diff.png").stat().st_size > 0
+        if outcome == "connect":
+            assert (artifact_dir / "github-connected.png").stat().st_size > 0
+            assert (artifact_dir / "github-used-link.png").stat().st_size > 0
+            assert (artifact_dir / "github-deliberate-change-diff.png").stat().st_size > 0
+        else:
+            assert (artifact_dir / "github-cancelled.png").stat().st_size > 0
         assert (artifact_dir / "report.json").is_file()
         print(f"owned-page QA artifacts: {artifact_dir}")
     finally:
