@@ -21,6 +21,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.responses import HTMLResponse
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from notebook_host.admin import AdminState
@@ -29,6 +30,12 @@ from notebook_host.lazy_spawn import ensure_running
 from notebook_host.lifecycle import NotebookProcess, origin_label_for
 
 _log = logging.getLogger(__name__)
+
+_LINK_UNAVAILABLE_HTML = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    "<title>Link unavailable</title></head><body><h1>Link unavailable</h1>"
+    "<p>This link is unavailable. Ask the sender to share a new link.</p></body></html>"
+)
 
 # Headers we strip when forwarding (hop-by-hop and per-connection).
 # RFC 2616 §13.5.1 + additional connection-specific headers that MUST NOT
@@ -221,6 +228,8 @@ def create_proxy_router(state: AdminState) -> APIRouter:
             state, slug, request.headers, request.query_params.get("access_token")
         )
         if resolved is None:
+            if state.settings.html_link_errors and request.method == "GET" and path == "":
+                return HTMLResponse(_LINK_UNAVAILABLE_HTML, status_code=status.HTTP_404_NOT_FOUND)
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no active notebook: {slug}")
         np, own_origin = resolved
         if own_origin is not None and _cross_origin(request.headers, own_origin):

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Deliver neutral provider lifecycle records by their own event identity across reconnects, so media revisions sharing a compatibility display ID reach the optional tap once while native delivery stays unchanged.
+- Add explicit offline Discord, Slack and Teams callbacks that expose actual
+  admission and session binding for backend-selection conformance.
+- Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
+- Add opt-in HTML pages for unavailable notebook and report document links, preserving existing status codes, authentication and default JSON responses.
 
 - Model calls an agent made while its chat worker was down (a deploy or crash mid-turn) are now billed when the next turn in that thread ends, at the same price and once only. Previously they went unbilled unless the usage sweep was switched on.
 - When your team's Daimon credit runs out, the reply now says how to fix it: "An admin can top up with `/billing`." on Discord and Slack, and `billing` in a 1:1 chat on Teams. Before, it only said "Ask an admin to top up." without naming where.

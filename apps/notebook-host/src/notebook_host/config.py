@@ -111,6 +111,14 @@ class Settings(BaseSettings):
     # Leave unset for local / trusted-network deployments where the
     # host_port is part of the address users actually visit.
     public_url_base: str | None = None
+    html_link_errors: bool = Field(
+        default=False,
+        description=(
+            "Opt in to a static HTML page for unavailable notebook document links "
+            "(GET /n/{slug}/, status 404). Other routes and methods keep their "
+            "existing responses. Disabled by default."
+        ),
+    )
     # Max bytes for the published notebook source. 1 MiB is far past a
     # hand-written notebook; agents emitting megabytes of generated code are
     # the failure mode this catches. Pre-allocation defense rather than a
