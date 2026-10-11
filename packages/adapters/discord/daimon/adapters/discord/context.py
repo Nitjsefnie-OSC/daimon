@@ -170,6 +170,7 @@ def _render_user_query(
     bot_display_name: str,
     is_admin: bool,
     unprompted: bool = False,
+    query_text: str | None = None,
 ) -> str:
     """Render the ``<user_query>`` element for a turn's trigger message.
 
@@ -186,7 +187,11 @@ def _render_user_query(
         + (' unprompted="true"' if unprompted else "")
     )
     content = escape(
-        _strip_bot_mention(trigger.content, bot_user_id, bot_display_name=bot_display_name)
+        _strip_bot_mention(
+            trigger.content if query_text is None else query_text,
+            bot_user_id,
+            bot_display_name=bot_display_name,
+        )
     )
     return f"<user_query{attrs}>{content}</user_query>"
 
@@ -202,6 +207,7 @@ async def build_context_xml(
     is_admin: bool = False,
     unprompted: bool = False,
     key_names: Sequence[str] = (),
+    query_text: str | None = None,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from thread history for the turn driver.
 
@@ -220,6 +226,8 @@ async def build_context_xml(
 
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
+    ``query_text`` replaces only the active query text; ``trigger`` still
+    supplies identity and remains excluded from history.
     """
     messages = [m async for m in thread.history(limit=limit)]
     messages.sort(key=lambda m: m.created_at)
@@ -278,6 +286,7 @@ async def build_context_xml(
             bot_display_name=bot_display_name,
             is_admin=is_admin,
             unprompted=unprompted,
+            query_text=query_text,
         )
     )
 
@@ -296,6 +305,7 @@ async def build_delta_xml(
     unprompted: bool = False,
     key_names: Sequence[str] = (),
     excluded_message_ids: Sequence[str] = (),
+    query_text: str | None = None,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -324,6 +334,8 @@ async def build_delta_xml(
 
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
+    ``query_text`` replaces only the active query text, preserving the
+    original trigger's identity and history exclusion.
     """
     if after_message_id is None:
         return await build_context_xml(
@@ -334,6 +346,7 @@ async def build_delta_xml(
             is_admin=is_admin,
             unprompted=unprompted,
             key_names=key_names,
+            query_text=query_text,
         )
 
     after_obj = discord.Object(id=after_message_id)
@@ -379,6 +392,7 @@ async def build_delta_xml(
             bot_display_name=bot_display_name,
             is_admin=is_admin,
             unprompted=unprompted,
+            query_text=query_text,
         )
     )
 

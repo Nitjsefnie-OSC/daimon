@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replacement checkpoints now report priced model calls in turn outcomes while retaining their predecessor-channel debits.
 - Restart recovery detaches a chat session when interrupting its orphaned turn fails, so the next message starts a fresh session instead of reaching a busy one.
 - Long Discord answers keep the consumed-input watermark while omitting their delivered answer chunks from the next turn's history.
+- Queued Discord mentions in one thread now reach the agent together, while a separate confirmation message starts its own turn.
 - Reused chat sessions are replaced when their budget channel changes, so the usage sweep charges missed turns to the channel that admitted them.
 - New Discord threads retain links to recent channel uploads after busy chat moves them outside the 25-message context window.
 - Discord continuations check thread history back to the queued handoff and retry when that history is unavailable, so a newer human reply cannot trigger stale work.

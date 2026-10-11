@@ -146,6 +146,16 @@ class TestBuildContextXml:
     """Tests for build_context_xml()."""
 
     @pytest.mark.asyncio
+    async def test_queued_query_replaces_only_trigger_text(self) -> None:
+        trigger = _make_message(msg_id=10, content="first", author_name="Bob", author_id=200)
+        thread = _make_thread([trigger])
+
+        result, _ = await build_context_xml(thread, trigger, query_text="first\n\nsecond <item>")
+
+        assert 'user_id="200"' in result
+        assert "first\n\nsecond &lt;item&gt;" in result
+
+    @pytest.mark.asyncio
     async def test_build_context_xml_empty_thread_returns_user_query_only(self) -> None:
         trigger = _make_message(msg_id=10, content="what's up?", author_name="Bob", author_id=200)
         thread = _make_thread([trigger])  # only the trigger in history
@@ -605,6 +615,18 @@ class TestBuildContextXml:
 
 class TestBuildDeltaXml:
     """Tests for build_delta_xml() — continuation turn delta builder."""
+
+    @pytest.mark.asyncio
+    async def test_queued_query_replaces_only_trigger_text(self) -> None:
+        trigger = _make_message(msg_id=10, content="first", author_name="Bob", author_id=200)
+        thread = _make_thread([])
+
+        result, _ = await build_delta_xml(
+            thread, trigger, after_message_id=5, query_text="first\n\nsecond <item>"
+        )
+
+        assert 'user_id="200"' in result
+        assert "first\n\nsecond &lt;item&gt;" in result
 
     @pytest.mark.asyncio
     async def test_delta_xml_is_admin_true_for_guild_admin(self) -> None:

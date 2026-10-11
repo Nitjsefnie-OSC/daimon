@@ -127,6 +127,7 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
+from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
@@ -2593,7 +2594,20 @@ class DaimonBot(commands.Bot):
 
         def compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
             draining.update((id(message), message) for message in queued)
-            return group_by_author(queued, lambda m: m.author.id)
+            groups: list[list[discord.Message]] = []
+            for author_messages in group_by_author(queued, lambda m: m.author.id):
+                pending: list[discord.Message] = []
+                for queued_message in author_messages:
+                    if is_affirmative(queued_message.content):
+                        if pending:
+                            groups.append(pending)
+                            pending = []
+                        groups.append([queued_message])
+                    else:
+                        pending.append(queued_message)
+                if pending:
+                    groups.append(pending)
+            return groups
 
         async def run(messages: list[discord.Message]) -> None:
             try:
@@ -2631,10 +2645,10 @@ class DaimonBot(commands.Bot):
     ) -> None:
         """Orchestrate thread creation/lookup, session lifecycle, and turn execution.
 
-        When ``content_override`` is provided (drain path for queued mentions in a
-        non-thread channel), it replaces ``message.content`` as the user message
-        for the turn. Everything else (author, channel, attachments, thread
-        history) still comes from ``message``.
+        When ``content_override`` is provided (drain path for queued mentions),
+        it replaces ``message.content`` as the active user query. Everything
+        else (author, channel, attachments, thread history) still comes from
+        ``message``.
 
         ``created_thread_ids``, when provided, receives the id of a bot-created
         thread even if the turn subsequently fails — the return value dies with
@@ -4086,6 +4100,7 @@ class DaimonBot(commands.Bot):
                         and _live_row_for_keys.id == prepared.mapping_id
                         else ()
                     ),
+                    query_text=content_override,
                 )
             else:
                 user_message, _ = await build_context_xml(
@@ -4097,6 +4112,7 @@ class DaimonBot(commands.Bot):
                     is_admin=is_admin,
                     unprompted=unprompted,
                     key_names=key_names,
+                    query_text=content_override,
                 )
         else:
             if content_override is not None:
@@ -4174,6 +4190,7 @@ class DaimonBot(commands.Bot):
                 is_admin=is_admin,
                 unprompted=unprompted,
                 key_names=key_names,
+                query_text=content_override,
             )
             if synthetic_prefix:
                 full_message = synthetic_prefix + "\n" + full_message
