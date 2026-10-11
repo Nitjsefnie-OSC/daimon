@@ -26,7 +26,7 @@ jobs:
           --health-interval=5s --health-timeout=3s --health-retries=10
     env:
       DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
-      DAIMON_QA_ARTIFACT_ROOT: ${{ runner.temp }}/qa-journeys
+      DAIMON_QA_ARTIFACT_ROOT: /tmp/qa-journeys
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
