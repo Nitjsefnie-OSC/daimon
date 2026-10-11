@@ -54,6 +54,9 @@ test_schema_cleanup	SchemaCleanup	SchemaCleanupSafe	clean	9	-	face transaction r
 test_schema_cleanup	SchemaCleanup	SchemaCleanupUnsafe	violates:NoDropDuringFaceTransaction	6	-	old fixture starts table drop while queued face still holds a transaction
 ci_deploy_gate	CiDeployGate	CiDeployGateSafe	clean	10	-	candidate publish may precede tests but SHA tag waits for staging verdict
 ci_deploy_gate	CiDeployGate	CiDeployGateUnsafe	violates:PromotableOnlyAfterStagingPass	7	-	early SHA tag permits promotion while tests are pending
+staging_tag	StagingTag	StagingTagSafe	clean	20	-	atomic create preserves an existing different digest
+staging_tag	StagingTag	StagingTagSame	clean	20	-	identical rerun accepts the published digest
+staging_tag	StagingTag	StagingTagUnsafe	violates:ImmutableTag	20	-	replacement after a concurrent create changes the canonical tag
 # ---- scheduler ----
 privacy_delete	PrivacyDelete	PrivacyDeleteSafe	clean	49	-	durable local commit keeps upstream work across crashes and failures
 privacy_delete	PrivacyDelete	PrivacyDeleteUnsafe	violates:LocalDeletionTracked	2	-	old local commit loses the target immediately
