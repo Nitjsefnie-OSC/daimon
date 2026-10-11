@@ -137,6 +137,8 @@ class Pending(RuntimeError):
 class WatchTimeout(Pending):
     """Observation completed without terminal proof; evaluate the collected evidence."""
 
+    turn: int | None = None
+
 
 class Backend(Protocol):
     fallback_watch_s: float

@@ -221,6 +221,7 @@ def test_thread_followup_posts_while_first_turn_is_still_running(
     def collect(turn: Turn, timeout: float) -> None:
         if turn.number == 1:
             turn.thread_id = "thread"
+            turn.verdicts = ["working"]  # positive running evidence on its latest poll
             first_live.set()
             assert followup_posted.wait(2), "runner waited for first turn terminal before follow-up"
         original_collect(turn, timeout)
@@ -267,5 +268,44 @@ def test_queue_followup_after_predecessor_finished_is_pending_and_never_sent(
     # be queued behind a busy turn, so it cannot claim queue coverage.
     result = Executor(backend, judge, ledger, pricing, "staging").run(changed)
     assert result.status == "PENDING"
-    assert any("finished before the queued follow-up" in c.reason for c in result.checks)
+    assert any("not observed running" in c.reason for c in result.checks)
     assert backend.sent == 1 and len(result.turns) == 1
+
+
+def test_terminal_predecessor_in_its_settle_window_cannot_prove_busy(
+    backend: FakeBackend,
+    judge: FakeJudge,
+    ledger: Ledger,
+    pricing: Pricing,
+    scenario: Scenario,
+) -> None:
+    """REVIEW-723-3c81958 should-fix: watcher liveness alone is not busy evidence."""
+    import time
+
+    from qa.live.types import Turn
+
+    original = backend.collect
+
+    def collect(turn: Turn, timeout: float) -> None:
+        if turn.number == 1:
+            turn.thread_id = "thread"
+            turn.messages = [{"id": "card", "channel_id": "thread", "content": "FIRST-DONE"}]
+            turn.verdicts = ["answered"]
+            turn.done_s = 0.01
+            time.sleep(0.15)  # the real collector's terminal stability interval
+        original(turn, timeout)
+
+    backend.collect = collect  # type: ignore[method-assign]
+    changed = Scenario.model_validate(
+        scenario.model_dump(by_alias=True)
+        | {
+            "steps": [
+                {"do": "mention", "text": "FIRST"},
+                {"do": "wait", "s": 0.03},
+                {"do": "thread_reply", "mention": True, "text": "SECOND"},
+                {"do": "wait_done", "timeout_s": 1},
+            ],
+        }
+    )
+    result = Executor(backend, judge, ledger, pricing, "staging").run(changed)
+    assert backend.sent == 1 and result.status == "PENDING"

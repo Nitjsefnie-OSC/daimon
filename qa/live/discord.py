@@ -169,7 +169,8 @@ class DiscordBackend:
         self.overlap_lock = threading.Lock()
         self.collected: list[Turn] = []
         self.predecessors: dict[str, list[Turn]] = {}
-        self.successors: dict[str, list[Turn]] = {}
+        # Successor triggers keyed by predecessor trigger: (trigger id, send time).
+        self.successors: dict[str, list[tuple[str, datetime]]] = {}
         self.ever_working: set[str] = set()
         self.inflight: dict[str, list[Message]] = {}
 
@@ -349,6 +350,7 @@ class DiscordBackend:
         self._owned(channel)
         self.driver.set_role(step.role)
         baseline = self.driver.messages(channel, after=None, limit=100)
+        sent_at = utcnow()
         content = (f"<@{self.target.daimon_id}> " if mention else "") + (step.text or "")
         payload: Message = {"content": content}
         if reply_message_id:
@@ -382,28 +384,43 @@ class DiscordBackend:
         if step.do == "thread_reply":
             # A Daimon card still working when the follow-up is posted proves
             # an in-flight predecessor, even if no watcher is collecting it.
-            self.inflight[message_id] = [
-                m
-                for m in baseline
-                if str(obj(m.get("author")).get("id")) == self.target.daimon_id
-                and self.classify(m) == "working"
-            ]
+            with self.overlap_lock:
+                self.inflight[message_id] = [
+                    m
+                    for m in baseline
+                    if str(obj(m.get("author")).get("id")) == self.target.daimon_id
+                    and self.classify(m) == "working"
+                ]
+                # Link now, before the predecessor's watcher can settle on
+                # this follow-up's messages ahead of its own collector starting.
+                self._link(message_id, channel, sent_at, followup=True)
         self.driver.set_role("user")
         return message_id
 
+    def _link(self, trigger_id: str, channel: str, sent_at: datetime, *, followup: bool) -> None:
+        """Link a trigger to every turn still unfinished in the thread it was sent to.
+
+        Called with `overlap_lock` held. A thread follow-up (`followup`) links to
+        in-thread predecessors too; a turn otherwise links only to the parent
+        mention whose thread it was sent into, so in-thread bursts are unchanged.
+        """
+        for prior in self.collected:
+            if prior.trigger_id == trigger_id:
+                continue
+            if channel == prior.channel_id and not followup:
+                continue
+            if channel not in {prior.thread_id, prior.trigger_id}:
+                continue
+            if prior.ended_at is not None and prior.ended_at <= sent_at:
+                continue
+            if prior not in self.predecessors.get(trigger_id, []):
+                self.predecessors.setdefault(trigger_id, []).append(prior)
+                self.successors.setdefault(prior.trigger_id, []).append((trigger_id, sent_at))
+
     def _link_overlaps(self, turn: Turn) -> None:
-        """Link a thread follow-up to predecessors that were unfinished when it was sent."""
         with self.overlap_lock:
-            for prior in self.collected:
-                if prior is turn or turn.channel_id == prior.channel_id:
-                    continue
-                if turn.channel_id not in {prior.thread_id, prior.trigger_id}:
-                    continue
-                if prior.ended_at is not None and prior.ended_at <= turn.started_at:
-                    continue
-                if prior not in self.predecessors.get(turn.trigger_id, []):
-                    self.predecessors.setdefault(turn.trigger_id, []).append(prior)
-                    self.successors.setdefault(prior.trigger_id, []).append(turn)
+            followup = turn.trigger_id in self.inflight
+            self._link(turn.trigger_id, turn.channel_id, turn.started_at, followup=followup)
             if turn not in self.collected:
                 self.collected.append(turn)
 
@@ -412,6 +429,9 @@ class DiscordBackend:
         return message_created_at({"id": turn.trigger_id}) or turn.started_at
 
     def _boundary(self, successor: Turn, messages: list[Message]) -> datetime | None:
+        return self._boundary_at(self._trigger_time(successor), messages)
+
+    def _boundary_at(self, start: datetime, messages: list[Message]) -> datetime | None:
         """Creation time of the follow-up's first card, if positively observed.
 
         The product runs a thread's turns serially: a queued follow-up's card is
@@ -420,7 +440,6 @@ class DiscordBackend:
         that postdates the finalization of every pre-trigger predecessor card.
         A predecessor card still working means no follow-up card can exist yet.
         """
-        start = self._trigger_time(successor)
         finalized = start
         for message in messages:
             created = message_created_at(message)
@@ -467,9 +486,9 @@ class DiscordBackend:
                 and created >= start
                 and created >= boundary
             ]
-        for successor in successors:
-            start = self._trigger_time(successor)
-            boundary = self._boundary(successor, messages)
+        for trigger_id, sent_at in successors:
+            start = message_created_at({"id": trigger_id}) or sent_at
+            boundary = self._boundary_at(start, messages)
             messages = [
                 m
                 for m in messages
