@@ -223,11 +223,9 @@ async def _hosted_agent(
                 selected = await current_backend(
                     session, channel_ref(tenant_id, grant.platform, grant.channel_id)
                 )
-            if (
-                selected is None
-                or selected.profile != "gemini.inline_reuse"
-                or selected.digest != grant.config_digest
-            ):
+            if selected is None or selected.profile != "gemini.inline_reuse":
+                continue
+            if selected.digest != grant.config_digest:
                 raise ResourceHostMismatch("Gemini resource grant is stale")
             host = request_gemini_resource_host(rt, grant)
             view = await host.find(name)

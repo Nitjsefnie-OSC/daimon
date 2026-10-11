@@ -514,34 +514,47 @@ async def test_mixed_gemini_runtime_leaves_unconfigured_copy_on_existing_dispatc
             await other.close()
 
 
+@pytest.mark.parametrize("restored_default", [False, True])
 async def test_mixed_gemini_runtime_keeps_existing_anthropic_agent_get_bytes(
-    run: _Run, tmp_path: Path
+    run: _Run, tmp_path: Path, restored_default: bool
 ) -> None:
     from dataclasses import replace
     from io import StringIO
 
     from daimon.adapters.cli.commands.agents import agents_get
     from daimon.adapters.cli.tenant import TenantSelector
+    from daimon.core.channel_backend import channel_ref, clear_channel_backend, current_backend
     from daimon.testing import ma_agent
     from daimon.testing.ma import list_response
     from daimon.testing.ma_transport import RecordedRequest, ScriptedReply
     from rich.console import Console
 
-    trace = ScriptedTransport()
-    other = await provision_admin_run(
-        run.binding.sessions,
-        workspace_id="123456789012345679",
-        backend="anthropic",
-        channels=frozenset({CHANNEL}),
-        trace=trace,
-    )
-    agent = ma_agent(id="agent_existing", name="existing", tenant_id=other.scope.tenant_id)
+    other = None
+    target = run.binding
+    if not restored_default:
+        other = await provision_admin_run(
+            run.binding.sessions,
+            workspace_id="123456789012345679",
+            backend="anthropic",
+            channels=frozenset({CHANNEL}),
+            trace=ScriptedTransport(),
+        )
+        target = other
+    trace = target.trace
+    agent = ma_agent(id="agent_existing", name="existing", tenant_id=target.scope.tenant_id)
     try:
         async with opt_in_operator_profile(
             run.binding, run.driver, workspace="project", root=tmp_path, fallback=run.resources
         ) as edge:
             await edge.authorize(CHANNEL)
-            rt = replace(edge.runtime(), anthropic=other.anthropic)
+            rt = replace(edge.runtime(), anthropic=target.anthropic)
+            if restored_default:
+                channel = channel_ref(uuid.UUID(target.scope.tenant_id), "discord", CHANNEL)
+                async with target.sessions() as session, session.begin():
+                    written = await clear_channel_backend(session, channel)
+                async with target.sessions() as session:
+                    read = await current_backend(session, channel)
+                assert read == written and read.profile == "anthropic.managed_agents"
             native_before = len(run.trace.requests)
             requests: list[tuple[RecordedRequest, ...]] = []
             outputs: list[str] = []
@@ -563,7 +576,7 @@ async def test_mixed_gemini_runtime_keeps_existing_anthropic_agent_get_bytes(
                     console=Console(file=output, force_terminal=False, width=200),
                     name="existing",
                     as_json=True,
-                    selector=TenantSelector(guild_id=other.workspace_id),
+                    selector=TenantSelector(guild_id=target.workspace_id),
                 )
                 requests.append(tuple(trace.requests[before:]))
                 outputs.append(output.getvalue())
@@ -583,9 +596,11 @@ async def test_mixed_gemini_runtime_keeps_existing_anthropic_agent_get_bytes(
                             for r in requests[1]
                         ],
                         "byte_identical": requests[0] == requests[1],
+                        "restored_default": restored_default,
                     },
                     indent=2,
                 )
             )
     finally:
-        await other.close()
+        if other is not None:
+            await other.close()
