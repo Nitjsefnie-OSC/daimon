@@ -151,6 +151,20 @@ thread_queue	ThreadQueue	FormDuringTail	violates:NoStrandedContinuation	200	-	re
 thread_queue	ThreadQueue	FormRedispatch	clean	514	-	#233 (merged): skipped dispatch reruns after release (NoStrandedMention is in the FormDispatch rows)
 thread_queue	ThreadQueue	FormDispatchNoDrain	violates:NoStrandedMention	82	-	pre-#237 bug, now fixed: a mention queued behind an out-of-turn dispatch is never drained
 thread_queue	ThreadQueue	FormDispatchDrain	clean	450	-	#237 (merged) shape: the dispatch drains queued mentions before releasing the thread
+thread_queue	ThreadGone	GoneMain	violates:NoParentPostAfterThread	271	-	current main (#809): a thread deleted before the card posts makes the error render raise, and on_message posts the error in the parent channel
+thread_queue	ThreadGone	GoneMainIncident	violates:NoParentPostAfterCard	651	-	current main, the #809 path: card up, thread deleted, the terminal write raises and the error fallback escapes to the parent channel
+thread_queue	ThreadGone	GoneMainStart	violates:NoTurnAfterGone	489	-	current main: the gateway delete event arrives between turns and the drain starts the next queued turn
+thread_queue	ThreadGone	GoneMainWrite	violates:NoWriteAfterGoneObserved	35	-	current main: the delete event is seen and the turn still writes its card to the thread
+thread_queue	ThreadGone	GoneMainRows	violates:AdmissionsFinishedWhenIdle	561	-	current main: the escaped error skips the drain and a queued message's admission row stays pending for #764 replay
+thread_queue	ThreadGone	GoneDesign	clean	1206	-	#809 design: guarded writes, 10003 is not a turn failure, drain stops before every turn, unrun rows finished
+thread_queue	ThreadGone	GoneDesignNoFinish	violates:AdmissionsFinishedWhenIdle	649	-	design without finishing the rows of turns the stopped drain will not run
+thread_queue	ThreadGone	GoneDesignBatchStop	violates:NoTurnAfterGone	990	-	design checking gone only when the queue is popped: a later turn of the same batch starts after the signal
+thread_queue	ThreadGone	GoneDesignNoGuard	violates:NoWriteAfterGoneObserved	52	-	design without the write guard: writes continue after the signal is seen
+thread_queue	ThreadGone	GoneDesignNoSwallow	violates:NoParentPostAfterThread	304	-	design where a 10003 on the error send still raises: an unrelated failure then reaches the parent channel
+thread_queue	ThreadGone	GoneDesignReactions	violates:NoWriteAfterGoneObserved	408	-	DESIGN.md step 4 as written: best-effort reaction removal is itself a write to the gone thread
+thread_queue	ThreadGone	GoneDesignNoReleaseFinish	violates:AdmissionsFinishedWhenIdle	891	-	design without finishing the final queue pop: a message queued while the stop is finishing rows is stranded
+thread_queue	ThreadGone	GoneWitnessMidGroup	violates:WitnessNoMidGroupStop	990	-	witness: the signal arrives between turns of one popped batch and the design stops the rest
+thread_queue	ThreadGone	GoneWitnessFinishOnStop	violates:WitnessNoFinishOnStop	408	-	witness: the stop path finishes queued messages' admission rows
 adapter_recovery	AdapterOverlap	OverlapPreCAS	violates:NoStaleClear	229	-	pre-2d3a002 (287b719 shape): blind sweep clear wipes a marker written after its snapshot
 adapter_recovery	AdapterOverlap	OverlapCASNoStale	clean	561	-	0bc1b14/2d3a002: compare-and-clear spares a marker written after the snapshot (clean by construction)
 adapter_recovery	AdapterOverlap	OverlapCASOnly	violates:NoStolenClear	88	-	pre-c923083 (Slack): compare-and-clear alone; a marker written before the snapshot still matches
