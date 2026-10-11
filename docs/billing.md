@@ -251,7 +251,10 @@ drops the money left.
 
 A denial raises `AdmissionDenied` carrying only the reason literal
 (`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording
-belongs to each adapter. The turn aborts — it never silently degrades to a
+comes from `packages/core/daimon/core/turn/notices.py` with each adapter's
+command names. A depleted balance reads "Your team's Daimon credit has run
+out." then "An admin can top up with `/billing`." (on Teams, "`billing` in a
+1:1 chat with me"). The turn aborts — it never silently degrades to a
 cheaper model. The balance and cap checks are re-run, with the same order, by
 the MCP tools that start a turn (`_admit` in
 `packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`), followed by the

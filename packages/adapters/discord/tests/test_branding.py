@@ -162,7 +162,7 @@ class TestCreditDepletedMessage:
         settings = MagicMock()
         settings.discord = DiscordSettings(bot_token=SecretStr("test-bot-token"))
         assert admission_refusal_message("balance_depleted", settings) == (
-            "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
+            "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
         )
 
     def test_set_name_changes_text(self) -> None:
@@ -171,7 +171,7 @@ class TestCreditDepletedMessage:
             bot_token=SecretStr("test-bot-token"), bot_display_name="daimon-staging"
         )
         assert admission_refusal_message("balance_depleted", settings) == (
-            "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
+            "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
         )
 
 
