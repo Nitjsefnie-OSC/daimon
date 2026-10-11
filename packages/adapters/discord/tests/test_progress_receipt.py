@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -214,3 +215,85 @@ async def test_receipt_waits_for_actual_sdk_ack(
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_adopted_card_receipt_tracks_actual_replacement(
+    harness: DiscordSurfaceHarness,
+) -> None:
+    original = lifecycle(harness, None)
+    await original.post_initial()
+    assert original.message_ref is not None
+    receipts: list[InitialProgressReceipt] = []
+    adapter = lifecycle(harness, receipts, adopt_message_ref=original.message_ref)
+    missing = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"code": 10008, "message": "Unknown Message"},
+    )
+    harness.gateway.fail_next("edit", missing)
+    await adapter.post_initial()
+    assert len(receipts) == 1
+    assert adapter.message_ref is not None
+    receipt, replacement = receipts[0], harness.gateway.events[-1]
+    assert receipt.operation == "edit"
+    assert replacement.operation == "send"
+    assert receipt.message_id == replacement.message.message_id == str(adapter.message_ref.id)
+    assert receipt.message_id != str(original.message_ref.id)
+    rendered, wire = json.loads(receipt.rendered_json), json.loads(replacement.request_json)
+    assert rendered["embeds"] == wire["embeds"]
+    assert rendered["components"] == wire["components"]
+
+
+async def test_cancelled_initial_waiter_retains_edit_and_receipt_after_wire_ack(
+    harness: DiscordSurfaceHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = lifecycle(harness, None)
+    await original.post_initial()
+    receipts: list[InitialProgressReceipt] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    edit = harness.gateway.edit_message
+
+    async def hold(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await release.wait()
+        return await edit(*args, **kwargs)
+
+    monkeypatch.setattr(harness.gateway, "edit_message", hold)
+    adapter = lifecycle(harness, receipts, adopt_message_ref=original.message_ref)
+    task = asyncio.create_task(adapter.post_initial())
+    pending: tuple[asyncio.Task[None], ...] = ()
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert receipts == [] and len(harness.gateway.events) == 1
+        pending = tuple(adapter._progress_edits)
+        assert len(pending) == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not pending[0].done() and receipts == []
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*pending), 5)
+        assert len(receipts) == 1 and len(harness.gateway.events) == 2
+        assert receipts[0].message_id == harness.gateway.events[-1].message.message_id
+        rendered = json.loads(receipts[0].rendered_json)
+        wire = json.loads(harness.gateway.events[-1].request_json)
+        assert rendered["embeds"] == wire["embeds"]
+        assert rendered["components"] == wire["components"]
+        assert not adapter._progress_edits
+    finally:
+        release.set()
+        await asyncio.gather(task, *pending, return_exceptions=True)
+
+
+async def test_failed_adopted_card_edit_has_no_receipt(
+    harness: DiscordSurfaceHarness,
+) -> None:
+    original = lifecycle(harness, None)
+    await original.post_initial()
+    receipts: list[InitialProgressReceipt] = []
+    adapter = lifecycle(harness, receipts, adopt_message_ref=original.message_ref)
+    harness.gateway.fail_next("edit", RuntimeError("offline edit rejection"))
+    with pytest.raises(RuntimeError, match="offline edit rejection"):
+        await adapter.post_initial()
+    assert receipts == [] and len(harness.gateway.events) == 1
+    assert not adapter._progress_edits

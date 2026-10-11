@@ -380,9 +380,17 @@ async def test_serializing_production_channel_admission_loses_burst_witness(
     lock = asyncio.Lock()
     original = bot_module.DaimonBot.on_message
 
-    async def serialized(bot: bot_module.DaimonBot, message: discord.Message) -> None:
+    async def serialized(
+        bot: bot_module.DaimonBot,
+        message: discord.Message,
+        *,
+        startup_replay: bool = False,
+        resume_admitted: bool = False,
+    ) -> None:
         async with lock:
-            await original(bot, message)
+            await original(
+                bot, message, startup_replay=startup_replay, resume_admitted=resume_admitted
+            )
 
     monkeypatch.setattr(bot_module.DaimonBot, "on_message", serialized)
     try:

@@ -2599,7 +2599,7 @@ class DaimonBot(commands.Bot):
 
             with (
                 holding(ticket),
-                queue_card_ticket(ticket)
+                queue_card_ticket(ticket, cap=cap)
                 if self.runtime.settings.discord.tenant_cap_waiting_card
                 else contextlib.nullcontext(),
             ):
@@ -4041,10 +4041,7 @@ class DaimonBot(commands.Bot):
             )
             return
 
-        if (
-            self.runtime.settings.discord is not None
-            and self.runtime.settings.discord.tenant_cap_waiting_card
-        ):
+        if self.runtime.settings.discord.tenant_cap_waiting_card:
             await lifecycle.on_slot_started()
 
         # D-03 boundary: the per-turn ceiling clock starts here, once admission

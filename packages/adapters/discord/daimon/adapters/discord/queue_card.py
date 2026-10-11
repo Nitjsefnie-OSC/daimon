@@ -9,13 +9,15 @@ from contextvars import ContextVar
 
 from daimon.core.turn_queue import TurnQueue, TurnTicket
 
-_ticket: ContextVar[TurnTicket | None] = ContextVar("discord_queue_card_ticket", default=None)
+_ticket: ContextVar[tuple[TurnTicket, int] | None] = ContextVar(
+    "discord_queue_card_ticket", default=None
+)
 
 
 @contextmanager
-def queue_card_ticket(ticket: TurnTicket) -> Iterator[None]:
-    """Observe this task's original ticket without claiming or releasing it."""
-    token = _ticket.set(ticket)
+def queue_card_ticket(ticket: TurnTicket, *, cap: int) -> Iterator[None]:
+    """Observe this task's ticket and actual admission cap without changing either."""
+    token = _ticket.set((ticket, cap))
     try:
         yield
     finally:
@@ -24,15 +26,12 @@ def queue_card_ticket(ticket: TurnTicket) -> Iterator[None]:
 
 def tenant_slot_waiter(queue: TurnQueue, tenant_id: uuid.UUID) -> Callable[[], bool]:
     """Only this mention's actual tenant-cap wait may change its card."""
-    ticket = _ticket.get()
+    admitted = _ticket.get()
+    if admitted is None:
+        return lambda: False
+    ticket, cap = admitted
 
     def waiting() -> bool:
-        return (
-            ticket is not None
-            and ticket.tenant_id == tenant_id
-            and ticket.queued
-            and ticket.cap is not None
-            and queue.in_flight(tenant_id) >= ticket.cap
-        )
+        return ticket.tenant_id == tenant_id and ticket.queued and queue.in_flight(tenant_id) >= cap
 
     return waiting

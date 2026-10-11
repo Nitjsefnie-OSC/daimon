@@ -206,3 +206,10 @@ PENDING and skip before ingress allocation; the shared runtime validator does
 not admit opaque alternate-provider dependencies. Shared ownership admission and
 the authorized temporary fixture preflight remain unchanged. Source YAML,
 product requests, routing, queue policy and ordinary defaults are unchanged.
+
+
+The observer forwards main's `startup_replay` and `resume_admitted` arguments
+unchanged; ordinary gateway delivery uses their false defaults. The opted-in
+initial waiting-card renderer keeps the actual cap passed to that mention's
+synchronous admission alongside its returned ticket. This replaces the cap field
+removed from main's ticket without changing core current-cap readmission.

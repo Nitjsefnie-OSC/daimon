@@ -25,7 +25,7 @@ async def test_real_tenant_ticket_is_scoped_and_clears_on_release() -> None:
     assert first is not None and waiting is not None
     assert first.state == "running" and waiting.state == "queued"
     assert not tenant_slot_waiter(queue, tenant)()
-    with queue_card_ticket(waiting):
+    with queue_card_ticket(waiting, cap=1):
         view = tenant_slot_waiter(queue, tenant)
         assert view() and not tenant_slot_waiter(queue, other)()
 
@@ -33,7 +33,7 @@ async def test_real_tenant_ticket_is_scoped_and_clears_on_release() -> None:
             # A separately admitted turn overrides its inherited task context.
             own = queue.admit(other, cap=1)
             assert own is not None
-            with queue_card_ticket(own):
+            with queue_card_ticket(own, cap=1):
                 assert not tenant_slot_waiter(queue, tenant)()
                 assert not tenant_slot_waiter(queue, other)()
             own.release()
@@ -59,7 +59,7 @@ async def test_global_only_wait_and_cancelled_ticket_are_not_tenant_cap_wording(
     first = queue.admit(other, cap=2)
     waiting = queue.admit(tenant, cap=2)
     assert first is not None and waiting is not None and waiting.queued
-    with queue_card_ticket(waiting):
+    with queue_card_ticket(waiting, cap=2):
         view = tenant_slot_waiter(queue, tenant)
         assert not view()
         waiting.release()

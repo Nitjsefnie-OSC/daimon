@@ -381,7 +381,13 @@ class _ObservedBot(DaimonBot):
         self.ingress_errors: list[str] = []
         self.parsed_replies: list[ParsedReply] = []
 
-    async def on_message(self, message: discord.Message) -> None:
+    async def on_message(
+        self,
+        message: discord.Message,
+        *,
+        startup_replay: bool = False,
+        resume_admitted: bool = False,
+    ) -> None:
         # Gateway callbacks are scheduled: an owner can replace deps after deliver.
         _require_runtime_bound(self.runtime, self.native)
         reference = message.reference
@@ -405,7 +411,9 @@ class _ObservedBot(DaimonBot):
                     else None,
                 )
             )
-        await super().on_message(message)
+        await super().on_message(
+            message, startup_replay=startup_replay, resume_admitted=resume_admitted
+        )
 
     def _schedule_event(
         self,
