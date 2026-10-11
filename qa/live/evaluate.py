@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -28,6 +29,125 @@ from qa.live.types import (
 
 def answers(turn: Turn, backend: Backend) -> list[Message]:
     return [m for m in turn.messages if backend.classify(m) in {"answered", "answered_tool_only"}]
+
+
+# A capture gap wider than this many poll intervals could hide running edits.
+CARD_GAP_POLLS = 2.5
+CARD_STATE_KEYS = ("content", "embeds", "components", "attachments", "edited_timestamp")
+
+
+def running_card_edits(turn: Turn) -> tuple[int, list[tuple[datetime, Message]]]:
+    """Count successive state changes per running card (A->B->A->B is three edits)."""
+    samples: list[tuple[datetime, Message]] = []
+    seen: set[tuple[str, str]] = set()
+    for sample in turn.card_history:
+        if (
+            sample.get("phase") != "running"
+            or not sample.get("message_id")
+            or not isinstance(sample.get("observed_at"), str)
+            or not isinstance(sample.get("message"), dict)
+        ):
+            continue
+        observation = (str(sample["message_id"]), str(sample["observed_at"]))
+        if observation in seen:
+            continue
+        try:
+            observed = datetime.fromisoformat(str(sample["observed_at"]))
+        except ValueError:
+            raise Pending("running card sample has an invalid observation time") from None
+        if observed.tzinfo is None:
+            raise Pending("running card sample observation time lacks a timezone")
+        seen.add(observation)
+        samples.append((observed, sample))
+    samples.sort(key=lambda item: item[0])
+    previous: dict[str, str] = {}
+    edits = 0
+    for _, sample in samples:
+        identity = str(sample["message_id"])
+        card = obj(sample["message"])
+        state = json.dumps({key: card.get(key) for key in CARD_STATE_KEYS}, sort_keys=True)
+        if identity in previous and previous[identity] != state:
+            edits += 1
+        previous[identity] = state
+    return edits, samples
+
+
+def _stamp(entry: Message, key: str) -> datetime:
+    value = entry.get(key)
+    if not isinstance(value, str):
+        raise Pending("running card observation time is missing; edit minimum is unproven")
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        raise Pending("running card sample has an invalid observation time") from None
+    if stamp.tzinfo is None:
+        raise Pending("running card sample observation time lacks a timezone")
+    return stamp
+
+
+def running_capture_covered(
+    turn: Turn, samples: list[tuple[datetime, Message]], minimum: int
+) -> None:
+    """Raise PENDING unless every running card's capture is tight enough to FAIL.
+
+    Coverage is checked per card identity. A card's running interval starts at
+    the earliest poll listing it working (`listed_at`, taken before the direct
+    read, so failed or slow readbacks still count). It ends when its direct
+    read raced to terminal, else at the next poll that no longer listed it
+    working, else at terminal proof. Another card's reads never end it.
+    """
+    counts: dict[str, int] = {}
+    for _, sample in samples:
+        counts[str(sample["message_id"])] = counts.get(str(sample["message_id"]), 0) + 1
+    if max(counts.values(), default=0) < max(2, minimum + 1):
+        raise Pending("insufficient running card samples; edit minimum is unproven")
+    listed: dict[str, list[datetime]] = {}
+    ended: dict[str, list[datetime]] = {}
+    intervals: list[JsonValue] = []
+    for entry in turn.card_history:
+        if entry.get("phase") != "running" or not entry.get("message_id"):
+            continue
+        identity = str(entry["message_id"])
+        observed = _stamp(entry, "observed_at")
+        poll = _stamp(entry, "listed_at") if "listed_at" in entry else observed
+        listed.setdefault(identity, []).append(poll)
+        if entry.get("ended") is True:
+            ended.setdefault(identity, []).append(observed)
+        intervals.append(entry.get("poll_interval_s"))
+    if any(isinstance(i, bool) or not isinstance(i, (int, float)) or i <= 0 for i in intervals):
+        raise Pending("running card capture cadence is unknown; edit minimum is unproven")
+    if turn.done_s is None:
+        raise Pending("running card end is unobserved; edit minimum is unproven")
+    bound = CARD_GAP_POLLS * max(cast(float, i) for i in intervals)
+    terminal = turn.started_at + timedelta(seconds=turn.done_s)
+    polls = sorted({t for times in listed.values() for t in times})
+    successful: dict[str, list[datetime]] = {}
+    for observed, sample in samples:
+        successful.setdefault(str(sample["message_id"]), []).append(observed)
+    for identity, times in listed.items():
+        good = sorted(successful.get(identity, []))
+        if not good:
+            raise Pending(f"running card {identity} was never read back; edit minimum is unproven")
+        if identity in ended:
+            end = min(ended[identity])
+        else:
+            last = max(times)
+            end = next((p for p in polls if p > last), terminal)
+        edges = [min(times), *good, max(end, good[-1])]
+        widest = max((b - a).total_seconds() for a, b in zip(edges, edges[1:], strict=False))
+        if widest > bound:
+            missing = sum(
+                1
+                for e in turn.card_history
+                if e.get("phase") == "running"
+                and str(e.get("message_id")) == identity
+                and e.get("unavailable")
+            )
+            raise Pending(
+                f"running card {identity} capture gap {widest:.1f}s exceeds {bound:.1f}s"
+                + (f" ({missing} card readbacks unavailable)" if missing else "")
+                + "; edit minimum is unproven"
+            )
 
 
 def component_labels(component: Message) -> list[str]:
@@ -172,27 +292,31 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 )
                 reason = "refreshed card text " + ("matched" if passed else "did not match")
             elif kind == "card_edits_min":
-                edits = {
-                    (str(e.get("message_id")), str(e.get("edited_timestamp")))
-                    for e in turn.card_history
-                    if e.get("phase") == "running"
-                    and e.get("message_id")
-                    and e.get("edited_timestamp")
-                }
-                passed = len(edits) >= assertion.minimum
-                if not passed and not turn.settled:
-                    raise Pending("turn did not settle; running card-edit minimum is unproven")
+                edits, samples = running_card_edits(turn)
+                passed = edits >= assertion.minimum
+                if not passed:
+                    if not turn.settled:
+                        raise Pending("turn did not settle; running card-edit minimum is unproven")
+                    running_capture_covered(turn, samples, assertion.minimum)
                 reason = (
-                    f"observed {len(edits)} distinct running card edits; "
-                    f"minimum {assertion.minimum}"
+                    f"observed {edits} successive running card edits; "
+                    f"minimum {assertion.minimum}; {len(samples)} running card samples"
                 )
             elif kind == "chunks_gap_max_s":
                 messages = answers(turn, backend)
                 if not messages:
                     raise Pending("no answer messages: delivery gaps are unavailable")
+                running_card_ids = {
+                    str(sample["message_id"])
+                    for sample in turn.card_history
+                    if sample.get("phase") == "running" and sample.get("message_id")
+                }
                 events = [
                     message_visible_at(
-                        m, turn.started_at, reused=str(m.get("id")) in turn.baseline_message_ids
+                        m,
+                        turn.started_at,
+                        reused=str(m.get("id"))
+                        in running_card_ids | set(turn.baseline_message_ids),
                     )
                     for m in messages
                 ]

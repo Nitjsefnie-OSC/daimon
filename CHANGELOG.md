@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Model calls an agent made while its chat worker was down (a deploy or crash mid-turn) are now billed when the next turn in that thread ends, at the same price and once only. Previously they went unbilled unless the usage sweep was switched on.
+- A Discord deploy now waits for every turn in progress, including wizard submits and DMs that are still queued or preparing, and starts no queued turn once it begins cancelling. A thread turn cut off by the deploy keeps its marker, so the next process delivers its finished answer or interrupts its session; a cut-off DM interrupts its own session. Before, a wizard turn was invisible to the drain and its session could keep running with nothing left to recover it.
 - Deleting a Discord thread while it is answering no longer leaves an error message in the channel. The turn stops, nothing more is written to the thread, and messages queued behind it are dropped instead of started. A deleted thread's chats are retired so a restart does not revive them. A thread that cannot be written to because it is archived and cannot be reopened stops the turn the same way, but keeps its chats.
 - A reply to an earlier Discord message is now answered about that message. The agent is told which message you replied to, including one from before its last turn, or part of a long answer, instead of treating your reply as being about the latest message.
 - Discord turns no longer show the agent their own status card as an empty message from itself right before your request, so it stops saying the message you replied to "has no text".
@@ -29,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Canceling Connect GitHub says "No changes saved", covering additions, removals, and working-repo edits.
 - After posting the Connect GitHub card, the agent no longer repeats the card's steps in its reply.
 - Connect GitHub links offered for a named repo open with that repo selected when it is available to add.
+- QA chunk delivery gaps use the answer edit time for cards observed running during the same turn; missing edit evidence remains pending.
+
+- QA running-card edit checks retain direct message snapshots on every poll and report missing or insufficient capture as PENDING.
+- QA running-card edit checks retain direct message snapshots on every poll, count successive changes, and report missing, sparse or gapped capture as PENDING. A failed card readback is recorded as unavailable instead of stopping the scenario.
 - Agents created before the Connect GitHub change get the new guidance on the next restart.
 - Agents no longer suggest pasting a GitHub token. When a private repo can't be read, they offer the Connect GitHub link. Agents that already use a saved token keep working.
 - QA reports model verification as n/a PENDING on confirmed pre-admission skipped turns, preserving product silence failures and recording zero spend.

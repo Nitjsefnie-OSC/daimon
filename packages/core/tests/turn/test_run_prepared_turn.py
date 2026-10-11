@@ -519,6 +519,67 @@ async def test_a_slow_billing_catch_up_neither_fails_nor_holds_the_turn(
     assert [e["truncated"] for e in logs if e["event"] == "billing.reconciled_unbilled"] == [True]
 
 
+async def test_a_turn_is_registered_as_running_for_exactly_the_call(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown drains count turns through `deps.running_turns`, whatever entry
+    point called `run_prepared_turn` (#16)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-running",
+        ma_session_id="sess_running",
+    )
+    await db_session.commit()
+
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(account_id=account.id, agent=agent, env=env),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_running",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    real_impl = run_module.run_prepared_turn_impl
+    seen: list[set[asyncio.Task[object]]] = []
+
+    async def _observing_impl(*args: object, **kwargs: object) -> RunOutcome:
+        seen.append(deps.running_turns.tasks())
+        return await real_impl(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(run_module, "run_prepared_turn_impl", _observing_impl)
+    assert deps.running_turns.count() == 0
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-running",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert seen == [{asyncio.current_task()}], "the calling task is registered while the turn runs"
+    assert deps.running_turns.count() == 0, "and unregistered once it returns"
+
+
 async def test_a_dead_session_replacement_is_sealed_when_its_seal_cannot_be_read(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
