@@ -28,6 +28,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_gone import stop_reason_of
 from daimon.core.config import McpSettings, ThreadNamingSettings
+from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
@@ -110,6 +111,8 @@ class _World:
     release_stream: asyncio.Event
     stream_opened: asyncio.Event
     sent_to_ma: list[dict[str, Any]]
+    #: Called when the question reaches MA, before the driver has read any event.
+    on_user_message: list[Callable[[], None]]
     #: What the fake thread answers a write with, or None while it is healthy.
     thread_error: Callable[[bool], Exception | None] = lambda _is_send: None
     edit_attempts: int = 0
@@ -165,6 +168,7 @@ async def _world(
     release = asyncio.Event()
     opened = asyncio.Event()
     sent: list[dict[str, Any]] = []
+    on_user_message: list[Callable[[], None]] = []
     streams = 0
     events = turn_events(agent_text="partial answer", usage_event_id=_USAGE_EVENT)
     working, idle = events[:-1], events[-1:]
@@ -174,6 +178,9 @@ async def _world(
     def send_events(request: httpx.Request, _match: Any) -> httpx.Response:
         body = json_body(request)
         sent.append(body)
+        if any(event.get("type") == "user.message" for event in body.get("events", [])):
+            for hook in on_user_message:
+                hook()
         return httpx.Response(200, json={"data": None})
 
     def stream(_request: httpx.Request, _match: Any) -> httpx.Response:
@@ -259,6 +266,7 @@ async def _world(
         release_stream=release,
         stream_opened=opened,
         sent_to_ma=sent,
+        on_user_message=on_user_message,
     )
 
     async def edit(**_kwargs: Any) -> discord.Message:
@@ -421,7 +429,9 @@ async def test_thread_deleted_mid_turn_interrupts_and_posts_nothing_in_the_chann
 
     # The turn was stopped through the normal path: a real user.interrupt, an
     # interrupted outcome, and the model calls it had already made still metered.
-    assert world.interrupts() == 1
+    assert 1 <= world.interrupts() <= 2, (
+        "the driver's interrupt, plus at most one best-effort extra"
+    )
     assert world.user_messages() == 1
     gone_logs = [e for e in logs if e["event"] == "turn.thread_gone"]
     assert len(gone_logs) == 1
@@ -566,7 +576,7 @@ async def test_thread_delete_event_during_a_turn_interrupts_it_and_retires_sessi
     await deleter
     await drain_outcomes()
 
-    assert world.interrupts() == 1
+    assert 1 <= world.interrupts() <= 2  # the driver's, plus at most one best-effort extra
     world.channel_message.channel.send.assert_not_called()
     assert world.thread.send.await_count == 1
     assert world.failed_writes == 0, "no write was issued after the delete event"
@@ -670,7 +680,7 @@ async def test_an_archived_thread_stops_the_turn_but_keeps_its_session(
     await archiver
     await drain_outcomes()
 
-    assert world.interrupts() == 1
+    assert 1 <= world.interrupts() <= 2  # the driver's, plus at most one best-effort extra
     world.channel_message.channel.send.assert_not_called()
     assert world.thread.send.await_count == 1
     assert world.failed_writes == 1
@@ -835,3 +845,44 @@ async def test_an_error_for_a_thread_that_is_already_gone_is_not_posted(
     surface.end_card.assert_not_awaited()  # pyright: ignore[reportOptionalMemberAccess]
     world.thread.send.assert_not_awaited()
     world.channel_message.channel.send.assert_not_called()
+
+
+@_patch_admission
+async def test_a_stop_during_send_initial_still_interrupts_the_session(
+    mock_resolve: AsyncMock,
+    mock_create_session: AsyncMock,
+    mock_find_env: AsyncMock,
+    mock_find_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_nullpool_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The driver ends a Stop that lands while the question is being sent without an interrupt.
+
+    MA would run that turn on for nobody, so the bot interrupts the stopped turn's
+    session itself, before it retires the rows.
+    """
+    _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
+    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    stops = world.bot._thread_stops  # pyright: ignore[reportPrivateUsage]
+    world.on_user_message.append(
+        lambda: stops.signal(_THREAD_ID, reason="gone", code=10003, phase="running")
+    )
+    sessions_interrupted: list[str] = []
+    real_interrupt = interrupt_orphaned_session
+
+    async def recording_interrupt(anthropic: Any, *, session_id: str, **kwargs: Any) -> bool:
+        sessions_interrupted.append(session_id)
+        return await real_interrupt(anthropic, session_id=session_id, **kwargs)
+
+    monkeypatch.setattr(
+        "daimon.adapters.discord.bot.interrupt_orphaned_session", recording_interrupt
+    )
+
+    await _run_mention(world, release_after_s=2)
+
+    assert world.user_messages() == 1
+    assert world.interrupts() >= 1, "MA was told to stop the turn it was just given"
+    assert sessions_interrupted == [_MA_SESSION]
+    world.channel_message.channel.send.assert_not_called()
+    assert await _sessions(world) == (0, 1)

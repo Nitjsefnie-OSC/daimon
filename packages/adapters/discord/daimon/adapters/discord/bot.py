@@ -3449,6 +3449,11 @@ class DaimonBot(commands.Bot):
                 )
                 archive_after = await self._archive_requested(origin.id)
         finally:
+            await self._interrupt_stopped_turn(
+                thread.id,
+                prepared.ma_session_id,
+                outcome.ma_session_id if outcome is not None else None,
+            )
             done_ids = {prepared.mapping_id}
             if outcome is not None:
                 done_ids.add(outcome.mapping_id)
@@ -3552,6 +3557,27 @@ class DaimonBot(commands.Bot):
                 deleted=True,
             )
             await session.commit()
+
+    async def _interrupt_stopped_turn(self, thread_id: int, *session_ids: str | None) -> None:
+        """After a turn that ended with its thread lost, stop its MA session for certain.
+
+        A Stop that lands before the driver has read any events (while the question
+        is still being sent) is finalised without a `user.interrupt`, so MA could
+        go on running a turn nobody can read. An interrupt on an idle session is
+        a no-op, so this is sent for every stopped turn without inspecting how far
+        the driver got. Best effort; runs before the sessions are retired.
+        """
+        if self._thread_stops.get(thread_id) is None:
+            return
+        for session_id in dict.fromkeys(i for i in session_ids if i):
+            try:
+                await interrupt_orphaned_session(self.runtime.anthropic, session_id=session_id)
+            except Exception as exc:  # best effort; the sweep and retired rows cover the rest
+                log.warning(
+                    "thread_gone.interrupt_failed",
+                    session_id=session_id,
+                    err_type=type(exc).__name__,
+                )
 
     async def _retire_gone_thread(self, tenant_id: uuid.UUID, thread_id: int | None) -> None:
         """After a turn: if its thread was deleted, nothing in it may be revived.
@@ -4531,6 +4557,11 @@ class DaimonBot(commands.Bot):
             # a special case here: run_prepared_turn already marked the
             # active mapping dead and returns a normal RunOutcome, so it takes
             # this same path.
+            await self._interrupt_stopped_turn(
+                thread.id,
+                prepared.ma_session_id,
+                outcome.ma_session_id if outcome is not None else None,
+            )
             _done_ids = {prepared.mapping_id}
             if outcome is not None:
                 _done_ids.add(outcome.mapping_id)
