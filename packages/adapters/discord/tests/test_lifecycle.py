@@ -855,6 +855,36 @@ class TestCleanReplace:
         assert lc.final_message_id == "1", "the answer still starts on the card"
         assert lc.feedback_message_id == "3", "the vote emoji go on the last chunk"
 
+    async def test_long_answer_watermark_follows_last_chunk(self) -> None:
+        """The next turn must not read overflow chunks as new delta history."""
+        sent = iter(range(1, 10))
+
+        async def send(**kwargs: Any) -> object:
+            return types.SimpleNamespace(id=next(sent))
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            pass
+
+        lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+        await lc.post_initial()
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x" * 4000)]))
+
+        assert lc.final_message_id == "1", "active-turn and recovery bookkeeping keep the card"
+        assert lc.watermark_message_id == "3", "the watermark follows all answer chunks"
+
+    async def test_single_chunk_watermark_stays_on_the_card(self) -> None:
+        async def send(**kwargs: Any) -> object:
+            return types.SimpleNamespace(id=1)
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            pass
+
+        lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+        await lc.post_initial()
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+
+        assert lc.final_message_id == lc.watermark_message_id == "1"
+
     async def test_short_answer_keeps_the_summary_on_its_one_message(self) -> None:
         lc, _sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())

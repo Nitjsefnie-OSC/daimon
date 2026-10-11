@@ -3340,12 +3340,12 @@ class DaimonBot(commands.Bot):
         )
         final_lifecycle = lifecycle_holder[0]
         if outcome.state.error is None and prepared.mapping_id is not None:
-            if final_lifecycle.final_message_id is not None:
+            if final_lifecycle.watermark_message_id is not None:
                 async with self.runtime.sessionmaker() as session:
                     await update_watermark(
                         session,
                         id=prepared.mapping_id,
-                        watermark_message_id=final_lifecycle.final_message_id,
+                        watermark_message_id=final_lifecycle.watermark_message_id,
                     )
                     await session.commit()
             if final_lifecycle.was_answered and final_lifecycle.feedback_message_id is not None:
@@ -4371,12 +4371,12 @@ class DaimonBot(commands.Bot):
         else:
             log.info("turn.completed", thread_id=thread.id, session_id=outcome.ma_session_id)
             # --- Write watermark (bot's reply message id) ---
-            if mapping_id is not None and final_lifecycle.final_message_id is not None:
+            if mapping_id is not None and final_lifecycle.watermark_message_id is not None:
                 async with self.runtime.sessionmaker() as _wm_session:
                     await update_watermark(
                         _wm_session,
                         id=mapping_id,
-                        watermark_message_id=final_lifecycle.final_message_id,
+                        watermark_message_id=final_lifecycle.watermark_message_id,
                     )
                     await _wm_session.commit()
             # The lifecycle flag below excludes a cancelled turn, which also

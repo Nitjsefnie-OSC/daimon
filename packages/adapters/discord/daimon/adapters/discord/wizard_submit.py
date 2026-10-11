@@ -794,12 +794,12 @@ async def run_wizard_submit_turn_observed(
                 thread_id=thread_id,
                 session_id=outcome.ma_session_id,
             )
-            if mapping_id is not None and final_lifecycle.final_message_id is not None:
+            if mapping_id is not None and final_lifecycle.watermark_message_id is not None:
                 async with bot.runtime.sessionmaker() as wm_session:
                     await update_watermark(
                         wm_session,
                         id=mapping_id,
-                        watermark_message_id=final_lifecycle.final_message_id,
+                        watermark_message_id=final_lifecycle.watermark_message_id,
                     )
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
         _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)

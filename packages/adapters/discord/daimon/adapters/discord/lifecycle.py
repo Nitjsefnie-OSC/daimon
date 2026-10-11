@@ -393,6 +393,7 @@ class DiscordTurnLifecycle:
         # The answer message that carries the summary, once there is one. The
         # vote emoji and the turn's files go on it too.
         self._summary_ref: discord.Message | None = None
+        self._last_answer_chunk_ref: discord.Message | None = None
         # A snowflake just past the turn's end: posts before it belong to the turn.
         self._ended_before: int | None = None
         # The newest Discord-side moment this turn's own sends and edits carried.
@@ -1144,6 +1145,7 @@ class DiscordTurnLifecycle:
             await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
         self._summary_ref = self._message_ref
+        self._last_answer_chunk_ref = self._message_ref
         # Overflow: subsequent chunks posted as new messages, the summary under the last.
         for i, chunk in enumerate(chunks[1:], start=2):
             last = summary is not None and i == len(chunks)
@@ -1152,6 +1154,7 @@ class DiscordTurnLifecycle:
                 allowed_mentions=discord.AllowedMentions.none(),
                 **({"embeds": [summary]} if last else {}),
             )
+            self._last_answer_chunk_ref = sent
             if last:
                 self._summary_ref = sent
         if notify:
@@ -1348,11 +1351,17 @@ class DiscordTurnLifecycle:
 
     @property
     def final_message_id(self) -> str | None:
-        """Discord message id of the last embed the bot posted this turn, or None
-        if nothing was sent (the watermark source for session-per-thread reuse)."""
+        """Discord message ID used for active-turn and recovery bookkeeping."""
         if self._message_ref is None:
             return None
         return str(self._message_ref.id)
+
+    @property
+    def watermark_message_id(self) -> str | None:
+        """Last answer chunk, or the terminal card when no text answer was posted."""
+        if self._last_answer_chunk_ref is not None:
+            return str(self._last_answer_chunk_ref.id)
+        return self.final_message_id
 
     @property
     def ended(self) -> bool:
