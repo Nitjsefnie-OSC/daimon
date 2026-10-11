@@ -222,9 +222,10 @@ async def interrupt_orphaned_session(
     logged and reported as `False`, never raised.
 
     ponytail: the sweeps assume one adapter process per platform (see
-    `list_orphaned_turns`). A second, overlapping process would see the first
-    one's live markers as orphans, and this call would then stop those live
-    MA turns, not just relabel their cards.
+    `list_orphaned_turns`). Callers mark the mapping dead when this returns
+    `False`, so a possibly running session cannot be reused. A second,
+    overlapping process would see the first one's live markers as orphans,
+    and this call would then stop those live MA turns, not just relabel their cards.
     """
     if timeout_s is None:
         timeout_s = ORPHAN_INTERRUPT_TIMEOUT_S
