@@ -112,6 +112,23 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
     return payload
 
 
+async def update_agent_ignored(
+    client: AsyncAnthropic,
+    scope: Scope,
+    agent_id: str,
+    patch: AgentPatch,
+    *,
+    expected: Revision,
+    authorization: ResourceAuthorization,
+) -> None:
+    """Update for legacy callers that consumed no fields of the SDK reply."""
+    authorize(authorization, scope, "agent", agent_id)
+    check_record(scope, agent_id, patch.metadata)
+    kwargs = agent_payload(patch)
+    kwargs["version"] = int(expected.native) if expected.native is not None else expected.local
+    await provider_call(client.beta.agents.update(agent_id, **cast(AgentUpdateParams, kwargs)))
+
+
 def tool_payload(tool: object) -> dict[str, object]:
     # Neutral tools are mapped separately from Anthropic-only toolset schemas.
     from mux.contracts.resources import ToolSpec

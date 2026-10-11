@@ -1845,6 +1845,7 @@ Initial public release.
 [Unreleased]: https://github.com/pymc-labs/daimon/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/pymc-labs/daimon/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/pymc-labs/daimon/releases/tag/v0.1.0
+- Route tenant credential-guidance backfills through the authorized resource driver with the same native update request and conflict behavior.
 
 - Preserve main's immediate interrupt acknowledgements on the optional Anthropic mux path, retaining claimed single-attempt cancellation and closing subscriptions on every exit.
 
