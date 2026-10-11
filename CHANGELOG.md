@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add explicitly injected Gemini conformance recovery and pinned inline-skill preparation hooks, with isolated actual-SDK offline crash/deployment proofs and honest shared-fixture PENDING boundaries.
 
 - Restack the signed offline QA replay, artifact, preparation and credential bindings with current ingress and separate product-profile reporting; frozen catalog assertions and goldens stay unchanged.
+- Reuse test worker engines across fixture aliases so mixed package runs create and drop each worker schema once.
 
 - Pin the separately signed F2-R2 workload and zero-message acceptance envelopes; reject rewritten financial approvals and retain merged A7 claim/output evidence.
 - Document the optional native footer-cost context in the prepared-turn public contract and verify its unset default.

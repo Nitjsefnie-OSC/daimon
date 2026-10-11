@@ -199,6 +199,73 @@ def test_core_and_testing_conftest_reexports_keep_their_real_schema(
     result.assert_outcomes(passed=12, deselected=1)
 
 
+@pytest.mark.usefixtures("db_preflight")
+def test_engine_fixture_aliases_share_worker_schema_lifetime(pytester: pytest.Pytester) -> None:
+    """A local base-engine alias and the next module's engine share one owner."""
+    pytester.makeconftest(
+        """
+import pytest
+import daimon.testing.db as shared
+from daimon.testing.db import db_engine, db_schema
+
+@pytest.fixture(scope="session", autouse=True)
+def schema_lifetime():
+    counts = {"create": 0, "drop": 0}
+    create = shared._create_schema_with_tables
+    drop = shared._drop_schema
+    patch = pytest.MonkeyPatch()
+    async def tracked_create(*args):
+        counts["create"] += 1
+        await create(*args)
+    async def tracked_drop(*args):
+        counts["drop"] += 1
+        await drop(*args)
+    patch.setattr(shared, "_create_schema_with_tables", tracked_create)
+    patch.setattr(shared, "_drop_schema", tracked_drop)
+    yield
+    patch.undo()
+    assert counts == {"create": 1, "drop": 1}
+"""
+    )
+    first = pytester.path / "test_alias.py"
+    first.write_text(
+        """
+import daimon.testing.db as shared
+from sqlalchemy import text
+base_db_engine = shared.db_engine
+
+async def test_alias(base_db_engine, db_engine, db_schema):
+    assert base_db_engine is db_engine
+    async with base_db_engine.begin() as connection:
+        await connection.execute(text(f'CREATE TABLE "{db_schema}".fixture_lifetime (n int)'))
+        await connection.execute(text(f'INSERT INTO "{db_schema}".fixture_lifetime VALUES (7)'))
+"""
+    )
+    second = pytester.path / "test_next_module.py"
+    second.write_text(
+        """
+from sqlalchemy import text
+async def test_next_module(db_engine, db_schema):
+    async with db_engine.connect() as connection:
+        assert await connection.scalar(text(f'SELECT n FROM "{db_schema}".fixture_lifetime')) == 7
+"""
+    )
+    root = Path(__file__).resolve().parents[3]
+    result = pytester.runpytest_subprocess(
+        "-q",
+        "-n",
+        "0",
+        "-p",
+        "no:randomly",
+        "-c",
+        str(root / "pyproject.toml"),
+        str(first),
+        str(second),
+        timeout=120,
+    )
+    result.assert_outcomes(passed=2)
+
+
 @pytest.mark.parametrize("ci", [False, True])
 def test_distinct_schema_definitions_each_admit_before_session_consumers(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, ci: bool
