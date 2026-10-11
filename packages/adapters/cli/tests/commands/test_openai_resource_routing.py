@@ -30,6 +30,7 @@ from daimon.adapters.cli.commands.channels import channels_rule_set
 from daimon.adapters.cli.runtime import CliRuntime, ResourceHostFactory
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import neutral_catalog
 from daimon.core.stores.access_policy import load_access_policy
@@ -55,6 +56,8 @@ OPENAI = BackendConfig(backend="openai", profile="openai.persistent_workspace", 
 GEMINI = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
 ANTHROPIC = BackendConfig()
 DEPLOYMENT_FILE = "DAIMON_TURN__PROVIDER_RUNTIME_FILE"
+# The actor account each stopped `set_channel_rule` call received (see `seen`).
+ACTORS: list[object] = []
 
 
 def _out(console: Console) -> str:
@@ -108,6 +111,71 @@ class _Factory:
 
 class _Stop(Exception):
     pass
+
+
+PRINCIPAL = "cli:testuser"
+AUTHORIZATION = "cli-deployment-operator"
+
+
+def _no_egress(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"native I/O for an unchecked host: {request.url}")
+
+
+def _scope(tenant_id: uuid.UUID, account_id: uuid.UUID, principal: str = PRINCIPAL) -> Scope:
+    return Scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id),
+        principal_id=principal,
+        authorization_id=AUTHORIZATION,
+    )
+
+
+def _driver(scope: Scope, workspace: str) -> Any:
+    from daimon.testing.isolated_sdk import build_async_openai
+    from mux.drivers.openai import OpenAIDriver
+    from mux.drivers.openai.transport import SDKTransport
+    from mux.drivers.openai.turn import MemoryRecoveryJournal
+    from mux.drivers.openai.usage import MemoryUsageRevisions
+
+    return OpenAIDriver(
+        SDKTransport(build_async_openai(transport=httpx.MockTransport(_no_egress))),
+        account_scope_id=workspace,
+        authorization=lambda authorized, _kind, _id: authorized == scope,
+        journal=MemoryRecoveryJournal(),
+        usage_revisions=MemoryUsageRevisions(),
+    )
+
+
+def _real_host(
+    sessions: async_sessionmaker[AsyncSession], scope: Scope, workspace: str = PROJECT
+) -> NeutralResourceHost:
+    """A real neutral resource host whose provider transport refuses any request."""
+    return NeutralResourceHost(
+        _driver(scope, workspace),
+        sessions,
+        scope=scope,
+        account_scope_id=workspace,
+        operation_key="test-operation",
+    )
+
+
+MISMATCHES = ("foreign_tenant", "foreign_account", "other_workspace", "other_principal")
+
+
+def _mismatched(
+    sessions: async_sessionmaker[AsyncSession],
+    kind: str,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+) -> NeutralResourceHost:
+    if kind == "foreign_tenant":
+        return _real_host(sessions, _scope(uuid.uuid4(), account_id))
+    if kind == "foreign_account":
+        return _real_host(sessions, _scope(tenant_id, uuid.uuid4()))
+    if kind == "other_workspace":
+        return _real_host(sessions, _scope(tenant_id, account_id), workspace="other-project")
+    return _real_host(sessions, _scope(tenant_id, account_id, principal="cli:someone-else"))
 
 
 def _with(rt: CliRuntime, factory: _Factory | None) -> CliRuntime:
@@ -177,9 +245,16 @@ async def _configure(
 def seen(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     """What `set_channel_rule` was handed as its resource host; it stops there."""
     hosts: list[object] = []
+    ACTORS.clear()
 
-    async def record(*_args: object, resource_host: object = None, **_kwargs: object) -> object:
+    async def record(
+        *_args: object,
+        resource_host: object = None,
+        actor_account_id: object = None,
+        **_kwargs: object,
+    ) -> object:
         hosts.append(resource_host)
+        ACTORS.append(actor_account_id)
         raise _Stop
 
     monkeypatch.setattr(channels_mod, "set_channel_rule", record)
@@ -253,15 +328,57 @@ async def test_an_authorized_openai_channel_copies_through_the_operator_host(
         channel_id=CHANNEL,
         digest=revision.digest,
     )
-    host = object()
+    host = _real_host(db_session_factory, _scope(tenant_id, account))
     factory = _Factory(host)
     with pytest.raises(_Stop):
         await _copy(_channel_rt(db_session_factory, tenant_id, factory))
     assert seen == [host]
+    assert [account] == ACTORS, "core binds the host to the authorized actor account"
     (call,) = factory.calls
     assert (call["tenant_id"], call["account_id"]) == (tenant_id, account)
-    assert call["principal_id"].startswith("cli:")
+    assert (call["principal_id"], call["authorization_id"]) == (PRINCIPAL, AUTHORIZATION)
     assert call["operation_key"].startswith("cli-channel-copy:")
+
+
+@pytest.mark.parametrize("kind", MISMATCHES)
+async def test_a_copy_through_a_mismatched_host_is_refused_before_any_change(
+    kind: str,
+    seen: list[object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _isolatable(db_session_factory)
+    revision = await _configure(db_session_factory, tenant_id, OPENAI)
+    account = uuid.uuid4()
+    _manifest(
+        tmp_path,
+        monkeypatch,
+        tenant_id=tenant_id,
+        account_id=account,
+        platform="discord",
+        channel_id=CHANNEL,
+        digest=revision.digest,
+    )
+    async with db_session_factory() as session:
+        before = await load_access_policy(session, tenant_id=tenant_id)
+    host = _mismatched(db_session_factory, kind, tenant_id=tenant_id, account_id=account)
+    console = _console()
+    with pytest.raises(typer.Exit):
+        await channels_rule_set(
+            rt=_channel_rt(db_session_factory, tenant_id, _Factory(host)),
+            console=console,
+            platform="discord",
+            workspace_id=GUILD,
+            channel_id=CHANNEL,
+            readers="own",
+            copy_from="shared",
+            discord_transport=None,
+        )
+    assert "different tenant, account or workspace" in _out(console)
+    assert seen == [], "the core copy edge is never reached"
+    async with db_session_factory() as session:
+        assert await load_access_policy(session, tenant_id=tenant_id) == before
 
 
 @pytest.mark.parametrize("manifest", ["absent", "stale_revision", "other_channel"])
@@ -394,17 +511,21 @@ async def _seed(
     return await catalog.put_agent(scope, name, _agent(account_id, name), expected_revision=0)
 
 
-class _Host:
-    """The host's native readback, recorded; the catalog itself is real."""
+class _Host(NeutralResourceHost):
+    """A real, correctly scoped host whose native readback is recorded."""
 
-    def __init__(self, row: AgentRevision) -> None:
+    def __init__(
+        self, sessions: async_sessionmaker[AsyncSession], scope: Scope, row: AgentRevision
+    ) -> None:
+        super().__init__(
+            _driver(scope, PROJECT),
+            sessions,
+            scope=scope,
+            account_scope_id=PROJECT,
+            operation_key="test-operation",
+        )
         self.row = row
         self.read_ids: list[str] = []
-
-    async def find(self, name: str) -> Any:
-        from daimon.core.neutral_resources import HostAgentView
-
-        return HostAgentView(self.row) if name == self.row.agent.spec.name else None
 
     async def read(self, catalog_id: str) -> AgentRevision:
         self.read_ids.append(catalog_id)
@@ -488,7 +609,7 @@ async def test_get_reads_an_authorized_openai_agent_back_through_the_host(
     row = await _seed(db_session_factory, account, "qa-agent")
     _get_manifest(tmp_path, monkeypatch, account)
     opened = _opened(monkeypatch)
-    host = _Host(row)
+    host = _Host(db_session_factory, _scope(_cli_tenant(), account), row)
     factory = _Factory(host)
 
     def no_anthropic(request: httpx.Request) -> httpx.Response:
@@ -552,3 +673,32 @@ def test_the_test_clients_refuse_ambient_settings_by_name(
         _isolated(no_egress)
     with pytest.raises(AmbientSDKConfigurationError, match=name):
         _ma(uuid.uuid4(), "shared")
+
+
+@pytest.mark.parametrize("kind", MISMATCHES)
+async def test_get_through_a_mismatched_host_refuses_without_reading_or_falling_back(
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.cli.runtime import ResourceHostMismatch
+
+    account = await _deployment_account(db_session_factory)
+    await _seed(db_session_factory, account, "qa-agent")
+    _get_manifest(tmp_path, monkeypatch, account)
+    host = _mismatched(db_session_factory, kind, tenant_id=_cli_tenant(), account_id=account)
+
+    def no_anthropic(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"fell back to Anthropic after a mismatched host: {request.url}")
+
+    rt = _with(
+        build_cli_runtime(
+            db_session_factory, anthropic=_isolated(no_anthropic), settings=_GetSettings()
+        ),
+        _Factory(host),
+    )
+    console = _console()
+    with pytest.raises(ResourceHostMismatch):
+        await agents_get(rt=rt, console=console, name="qa-agent", as_json=True)
+    assert "qa-original" not in _out(console)
