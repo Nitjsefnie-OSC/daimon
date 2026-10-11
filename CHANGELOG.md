@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add requester-only Discord cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.
 - Add requester-only Slack cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.
 - Add requester-only Teams cards for typed browser-origin permission and supported authentication actions on alternate-provider turns.
+- Add an explicit, default-off Gemini native agent catalog adapter with concrete skill compilation, fenced creation, independent provider readback and scoped host CAS proofs; existing host routing and inline defaults remain unchanged.
+
 - Isolate Gemini full-byte bundle and F2 replay SDK clients with explicit fixture authentication and owned sync/async transports; refuse ambient provider settings before construction.
 - Add lead-signed whole-column QA budget admission with conservative receipt-based bounds, disjoint monotonic per-cell settlement and terminal release of never-started holds; incomplete usage stays held.
 - Route the shared no-retry Anthropic test builder through isolated SDK admission, retaining its handler/router API, native request bytes, SDK timeout and zero-retry behavior.
