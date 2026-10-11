@@ -74,20 +74,38 @@ and the `turn:<session>:<event>` ledger key are the live path's, so a call
 the live stream or the sweep also records is debited once. It never runs in
 front of the user's message and does not count against the turn ceiling.
 
-- **Bounds.** At most 10 pages of 100 calls per turn, and a single 5-second
-  budget over the whole pass, Managed Agents reads and database work
-  together. A pass that runs out of either keeps what it has committed.
-- **Resuming.** `usage_reconcile_progress` stores, per session, the newest
-  call time the catch-up has covered. The next pass resumes there (less a
-  5-minute overlap for calls that become listable late), so a long backlog is
-  worked through over successive turns instead of rereading the same pages,
-  and a caught-up session costs one small read per turn.
+- **Order.** Managed Agents lists a session's events in `processed_at`
+  order, and its `created_at[gte]`/`created_at[lt]` filters compare
+  `processed_at` (see the List Events API reference); the catch-up relies on
+  both.
+- **Bounds.** Per turn: forward pages up to 10 pages of 100 calls that move
+  the cursor, plus one repair page, all inside a single 5-second budget that
+  covers Managed Agents reads and database work together. A pass that runs
+  out keeps what it has committed.
+- **Adapter time.** The catch-up runs inside the adapter's turn task after the
+  answer is shown, so that task (and anything queued behind it in the same
+  thread) can be held for up to the 5-second budget; a caught-up session
+  usually costs two small reads.
+- **Resuming.** `usage_reconcile_progress` stores, per session, an exact
+  position: the newest call time the forward scan handled and the ids it
+  handled at exactly that time. The next pass resumes there and skips those
+  ids, and pages that only reread them do not count against the page cap, so
+  each pass that can read at least one page moves past what the last one
+  billed, including through calls packed closely together or sharing a
+  timestamp. A backlog is billed over successive turns on the session.
+- **Late calls.** Managed Agents does not document that a call is listable
+  before newer calls are. A separate repair scan therefore rereads the
+  history behind the forward position, one page per turn on its own cursor,
+  restarting from the top once it catches up. A call listed late is billed
+  within one full rescan cycle, which for a session of N calls takes about
+  N / 100 further turns on that session; not if no further turn happens.
 - **Failures.** A Managed Agents or database error is logged as
   `billing.reconcile_failed` (a deleted session as `billing.reconcile_skipped`)
   and never fails the turn; the next turn on the session retries.
 - **Evidence.** A pass that finds a missing call or runs out of budget logs
   `billing.reconciled_unbilled` with `managed_session_id`, `scanned`,
-  `missing` (calls with no usage row when read), `debited` and `debit_usd`
+  `missing` (calls with no usage row when read), `repaired` (of those, found
+  by the repair scan), `debited` and `debit_usd`
   (ledger rows this pass actually inserted), `pages`, `truncated` and
   `elapsed_s`.
 - **Attribution.** A recovered call's `usage_events` row carries the platform

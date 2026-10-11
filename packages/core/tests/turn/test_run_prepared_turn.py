@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn, cast
 
 import anthropic
 import httpx
@@ -467,15 +467,17 @@ async def test_a_slow_billing_catch_up_neither_fails_nor_holds_the_turn(
     await db_session.commit()
     router = _router(session_bodies=[], dead_session_ids=set())
 
-    def _stalled_list(_request: httpx.Request, _match: object) -> httpx.Response:
-        time.sleep(0.5)
+    stall_s, budget_s = 30.0, 0.2
+
+    async def _stalled_list(_request: httpx.Request, _match: object) -> httpx.Response:
+        await asyncio.sleep(stall_s)  # an upstream that never answers in time
         return list_response([])
 
     router.routes.insert(
-        0, ("GET", re.compile(r"/v1/sessions/(?P<sid>[^/]+)/events"), _stalled_list)
+        0, ("GET", re.compile(r"/v1/sessions/(?P<sid>[^/]+)/events"), cast(Any, _stalled_list))
     )
     monkeypatch.setattr(
-        run_module, "reconcile_unbilled", functools.partial(reconcile_unbilled, budget_s=0.05)
+        run_module, "reconcile_unbilled", functools.partial(reconcile_unbilled, budget_s=budget_s)
     )
     deps = _deps(sessionmaker=db_session_factory, router=router)
     prepared = _prepared_turn(
@@ -510,7 +512,8 @@ async def test_a_slow_billing_catch_up_neither_fails_nor_holds_the_turn(
             deadline=(datetime.now(UTC) - timedelta(seconds=5)) if ceiling else None,
         )
 
-    assert time.monotonic() - started < 3.0
+    elapsed = time.monotonic() - started
+    assert elapsed < budget_s + 2.0 < stall_s, f"the turn was held {elapsed:.2f}s by its catch-up"
     expected = TerminationReason.CEILING if ceiling else TerminationReason.COMPLETED
     assert outcome.termination is expected
     assert [e["truncated"] for e in logs if e["event"] == "billing.reconciled_unbilled"] == [True]

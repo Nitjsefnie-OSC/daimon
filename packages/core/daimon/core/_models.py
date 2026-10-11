@@ -3275,18 +3275,27 @@ class DiscordGatewayLease(Base):
 class UsageReconcileProgress(Base):
     """How far the turn-end billing catch-up has read one MA session.
 
-    `covered_through` is the newest `span.model_request_end` `processed_at`
-    the catch-up has metered (or confirmed metered), so the next pass resumes
-    there instead of rereading the session from the start
-    (`daimon.core.usage_reconcile`). A missing row means "never read".
+    Two exact continuations over the session's `span.model_request_end`
+    events, ordered by `processed_at` (`daimon.core.usage_reconcile`):
 
-    Private to `daimon.core.stores.**` per the import-linter ORM contract.
+    - forward: `covered_through` is the newest call time handled, and
+      `covered_ids` the ids handled at exactly that time, so a resumed scan
+      skips them and calls sharing a timestamp can never stall it;
+    - repair: a slower rescan of the already-covered history, one page per
+      pass, that catches a call MA listed only after newer ones. NULL
+      `repair_through` means the next repair cycle starts from the top.
+
+    A missing row means "never read". Private to `daimon.core.stores.**` per
+    the import-linter ORM contract.
     """
 
     __tablename__ = "usage_reconcile_progress"
 
     managed_session_id: Mapped[str] = mapped_column(Text, primary_key=True)
     covered_through: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    covered_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    repair_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    repair_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
