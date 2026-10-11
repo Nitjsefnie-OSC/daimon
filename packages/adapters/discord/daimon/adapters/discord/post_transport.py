@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 import structlog
-from daimon.adapters.discord.thread_gone import ThreadStopped, TurnThreadWatch
+from daimon.adapters.discord.thread_gone import ThreadStopped, TurnThreadWatch, Write
 from daimon.core.agent_identity import identity_enabled_for
 from daimon.core.agent_post_identity import (
     DISCORD_AGENT_WEBHOOK_NAME,
@@ -398,16 +398,16 @@ class DiscordPostTransport:
         if self._watch is not None and self._watch.is_stopped():
             raise ThreadStopped("thread is gone or closed")
 
-    def _note_error(self, exc: discord.HTTPException) -> None:
+    def _note_error(self, exc: discord.HTTPException, write: Write) -> None:
         if self._watch is not None:
-            self._watch.note_error(exc)
+            self._watch.note_error(exc, write=write)
 
     async def send(self, *args: Any, **kwargs: Any) -> discord.Message:  # noqa: ANN401
         self._refuse_if_stopped()
         try:
             return await self._send(*args, **kwargs)
         except discord.HTTPException as exc:
-            self._note_error(exc)
+            self._note_error(exc, "send")
             raise
 
     async def _send(self, *args: Any, **kwargs: Any) -> discord.Message:  # noqa: ANN401
@@ -419,6 +419,7 @@ class DiscordPostTransport:
         retry_files = _snapshot_files(kwargs)
         hook = await self._webhook()
         webhook_rejected = self._creation_fallback
+        self._refuse_if_stopped()  # the lookup awaited: the thread may be lost by now
         if hook is not None:
             destination = self._destination()
             assert destination is not None
@@ -435,6 +436,7 @@ class DiscordPostTransport:
             except discord.HTTPException as exc:
                 if exc.code == 50083 and thread is not None:
                     await thread.edit(archived=False)
+                    self._refuse_if_stopped()
                     try:
                         sent = await hook.send(  # pyright: ignore[reportCallIssue]
                             *args,
@@ -476,12 +478,14 @@ class DiscordPostTransport:
             kwargs["content"] = fallback_name_prefix(self.name, kwargs["content"])
         elif should_prefix and args and isinstance(args[0], str):
             args = (fallback_name_prefix(self.name, args[0]), *args[1:])
+        self._refuse_if_stopped()
         try:
             return await self.channel.send(*args, **_retry_kwargs(kwargs, retry_files))
         except discord.HTTPException as exc:
             if exc.code != 50083 or not isinstance(self.channel, discord.Thread):
                 raise
             await self.channel.edit(archived=False)
+            self._refuse_if_stopped()
             return await self.channel.send(*args, **_retry_kwargs(kwargs, retry_files))
 
     async def edit(self, message: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
@@ -489,7 +493,7 @@ class DiscordPostTransport:
         try:
             return await self._edit(message, **kwargs)
         except discord.HTTPException as exc:
-            self._note_error(exc)
+            self._note_error(exc, "edit")
             raise
 
     async def _edit(self, message: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
@@ -505,6 +509,7 @@ class DiscordPostTransport:
             if self._destination() is None:
                 raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)
+            self._refuse_if_stopped()
             if hook is None:
                 if not allow_replacement:
                     raise discord.ClientException("own webhook token unavailable")
@@ -535,6 +540,7 @@ class DiscordPostTransport:
                     raise discord.ClientException("own webhook no longer exists") from exc
                 return await self.send(_prefix_if_fallback=True, **_replacement_send_kwargs(kwargs))
         # Same id, so callers read it as no replacement; its edited_at is Discord's clock.
+        self._refuse_if_stopped()
         return await message.edit(**kwargs)
 
     async def delete(self, message: discord.Message) -> None:
@@ -542,7 +548,7 @@ class DiscordPostTransport:
         try:
             await self._delete(message)
         except discord.HTTPException as exc:
-            self._note_error(exc)
+            self._note_error(exc, "delete")
             raise
 
     async def _delete(self, message: discord.Message) -> None:
@@ -550,6 +556,7 @@ class DiscordPostTransport:
             if self._destination() is None:
                 raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)
+            self._refuse_if_stopped()
             if hook is None:
                 raise discord.ClientException("own webhook token unavailable")
             destination = self._destination()
@@ -560,6 +567,7 @@ class DiscordPostTransport:
             else:
                 await hook.delete_message(message.id)
             return
+        self._refuse_if_stopped()
         await message.delete()
 
 

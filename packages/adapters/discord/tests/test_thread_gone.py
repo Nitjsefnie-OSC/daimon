@@ -25,8 +25,14 @@ import pytest
 import structlog
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.thread_gone import stop_reason_of
+from daimon.adapters.discord.thread_gone import (
+    ThreadStopped,
+    ThreadStops,
+    TurnThreadWatch,
+    stop_reason_of,
+)
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import new_resolver_cache
@@ -82,7 +88,9 @@ class _SSE(httpx.AsyncByteStream):
         events: list[dict[str, Any]],
         release: asyncio.Event | None,
         drained: asyncio.Event | None = None,
+        after_release: list[dict[str, Any]] | None = None,
     ) -> None:
+        self._after_release = after_release or []
         self._events = events
         self._release = release
         self._drained = drained
@@ -96,6 +104,8 @@ class _SSE(httpx.AsyncByteStream):
             self._drained.set()  # the turn's events are in; it now keeps running
         if self._release is not None:
             await self._release.wait()
+            for event in self._after_release:
+                yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
 
 
 @dataclass
@@ -144,8 +154,9 @@ def _gone(is_send: bool) -> Exception:
     return _http(10003, status=404, cls=discord.NotFound) if is_send else _http(10003)
 
 
-def _closed(_is_send: bool) -> Exception:
-    return _http(50083)
+def _closed_for_sends(is_send: bool) -> Exception:
+    """The card is missing (10008), so its replacement send runs, and that send is refused 50083."""
+    return _http(50083) if is_send else _http(10008, status=404, cls=discord.NotFound)
 
 
 async def _world(
@@ -189,7 +200,7 @@ async def _world(
         headers = {"content-type": "text/event-stream"}
         if streams == 1:
             # The turn: some work, then it keeps running until `release` (or a Stop).
-            return httpx.Response(200, headers=headers, stream=_SSE(working, release, opened))
+            return httpx.Response(200, headers=headers, stream=_SSE(working, release, opened, idle))
         # A Stop's interrupt waits on this stream for the session to go idle; a
         # turn that was let run to its end reads the same idle from here.
         return httpx.Response(200, headers=headers, stream=_SSE(idle, None))
@@ -386,7 +397,7 @@ class TestStopReason:
     def test_matches_the_code_not_the_status(self) -> None:
         assert stop_reason_of(_http(10003, status=400)) == ("gone", 10003)
         assert stop_reason_of(_http(10003, status=404, cls=discord.NotFound)) == ("gone", 10003)
-        assert stop_reason_of(_http(50083)) == ("closed", 50083)
+        assert stop_reason_of(_http(50083), write="send") == ("closed", 50083)
 
     def test_a_missing_webhook_or_message_is_not_a_lost_thread(self) -> None:
         assert stop_reason_of(_http(10015, status=404, cls=discord.NotFound)) is None
@@ -458,7 +469,8 @@ async def test_thread_deleted_mid_turn_interrupts_and_posts_nothing_in_the_chann
             == []
         )
     assert _THREAD_ID not in world.bot._processing  # pyright: ignore[reportPrivateUsage]
-    assert world.bot._thread_stops.get(_THREAD_ID) is None  # pyright: ignore[reportPrivateUsage]
+    stop = world.bot._thread_stops.get(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    assert stop is not None and stop.reason == "gone", "a gone thread stays gone after the release"
 
 
 @_patch_admission
@@ -657,7 +669,7 @@ async def test_thread_delete_event_with_no_turn_running_still_retires_the_sessio
 
 
 @_patch_admission
-async def test_an_archived_thread_stops_the_turn_but_keeps_its_session(
+async def test_a_send_refused_as_archived_stops_the_turn_but_keeps_its_session(
     mock_resolve: AsyncMock,
     mock_create_session: AsyncMock,
     mock_find_env: AsyncMock,
@@ -666,13 +678,14 @@ async def test_an_archived_thread_stops_the_turn_but_keeps_its_session(
     db_nullpool_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """50083 (closed) stops writes like a deletion, but the thread can be mentioned again."""
+    """A send still 50083 after the unarchive-and-retry means closed: stop, keep the session."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
     world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world.thread.edit = AsyncMock(side_effect=_http(50083))  # the unarchive fails too
 
     async def archive_when_running() -> None:
         await world.stream_opened.wait()
-        world.break_thread(_closed)
+        world.break_thread(_closed_for_sends)
 
     archiver = asyncio.create_task(archive_when_running())
     with structlog.testing.capture_logs() as logs:
@@ -682,12 +695,51 @@ async def test_an_archived_thread_stops_the_turn_but_keeps_its_session(
 
     assert 1 <= world.interrupts() <= 2  # the driver's, plus at most one best-effort extra
     world.channel_message.channel.send.assert_not_called()
-    assert world.thread.send.await_count == 1
-    assert world.failed_writes == 1
+    assert world.thread.send.await_count == 2, "the card, then the one replacement that failed"
+    world.thread.edit.assert_awaited_once()
     gone_logs = [e for e in logs if e["event"] == "turn.thread_gone"]
     assert [(e["reason"], e["error_code"]) for e in gone_logs] == [("closed", 50083)]
     assert await _sessions(world) == (1, 0), "a closed thread keeps its live session"
     assert await _admission_handled(world, "1000") == {"1000": True}
+
+
+@_patch_admission
+async def test_archived_edits_do_not_stop_a_turn_whose_answer_is_then_delivered(
+    mock_resolve: AsyncMock,
+    mock_create_session: AsyncMock,
+    mock_find_env: AsyncMock,
+    mock_find_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_nullpool_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread can auto-archive during a slow turn; progress edits fail 50083, the turn goes on."""
+    _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
+    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    archived_edits = iter([_http(50083), _http(50083)])
+
+    def archived_then_open(is_send: bool) -> Exception | None:
+        return None if is_send else next(archived_edits, None)
+
+    async def archive_when_running() -> None:
+        await world.stream_opened.wait()
+        world.break_thread(archived_then_open)
+
+    archiver = asyncio.create_task(archive_when_running())
+    with structlog.testing.capture_logs() as logs:
+        await _run_mention(world, release_after_s=6)
+    await archiver
+    await drain_outcomes()
+
+    assert world.failed_writes == 2, "the archived progress edits really failed"
+    assert world.interrupts() == 0, "and did not stop the turn"
+    assert not [e for e in logs if e["event"] == "turn.thread_gone"]
+    delivered = [c.kwargs.get("content") or "" for c in world.card.edit.await_args_list]
+    assert any("partial answer" in content for content in delivered), "the answer arrived"
+    async with world.sessionmaker() as session:
+        outcomes = await list_outcomes(session, world.tenant_id)
+    assert [o.reason for o in outcomes] == [TerminationReason.COMPLETED]
+    assert await _sessions(world) == (1, 0)
 
 
 @_patch_admission
@@ -886,3 +938,150 @@ async def test_a_stop_during_send_initial_still_interrupts_the_session(
     assert sessions_interrupted == [_MA_SESSION]
     world.channel_message.channel.send.assert_not_called()
     assert await _sessions(world) == (0, 1)
+
+
+def _stale_world() -> tuple[ThreadStops, int]:
+    return ThreadStops(), 4242
+
+
+class TestThreadStopsLifetime:
+    def test_a_closed_record_outlives_its_release_and_a_new_claim_clears_it(self) -> None:
+        stops, thread_id = _stale_world()
+        stops.claim(thread_id)
+        stops.signal(thread_id, reason="closed", code=50083, phase="running")
+        stops.release(thread_id)
+        assert stops.get(thread_id) is not None, "a suspended reaction still sees the stop"
+        stops.claim(thread_id)
+        assert stops.get(thread_id) is None, "a new turn starts clean on an unarchived thread"
+
+    def test_a_gone_record_is_never_cleared(self) -> None:
+        stops, thread_id = _stale_world()
+        stops.claim(thread_id)
+        stops.signal(thread_id, reason="gone", code=10003, phase="running")
+        stops.release(thread_id)
+        stops.claim(thread_id)
+        assert stops.get(thread_id) is not None
+
+    def test_a_healthy_threads_bookkeeping_is_dropped_on_release(self) -> None:
+        stops, thread_id = _stale_world()
+        stops.claim(thread_id)
+        stops.watch(thread_id, asyncio.Event())
+        stops.release(thread_id)
+        assert stops.generation(thread_id) == 0 and thread_id not in stops._cancels  # pyright: ignore[reportPrivateUsage]
+
+    async def test_an_old_turns_late_archive_error_does_not_cancel_the_new_turn(self) -> None:
+        stops, thread_id = _stale_world()
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = thread_id
+        thread.send = AsyncMock(side_effect=_http(50083))
+        thread.edit = AsyncMock(side_effect=_http(50083))
+        client = MagicMock()
+        stops.claim(thread_id)
+        old = DiscordPostTransport(
+            client,
+            thread,
+            name="a",
+            avatar_url=None,
+            builtin=True,
+            identity_enabled=False,
+            watch=TurnThreadWatch(stops, thread_id),
+        )
+        stops.release(thread_id)
+        stops.claim(thread_id)  # the next turn
+        new_cancel = asyncio.Event()
+        stops.watch(thread_id, new_cancel)
+
+        with pytest.raises(discord.HTTPException):
+            await old.send("late")  # the old turn's write fails 50083 after the new turn began
+
+        assert stops.get(thread_id) is None and not new_cancel.is_set()
+
+    async def test_an_old_turns_late_deletion_error_still_stops_the_thread(self) -> None:
+        stops, thread_id = _stale_world()
+        stale = TurnThreadWatch(stops, thread_id)
+        stops.claim(thread_id)
+        new_cancel = asyncio.Event()
+        stops.watch(thread_id, new_cancel)
+        stale.note_error(_http(10003), write="edit")
+        assert stops.get(thread_id) is not None and new_cancel.is_set()
+
+
+async def test_a_stop_signalled_while_the_webhook_lookup_is_suspended_sends_nothing() -> None:
+    stops, thread_id = _stale_world()
+    stops.claim(thread_id)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = thread_id
+    thread.send = AsyncMock()
+    transport = DiscordPostTransport(
+        MagicMock(),
+        thread,
+        name="a",
+        avatar_url=None,
+        builtin=False,
+        identity_enabled=True,
+        watch=TurnThreadWatch(stops, thread_id),
+    )
+    hook = MagicMock()
+    hook.send = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_may_finish = asyncio.Event()
+
+    async def slow_lookup(**_kwargs: Any) -> Any:
+        lookup_started.set()
+        await lookup_may_finish.wait()
+        return hook
+
+    monkeypatch_target = transport
+    monkeypatch_target._webhook = slow_lookup  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+    sending = asyncio.create_task(transport.send("answer"))
+    await lookup_started.wait()
+    stops.signal(thread_id, reason="gone", code=10003, phase="running")
+    lookup_may_finish.set()
+
+    with pytest.raises(ThreadStopped):
+        await sending
+    hook.send.assert_not_awaited()
+    thread.send.assert_not_awaited()
+
+
+@_patch_admission
+async def test_a_reaction_suspended_across_the_release_is_not_followed_by_a_removal(
+    mock_resolve: AsyncMock,
+    mock_create_session: AsyncMock,
+    mock_find_env: AsyncMock,
+    mock_find_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_nullpool_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hourglass call is still in flight when the thread is deleted and the slot released."""
+    _ = (mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
+    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    bot = world.bot
+    stops = bot._thread_stops  # pyright: ignore[reportPrivateUsage]
+    message = _queued_follow_up(1004)
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def suspended_add(*_args: Any) -> None:
+        entered.set()
+        await finish.wait()
+
+    message.add_reaction = AsyncMock(side_effect=suspended_add)
+    bot._processing.add(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    stops.claim(_THREAD_ID)
+    queuing = asyncio.create_task(
+        bot._queue_behind_inflight_turn(_THREAD_ID, message)  # pyright: ignore[reportPrivateUsage]
+    )
+    await entered.wait()
+
+    stops.signal(_THREAD_ID, reason="gone", code=10003, phase="running")
+    await bot._release_and_clear(  # pyright: ignore[reportPrivateUsage]
+        _THREAD_ID, world.tenant_id, clear_reactions=True
+    )
+    assert _THREAD_ID not in bot._processing  # pyright: ignore[reportPrivateUsage]
+    finish.set()
+    await queuing
+
+    message.remove_reaction.assert_not_awaited()
+    assert await _admission_handled(world, "1004") == {}, "no claim row was ever made here"

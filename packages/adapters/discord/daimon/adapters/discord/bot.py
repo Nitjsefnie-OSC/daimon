@@ -2093,6 +2093,7 @@ class DaimonBot(commands.Bot):
                 )
             return
         self._processing.add(thread_id)
+        self._thread_stops.claim(thread_id)
         self._track_processing_task(thread_id)
         with holding(ticket):
             try:
@@ -2498,6 +2499,7 @@ class DaimonBot(commands.Bot):
 
                 thread_id = message.channel.id
                 self._processing.add(thread_id)
+                self._thread_stops.claim(thread_id)
                 self._track_processing_task(thread_id)
                 try:
                     await self._handle_mention(message, guild_id, tenant_id)
@@ -2863,7 +2865,7 @@ class DaimonBot(commands.Bot):
             else:
                 await transport.send(error_text)
         except Exception as post_exc:  # the error post is the last resort; never raise from it
-            if thread is not None and (stop := stop_reason_of(post_exc)) is not None:
+            if thread is not None and (stop := stop_reason_of(post_exc, write="send")) is not None:
                 self._thread_stops.signal(thread.id, reason=stop[0], code=stop[1], phase="failure")
             log.warning(
                 "turn.error_post_failed",
@@ -2916,6 +2918,7 @@ class DaimonBot(commands.Bot):
             (tenant_id, thread, guild_id),
         ):
             return
+        self._thread_stops.claim(thread.id)
         self._track_processing_task(thread.id)
         try:
             await dispatch_and_drain(
@@ -3043,7 +3046,7 @@ class DaimonBot(commands.Bot):
 
     def _release_thread(self, thread_id: int) -> None:
         self._processing_tasks.pop(thread_id, None)
-        self._thread_stops.forget(thread_id)
+        self._thread_stops.release(thread_id)
 
         def resume(_key: int, request: tuple[uuid.UUID, discord.Thread, str]) -> None:
             tenant_id, thread, guild_id = request
@@ -3837,6 +3840,7 @@ class DaimonBot(commands.Bot):
                         and existing.parent_id == message.channel.id
                     ):
                         self._processing.add(existing.id)
+                        self._thread_stops.claim(existing.id)
                         if created_thread_ids is not None:
                             created_thread_ids.append(existing.id)
                         return existing
@@ -3876,6 +3880,7 @@ class DaimonBot(commands.Bot):
                 # No await between creation and registration: follow-ups must queue
                 # behind this turn. The channel branch owns the eventual cleanup.
                 self._processing.add(opened.id)
+                self._thread_stops.claim(opened.id)
                 self._track_processing_task(opened.id)
                 if created_thread_ids is not None:
                     created_thread_ids.append(opened.id)
