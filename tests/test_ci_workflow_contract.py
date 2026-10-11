@@ -1,6 +1,8 @@
 """Keep the CI verdict and image-promotion gates linked as workflows evolve."""
 
+import glob
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -9,10 +11,39 @@ import pytest
 import yaml
 
 _WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+_ROOT = _WORKFLOWS.parents[1]
 
 
 def _workflow(name: str) -> dict[str, Any]:
     return yaml.safe_load((_WORKFLOWS / name).read_text())
+
+
+def test_ci_pytest_commands_collect_top_level_and_performance_tests() -> None:
+    """Expand the paths passed to pytest, so newly added tests remain selected."""
+    selected: set[Path] = set()
+    for job in _workflow("ci.yml")["jobs"].values():
+        for step in job.get("steps", []):
+            command = step.get("run", "")
+            if "uv run pytest" not in command:
+                continue
+            tokens = shlex.split(command)
+            paths = tokens[tokens.index("pytest") + 1 :]
+            for token in paths:
+                if token.startswith("-"):
+                    break
+                for match in glob.glob(str(_ROOT / token)):
+                    path = Path(match)
+                    if path.is_dir():
+                        selected.update(path.rglob("test_*.py"))
+                    elif path.is_file():
+                        selected.add(path)
+
+    expected = {
+        *(_ROOT / "tests").glob("test_*.py"),
+        *(_ROOT / "tests/performance").glob("test_*.py"),
+    }
+    assert expected, "the selection check needs test files to inspect"
+    assert expected <= selected, f"CI omits: {sorted(expected - selected)}"
 
 
 def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
