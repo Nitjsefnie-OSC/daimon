@@ -48,9 +48,6 @@ from uuid import UUID, uuid4
 import aiohttp
 import structlog
 from anthropic.types import RawMessageStreamEvent
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.blockkit import (
     NOTICE_MAX_CHARS,
@@ -80,7 +77,7 @@ from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
-from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.degraded import render_degraded_notice
@@ -210,6 +207,7 @@ class SlackTurnLifecycle:
         self._budget_channel_id = budget_channel_id
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
+        self._agent_name = agent_name
         self._thread_ts = thread_ts
         self._cancel = cancel
         self._author_id = author_id
@@ -257,7 +255,7 @@ class SlackTurnLifecycle:
         self._revealed_first_blocks: list[dict[str, Any]] | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
-        # Admission already adds eyes; only opted-in completion replaces it.
+        # Admission adds eyes; terminal hooks clear them for every tenant.
         if not self._notify_on_completion or phase == "accepted":
             return
         if self._trigger_ts is None or self.final_ts is None:
@@ -267,7 +265,11 @@ class SlackTurnLifecycle:
             timestamp=self._trigger_ts,
             name="white_check_mark",
         )
-        if phase == "done":
+
+    async def _clear_acknowledgment(self) -> None:
+        if self._trigger_ts is None:
+            return
+        with contextlib.suppress(*_SLACK_SEND_ERRORS):
             await self._client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
                 timestamp=self._trigger_ts,
@@ -427,10 +429,8 @@ class SlackTurnLifecycle:
     def _apply_usage(self, state: TurnState) -> None:
         """Price accumulated token totals onto the Block Kit state.
 
-        Reconstructs a per-turn BetaManagedAgentsSpanModelUsage from the four
-        cache-split totals and prices it through cost_of, so the displayed cost
-        matches the billing ledger to the cent. An unpriced model yields None
-        cost and the summary line omits it.
+        Price the short and long prompt request totals at their respective rates.
+        An unpriced model omits the cost from the summary line.
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
@@ -438,14 +438,11 @@ class SlackTurnLifecycle:
             # display tariff is supplied, omit cost rather than synthesize MA usage.
             self._state = dataclasses.replace(self._state, cost_str=None)
             return
-        usage = BetaManagedAgentsSpanModelUsage(
-            input_tokens=t.input_tokens,
-            cache_creation_input_tokens=t.cache_creation_input_tokens,
-            cache_read_input_tokens=t.cache_read_input_tokens,
-            output_tokens=t.output_tokens,
-            speed="standard",
+        cost = cost_of_totals(
+            state.usage_totals,
+            state.long_prompt_usage_totals,
+            MODEL_PRICING.get(self._model_id),
         )
-        cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
         if cost is not None:
             # What the tenant is debited, markup included, so `used` matches `left`.
             cost = float(debit_amount(cost, markup=self._markup))
@@ -763,6 +760,7 @@ class SlackTurnLifecycle:
             if not surface_replaced:
                 await self._repair_terminal_flush(repair_notice)
         finally:
+            await self._clear_acknowledgment()
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
             if self._pending_registered and self._deregister_pending is not None:
@@ -834,8 +832,12 @@ class SlackTurnLifecycle:
                 message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
             )
         try:
-            label = str(err)[:100]
-            body = ""
+            label = "Something went wrong."
+            body = (
+                "Send your message again."
+                if self._channel.startswith("D")
+                else "@mention Daimon to try again."
+            )
             fallback_text: str | None = None
             reason = request_id = None
             # The notice is words on top of the ❌ card, never a reason not to
@@ -844,7 +846,12 @@ class SlackTurnLifecycle:
                 reason = state.termination or termination_reason(err)
                 request_id = self._request_id()
                 notice = render_termination_notice(
-                    reason, state=state, request_id=request_id, error=err
+                    reason,
+                    state=state,
+                    request_id=request_id,
+                    error=err,
+                    in_dm=self._channel.startswith("D"),
+                    agent_name=self._agent_name,
                 )
                 if notice is not None:
                     label, body = notice.headline, format_termination_notice(notice)
@@ -863,15 +870,21 @@ class SlackTurnLifecycle:
             # footer (reason + usage) under the notice and removes the cancel
             # button — Discord parity.
             self._state = update(self._state, EmbedEvent(kind="error", label=label))
-            self._state = dataclasses.replace(self._state, notice=body)
+            self._state = dataclasses.replace(self._state, notice=body, notice_title=label)
             self._apply_usage(state)
             await self._apply_balance()
             await self._flush_terminal(fallback_text)
             self.final_ts = self._status_ts
         except Exception:
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)
-            await self._repair_terminal_flush("Something went wrong.\nMention me to try again.")
+            action = (
+                "Send your message again."
+                if self._channel.startswith("D")
+                else "@mention Daimon to try again."
+            )
+            await self._repair_terminal_flush(f"Something went wrong.\n\n{action}")
         finally:
+            await self._clear_acknowledgment()
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
             if self._pending_registered and self._deregister_pending is not None:

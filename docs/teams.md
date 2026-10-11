@@ -179,8 +179,9 @@ extra skills for whatever agent answers in that channel, added by name,
 with `set_channel_rule` or `daimon channels rule set`. A thread (`;messageid=`)
 counts as its channel, and a channel's own agents send nothing to 1:1 chats. The
 CLI can't read channel names, so a copy it makes is named from the channel id.
-The setup panel lives in the 1:1 chat, outside every channel, so a member's
-Agents list leaves out every channel's own agents; an admin sees all.
+Members see only the responders and agents explicitly allowed at the panel's
+channel/thread. A panel opened in a 1:1 chat has no verified channel and lists
+no agents for members; an admin retains the existing full panel roster.
 
 ### Channel history
 
@@ -421,3 +422,7 @@ different agent posts a notice instead of running. A deployment with
 Group chats, reactions, `/dm` conversations, files in channels whose site is
 not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
+
+Agent Details shows a read-only GitHub section with one repo per line, the
+working repo (or “No working repo”), and a prompt to ask the agent in the
+setup conversation to change repos.

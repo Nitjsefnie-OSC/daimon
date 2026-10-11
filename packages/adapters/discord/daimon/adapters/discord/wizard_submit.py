@@ -8,10 +8,10 @@ additionally claims the row exactly once and starts a billed turn, so it gets
 its own `discord.ui.DynamicItem` template (`SUBMIT_CUSTOM_ID_TEMPLATE`) and
 its own module rather than sharing `WizardNavButton`'s dispatch.
 
-Three things are load-bearing about `callback`'s shape:
+Three things are load-bearing about the submit dispatch:
 
-1. **The acknowledgement comes first, the turn second, and the turn is never
-   awaited from inside `callback`.** discord.py wraps a `DynamicItem`
+1. **The acknowledgement comes before the row lookup and the turn, and the
+   turn is never awaited from inside `callback`.** discord.py wraps a `DynamicItem`
    callback in a bare catch-and-log (verified against the installed
    `discord/ui/view.py`, same as every other class in this adapter's short
    list of persistent dynamic items). A turn can run for minutes; awaiting
@@ -76,7 +76,12 @@ from daimon.adapters.discord.bot import (
     admission_refusal_message,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
-from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.errors import (
+    NOT_SET_UP_NOTICE,
+    SETUP_OUT_OF_DATE_NOTICE,
+    generate_request_id,
+    render_error,
+)
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.provider_actions import (
@@ -93,6 +98,7 @@ from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.wizard import (
     _authorize_tap,  # pyright: ignore[reportPrivateUsage]  # shared requester-only gate the sibling dispatch classes use -- reused verbatim so authorization logic exists in exactly one place
     _load_row,  # pyright: ignore[reportPrivateUsage]  # shared row loader the sibling dispatch classes use -- reused verbatim
+    _reconstruct_row,  # pyright: ignore[reportPrivateUsage]
     _reply_or_followup,  # pyright: ignore[reportPrivateUsage]  # shared is_done()-gated reply helper the sibling dispatch classes use -- reused verbatim
 )
 from daimon.adapters.discord.wizard_render import build_wizard_view
@@ -140,9 +146,9 @@ from discord.ext import commands
 
 _log = structlog.get_logger()
 
-_CALLBACK_FAILED = "Something went wrong submitting this form -- please try again."
-_CHECK_FAILED = "Something went wrong checking this form -- please try again."
-_DRAINING = "I'm restarting right now -- submit this form again in a moment."
+_CALLBACK_FAILED = "Something went wrong.\n\nTry again."
+_CHECK_FAILED = "Something went wrong.\n\nTry again."
+_DRAINING = "Daimon is restarting.\n\nPress Submit again in a minute."
 _OVER_CAP = (
     "Your answers were recorded, but this server has too many chats in flight "
     "right now -- ask again in the thread in a moment."
@@ -161,7 +167,9 @@ class WizardSubmitButton(
     `wizard.py`'s docstrings for why `from_custom_id`/`interaction_check`/
     `callback` each catch their own exceptions."""
 
-    def __init__(self, *, short_id: str, wizard_row: WizardSessionRow | None) -> None:
+    def __init__(
+        self, *, short_id: str, wizard_row: WizardSessionRow | None, lookup_timed_out: bool = False
+    ) -> None:
         button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
             style=discord.ButtonStyle.success,
             label="Submit",
@@ -170,6 +178,7 @@ class WizardSubmitButton(
         super().__init__(button)
         self.short_id = short_id
         self.wizard_row = wizard_row
+        self.lookup_timed_out = lookup_timed_out
 
     @classmethod
     async def from_custom_id(  # type: ignore[override]  # discord.py's ClientT is a free TypeVar; this adapter only ever runs DaimonBot
@@ -181,19 +190,21 @@ class WizardSubmitButton(
     ) -> Self:
         short_id = match["short_id"]
         bot = cast(DaimonBot, interaction.client)
-        wizard_row = await _load_row(bot, short_id)
-        return cls(short_id=short_id, wizard_row=wizard_row)
+        wizard_row, timed_out = await _reconstruct_row(bot, short_id, interaction, defer=True)
+        return cls(short_id=short_id, wizard_row=wizard_row, lookup_timed_out=timed_out)
 
     async def interaction_check(  # type: ignore[override]  # see from_custom_id
         self, interaction: discord.Interaction[commands.Bot], /
     ) -> bool:
         try:
+            if self.lookup_timed_out:
+                return False
             return await _authorize_tap(self.wizard_row, interaction)
         except Exception as err:
             # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
             # dispatcher swallows anything raised here
             _log.exception("wizard_submit.interaction_check_failed", err_type=type(err).__name__)
-            await interaction.response.send_message(_CHECK_FAILED, ephemeral=True)
+            await _reply_or_followup(interaction, _CHECK_FAILED)
             return False
 
     async def callback(  # type: ignore[override]  # see from_custom_id
@@ -205,9 +216,10 @@ class WizardSubmitButton(
                 return
             bot = cast(DaimonBot, interaction.client)
 
-            # The acknowledgement is unconditionally the FIRST statement --
-            # see the module docstring, point 1.
-            await interaction.response.defer()
+            # Reconstruction already deferred this tap; directly constructed
+            # items still need an acknowledgement before the claim.
+            if not interaction.response.is_done():
+                await interaction.response.defer()
 
             spec = WizardSpec.model_validate(row.spec)
             state = WizardState(
@@ -482,22 +494,7 @@ async def run_wizard_submit_turn_observed(
                 short_id=row.id,
                 missing=list(err.missing),
             )
-            hints: list[str] = []
-            if "agent" in err.missing:
-                hints.append(
-                    "An admin can tell Daimon: make an agent answer in this channel or the "
-                    "whole server. Run `/agent-setup` to see who answers where."
-                )
-            if "environment" in err.missing:
-                hints.append(
-                    "An admin of this server or channel can pick an environment in "
-                    "`/agent-setup` → Who answers where."
-                )
-            await channel.send(
-                "Your answers were recorded, but no "
-                f"{' or '.join(err.missing)} configured for this channel -- ask again "
-                "in the thread once it's set up. " + " ".join(hints)
-            )
+            await channel.send(NOT_SET_UP_NOTICE)
             return
         except MAResolverMissError as err:
             _log.warning(
@@ -506,11 +503,7 @@ async def run_wizard_submit_turn_observed(
                 daimon_tag=err.daimon_tag,
                 tenant_id=str(err.tenant_id),
             )
-            await channel.send(
-                "Your answers were recorded, but the configured agent or environment "
-                "no longer exists. An admin of this server or channel can pick another in "
-                "`/agent-setup`; then ask again in the thread."
-            )
+            await channel.send(SETUP_OUT_OF_DATE_NOTICE)
             return
         except AdmissionDenied as err:
             if err.reason == "writers_none":
@@ -532,7 +525,7 @@ async def run_wizard_submit_turn_observed(
                 _log.info("wizard_submit.skipped.over_cap", user_id=str(interaction.user.id))
             if err.reason != "writers_none":
                 await channel.send(
-                    "Your answers were recorded. "
+                    "Your answers were recorded.\n\n"
                     + admission_refusal_message(err.reason, bot.runtime.settings)
                 )
             return
@@ -605,6 +598,7 @@ async def run_wizard_submit_turn_observed(
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
+                in_dm=isinstance(interaction.channel, discord.DMChannel),
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
                 markup=bot.runtime.turn_deps.markup,
@@ -714,6 +708,7 @@ async def run_wizard_submit_turn_observed(
                 send=_send_embed,
                 edit=_edit_message,
                 agent_name=agent.name,
+                in_dm=isinstance(interaction.channel, discord.DMChannel),
                 model_id=agent.model.id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -724,7 +719,7 @@ async def run_wizard_submit_turn_observed(
                 # Take over the failed attempt's message so its upstream-error
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
-                adopt_message_ref=lifecycle.message_ref,
+                adopt_message_ref=lifecycle.release_message_ref(),
             )
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
@@ -811,13 +806,15 @@ async def run_wizard_submit_turn_observed(
                 thread_id=thread_id,
                 session_id=outcome.ma_session_id,
             )
-            if mapping_id is not None and final_lifecycle.final_message_id is not None:
+            if mapping_id is not None and final_lifecycle.watermark_message_id is not None:
                 async with bot.runtime.sessionmaker() as wm_session:
                     await update_watermark(
                         wm_session,
                         id=mapping_id,
-                        watermark_message_id=final_lifecycle.final_message_id,
+                        watermark_message_id=final_lifecycle.watermark_message_id,
+                        delivered_answer_chunk_ids=final_lifecycle.delivered_answer_chunk_ids,
                     )
+                    await wm_session.commit()
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
         _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)
         await _render_wizard_turn_error(

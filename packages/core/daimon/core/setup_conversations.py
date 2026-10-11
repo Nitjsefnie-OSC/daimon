@@ -13,7 +13,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from mux.errors import ScopeViolation
@@ -64,18 +64,18 @@ async def get_setup_agent(
         agent = await retrieve_agent(anthropic, ma_agent_id, scope=backend_scope)
     except APIStatusError as error:
         if error.status_code in (400, 404):
-            raise DaimonError(
+            raise UserFacingError(
                 "That agent no longer exists. Choose another agent for setup."
             ) from error
         raise
     except ScopeViolation:
-        raise DaimonError(
+        raise UserFacingError(
             "That agent is no longer available in this workspace. Choose another agent."
         ) from None
     if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
         tenant_id
     ):
-        raise DaimonError(
+        raise UserFacingError(
             "That agent is no longer available in this workspace. Choose another agent."
         )
     return agent
@@ -87,7 +87,7 @@ async def get_setup_responder(
     try:
         responder = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     except DaimonError as error:
-        raise DaimonError(
+        raise UserFacingError(
             "This setup conversation's Daimon responder is missing. "
             "Ask the operator to restore it, then open a new setup conversation."
         ) from error
@@ -95,7 +95,7 @@ async def get_setup_responder(
         responder.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
         or responder.metadata.get(MA_METADATA_KEY_NAME) != "daimon"
     ):
-        raise DaimonError(
+        raise UserFacingError(
             "This conversation's responder is no longer the built-in Daimon. "
             "Open a new setup conversation."
         )
@@ -114,7 +114,7 @@ async def resolve_setup_agents(
         if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     ]
     if len(responders) != 1:
-        raise DaimonError(
+        raise UserFacingError(
             "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."
         )
     target = None

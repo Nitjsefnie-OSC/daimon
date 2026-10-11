@@ -183,10 +183,10 @@ _RECOVERY_RETRY_DELAY_S = 1.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
-_RESOLVER_MISS = (
-    "The configured agent or environment no longer exists. Pick another with `setup` in a "
-    "1:1 chat with me, or ask an admin to restore it."
-)
+# "Daimon can't answer here": the same words as Discord and Slack, with
+# Teams' `setup` command.
+_NOT_SET_UP = "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `setup`."
+_RESOLVER_MISS = "This channel's setup is out of date.\n\nAsk an admin to check `setup`."
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 _CANCELLING = "Cancelling…"
@@ -194,7 +194,10 @@ _CANCELLING = "Cancelling…"
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
 TEAMS_REFUSAL_NOUNS = RefusalNouns(
-    scope="organisation", admin="an admin", billing="`billing` in a 1:1 chat with me"
+    scope="organisation",
+    admin="an admin",
+    billing="`billing` in a 1:1 chat with me",
+    setup="`setup`",
 )
 # The log event each refusal is recorded under.
 _DENIALS: dict[AdmissionDenialReason, str] = {
@@ -240,12 +243,15 @@ def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
 
 
 def _admission_refusal(
-    err: MissingTurnConfigError | MAResolverMissError | AdmissionDenied, tenant_id: uuid.UUID
+    err: MissingTurnConfigError | MAResolverMissError | AdmissionDenied,
+    tenant_id: uuid.UUID,
+    *,
+    in_dm: bool = False,
 ) -> str | None:
     """Log a refused admission; what to tell the person, if anything."""
     if isinstance(err, MissingTurnConfigError):
         log.info("teams.missing_config", missing=list(err.missing))
-        return f"No {' or '.join(err.missing)} configured here. Ask the operator to set one."
+        return _NOT_SET_UP
     if isinstance(err, MAResolverMissError):
         log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
         return _RESOLVER_MISS
@@ -253,7 +259,7 @@ def _admission_refusal(
     # A protected channel hears nothing, a refusal included.
     if err.reason == "writers_none":
         return None
-    return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS)
+    return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS, in_dm=in_dm)
 
 
 def _agent_name_prefix(
@@ -912,7 +918,7 @@ class TeamsApp:
                 external=ExternalFinding(inbound.is_external, inbound.is_external_known),
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
-            refusal = _admission_refusal(err, tenant_id)
+            refusal = _admission_refusal(err, tenant_id, in_dm=inbound.kind == "dm")
             if refusal is not None and continuation is None:  # queued work settles silently
                 await self._say(inbound, refusal)
             if reraise:
@@ -1003,7 +1009,10 @@ class TeamsApp:
                 # Over the cap the turn waits here, behind its ordinary card:
                 # the queue is never shown.
                 slot = await wait_for_slot(
-                    cancel, sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id
+                    cancel,
+                    sessionmaker=self.runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    default_cap=self._teams.max_concurrent_turns_per_tenant,
                 )
                 if slot != "started":
                     await lifecycle.close_with_notice(
@@ -1141,7 +1150,7 @@ class TeamsApp:
             return
 
         summary: str | None = None
-        if prepared.continuity.state == "replaced" and prepared.continuity.transfer_kind:
+        if prepared.continuity.announces_replacement() and prepared.continuity.transfer_kind:
             summary = render_replacement_summary(prepared.continuity.transfer_kind, lost=[])
             lifecycle.answer_prefix = summary
         if prepared.mapping_id is not None and lifecycle.message_id is not None:

@@ -13,7 +13,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import list_memory_entries, read_memory
@@ -33,7 +33,7 @@ log = structlog.get_logger()
 BotInteraction = Interaction[commands.Bot]
 
 _DISCORD_LIMIT = 1900  # headroom under the 2000-char message cap (split.py convention)
-_EMPTY = "This agent has no memories yet — it will start remembering as it works."
+_EMPTY = "No memory to show here."
 
 
 def _get_runtime(interaction: BotInteraction) -> DiscordRuntime:
@@ -70,7 +70,10 @@ async def _resolve_store(
         runtime.anthropic, tenant_id=tenant_id, name=config.agent_name
     )
     if agent is None:
-        raise DaimonError(f"Configured agent **{config.agent_name}** not found.")
+        log.warning("discord.memory.agent_missing", configured_name=config.agent_name)
+        raise UserFacingError(
+            "The configured agent could not be found. Ask an admin to check the agent setup."
+        )
     channel = interaction.channel
     parent = channel.parent_id if isinstance(channel, discord.Thread) else None
     if is_memory_hidden(
@@ -170,7 +173,7 @@ class MemoryCog(commands.Cog):
                     break
             if mem_id is None:
                 await interaction.followup.send(
-                    f"No memory at `{path}`. Run `/memory` to list paths.",
+                    f"No memory file called `{path}`.\n\nRun `/memory` to see them all.",
                     ephemeral=True,
                 )
                 return

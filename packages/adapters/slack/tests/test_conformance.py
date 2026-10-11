@@ -249,7 +249,7 @@ async def test_production_mutation_rejects_the_same_independent_platform_fixture
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.If)
-            and ast.unparse(node.test) == "thread_id in self._processing"
+            and ast.unparse(node.test) == "thread_key in self._processing"
         ]
         assert len(matching) == 1, "production admission branch must exist"
         matching[0].test = ast.Constant(value=False)

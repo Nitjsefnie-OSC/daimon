@@ -25,6 +25,7 @@ from contextvars import ContextVar
 from typing import Literal
 
 import structlog
+from daimon.core.stores.tenants import get_turn_cap
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.termination import TerminationReason
@@ -99,6 +100,7 @@ async def wait_for_slot(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
+    default_cap: int | None = None,
 ) -> SlotResult:
     """Wait, after the card is up, until this turn holds a slot.
 
@@ -107,7 +109,9 @@ async def wait_for_slot(
     queue is full that is "queue_full". The adapter ends the card as Stopped
     on "cancelled", with `QUEUE_TIMED_OUT_TEXT` on "timed_out", and with its
     balance or capacity refusal on "balance_depleted" or "queue_full". Each
-    records the turn's outcome.
+    records the turn's outcome. Adapters pass their configured `default_cap`
+    so a follow-up reads the current tenant override (or its cleared default)
+    before taking a new ticket.
     """
     holder = _current_holder.get()
     if holder is None:
@@ -117,7 +121,12 @@ async def wait_for_slot(
         holder.current = None
     ticket, holder.first = holder.first, None
     if ticket is None:
-        ticket = holder.template.successor()
+        cap = (
+            await get_turn_cap(sessionmaker, tenant_id=tenant_id, default=default_cap)
+            if default_cap is not None
+            else None
+        )
+        ticket = holder.template.successor(cap=cap)
         if ticket is None:
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=_REASONS["queue_full"])

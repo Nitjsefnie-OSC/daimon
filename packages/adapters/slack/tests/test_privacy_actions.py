@@ -274,7 +274,7 @@ async def test_export_with_no_account_pushes_no_data_modal(
     assert push_calls, "no-account export must still push a result modal"
     body: dict[str, Any] = push_calls[0].kwargs["json"]
     view_text = str(body["view"]["blocks"][0]["text"]["text"])
-    assert "no data" in view_text, "no-account export must say there is nothing on file"
+    assert "You have no daimon account." in view_text
 
 
 async def test_disconnect_deletes_row_and_revokes(
@@ -504,6 +504,11 @@ async def test_privacy_command_replaces_loading_modal_with_error_on_failure(
     assert update_calls, "the Loading… modal must be replaced after account resolution fails"
     body: dict[str, Any] = update_calls[-1].kwargs["json"]
     assert body["view"]["title"]["text"] == "Privacy"
-    text = body["view"]["blocks"][0]["text"]["text"]
-    assert "identity store unavailable" in text
-    assert "rid:" in text
+    blocks = body["view"]["blocks"]
+    assert blocks[0]["text"]["text"] == (
+        "Something went wrong on our side.\n\nTry again. If it keeps happening, tell an admin."
+    )
+    assert blocks[1]["type"] == "context", "the ref is drawn small"
+    assert blocks[1]["elements"][0]["text"].startswith("Ref ")
+    assert len(blocks[1]["elements"][0]["text"]) == len("Ref ") + 6
+    assert "identity store unavailable" not in str(body["view"]), "exception text stays in the logs"

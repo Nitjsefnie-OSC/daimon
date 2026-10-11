@@ -13,14 +13,67 @@ java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -config Metering.cfg Metering.tla
 java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -config BalanceGate.cfg BalanceGate.tla
 ```
 
-The directory holds two models:
+The directory holds four models:
 
 - `Metering.tla` covers who writes a model call's usage and ledger rows, how
   many times, and with which price and attribution.
 - `BalanceGate.tla` covers how far a tenant's balance can go below zero when
   the gate reads the balance once, before spend lands.
+- `BudgetChannelRecovery.tla` checks legacy stamp resolution, replacement on a
+  channel change, and live versus recovered checkpoint attribution.
+- `ReplacementUsage.tla` checks the replacing turn's checkpoint and successor
+  outcome prices alongside their separate ledger debits.
+
+`ReplacementUsageSafe` checks 6 states. `ReplacementUsageUnpriced` reaches
+`PricedObservation` after 3 states: the predecessor checkpoint is debited to A,
+but its diagnostic sample has no registered model. The safe configuration
+registers the predecessor model in `_bind_checkpoint_recorder` before the
+checkpoint event. `BindSuccessor` represents `prepare_session_for_turn` binding
+the new recorder before returning the prepared turn; `SuccessorCall` represents
+the subsequent `run_prepared_turn`. `Sweep` represents the idempotent
+`usage_events` and ledger inserts. This is a bounded ordering check, replayed
+by `test_replacement_checkpoint_live_and_recovered_debits_use_old_channel`
+against PostgreSQL and the MA fake. It does not model failures in the recorder
+or the MA service.
 
 State counts below come from single-worker TLC 2.19 (tla2tools v1.7.4) runs.
+
+## `BudgetChannelRecovery.tla`
+
+The initial MA session carries `daimon_budget_channel=A`. The DB mapping
+either stores A or the legacy unknown marker. `ResolveLegacy` maps to the MA
+retrieve and `set_budget_channel_stamp` in `prepare_session_for_turn`; a failed
+read leaves the marker unknown. `Prepare` compares the stored stamp with the
+new admission and replaces only on a known difference. `Checkpoint` maps to
+`_run_replacement` and `_bind_checkpoint_recorder`: the live debit uses the
+predecessor stamp. `Sweep` maps to `sweep_headless_usage`, which reads that same
+stamp from MA for a missed checkpoint event and reads the successor stamp for
+a missed ordinary turn. The model abstracts archive listing and event dedup.
+
+| Configuration | Verdict | Distinct states | Meaning |
+| --- | --- | ---: | --- |
+| `BudgetChannelRecoverySafe` | clean | 6 | Replacement stamps B before the missed turn event; checkpoint debits A. |
+| `BudgetChannelRecoveryUnsafe` | violates `CorrectDebit` | 6 | Pre-fix reuse leaves A stamped and the sweep charges A. |
+| `BudgetChannelLegacySafe` | clean | 6 | A legacy row reads A from MA and reuses. |
+| `BudgetChannelLegacyChanged` | clean | 6 | A legacy row reads A from MA and replaces for B. |
+| `BudgetChannelLegacyUnsafe` | violates `NoSpuriousReplacement` | 3 | Pre-fix unknown marker replaces an unchanged session. |
+| `BudgetChannelCheckpointUnsafe` | violates `CheckpointDebit` | 6 | Live checkpoint charges B while recovery charges A. |
+| `BudgetChannelReadFailure` | clean | 6 | Failed MA read keeps the mapping unknown and avoids replacement. |
+
+The old reuse trace is replayed by
+`test_missed_usage_after_budget_channel_change_is_recovered_to_current_channel`
+against PostgreSQL and the stateful MA fake: before the fix, the test recorded
+one missed event on the reused session and read `usage.channel_id=channel-a`
+instead of `channel-b`. The two new unsafe traces are replayed by
+`test_legacy_budget_stamp_uses_ma_before_deciding_replacement` and
+`test_replacement_checkpoint_live_and_recovered_debits_use_old_channel`.
+`test_legacy_budget_stamp_read_failure_keeps_mapping_unknown` covers the read
+failure branch. These are PostgreSQL tests with the stateful MA fake; there is
+no staging MA contract test. The model abstracts the replacement pipeline,
+active-turn wait, retries, idempotency and timing. A read failure deliberately
+defers stamp reconciliation, so a missed ordinary turn in that interval may
+still use the old MA channel. It checks one old stamp and two admitted channels,
+not every production interleaving.
 
 ## `Metering.tla`
 

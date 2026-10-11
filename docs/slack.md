@@ -3,6 +3,23 @@
 This page documents how Daimon's Slack adapter handles per-user access and
 what operators should understand about the resulting trust model.
 
+### Agent visibility
+
+Members see only the effective channel and thread responders and agents whose
+explicit rules allow them to answer at that location. Unrouted agents,
+shadowed workspace or deployment defaults, and agents restricted to other
+channels are hidden from the setup panel and agent tool lookups. Agent aliases
+and channels kept to their own agents follow the same rules as on Discord.
+Admins retain their existing visibility.
+
+Agent tools verify location from the active turn origin or a channel-bound
+key. Omitting a turn origin cannot reveal the workspace roster. External
+participants retain the separate restriction on setup tools.
+
+Discovery and mutation authorization are separate: operations that already
+name an agent still apply their existing channel isolation and edit permission
+checks. Knowing an agent name does not grant permission to change it.
+
 ### `/here` card
 
 `/here` sends only the caller a compact channel card. Its title names the agent
@@ -163,20 +180,15 @@ the Daimon operator to switch it. Existing Slack installations need the
 Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle only; messages still trigger conversation only through `app_mention`. An `app_mention` runs a turn only when the message actually contains `@daimon`, so follow-ups in a thread need the mention too; Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
 
 Workspace admins can click **🐙 GitHub** in `/agent-setup` or run `/github`.
-Anyone can run `/github` to see their personal GitHub link. Admins also see
-pending connection links and **Requests waiting**. The ephemeral button opens GitHub to
-confirm repos. Each agent's Details view has
-**🐙 GitHub repos** to add connected repos to an agent. **Settings** changes or
-removes the agent's repos; **Manage connected repos** changes or disconnects
-them for the workspace. New repos appear in a grouped **Connect more repos**
-or **Not now** card when an admin opens GitHub setup after the UTC day closes.
-Installation removals appear as an ephemeral reconnect button when an admin opens setup.
-GitHub request cards use ephemeral replies in their originating thread; no
-GitHub connection or confirmation is sent as a DM. A bare connection confirms
-ephemerally in that channel or thread, while an interrupted task resumes in
-its original thread. Add the
-`/github` command from `docs/slack-app-manifest.yaml` and reinstall the Slack
-app before testing it.
+The GitHub home lists each agent and its repo count without grant controls.
+An agent's **🐙 GitHub repos** section lists its repos one per line, identifies
+its working repo (or says there is none), and says to ask the agent in chat to
+change repos. Connect GitHub remains a browser sign-in link. In the setup
+conversation, ask the agent to connect repos or change its working repo.
+The `/github connect` command can still issue a browser link. GitHub request
+cards use ephemeral replies in their originating thread; connection and
+confirmation are not sent as DMs. Add `/github` from
+`docs/slack-app-manifest.yaml` and reinstall the Slack app before testing it.
 
 Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS`
 (see [architecture](architecture.md#completion-signals)). Enabled turns post their
@@ -308,9 +320,22 @@ This version moves recent channel text, not Slack thread replies or attachments.
 
 Before `/dm` moves a conversation or `/dm enable` changes policy, Daimon checks the
 granted `x-oauth-scopes` for both IM scopes. Missing or unreadable grants refuse
-without saving a route; scope/token errors request reinstall or reauthorization.
+without saving a route. The person sees "Daimon can't use DMs in this workspace
+yet." and "Ask a workspace admin to finish Daimon's DM setup."; the steps below are
+logged as a `slack.dm.setup_incomplete` warning with the workspace's `team_id`.
 The scope header cannot verify event subscriptions: operators must also apply the
 manifest's `message.im` subscription and enable the Messages tab.
+
+#### DM setup
+
+1. Reinstall or reauthorize the Slack app so it holds the `im:history` and
+   `im:write` bot scopes.
+2. Subscribe the app to the `message.im` bot event.
+3. Turn on the Messages tab under App Home.
+4. Run `/dm enable` as a workspace admin.
+
+`docs/slack-app-manifest.yaml` already carries steps 1 to 3; applying it and
+reinstalling covers them.
 
 Private turns use fresh MA sessions with isolated execution credentials. Recent
 private history is replayed, but ephemeral workspace files are not carried forward.

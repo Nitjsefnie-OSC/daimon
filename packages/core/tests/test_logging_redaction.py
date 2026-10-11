@@ -5,11 +5,22 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Iterator
 
 import pytest
 import structlog
 from daimon.core.logging_setup import configure_log_level
 from daimon.core.observability import LogRedactionFilter, install_log_redaction
+
+
+@pytest.fixture(autouse=True)
+def reset_structlog() -> Iterator[None]:
+    """These tests configure structlog at INFO for the whole process; restore the
+    defaults so a later debug-level `capture_logs` in the same worker still sees
+    its events."""
+    yield
+    structlog.reset_defaults()
+    structlog.contextvars.clear_contextvars()
 
 
 def _canary() -> str:

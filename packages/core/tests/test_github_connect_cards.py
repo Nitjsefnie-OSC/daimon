@@ -26,7 +26,11 @@ def test_names_on_connect_card(name: str, shown: str | None) -> None:
         public_base_url="https://mcp.test",
     )
     assert card.author_name == (shown or "This agent")
-    assert card.description == f"Pick repos {shown or 'this agent'} can use."
+    assert (
+        card.description
+        == "Nothing is connected yet.\n\n"
+        + f"Tap the button and tick the repos {shown or 'this agent'} can use."
+    )
     if shown is None:
         assert name not in json.dumps(
             cards.connect_button_blocks("https://mcp.test/secret", card=card)
@@ -83,4 +87,23 @@ def test_card_clips_long_agent_name() -> None:
         public_base_url="https://mcp.test",
     )
     assert card.author_name == name[:80]
-    assert card.description == f"Pick repos {name[:80]} can use."
+    assert (
+        card.description
+        == "Nothing is connected yet.\n\n"
+        + f"Tap the button and tick the repos {name[:80]} can use."
+    )
+
+
+def test_card_names_the_requested_repo_and_the_exact_clicks() -> None:
+    card = cards.build_connect_card(
+        agent_name="ResearchBot",
+        identity_enabled=False,
+        avatar_url=None,
+        public_base_url="https://daimon.example",
+        requested_repo="acme/data",
+    )
+    assert card.description == (
+        "Nothing is connected yet.\n\n"
+        "Tap the button. On the page, click Add repos, make sure acme/data is ticked, "
+        "click Add 1 repo, then Save changes."
+    )

@@ -83,6 +83,7 @@ from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
+from daimon.core.purge import sweep_privacy_session_deletes
 from daimon.core.routine_delivery import (
     DirectPost,
     agent_posted_to,
@@ -246,6 +247,9 @@ async def _build_fire(
             tenant = await get_tenant(s, row.tenant_id)
             if tenant is None:
                 await record_result(s, row.id, tail=None, error="routine tenant not found")
+                return
+            if tenant.archived_at is not None:
+                await record_result(s, row.id, tail=None, error="routine tenant archived")
                 return
             platform = tenant.platform
             principal = await get_or_create_platform_principal(
@@ -487,7 +491,7 @@ async def _build_fire(
             )
         final_state: list[TurnState] = []
 
-        tail = await run_turn(
+        result = await run_turn(
             anthropic=client,
             agent_id=resolved_agent_id,
             environment_id=resolved_env_id,
@@ -517,7 +521,7 @@ async def _build_fire(
 
         if row.destination_kind is None:
             async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=tail, error=None)
+                await record_result(s, row.id, tail=result, error=None)
             return
 
         # Fallback post: only when the agent did not deliver to the
@@ -527,7 +531,7 @@ async def _build_fire(
             await record_result(
                 s,
                 row.id,
-                tail=tail,
+                tail=result,
                 error=None,
                 delivery="skipped" if posted else "pending",
                 delivery_note="agent_posted" if posted else None,
@@ -548,6 +552,16 @@ async def _sweep_pending_files(
         await sweep_pending_file_deletes(client, sm, now=datetime.now(UTC))
     except anthropic.APIError:
         log.exception("scheduler.sweep.failed")
+
+
+async def _sweep_privacy_deletes(
+    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
+) -> None:
+    """Retain failed MA erasures for the next tick."""
+    try:
+        await sweep_privacy_session_deletes(client, sm)
+    except Exception:
+        log.exception("scheduler.privacy_delete_sweep.failed")
 
 
 async def _sweep_headless_usage(
@@ -771,6 +785,7 @@ async def _refresh_github_app_sessions(
                     is_external=False,
                     config=settings.github_app,
                     fernet=fernet,
+                    mounted_only=True,
                 )
                 if desired_urls != snapshot.repo_urls and not active_turn:
                     scope = session_scope(
@@ -901,6 +916,7 @@ async def _refresh_github_app_sessions(
                     is_external=False,
                     config=settings.github_app,
                     fernet=fernet,
+                    mounted_only=True,
                 )
                 if desired_urls != current.repo_urls and not active_turn:
                     await _retire_mcp_app_session(anthropic_client, sm, current, fernet=fernet)
@@ -1053,26 +1069,48 @@ async def _repeat_until_stopped(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
 
+async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None]]) -> None:
+    """One usage pass for `--once`, honouring the same switch as the loop."""
+    if not enabled:
+        log.warning("scheduler.usage_sweep.disabled")
+        return
+    await sweep()
+
+
 async def _run_loops(
     *,
     tick: Callable[[], Awaitable[None]],
-    usage_sweep: Callable[[], Awaitable[None]],
+    usage_sweep: Callable[[], Awaitable[None]] | None,
+    privacy_sweep: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
 ) -> None:
-    """Run ticks and usage sweeps on separate loops until ``stop_event`` is set.
+    """Run ticks and upstream sweeps on separate loops until stopped.
+
+    ``usage_sweep=None`` (the sweep is switched off) runs no usage loop; the
+    privacy deletion loop always runs, since a pending erasure must not wait on
+    an unrelated setting.
 
     A usage pass lists every session in the workspace and can outlast many
-    ticks; inline, routine claims waited for it. On stop the pass in flight is
-    cancelled: each model call commits on its own and an unfinished pass leaves
-    the watermark in place. A crash in either loop ends both and propagates.
+    ticks; inline, routine claims waited for it. On stop the passes in flight
+    are cancelled: each model call commits on its own and an unfinished pass
+    leaves the watermark in place. An uncaught error in any loop ends all loops.
     """
     async with asyncio.TaskGroup() as loops:
-        sweeps = loops.create_task(
-            _repeat_until_stopped(usage_sweep, interval_s=interval_s, stop_event=stop_event)
-        )
+        background = [
+            loops.create_task(
+                _repeat_until_stopped(privacy_sweep, interval_s=interval_s, stop_event=stop_event)
+            )
+        ]
+        if usage_sweep is not None:
+            background.append(
+                loops.create_task(
+                    _repeat_until_stopped(usage_sweep, interval_s=interval_s, stop_event=stop_event)
+                )
+            )
         await _repeat_until_stopped(tick, interval_s=interval_s, stop_event=stop_event)
-        sweeps.cancel()
+        for task in background:
+            task.cancel()
 
 
 async def run(
@@ -1193,8 +1231,12 @@ async def run(
                 wait_for_completion=True,
             )
             await _sweep_pending_files(client, sm)
-            await _sweep_headless_usage(
-                client, sm, markup=settings.billing.markup, watermark=usage_watermark
+            await _sweep_privacy_deletes(client, sm)
+            await _usage_sweep_once(
+                enabled=scheduler_settings.usage_sweep_enabled,
+                sweep=lambda: _sweep_headless_usage(
+                    client, sm, markup=settings.billing.markup, watermark=usage_watermark
+                ),
             )
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
@@ -1254,12 +1296,18 @@ async def run(
                 client, sm, markup=settings.billing.markup, watermark=usage_watermark
             )
 
+        async def privacy_sweep() -> None:
+            await _sweep_privacy_deletes(client, sm)
+
         async with runtime_health(
             "scheduler", engine, settings.observability.health_interval_s, current_turn_counts
         ):
+            if not scheduler_settings.usage_sweep_enabled:
+                log.warning("scheduler.usage_sweep.disabled")
             await _run_loops(
                 tick=tick,
-                usage_sweep=usage_sweep,
+                usage_sweep=usage_sweep if scheduler_settings.usage_sweep_enabled else None,
+                privacy_sweep=privacy_sweep,
                 interval_s=scheduler_settings.tick_interval_s,
                 stop_event=stop_event,
             )

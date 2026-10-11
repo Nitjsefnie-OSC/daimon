@@ -1,14 +1,20 @@
 # serializer version: 1
 # name: TestRenderErrorSnapshot.test_generic_exception_snapshot
   '''
-  ⚠️ **Invalid input**: bad input
-  `rid: 01ARZ3NDEKTSV4RRFFQ69G5FAV`
+  Something went wrong on our side.
+  
+  Try again. If it keeps happening, tell an admin.
+  
+  -# Ref 9G5FAV
   '''
 # ---
 # name: TestRenderErrorSnapshot.test_spec_error_snapshot
   '''
-  ⚠️ **Spec validation failed**: agent 'atlas' is not configured for this tenant
-  `rid: 01ARZ3NDEKTSV4RRFFQ69G5FAV`
+  Something went wrong on our side.
+  
+  Try again. If it keeps happening, tell an admin.
+  
+  -# Ref 9G5FAV
   '''
 # ---
 # name: test_embed_render_snapshot[minimal_thinking]
@@ -30,10 +36,10 @@
   EmbedData(phase=<TurnPhase.DONE: 'done'>, title='', description='', color=5763719, footer='Atlas\u2003\u200342s\u2003\u2003$0.04 used', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[terminal_error_no_trail]
-  EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='Something went wrong.', description='Mention me to try again.', color=15548997, footer='Atlas\u2003\u200342s', details=None, notice=None)
+  EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='Something went wrong.', description='@mention Daimon to try again.', color=15548997, footer='Atlas\u2003\u200342s', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[terminal_error_with_reason]
-  EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='Something went wrong.', description='Mention me to try again.', color=15548997, footer='Atlas\u2003\u200342s', details=None, notice=None)
+  EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='Something went wrong.', description='@mention Daimon to try again.', color=15548997, footer='Atlas\u2003\u200342s', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[thinking_no_now]
   EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='Working on it…', description='', color=3447003, footer=None, details=None, notice=None)

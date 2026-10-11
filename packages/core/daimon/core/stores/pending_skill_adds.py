@@ -5,8 +5,10 @@ previewing turn (`TurnOriginRow`): its person, thread and target agent, and
 the previewed content's hash. When that person's next turn in the thread
 starts, the adapter's own copy of their message settles it
 (`resolve_pending_skill_adds`): an explicit yes approves it for that turn
-alone, anything else cancels it. `add_skill` then consumes it once, from that
-turn, before it expires. Nothing the model passes decides the confirmation.
+alone, anything else cancels it. Messages queued behind a running turn do not
+settle it; the preview stays open for a later direct reply. `add_skill` then
+consumes it once, from that turn, before it expires. Nothing the model passes
+decides the confirmation.
 """
 
 from __future__ import annotations
@@ -45,13 +47,14 @@ async def record_pending_skill_add(
     content_hash: str,
     now: datetime,
 ) -> None:
-    """Open a preview for ``origin``'s person, replacing their open one for this agent.
+    """Open a preview for ``origin``'s person, replacing their open one in this thread.
 
     One upsert on the open-preview unique index, so concurrent previews leave
     exactly one open row and the person's yes answers only the one that won.
     """
     await session.execute(delete(PendingSkillAdd).where(PendingSkillAdd.expires_at <= now))
     preview = {
+        "ma_agent_id": ma_agent_id,
         "content_hash": content_hash,
         "preview_origin_id": origin.id,
         "created_at": now,
@@ -65,7 +68,6 @@ async def record_pending_skill_add(
             account_id=origin.account_id,
             platform=origin.platform,
             thread_id=origin.thread_id,
-            ma_agent_id=ma_agent_id,
             **preview,
         )
         .on_conflict_do_update(
@@ -74,7 +76,6 @@ async def record_pending_skill_add(
                 PendingSkillAdd.account_id,
                 PendingSkillAdd.platform,
                 PendingSkillAdd.thread_id,
-                PendingSkillAdd.ma_agent_id,
             ],
             index_where=PendingSkillAdd.consumed_at.is_(None),
             set_=preview,
@@ -83,12 +84,16 @@ async def record_pending_skill_add(
 
 
 async def resolve_pending_skill_adds(
-    session: AsyncSession, *, origin: TurnOriginRow, message_text: str, now: datetime
+    session: AsyncSession,
+    *,
+    origin: TurnOriginRow,
+    message_text: str,
+    now: datetime,
 ) -> None:
-    """Settle this person's open previews in this thread with their new message.
+    """Settle this person's one open preview in this thread with their new message.
 
-    An explicit yes (`is_affirmative`) approves them for ``origin`` alone;
-    anything else cancels them. Either way their next message has been used.
+    An explicit yes (`is_affirmative`) approves it for ``origin`` alone;
+    anything else cancels it. Queued messages never reach this function.
     """
     still_open = (
         PendingSkillAdd.tenant_id == origin.tenant_id,

@@ -1,0 +1,410 @@
+import json
+import subprocess
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+
+from qa.live.config import Alerts, Config, Pricing
+from qa.live.cost import Ledger
+from qa.live.deployment import run_with_deploy_retry, wait_for_stable_deployment
+from qa.live.discord import DiscordBackend
+from qa.live.report import Alerter, Result
+from qa.live.runner import Executor
+from qa.live.schema import Scenario
+from qa.live.tests.conftest import FakeBackend, FakeJudge
+from qa.live.types import Check, DeploymentEvidence, Message, Pending, Turn, utcnow
+
+
+class RollingBackend(FakeBackend):
+    def __init__(self, *, changed: bool = False, restart: bool = False) -> None:
+        super().__init__()
+        self.probes = 0
+        self.changed = changed
+        self.restart = restart
+
+    def deployment_image(self) -> str:
+        self.probes += 1
+        return ("b" if self.changed and self.probes > 1 else "a") * 40
+
+    def collect(self, turn: Turn, timeout: float) -> None:
+        super().collect(turn, timeout)
+        if self.restart:
+            turn.messages = [
+                {
+                    "id": "card",
+                    "embeds": [
+                        {
+                            "title": "Daimon restarted before this request finished.",
+                            "color": 15158332,
+                        }
+                    ],
+                }
+            ]
+            turn.verdicts = ["other_embed"]
+
+
+@pytest.mark.parametrize("changed,restart", [(True, False), (True, True)])
+def test_changed_image_or_restart_preserves_checks_but_never_product_fails(
+    changed: bool, restart: bool, scenario: Scenario, ledger: Ledger, pricing: Pricing
+) -> None:
+    backend = RollingBackend(changed=changed, restart=restart)
+    backend.verdict = "error"
+    result = Executor(backend, FakeJudge(), ledger, pricing, "staging").run(scenario)
+    assert result.status == "PENDING"
+    assert result.deployment and result.deployment.interrupted
+    assert result.deployment.start_image == "a" * 40
+    assert result.deployment.end_image == ("b" if changed else "a") * 40
+    assert any(check.status == "FAIL" for check in result.checks)
+    assert any(check.reason == "deploy-interrupted" for check in result.checks)
+    if restart:
+        assert result.deployment.events[0]["event"] == "restart_card"
+    assert backend.events[-1] == "delete"
+    assert ledger.charged({result.run_id}) == 0.04
+
+
+def test_stable_deployment_keeps_real_product_failure(
+    scenario: Scenario, ledger: Ledger, pricing: Pricing
+) -> None:
+    backend = RollingBackend()
+    backend.verdict = "error"
+    result = Executor(backend, FakeJudge(), ledger, pricing, "staging").run(scenario)
+    assert result.status == "FAIL"
+    assert result.deployment and not result.deployment.interrupted
+
+
+def test_verified_images_keep_product_failure_when_event_logs_unavailable(
+    monkeypatch: pytest.MonkeyPatch, scenario: Scenario, ledger: Ledger, pricing: Pricing
+) -> None:
+    backend = RollingBackend()
+    backend.verdict = "error"
+
+    def unavailable(*args: object) -> list[Message]:
+        raise Pending("logging unavailable")
+
+    monkeypatch.setattr(backend, "deployment_events", unavailable)
+    result = Executor(backend, FakeJudge(), ledger, pricing, "staging").run(scenario)
+    assert result.status == "FAIL"
+    assert result.deployment and not result.deployment.interrupted
+    assert result.deployment.start_image == result.deployment.end_image == "a" * 40
+    assert any(check.kind == "deployment" and check.status == "PENDING" for check in result.checks)
+    assert any("deployment observation unavailable: Pending" in note for note in result.notes)
+
+
+def test_end_probe_pending_retries_after_settle_without_pending_streak(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    scenario: Scenario,
+    ledger: Ledger,
+    pricing: Pricing,
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr("qa.live.deployment.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        "qa.live.deployment.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds)
+    )
+
+    class MixedAtEnd(RollingBackend):
+        def deployment_image(self) -> str:
+            self.probes += 1
+            if self.probes in (2, 3):
+                raise Pending("mixed/not-ready workers")
+            return ("a" if self.probes == 1 else "b") * 40
+
+    instances: list[RollingBackend] = []
+
+    def factory() -> Executor:
+        if instances:
+            assert now[0] >= 40
+        backend = RollingBackend() if instances else MixedAtEnd()
+        if not instances:
+            backend.verdict = "error"
+        instances.append(backend)
+        return Executor(backend, FakeJudge(), ledger, pricing, "staging")
+
+    state = tmp_path / "state.json"
+    prior = {f"staging:{scenario.id}": {"pending_count": "2"}}
+    state.write_text(json.dumps(prior))
+    alerter = Alerter(Alerts(inbox=str(tmp_path / "alerts"), command=[]), state)
+
+    def persist(result: Result) -> None:
+        if len(instances) == 1:
+            alerter.notify(result, tmp_path / "result.json")
+            assert json.loads(state.read_text()) == prior
+
+    attempts = run_with_deploy_retry(scenario, factory, persist, retry_allowed=lambda: True)
+    assert len(attempts) == 2
+    first, retry = attempts
+    assert first.status == "PENDING"
+    assert first.deployment and first.deployment.interrupted
+    assert first.deployment.start_image == "a" * 40 and first.deployment.end_image is None
+    assert any(check.reason == "deploy-interrupted" for check in first.checks)
+    assert any(check.status == "FAIL" for check in first.checks)
+    assert retry.status == "PASS" and retry.retry_of == first.run_id
+    assert not (tmp_path / "alerts").exists()
+    assert ledger.charged({first.run_id, retry.run_id}) == 0.08
+
+
+def test_interrupted_runs_never_alert_or_change_pending_streak(tmp_path: Path) -> None:
+    state = tmp_path / "state.json"
+    prior = {"staging:QA-TEST": {"pending_count": "2", "status": "FAIL"}}
+    state.write_text(json.dumps(prior))
+    alerter = Alerter(Alerts(inbox=str(tmp_path / "alerts"), command=[]), state)
+    result = Result(
+        "interrupted", "QA-TEST", "staging", deployment=DeploymentEvidence(interrupted=True)
+    )
+    result.checks = [Check("watch", "FAIL", "timeout")]
+    result.finalize()
+    for _ in range(4):
+        alerter.notify(result, tmp_path / "result.json")
+    assert json.loads(state.read_text()) == prior
+    assert not (tmp_path / "alerts").exists()
+
+
+@pytest.mark.parametrize("twice,allowed", [(False, True), (True, True), (False, False)])
+def test_retry_waits_for_stability_is_fresh_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    twice: bool,
+    allowed: bool,
+    scenario: Scenario,
+    ledger: Ledger,
+    pricing: Pricing,
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr("qa.live.deployment.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        "qa.live.deployment.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds)
+    )
+    instances: list[RollingBackend] = []
+    persisted: list[str] = []
+
+    def factory() -> Executor:
+        if instances:
+            assert now[0] >= 30
+            assert persisted == [first_id[0]]
+        backend = RollingBackend(changed=not instances or twice)
+        instances.append(backend)
+        return Executor(backend, FakeJudge(), ledger, pricing, "staging")
+
+    first_id: list[str] = []
+
+    def persist(result: Result) -> None:
+        if not first_id:
+            first_id.append(result.run_id)
+        persisted.append(result.run_id)
+
+    results = run_with_deploy_retry(scenario, factory, persist, retry_allowed=lambda: allowed)
+    assert len(instances) == (2 if allowed else 1)
+    assert results[0].status == "PENDING"
+    if allowed:
+        assert results[1].retry_of == results[0].run_id
+        assert results[1].status == ("PENDING" if twice else "PASS")
+        assert len(persisted) == 2
+    else:
+        assert "budget" in results[0].notes[-1]
+
+
+def test_mixed_workers_cannot_settle(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [0.0]
+    monkeypatch.setattr("qa.live.deployment.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        "qa.live.deployment.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds)
+    )
+    backend = FakeBackend()
+
+    def unavailable() -> str:
+        raise Pending("mixed workers")
+
+    monkeypatch.setattr(backend, "deployment_image", unavailable)
+    with pytest.raises(Pending, match="did not settle"):
+        wait_for_stable_deployment(backend, timeout_s=35)
+
+
+def test_probe_requires_all_worker_images_and_full_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = Config.model_validate_json(Path("qa/live/config.example.json").read_text())
+    config.staging.enabled = True
+    config.staging.deployment_probe = ["readonly-probe"]
+    backend = DiscordBackend(config, "staging")
+    sha = "a" * 40
+    workers = {f"daimon-{name}-1": sha for name in ("discord", "slack", "teams", "scheduler")}
+    response = subprocess.CompletedProcess(
+        ["readonly-probe"], 0, json.dumps({"image": sha, "workers": workers}), ""
+    )
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args == ["readonly-probe"]
+        assert json.loads(str(kwargs["input"])) == {
+            "env": "staging",
+            "guild_id": config.staging.guild_id,
+            "read_only": True,
+        }
+        return response
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert backend.deployment_image() == sha
+    workers["daimon-slack-1"] = "b" * 40
+    response.stdout = json.dumps({"image": sha, "workers": workers})
+    with pytest.raises(Pending, match="mixed"):
+        backend.deployment_image()
+
+
+def test_restart_logs_are_scoped_to_turn_and_active_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = Config.model_validate_json(Path("qa/live/config.example.json").read_text())
+    config.staging.enabled = True
+    backend = DiscordBackend(config, "staging")
+    end = utcnow() - timedelta(seconds=60)
+    start = end - timedelta(seconds=100)
+    turn = Turn(1, "trigger", "parent", start, ended_at=end - timedelta(seconds=10))
+    turn.messages = [{"id": "owned-card"}]
+    active = start + timedelta(seconds=5)
+    rows: list[Message] = [
+        {"jsonPayload": {"event": "discord.draining", "timestamp": active.isoformat()}},
+        {"jsonPayload": {"event": "discord.draining", "timestamp": end.isoformat()}},
+        {
+            "jsonPayload": {
+                "event": "turn.card_orphan_retirement_completed",
+                "timestamp": active.isoformat(),
+                "message_id": "owned-card",
+            }
+        },
+        {
+            "jsonPayload": {
+                "event": "turn.card_orphan_retirement_completed",
+                "timestamp": active.isoformat(),
+                "message_id": "other-card",
+            }
+        },
+    ]
+
+    def logs(query: str) -> list[Message]:
+        assert "owned-card" in query and "discord.draining" in query
+        return rows
+
+    monkeypatch.setattr(backend, "_read_logs", logs)
+    evidence = backend.deployment_events(start, end, [turn])
+    assert [row["affects_turn"] for row in evidence] == [True, False, True]
+
+
+@pytest.mark.parametrize("budget", [True, False])
+@pytest.mark.parametrize("probe_pending", [True, False])
+@pytest.mark.parametrize("restart", [True, False])
+def test_same_image_probe_recovery_restores_alertable_failure_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    budget: bool,
+    probe_pending: bool,
+    restart: bool,
+    scenario: Scenario,
+    ledger: Ledger,
+    pricing: Pricing,
+) -> None:
+    from qa.live.report import report
+
+    clock = [0.0]
+    monkeypatch.setattr("qa.live.deployment.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "qa.live.deployment.time.sleep", lambda s: clock.__setitem__(0, clock[0] + s)
+    )
+
+    class CrashingBackend(RollingBackend):
+        def deployment_image(self) -> str:
+            self.probes += 1
+            if probe_pending and self.probes == 2:
+                raise Pending("worker not ready")
+            return "a" * 40
+
+    backend = CrashingBackend(restart=restart)
+    backend.verdict = "error"
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({f"staging:{scenario.id}": {"pending_count": "2"}}))
+    alerter = Alerter(Alerts(inbox=str(tmp_path / "alerts"), command=[]), state)
+    snapshots: list[str] = []
+
+    def persist(result: Result) -> None:
+        snapshots.append(result.status)
+        alerter.notify(result, report(result, tmp_path))
+
+    instances = []
+
+    def factory() -> Executor:
+        instances.append(backend)
+        return Executor(backend, FakeJudge(), ledger, pricing, "staging")
+
+    results = run_with_deploy_retry(scenario, factory, persist, retry_allowed=lambda: budget)
+    assert len(results) == len(instances) == 1
+    result = results[0]
+    assert snapshots == (["PENDING", "FAIL"] if probe_pending else ["FAIL"])
+    assert result.status == "FAIL"
+    assert result.deployment and not result.deployment.interrupted
+    assert result.deployment.end_probe_pending is probe_pending
+    assert result.deployment.start_image == result.deployment.end_image == "a" * 40
+    assert result.deployment.settled_image == ("a" * 40 if probe_pending else None)
+    if restart:
+        assert any(c.reason == "worker restarted on the same image" for c in result.checks)
+    assert len(list((tmp_path / "alerts").glob("qa-canary-FAIL-*.md"))) == 1
+    assert json.loads(state.read_text())[f"staging:{scenario.id}"]["pending_count"] == "0"
+    assert ("end_probe_pending" in capsys.readouterr().out) is probe_pending
+    assert ledger.charged({result.run_id}) == 0.04
+
+
+@pytest.mark.parametrize("logs_down", [True, False])
+@pytest.mark.parametrize("product_failure", [True, False])
+def test_same_image_restore_retains_original_observation_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    logs_down: bool,
+    product_failure: bool,
+    scenario: Scenario,
+    ledger: Ledger,
+    pricing: Pricing,
+) -> None:
+    class RecoveringBackend(RollingBackend):
+        def deployment_image(self) -> str:
+            self.probes += 1
+            if self.probes == 2:
+                raise Pending("mixed workers")
+            return "a" * 40
+
+        def deployment_events(self, start: object, end: object, turns: list[Turn]) -> list[Message]:
+            if logs_down:
+                raise Pending("logging unavailable")
+            return []
+
+    backend = RecoveringBackend()
+    if product_failure:
+        backend.verdict = "error"
+    monkeypatch.setattr("qa.live.deployment.wait_for_stable_deployment", lambda backend: "a" * 40)
+    snapshots: list[str] = []
+    instances: list[Executor] = []
+
+    def factory() -> Executor:
+        executor = Executor(backend, FakeJudge(), ledger, pricing, "staging")
+        instances.append(executor)
+        return executor
+
+    attempts = run_with_deploy_retry(
+        scenario,
+        factory,
+        lambda result: snapshots.append(result.status),
+        retry_allowed=lambda: False,
+    )
+    assert len(attempts) == len(instances) == 1
+    result = attempts[0]
+    expected = "FAIL" if product_failure else ("PENDING" if logs_down else "PASS")
+    assert snapshots == ["PENDING", expected]
+    assert result.status == expected
+    assert result.deployment and not result.deployment.interrupted
+    assert result.deployment.events_error == (
+        "deployment observation unavailable: Pending" if logs_down else None
+    )
+    assert (
+        any(
+            c.kind == "deployment"
+            and c.status == "PENDING"
+            and c.reason == result.deployment.events_error
+            for c in result.checks
+        )
+        is logs_down
+    )
+    assert not any(c.reason == "deploy-interrupted" for c in result.checks)
+    assert ledger.charged({result.run_id}) == 0.04

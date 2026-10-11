@@ -151,7 +151,8 @@ async def send_interrupt_and_wait(
     terminal idle or `timeout_s` elapses.
 
     Per refinements §5 (interrupt UX):
-    - POST `user.interrupt`.
+    - Open the SSE stream before posting `user.interrupt`, so an immediate
+      idle acknowledgement cannot arrive before the subscription.
     - Wait up to `timeout_s` (default 120s) for a `session.status_idle` whose
       `stop_reason.type` is in `_INTERRUPT_TERMINAL` (`end_turn`,
       `retries_exhausted`, or `requires_action`). `requires_action` IS treated
@@ -164,15 +165,18 @@ async def send_interrupt_and_wait(
     helper is pure I/O-and-wait.
     """
     transport = LegacyTurnTransport(anthropic, session_id, scope=scope)
-    await transport.send([{"type": "user.interrupt"}])
 
     async def _wait_for_terminal_idle() -> None:
         stream = await transport.open_interrupt_stream()
-        async for event in stream:
-            if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
-                continue
-            if event.stop_reason.type in _INTERRUPT_TERMINAL:
-                return
+        try:
+            await transport.send([{"type": "user.interrupt"}])
+            async for event in stream:
+                if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
+                    continue
+                if event.stop_reason.type in _INTERRUPT_TERMINAL:
+                    return
+        finally:
+            await stream.close()
         raise TurnError(
             kind="interrupt_timeout",
             message=f"MA SSE stream closed without terminal idle (timeout {timeout_s}s)",
@@ -227,9 +231,10 @@ async def interrupt_orphaned_session(
     logged and reported as `False`, never raised.
 
     ponytail: the sweeps assume one adapter process per platform (see
-    `list_orphaned_turns`). A second, overlapping process would see the first
-    one's live markers as orphans, and this call would then stop those live
-    MA turns, not just relabel their cards.
+    `list_orphaned_turns`). Callers mark the mapping dead when this returns
+    `False`, so a possibly running session cannot be reused. A second,
+    overlapping process would see the first one's live markers as orphans,
+    and this call would then stop those live MA turns, not just relabel their cards.
     """
     if scope is None:
         log.info(
@@ -469,10 +474,13 @@ async def delete_sessions_for_account(
     *,
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
+    pending_session_ids: set[str] | None = None,
+    on_discovered: Callable[[set[str]], Awaitable[None]] | None = None,
+    on_deleted: Callable[[str], Awaitable[None]] | None = None,
 ) -> SessionDeletionReport:
     """Hard-delete every MA session tagged for `account_id` under `tenant_id`.
 
-    Enumeration: list the tenant's agents (list_agents_by_tenant), then
+    Enumeration: list the tenant's live and archived agents, then
     sessions.list(agent_id=...) per agent, client-side filter on
     metadata[MA_METADATA_KEY_ACCOUNT] == str(account_id). Best-effort:
     per-session failures are counted, not raised. 404 = already gone
@@ -480,10 +488,10 @@ async def delete_sessions_for_account(
     """
     # Local imports break the circular dependency:
     # ma.py <-> defaults/__init__ -> apply -> reconcile_skills -> ma.py
-    from daimon.core.defaults.ma_index import list_agents_by_tenant
+    from daimon.core.defaults.ma_index import list_agents_for_privacy_deletion
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 
-    agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+    agents = await list_agents_for_privacy_deletion(client, tenant_id=tenant_id)
     scope = resource_scope(
         tenant_id=str(tenant_id), account_id=str(account_id), authorization_id="account-purge"
     )
@@ -501,6 +509,10 @@ async def delete_sessions_for_account(
             if session.metadata.get(MA_METADATA_KEY_ACCOUNT) == str(account_id):
                 target_ids.add(session.id)
 
+    if on_discovered is not None and target_ids:
+        await on_discovered(target_ids)
+    target_ids.update(pending_session_ids or ())
+
     deleted = 0
     failed = 0
     backend = managed_agents(
@@ -517,9 +529,13 @@ async def delete_sessions_for_account(
                 )
             )
             deleted += 1
+            if on_deleted is not None:
+                await on_deleted(session_id)
         except APIStatusError as err:
             if err.status_code == 404:
                 deleted += 1
+                if on_deleted is not None:
+                    await on_deleted(session_id)
             else:
                 failed += 1
 

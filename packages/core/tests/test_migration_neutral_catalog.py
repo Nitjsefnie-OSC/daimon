@@ -18,7 +18,7 @@ TABLES = {"neutral_agent_revisions", "neutral_skill_versions"}
 
 
 def migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0079_neutral_catalog.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0089_neutral_catalog.py"
     spec = importlib.util.spec_from_file_location("neutral_catalog_migration", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

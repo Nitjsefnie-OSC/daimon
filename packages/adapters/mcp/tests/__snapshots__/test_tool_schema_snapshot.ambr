@@ -620,8 +620,8 @@
         github.com/owner/project", "point it at our open-source repository".
         <blank line>
         Only for a repository that needs no token to clone; this checks, and
-        refuses otherwise. When a token is needed, use ``request_repo_binding``,
-        which collects one privately.
+        refuses otherwise. For a private repo, use ``github_connect`` (the
+        Connect GitHub link); never suggest a token.
         <blank line>
         The agent checks it out and works in it from your next message here, and
         anyone who talks to it works in it too. Files already open in this
@@ -2499,8 +2499,9 @@
         answers that seems wrong for the channel, or before changing a default —
         the tier that currently wins is the tier worth changing.
         <blank line>
-        Not admin-gated: this is a read of routing any member can already infer
-        from a reply's footer.
+        Members must pass turn_controls.origin_context_id and use its channel/thread;
+        channel-bound keys can read their own channel. Hidden agents and configuration
+        targets are omitted. Admins retain their routing view within channel isolation.
         <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
@@ -2517,6 +2518,17 @@
         'properties': dict({
           'channel_id': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'thread_id': dict({
             'anyOf': list([
@@ -2877,12 +2889,26 @@
       }),
     }),
     'get_skill': dict({
-      'description': 'Look up a skill by name. Returns detail including version count.',
+      'description': '''
+        Look up a visible skill by name, including version count. Pass
+        turn_controls.origin_context_id for skills of local responders.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
@@ -2989,15 +3015,25 @@
     }),
     'github_connect': dict({
       'description': '''
-        Connect this agent to GitHub when someone asks to set up GitHub.
+        Give this agent token access to more repos, such as a private GitHub repo.
         <blank line>
-        Show the admin a single-use connection button bound to the selected agent.
-        Members get Ask an admin and a recorded request. Never repeat a private
+        Show a single-use connection button bound to the selected agent to a
+        server admin, or to a channel admin who manages that agent; repos
+        connected this way are for that agent only. Other members get Ask an
+        admin and a recorded request. Never repeat a private
         link in a shared reply. For a setup target, pass its current name and
         MA id from turn_controls; otherwise this defaults to the responder.
         When GitHub access interrupted a task, pass a short restatement as
         requested_work so the task resumes after connection. Leave it empty
         when someone only asks to connect GitHub.
+        For a clear 'give this agent access to owner/repo', call with repo_name
+        right away; don't ask for a yes first. Ask only if the repo or agent is
+        unclear. Use write only if asked. confirmed is ignored. A connected repo is granted
+        directly when this person may grant it. Otherwise the single Connect
+        GitHub link lets them connect that repo in a browser. Connecting repos
+        gives token access; it does not put them all in the filesystem.
+        After it posts, nothing is connected until the person saves on the page.
+        The card carries the steps: never repeat them, and never say done or connected.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3013,6 +3049,10 @@
             ]),
             'default': None,
           }),
+          'confirmed': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'expected_ma_agent_id': dict({
             'anyOf': list([
               dict({
@@ -3025,7 +3065,19 @@
             'default': None,
           }),
           'origin_context_id': dict({
+            'default': '',
             'type': 'string',
+          }),
+          'repo_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'requested_work': dict({
             'anyOf': list([
@@ -3038,10 +3090,15 @@
             ]),
             'default': None,
           }),
+          'required_ability': dict({
+            'default': 'read',
+            'enum': list([
+              'read',
+              'write',
+            ]),
+            'type': 'string',
+          }),
         }),
-        'required': list([
-          'origin_context_id',
-        ]),
         'type': 'object',
       }),
     }),
@@ -3159,9 +3216,13 @@
     }),
     'list_agents': dict({
       'description': '''
-        List agents in the tenant pool, including each agent's attached
-        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination.
-        Pass this turn's ``origin_context_id`` so its channel counts.
+        List agents visible here, including their attached ``mcp_servers`` and ``skills``.
+        <blank line>
+        Members see the channel/thread responders and agents explicitly allowed
+        to run here; unrouted agents and other channels' agents are hidden.
+        Pass this turn's ``origin_context_id`` to verify its location. Without
+        a verified location a member cannot list unrestricted agents. Admins
+        retain their existing visibility. ``page`` is reserved for pagination.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3549,10 +3610,24 @@
       }),
     }),
     'list_skills': dict({
-      'description': 'List all custom skills.',
+      'description': '''
+        List visible custom skills. Pass turn_controls.origin_context_id so member
+        reads include skills belonging to this conversation's local responders.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
         }),
         'type': 'object',
       }),
@@ -3650,12 +3725,11 @@
         <blank line>
         For requests to set up or hook up GitHub for an agent, use
         ``github_connect`` instead.
-        For a private repo with a working token, use ``request_repo_binding`` instead.
-        A token remains the fallback and existing bound tokens keep being used.
+        Never suggest a GitHub token; existing bound tokens keep being used.
         <blank line>
         Posts a link button in this channel opening GitHub's install page. It cannot
         tell whether installation happened. Installing alone neither verifies this
-        tenant's access nor binds a working repo; use ``request_repo_binding`` and
+        tenant's access nor binds a working repo; use ``github_connect`` and
         verify access through the requested operation afterwards.
       ''',
       'parameters': dict({
@@ -4189,6 +4263,59 @@
         'type': 'object',
       }),
     }),
+    'remove_repo': dict({
+      'description': '''
+        Remove owner/repo from this agent only.
+        <blank line>
+        A clear ask is enough: call it right away and reply with the returned
+        line. Ask only if the repo or agent is unclear. confirmed is ignored.
+        The Connect GitHub page also adds and removes repos. If it was the working
+        repo, the working repo is cleared. Other agents keep their access.
+        Pass the current turn origin and selected agent identity.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'confirmed': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'repo_name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'repo_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'remove_skill': dict({
       'description': '''
         Stop an agent using an attached skill, such as eda. Remove that one
@@ -4274,7 +4401,7 @@
         Never accept secret values in chat; ask for rotation if pasted. One named key
         → pass `key`. To load, upload or import a whole `.env` file of several keys at
         once, omit it. For MCP credentials use ``request_mcp_token``; GitHub access
-        uses ``request_repo_binding``.
+        uses ``github_connect``, never a token.
         <blank line>
         Posts a card naming the agent and the key. Only the requester can open its
         private form; it expires in 30 minutes. Values never appear in chat. Anyone
@@ -4340,10 +4467,13 @@
     }),
     'request_github_access': dict({
       'description': '''
-        Ask for GitHub access needed to finish this person's current request.
+        Ask for token access to a repo needed for this agent's current request.
         <blank line>
         Use the active turn's origin ID and exactly one owner/repo. Give only the
         unfinished work, so the queued turn will not repeat completed steps.
+        The agent has at most one working repo in its filesystem; other granted
+        repos are reached by token and cloned by name when asked. Name only
+        repos this agent and the person may see.
         Never pass a repo name found in a DM or by the agent to another person.
         Return the message verbatim only when it is nonempty. A private card
         handles the admin's own request without a public status line.
@@ -4451,9 +4581,9 @@
         Match supported authentication; an API key is not automatically an MCP token.
         <blank line>
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. Members can use this form on shared agents and built-in
-        Daimon to add a server; replacing one the agent already has (same name at
-        another URL, or a new token for a connected URL) needs an admin there.
+        credentials in chat. Connecting requires a workspace or server admin, or an
+        admin of every channel the agent's rule names, with all of its uses staying
+        inside those channels. This applies to new servers and replacements.
         <blank line>
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not
@@ -4512,10 +4642,12 @@
     }),
     'request_repo_binding': dict({
       'description': '''
-        Let an agent read a GitHub working repo or repository, public or private.
+        Legacy: save a GitHub token for an agent that already uses one.
         <blank line>
-        For requests to set up or hook up GitHub for an agent, use
-        ``github_connect`` instead.
+        Never offer, suggest or mention this, or any GitHub token, to people.
+        For any GitHub access, private repo or setup, use ``github_connect``
+        (the Connect GitHub link). Call this only if the person themselves
+        brings a token for an agent already on a saved token.
         For a private skill repo use ``request_skill_repo_token``. If the user has
         no working token, ``post_github_app_install_link`` offers a GitHub App install;
         installing alone does not bind the repo or verify this tenant's access.
@@ -4585,7 +4717,7 @@
         <blank line>
         After ``sync_skills`` cannot read a private skill repository, use this form.
         The skill repo is separate from the working repo; for that one use
-        ``request_repo_binding``.
+        ``set_working_repo`` and ``github_connect``.
         <blank line>
         Posts a requester-only card naming the agent and the repo, expiring in 30
         minutes. Its private form retries import and attachment; tokens never appear
@@ -5502,6 +5634,57 @@
         }),
         'required': list([
           'mode',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_working_repo': dict({
+      'description': '''
+        Choose the one repo in this agent's filesystem, or pass 'none' to clear it.
+        <blank line>
+        A clear ask is enough: set it right away and reply with the returned
+        line. Ask once in plain words during agent setup. Use an owner/repo already on
+        this agent's list. Other repos have token access; clone one with gh repo clone when
+        asked. Only a server admin or an admin for this non-managed agent's
+        channels may change this setting. Pass the current turn origin and the
+        selected agent's name and MA id. If the repo is not on its list, offer
+        the single Connect GitHub link.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'repo_name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'repo_name',
         ]),
         'type': 'object',
       }),

@@ -47,7 +47,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
-__all__ = ["LatestMessageAt", "PostNotice", "RunFollowUp", "dispatch_pending_continuations"]
+
+class ContinuationContextUnavailable(Exception):
+    """The adapter could not safely decide whether a queued turn is still current."""
+
+
+__all__ = [
+    "ContinuationContextUnavailable",
+    "LatestMessageAt",
+    "PostNotice",
+    "RunFollowUp",
+    "dispatch_pending_continuations",
+]
 
 #: Runs the receiving agent's turn seeded with the requested work; raises on failure.
 RunFollowUp = Callable[[TaskContinuationRow, str], Awaitable[None]]
@@ -162,23 +173,29 @@ async def dispatch_pending_continuations(
             reason=row.reason,
             idempotency_key=row.idempotency_key,
         )
-        if decision_context is None:
-            async with sessionmaker() as session:
-                live = await get_live_thread_session(
-                    session,
-                    tenant_id=row.tenant_id,
-                    platform=platform,
-                    thread_id=row.thread_id,
-                    account_id=row.requester_account_id,
-                )
-            # Preserve core's clock read before the history callback.
-            decision_now = now()
-            assert latest_user_message_at is not None
-            latest = await latest_user_message_at(row)
-            active_turn = live is not None and live.active_turn_message_id is not None
-        else:
-            latest, active_turn = await decision_context(row)
-            decision_now = now()
+        try:
+            if decision_context is None:
+                async with sessionmaker() as session:
+                    live = await get_live_thread_session(
+                        session,
+                        tenant_id=row.tenant_id,
+                        platform=platform,
+                        thread_id=row.thread_id,
+                        account_id=row.requester_account_id,
+                    )
+                # Preserve core's clock read before the history callback.
+                decision_now = now()
+                assert latest_user_message_at is not None
+                latest = await latest_user_message_at(row)
+                active_turn = live is not None and live.active_turn_message_id is not None
+            else:
+                latest, active_turn = await decision_context(row)
+                decision_now = now()
+        except ContinuationContextUnavailable as exc:
+            # An incomplete history must never authorize a stale handoff.
+            log.warning("continuation.context_unavailable", row_id=str(row.id), reason=str(exc))
+            await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
+            continue
         decision = await decide_continuation(
             sessionmaker,
             anthropic,

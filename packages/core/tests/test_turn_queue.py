@@ -280,6 +280,74 @@ def test_a_raised_cap_starts_waiting_turns_before_a_newcomer() -> None:
     assert newcomer.state == "queued"
 
 
+def test_follow_up_obeys_current_tenant_cap_after_admin_lowers_it() -> None:
+    queue = make_queue(global_cap=200)
+    first = admit(queue, A, cap=2)
+    other = admit(queue, A, cap=2)
+    assert first.state == other.state == "running"
+
+    newcomer = admit(queue, A, cap=1)
+    assert newcomer.state == "queued"
+
+    first.release()
+    follow_up = first.successor()
+    assert follow_up is not None
+    assert follow_up.state == "queued"
+    assert queue.in_flight(A) == 1
+    other.release()
+    assert newcomer.state == "running"
+    assert follow_up.state == "queued"
+    newcomer.release()
+    assert follow_up.state == "running"
+
+
+async def test_follow_up_reads_the_latest_tenant_cap() -> None:
+    queue = make_queue(global_cap=10)
+    first = admit(queue, A, cap=2)
+    other = admit(queue, A, cap=2)
+    newcomer = admit(queue, A, cap=1)
+    cap_read = AsyncMock(return_value=1)
+    with (
+        patch("daimon.core.turn.slots.get_turn_cap", cap_read),
+        patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=False)),
+        holding(first),
+    ):
+        assert (
+            await wait_for_slot(asyncio.Event(), sessionmaker=MagicMock(), tenant_id=A) == "started"
+        )
+        release_turn_slot()
+        follow_up = asyncio.create_task(
+            wait_for_slot(
+                asyncio.Event(),
+                sessionmaker=MagicMock(),
+                tenant_id=A,
+                default_cap=3,
+            )
+        )
+        await asyncio.sleep(0)
+        cap_read.assert_awaited_once()
+        assert cap_read.await_args is not None
+        assert cap_read.await_args.kwargs["default"] == 3
+        assert queue.in_flight(A) == 1
+        assert queue.depth(A) == 2
+        other.release()
+        assert newcomer.state == "running"
+        newcomer.release()
+        assert await follow_up == "started"
+    assert queue.in_flight() == 0
+
+
+def test_follow_up_observes_a_raised_tenant_cap() -> None:
+    queue = make_queue(global_cap=10)
+    first = admit(queue, A, cap=1)
+    waiting = admit(queue, A, cap=1)
+    first.release()
+    follow_up = first.successor(cap=2)
+    assert waiting.state == "running"
+    assert follow_up is not None and follow_up.state == "running"
+    assert queue.in_flight(A) == 2
+
+
 async def test_started_log_carries_the_wait_and_the_window_reports_percentiles() -> None:
     clock = Clock()
     queue = make_queue(global_cap=1, clock=clock)

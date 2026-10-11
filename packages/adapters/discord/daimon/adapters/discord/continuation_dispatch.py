@@ -11,7 +11,12 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.continuity.continuation import ContinuationDecision
-from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
+from daimon.core.continuity.dispatch import (
+    ContinuationContextUnavailable,
+)
+from daimon.core.continuity.dispatch import (
+    dispatch_pending_continuations as dispatch_core,
+)
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -22,19 +27,36 @@ log = structlog.get_logger(__name__)
 __all__ = ["RunFollowUp", "dispatch_pending_continuations"]
 RunFollowUp = Callable[[TaskContinuationRow, ContinuationDecision], Awaitable[None]]
 MayPost = Callable[[], Awaitable[bool]]
+_HISTORY_PAGE_SIZE = 100
+_HISTORY_MAX_PAGES = 20
 
 
 async def _latest_human_message_at(thread: discord.Thread, *, after: datetime) -> datetime | None:
-    """Newest human message timestamp in `thread` strictly after `after`, or None."""
-    latest: datetime | None = None
-    async for message in thread.history(limit=5):
-        if message.author.bot:
-            continue
-        if message.created_at <= after:
-            continue
-        if latest is None or message.created_at > latest:
-            latest = message.created_at
-    return latest
+    """Newest human post after `after`; defer if the history read fails.
+
+    Reaching the page cap is not retried: the same scan would hit it again on
+    every retry. The work is treated as superseded instead, so a stale handoff
+    never runs and the row doesn't wait forever.
+    """
+    before: discord.Message | None = None
+    try:
+        for _ in range(_HISTORY_MAX_PAGES):
+            page = [
+                message async for message in thread.history(limit=_HISTORY_PAGE_SIZE, before=before)
+            ]
+            for message in page:
+                if message.created_at <= after:
+                    return None
+                if not message.author.bot:
+                    return message.created_at
+            if len(page) < _HISTORY_PAGE_SIZE:
+                return None
+            before = page[-1]
+    except Exception as exc:
+        raise ContinuationContextUnavailable("Discord history read failed") from exc
+    assert before is not None
+    log.warning("continuation.history_cap_assumed_superseded", thread_id=thread.id)
+    return before.created_at
 
 
 async def dispatch_pending_continuations(
@@ -53,7 +75,12 @@ async def dispatch_pending_continuations(
     """Dispatch under the caller's existing thread guard."""
 
     async def context(row: TaskContinuationRow) -> tuple[datetime | None, bool]:
-        latest = await _latest_human_message_at(thread, after=row.created_at)
+        # A timer is never superseded by newer messages, so it needs no history.
+        latest = (
+            None
+            if row.reason == "timer"
+            else await _latest_human_message_at(thread, after=row.created_at)
+        )
         async with sessionmaker() as session:
             live = await get_live_thread_session(
                 session,

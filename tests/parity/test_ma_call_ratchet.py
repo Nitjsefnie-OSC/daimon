@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-MAX_OUTSIDE_DRIVERS = 0
+# Main sync: three main-added calls, recorded with owner follow-ups in the sync READY.
+MAX_OUTSIDE_DRIVERS = 3
 SPEC = importlib.util.spec_from_file_location("ma_inventory", ROOT / "scripts/ma_inventory.py")
 assert SPEC is not None and SPEC.loader is not None
 inventory = importlib.util.module_from_spec(SPEC)

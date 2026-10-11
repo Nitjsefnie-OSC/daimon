@@ -107,3 +107,38 @@ async def test_a_card_whose_post_lost_its_id_is_found_and_interrupted(
     assert [(c, a.id) for c, a, _ in sender.sent] == [(THREAD_ID, "m-found")]
     async with db_session_factory() as session:
         assert await list_recoverable_turn_card_intents(session, platform="teams") == []
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_failed_orphan_interrupt_detaches_busy_session_and_retires_card(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    row = await make_thread_session(db_session, platform="teams", thread_id=CONVERSATION_ID)
+    await mark_turn_active(
+        db_session,
+        id=row.id,
+        active_turn_message_id="m-orphan",
+        active_turn_channel_id=CONVERSATION_ID,
+        now=datetime.now(UTC),
+    )
+    await db_session.commit()
+    sender = FakeSender()
+    with patch(
+        "daimon.adapters.teams.boot_sweep.interrupt_orphaned_session",
+        new_callable=AsyncMock,
+        return_value=False,
+    ) as interrupt:
+        await retire_orphaned_turns(
+            anthropic=AsyncMock(),
+            sessionmaker=db_session_factory,
+            sender=sender,
+            now=datetime.now(UTC),
+        )
+    interrupt.assert_awaited_once()
+    async with db_session_factory() as session:
+        recovered = await get_thread_session_by_id(session, id=row.id)
+    assert recovered is not None and recovered.status == "dead"
+    assert recovered.active_turn_message_id is None
+    assert (
+        "Daimon restarted before this request finished." in sender.activities[0].model_dump_json()
+    )

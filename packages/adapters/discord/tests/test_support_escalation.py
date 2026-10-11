@@ -11,9 +11,12 @@ from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
     SupportModal,
     discord_channel,
+    post_to_support_channel,
 )
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.stores import accounts
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -26,8 +29,49 @@ _THREAD = "333"
 _ESCALATION = "999"
 
 
-async def _seed(session: AsyncSession, *, grant: bool) -> None:
+async def test_long_support_note_reaches_channel_in_order() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    sent: list[str] = []
+
+    async def send(body: str, **_kwargs: Any) -> None:
+        if len(body) > 2000:
+            raise discord.HTTPException(
+                SimpleNamespace(status=400, reason="Bad Request"), "too long"
+            )
+        sent.append(body)
+
+    channel.send = AsyncMock(side_effect=send)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+    note = "x" * 4000
+    body = "**Human support requested** by <@7>\nhttps://discord.com/channels/1/2/3\n\n" + note
+
+    assert await post_to_support_channel(bot, channel_id=_ESCALATION, body=body)
+    assert all(len(part) <= 2000 for part in sent)
+    assert sent[0].startswith("**Human support requested** by <@7>\nhttps://")
+    assert "".join(sent).endswith(note)
+
+
+async def test_partial_support_channel_post_is_undelivered() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock(
+        side_effect=[
+            None,
+            discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "lost access"),
+        ]
+    )
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    assert not await post_to_support_channel(bot, channel_id=_ESCALATION, body="x" * 4000)
+    assert channel.send.await_count == 2
+
+
+async def _seed(session: AsyncSession, *, grant: bool, sealed: bool = False) -> None:
     tenant = await make_tenant(session, platform="discord", workspace_id=_GUILD)
+    if sealed:
+        policy = TenantAccessPolicy(channel_rules={_CHANNEL: ChannelRule(readers="inside")})
+        await set_access_policy(session, tenant_id=tenant.id, policy=policy)
     account = await make_account(session, tenant=tenant)
     await make_platform_principal(
         session, platform="discord", external_id="50", tenant=tenant, account=account
@@ -51,6 +95,7 @@ async def _submit(
     *,
     open_dm: Any = None,
     escalation_channel: str = _ESCALATION,
+    note: str = "help please",
 ) -> tuple[Any, Any, AsyncMock]:
     """Send a note on an answer in a thread of `_CHANNEL`; the bot, the escalation channel, a DM."""
     thread = MagicMock(spec=discord.Thread)
@@ -72,7 +117,7 @@ async def _submit(
     runtime.settings.support = SupportSettings(escalation_channel_id=escalation_channel)
     runtime.settings.direct_message_policies = {}
     modal = SupportModal(runtime=runtime, guild_id=_GUILD, channel_id=_THREAD, message_id="444")
-    modal.note_input = SimpleNamespace(value="help please")  # type: ignore[assignment]
+    modal.note_input = SimpleNamespace(value=note)  # type: ignore[assignment]
     await modal.on_submit(interaction)
     return bot, escalation, dm
 
@@ -94,7 +139,34 @@ async def test_a_thread_of_a_channel_with_admins_dms_them_not_the_escalation_cha
     bot.open_member_dm.assert_awaited_once_with(int(_GUILD), 40)
     body = dm.send.await_args.args[0]
     assert "help please" in body and f"/{_THREAD}/444" in body
+    head, link, note = body.split("\n\n")
+    assert head.startswith("**Human support requested** by "), "who asked, then a blank line"
+    assert link.endswith(f"/{_THREAD}/444") and note == "help please", "link, then the note"
     escalation.send.assert_not_awaited()
+    assert await _delivered(db_session_factory) == [True]
+
+
+async def test_partial_admin_dm_falls_back_to_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        await _seed(session, grant=True)
+
+    dm = AsyncMock()
+    dm.send.side_effect = [
+        None,
+        discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "closed"),
+    ]
+
+    async def open_dm(_guild_id: int, _user_id: int) -> Any:
+        if _user_id != 40:
+            raise LookupError("server admin unavailable")
+        return dm
+
+    _bot, channel, _dm = await _submit(db_session_factory, open_dm=open_dm, note="x" * 4000)
+
+    assert dm.send.await_count == 2
+    assert channel.send.await_count > 1
     assert await _delivered(db_session_factory) == [True]
 
 
@@ -164,3 +236,50 @@ async def test_a_teams_escalation_channel_spends_nothing_and_posts_nothing(
     escalation.send.assert_not_awaited()
     dm.send.assert_not_awaited()
     assert await _delivered(db_session_factory) == [], "no credit is spent on an undeliverable ask"
+
+
+async def test_a_sealed_channel_marks_the_post_and_an_open_one_does_not(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The same core check as Slack and Teams: the answer's thread sits in a sealed channel."""
+    async with db_session_factory() as session:
+        await _seed(session, grant=False, sealed=True)
+
+    _bot, escalation, _dm = await _submit(db_session_factory)
+
+    head, link, marker, note = escalation.send.await_args.args[0].split("\n\n")
+    assert head.startswith("**Human support requested** by ") and link.endswith("/444")
+    assert marker == "*Reply in the original channel.*", "whoever picks it up answers there"
+    assert note == "help please"
+
+
+async def test_the_form_warns_only_for_a_sealed_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        await _seed(session, grant=False, sealed=True)
+    thread = MagicMock(spec=discord.Thread)
+    thread.parent_id = int(_CHANNEL)
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    bot = MagicMock()
+    bot.runtime = runtime
+    bot.get_channel = MagicMock(side_effect=lambda cid: {333: thread}.get(cid))
+    interaction = MagicMock()
+    interaction.client = bot
+    interaction.response.send_modal = AsyncMock()
+
+    await SupportEscalateButton(guild_id=_GUILD, channel_id=_THREAD, message_id="444").callback(
+        interaction
+    )
+
+    modal = interaction.response.send_modal.await_args.args[0]
+    hints = [item.content for item in modal.children if isinstance(item, discord.ui.TextDisplay)]
+    assert hints == [
+        "-# Support gets your note and a link, not the conversation.\n\n"
+        "-# Leave out anything that must stay in this channel."
+    ], "told the note leaves the channel before sending it"
+    open_form = SupportModal(
+        runtime=cast(Any, None), guild_id=_GUILD, channel_id=_THREAD, message_id="444"
+    )
+    assert not any(isinstance(item, discord.ui.TextDisplay) for item in open_form.children)

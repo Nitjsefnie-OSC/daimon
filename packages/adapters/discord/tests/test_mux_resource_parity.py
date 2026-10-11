@@ -153,7 +153,9 @@ async def test_imported_skill_attachment_keeps_requests_retry_limit_and_notice(
             outcomes=outcomes,
         )
     assert result == (
-        "Attaching them did not finish. Ask again to retry." if status == "exhausted" else None
+        "Attaching them did not finish. Try again using the same form."
+        if status == "exhausted"
+        else None
     )
     for transport in (before, after):
         transport.assert_consumed()

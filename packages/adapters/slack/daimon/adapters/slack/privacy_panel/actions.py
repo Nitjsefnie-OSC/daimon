@@ -32,6 +32,7 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.privacy_panel.read import load_purge_preview, resolve_privacy_account
 from daimon.adapters.slack.privacy_panel.views import (
     build_delete_modal,
+    build_delete_paused_view,
     build_disconnect_result_view,
     build_export_result_view,
     build_loading_view,
@@ -60,7 +61,7 @@ def _no_data_blocks(display_name: str) -> list[dict[str, Any]]:
                 "type": "mrkdwn",
                 "text": (
                     "*🔒 Privacy*\n"
-                    f"You have no data on file with {escape_mrkdwn(display_name)}.\n"
+                    f"You have no {escape_mrkdwn(display_name)} account.\n"
                     "Run any other slash command to start fresh."
                 ),
             },
@@ -138,7 +139,6 @@ async def handle_privacy_command(
             )
             return
 
-        preview = await load_purge_preview(sm=runtime.sessionmaker, account_id=account_id)
         async with runtime.sessionmaker() as s:
             token_row = await get_slack_user_token(s, team_id=team_id, slack_user_id=user_id)
         is_slack_connected = token_row is not None
@@ -150,11 +150,11 @@ async def handle_privacy_command(
         await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
             view=build_privacy_main_container(
-                preview,
                 is_slack_connected=is_slack_connected,
                 slack_connect_url=connect_url,
                 policy_url=str(runtime.settings.privacy_policy_url),
                 display_name=resolve_bot_display_name(runtime.settings),
+                delete_enabled=runtime.settings.privacy.delete_enabled,
             ),
         )
     except (DaimonError, anthropic.APIError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
@@ -208,6 +208,12 @@ async def handle_privacy_block_action(
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
         if action_id == "privacy_delete_open":
+            if not runtime.settings.privacy.delete_enabled:
+                await web_client.views_push(  # pyright: ignore[reportUnknownMemberType]
+                    trigger_id=trigger_id,
+                    view=build_delete_paused_view(),
+                )
+                return
             async with runtime.sessionmaker() as s:
                 account_id = await resolve_privacy_account(
                     s, tenant_id=tenant_id, platform_user_id=user_id
@@ -226,6 +232,7 @@ async def handle_privacy_block_action(
                     account_id=account_id,
                     user_name=user_name,
                     view_id=current_view_id,
+                    display_name=resolve_bot_display_name(runtime.settings),
                 ),
             )
         elif action_id == "privacy_export":

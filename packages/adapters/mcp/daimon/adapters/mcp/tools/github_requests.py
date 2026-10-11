@@ -137,7 +137,9 @@ async def request_github_access_impl(
         tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
     )
     async with runtime.session_factory() as session:
-        known_repos = await list_authorized_repos(session, tenant_id=origin.tenant_id)
+        known_repos = await list_authorized_repos(
+            session, tenant_id=origin.tenant_id, agent_id=agent_id
+        )
         known = next(
             (
                 repo
@@ -367,10 +369,13 @@ def register_github_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         required_ability: Literal["read", "write"],
         remaining_work: str,
     ) -> GitHubRequestResult:
-        """Ask for GitHub access needed to finish this person's current request.
+        """Ask for token access to a repo needed for this agent's current request.
 
         Use the active turn's origin ID and exactly one owner/repo. Give only the
         unfinished work, so the queued turn will not repeat completed steps.
+        The agent has at most one working repo in its filesystem; other granted
+        repos are reached by token and cloned by name when asked. Name only
+        repos this agent and the person may see.
         Never pass a repo name found in a DM or by the agent to another person.
         Return the message verbatim only when it is nonempty. A private card
         handles the admin's own request without a public status line.

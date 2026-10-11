@@ -187,7 +187,7 @@ async def test_actual_terminal_callbacks_retire_provider_progress_card(
     def no_sdk_meter(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError("provider totals must never be made into Anthropic usage")
 
-    monkeypatch.setattr(slack_lifecycle, "BetaManagedAgentsSpanModelUsage", no_sdk_meter)
+    monkeypatch.setattr(slack_lifecycle, "cost_of_totals", no_sdk_meter)
     posts = Posts(fake_slack_web_client)
     lifecycle = posts.lifecycle()
     await lifecycle.post_initial()
@@ -312,7 +312,7 @@ async def test_actual_driver_to_slack_surface_finalizes_without_synthetic_meter(
     def no_sdk_meter(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError("provider observation is not an Anthropic meter")
 
-    monkeypatch.setattr(slack_lifecycle, "BetaManagedAgentsSpanModelUsage", no_sdk_meter)
+    monkeypatch.setattr(slack_lifecycle, "cost_of_totals", no_sdk_meter)
     text, done = native_events()
     observation = UsageObservation(
         id="usage",

@@ -44,7 +44,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
-from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, build_connect_card
+from daimon.core.github_connect_cards import repo_count
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
@@ -131,149 +131,58 @@ ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
 ACTION_GITHUB_CONNECT: Final = "agent_setup__github_connect"
-ACTION_GITHUB_START: Final = "agent_setup__github_start"
-ACTION_GITHUB_CHOOSE_AGENT: Final = "agent_setup__github_choose_agent"
 ACTION_GITHUB_BACK: Final = "agent_setup__github_step_back"
-ACTION_GITHUB_MANAGE: Final = "agent_setup__github_manage"
 ACTION_GITHUB_REPOS: Final = "agent_setup__github_repos"
 ACTION_GITHUB_PERSONAL_LINK: Final = "agent_setup__github_personal_link"
-ACTION_GITHUB_UNLINK: Final = "agent_setup__github_unlink"
-ACTION_GITHUB_UNLINK_CONFIRM: Final = "agent_setup__github_unlink_confirm"
-ACTION_GITHUB_UNLINK_BACK: Final = "agent_setup__github_unlink_back"
-ACTION_GITHUB_WAITING: Final = "agent_setup__github_waiting_open"
+ACTION_GITHUB_WAITING: Final = "agent_setup__github_waiting_open"  # stale panel only
+GITHUB_HOME_AGENT_LIMIT: Final = 20
 
 
 def build_github_home_view(
     meta: PanelMetadata,
     *,
-    connected_count: int,
-    public_base_url: str | None = None,
-    is_admin: bool = True,
-    owners: tuple[str, ...] = (),
-    agent_count: int = 0,
-    pending_url: str | None = None,
+    agent_counts: tuple[tuple[str, int], ...] = (),
     linked_login: str | None = None,
     can_choose_agent: bool = False,
     own_waiting_count: int = 0,
 ) -> dict[str, Any]:
-    """The private GitHub entry screen for workspace admins."""
-    if meta.github_step == "personal_unlink":
-        return finish_modal(
-            title="GitHub",
-            blocks=[
-                _section("Unlink GitHub from your account?"),
-                {
-                    "type": "actions",
-                    "elements": [
-                        _button(action_id=ACTION_GITHUB_UNLINK_CONFIRM, label="Unlink"),
-                        _button(action_id=ACTION_GITHUB_UNLINK_BACK, label="◀ Back"),
-                    ],
-                },
-            ],
-            private_metadata=encode_panel_metadata(meta.with_view("github_home")),
-            callback_id="agent_setup__github_home",
-        )
-    if is_admin and pending_url:
-        summary = "Connection in progress."
-        actions: list[dict[str, Any]] = [
-            {
-                "type": "button",
-                "action_id": "github_link__open",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
-                    "emoji": True,
-                },
-                "url": pending_url,
-            },
-            _button(action_id=ACTION_GITHUB_START, label="Start over"),
-        ]
-    elif not is_admin:
-        summary = "Workspace admins connect repos here."
-        actions = (
-            [_button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent")]
-            if can_choose_agent
-            else []
-        )
-    elif connected_count:
-        source = f" from {', '.join(owners)}" if owners else ""
-        summary = f"Connected: {connected_count} repos{source}."
-        actions = [
-            _button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent"),
-            _button(action_id=ACTION_GITHUB_START, label="Connect more repos"),
-            _button(action_id=ACTION_GITHUB_MANAGE, label="Manage connected repos"),
-        ]
-    else:
-        summary = "Connect repos here, then choose which agents can use them."
-        actions = [
-            _button(action_id=ACTION_GITHUB_START, label=f"{CONNECT_GITHUB_EMOJI} Connect GitHub")
-        ]
-    actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
-    status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
-    fields = [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}]
-    if connected_count:
-        fields.insert(0, {"type": "mrkdwn", "text": f"*Agents*\n{agent_count} using these repos"})
-    blocks: list[dict[str, Any]] = []
-    if is_admin and not connected_count and public_base_url:
-        card = build_connect_card(
-            agent_name=None,
-            identity_enabled=False,
-            avatar_url=None,
-            public_base_url=public_base_url,
-        )
-        blocks.extend(
-            [
-                {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "image",
-                            "image_url": card.author_icon_url,
-                            "alt_text": card.author_name,
-                        },
-                        {"type": "plain_text", "text": card.author_name},
-                    ],
-                },
-                {"type": "header", "text": {"type": "plain_text", "text": card.title}},
-                {
-                    "type": "section",
-                    "text": {"type": "plain_text", "text": card.description},
-                    "accessory": {
-                        "type": "image",
-                        "image_url": card.github_mark_url,
-                        "alt_text": "GitHub",
-                    },
-                },
-            ]
-        )
-        if card.detail:
-            blocks.append({"type": "section", "text": {"type": "plain_text", "text": card.detail}})
-        if card.footer:
-            blocks.append(
-                {"type": "context", "elements": [{"type": "plain_text", "text": card.footer}]}
-            )
-    else:
-        blocks.append(_section(summary))
-    blocks.extend([{"type": "section", "fields": fields}, {"type": "divider"}])
-    if actions:
-        blocks.append({"type": "actions", "elements": actions})
-    personal = [
-        _button(
-            action_id=ACTION_GITHUB_PERSONAL_LINK,
-            label="Use another account" if linked_login else "Link GitHub",
-        )
+    """Read-only list of agents and their repository counts."""
+    blocks: list[dict[str, Any]] = [
+        _section("Each agent uses its own repos." if agent_counts else "No agents here yet.")
     ]
-    if linked_login:
-        personal.append(_button(action_id=ACTION_GITHUB_UNLINK, label="Unlink"))
-    blocks.append({"type": "actions", "elements": personal})
-    if is_admin or can_choose_agent or own_waiting_count:
+    for name, count in agent_counts[:GITHUB_HOME_AGENT_LIMIT]:
+        line = f"{name}: {repo_count(count)}" if count else f"{name}: no repos yet"
+        blocks.append(_section(line))
+    if len(agent_counts) > GITHUB_HOME_AGENT_LIMIT:
         blocks.append(
             {
-                "type": "actions",
-                "elements": [_button(action_id=ACTION_GITHUB_WAITING, label="Requests waiting")],
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "plain_text",
+                        "text": f"and {len(agent_counts) - GITHUB_HOME_AGENT_LIMIT} more",
+                    }
+                ],
             }
         )
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
+    status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
+    blocks.extend(
+        [
+            {
+                "type": "section",
+                "fields": [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}],
+            },
+            {"type": "divider"},
+        ]
+    )
+    actions: list[dict[str, Any]] = [
+        _button(
+            action_id=ACTION_GITHUB_PERSONAL_LINK,
+            label="Connect GitHub",
+        )
+    ]
+    actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
+    blocks.append({"type": "actions", "elements": actions})
     return finish_modal(
         title="GitHub",
         blocks=blocks,
@@ -389,15 +298,17 @@ _MAX_OPTION_TEXT: Final = 75
 CHANNEL_ADMINS_LISTING_MAX_CHARS: Final = 2_800
 """Room for the listing, its heading and "and N more" in one section's 3000 characters."""
 CHANNEL_ADMINS_NOTE: Final = (
-    "Workspace admins run every channel. A channel's admins may change agents that answer "
-    "only in channels they run, and pick those channels' default agent. Built-in agents and "
-    "the workspace default stay with workspace admins."
+    "Channel admins choose their channels' environment and agent, and edit agents limited to those "
+    "channels.\n\n"
+    "Starting agents and the workspace default stay with workspace admins."
 )
 CHANNEL_SKILLS_LABEL: Final = "Channel skills"
+CHANNEL_SKILLS_HEADER: Final = "Extra skills"
 CHANNEL_SKILLS_NOTE: Final = (
-    "Added to whatever agent answers in this channel, here only, from the next message: a "
-    "workspace library skill, or one uploaded to this channel's agent. Workspace admins only."
+    "These skills apply only here, from the next message.\n\nOnly workspace admins can change them."
 )
+#: Beside the Add a skill field: which skills can be named.
+CHANNEL_SKILLS_ADD_HINT: Final = "A library skill, or one uploaded to this channel's agent."
 OPERATOR_TOKENS_LABEL: Final = "Operator tokens"
 MAX_OPERATOR_TOKEN_LINES: Final = 25
 OPERATOR_TOKENS_NOTE: Final = (
@@ -536,8 +447,8 @@ def build_agents_view(
     """The root view: who answers here, then everyone else, then the actions.
 
     `is_admin` is accepted and deliberately unused in the block layout —
-    members and admins see the same roster and the same entries, because
-    entering a conversation about a change is not the change.
+    the loader filters member rosters to local responders before rendering.
+    Entering a conversation about a change is not the change.
 
     `routed_agent_names` is every agent this install routes to somewhere. It
     is optional because the roster alone cannot tell "answers in another
@@ -902,7 +813,7 @@ def build_routing_view(
     if answering_map.deployment_default is not None:
         line = f"Deployment default: *{escape_mrkdwn(answering_map.deployment_default)}*"
         if answering_map.tenant_consumes_fallthrough:
-            line = f"{line}\n_not in effect while a workspace default is set_"
+            line = f"{line}\n\n_Not used while a workspace default is set._"
         blocks.append(_section(line))
     else:
         blocks.append(_section("_no deployment default_"))
@@ -957,7 +868,7 @@ def _environment_blocks(
     if deployment is not None:
         defaults.append(f"Deployment default: *{_shown_name(deployment)}*")
         if tenant is not None:
-            defaults.append("_not in effect while a workspace default is set_")
+            defaults.append("_Not used while a workspace default is set._")
     rows = answering_map.channel_environments
     lines = fit_lines(
         (
@@ -1032,11 +943,11 @@ def _channel_admins_blocks(
     )
     if len(lines) < len(grants):
         lines.append(f"_and {len(grants) - len(lines)} more_")
-    listing = "\n".join(lines) or "_no channel has its own admins yet_"
+    listing = "\n".join(lines) or "_No channel admins yet._"
     editable = _is_channel(channel_id)
     edit = _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if editable else None
     return [
-        _section(f"*{CHANNEL_ADMINS_LABEL}*\n{listing}", accessory=edit),
+        _section(f"*{CHANNEL_ADMINS_LABEL}*\n\n{listing}", accessory=edit),
         _context(CHANNEL_ADMINS_NOTE),
         {"type": "divider"},
     ]
@@ -1045,10 +956,13 @@ def _channel_admins_blocks(
 def _channel_skills_blocks(
     rows: Sequence[ChannelSkillRow], *, channel_id: str
 ) -> list[dict[str, Any]]:
-    names = ", ".join(f"`{escape_mrkdwn(row.name)}`" for row in rows) or "_none_"
+    names = (
+        ", ".join(f"`{escape_mrkdwn(row.name)}` ({escape_mrkdwn(row.version)})" for row in rows)
+        or "_none_"
+    )
     edit = _button(action_id=ACTION_CHANNEL_SKILLS, label="Edit")
     return [
-        _section(f"*{CHANNEL_SKILLS_LABEL}* of <#{channel_id}>\n{names}", accessory=edit),
+        _section(f"*{CHANNEL_SKILLS_HEADER} in <#{channel_id}>*\n\n{names}", accessory=edit),
         _context(CHANNEL_SKILLS_NOTE),
         {"type": "divider"},
     ]
@@ -1203,7 +1117,7 @@ def build_channel_admins_form(
         blocks.append(_context(GROUPS_UNLISTED_NOTE))
     elif group_input := _groups_input(groups, group_ids):
         blocks += [group_input, _context(GROUP_GRANT_WARNING)]
-    blocks.append(_context(f"Empty the lists to clear it. {CHANNEL_ADMINS_NOTE}"))
+    blocks += [_context("Empty the lists to clear it."), _context(CHANNEL_ADMINS_NOTE)]
     return finish_modal(
         title=CHANNEL_ADMINS_LABEL,
         blocks=blocks,
@@ -1219,11 +1133,12 @@ def build_channel_skills_form(
 ) -> dict[str, Any]:
     """Add a skill to `meta.channel_id`, or tick its current ones to remove them."""
     blocks: list[dict[str, Any]] = [
-        _section(f"Extra skills for whatever agent answers in <#{meta.channel_id}>."),
+        _section(f"*{CHANNEL_SKILLS_HEADER} in <#{meta.channel_id}>*"),
         {
             "type": "input",
             "block_id": CHANNEL_SKILLS_ADD_INPUT_ID,
             "label": {"type": "plain_text", "text": "Add a skill"},
+            "hint": {"type": "plain_text", "text": CHANNEL_SKILLS_ADD_HINT},
             "optional": True,
             "element": {
                 "type": "plain_text_input",
@@ -1460,7 +1375,7 @@ def build_creating_view(*, agent_name: str, meta: PanelMetadata) -> dict[str, An
 
 
 def build_created_view(
-    *, agent_name: str, meta: PanelMetadata, isolated_here: bool
+    *, agent_name: str, meta: PanelMetadata, isolated_here: bool, member_here: bool = False
 ) -> dict[str, Any]:
     """What the placeholder becomes when the new agent can't be shown to its creator here."""
     name = escape_mrkdwn(agent_name)
@@ -1468,7 +1383,12 @@ def build_created_view(
         f"*{name}* was created. This channel is kept to its own agents, so it shows here once it "
         "is set as the channel's agent."
         if isolated_here
-        else f"*{name}* was created but is not listed yet. Reopen setup to see it."
+        else (
+            f"*{name}* was created. Not answering in any channel yet. "
+            "An admin can make it answer in this channel; it will then appear in setup here."
+            if member_here
+            else f"*{name}* was created but is not listed yet. Reopen setup to see it."
+        )
     )
     return finish_modal(
         title="New agent",

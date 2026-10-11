@@ -32,9 +32,11 @@ from daimon.adapters.scheduler.main import (
     _refresh_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # MCP token renewal
     _run_loops,  # pyright: ignore[reportPrivateUsage]  # tick and usage-sweep loops
     _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
+    _sweep_privacy_deletes,  # pyright: ignore[reportPrivateUsage]  # privacy retry boundary
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
+    _usage_sweep_once,  # pyright: ignore[reportPrivateUsage]  # --once usage pass
     _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
 )
 from daimon.core.billing import BillingConfig
@@ -53,6 +55,7 @@ from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.tenants import set_provision_status
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import (
@@ -86,6 +89,18 @@ _TEST_BILLING = BillingConfig(
     success_url="http://test/success",
     cancel_url="http://test/cancel",
 )
+
+
+async def test_privacy_sweep_boundary_retries_after_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sweep = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
+    monkeypatch.setattr("daimon.adapters.scheduler.main.sweep_privacy_session_deletes", sweep)
+    client = unittest.mock.Mock()
+    sm = unittest.mock.Mock()
+    await _sweep_privacy_deletes(client, sm)
+    await _sweep_privacy_deletes(client, sm)
+    assert sweep.await_count == 2
 
 
 async def test_app_vault_archive_retries_after_failure(
@@ -960,6 +975,48 @@ async def test_fire_records_error_and_skips_run_turn_when_created_by_user_id_is_
     )
 
     await fake_client.close()
+
+
+async def test_fire_rejects_tenant_archived_after_claim(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u1",
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="run",
+    )
+    await db_session.commit()
+    await set_provision_status(db_session_factory, tenant_id=tenant.id, archive=True)
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.get_or_create_platform_principal"
+        ) as principal,
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as run_turn,
+    ):
+        await fire(row)
+    principal.assert_not_called()
+    run_turn.assert_not_called()
+    async with db_session_factory() as session:
+        saved = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert saved is not None and saved.last_error == "routine tenant archived"
+    await client.close()
 
 
 async def test_fire_resolves_principal_using_tenant_platform_not_hardcoded_discord(
@@ -1885,7 +1942,13 @@ async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None
             raise
 
     async with asyncio.timeout(5):
-        await _run_loops(tick=tick, usage_sweep=endless_pass, interval_s=0.01, stop_event=stop)
+        await _run_loops(
+            tick=tick,
+            usage_sweep=endless_pass,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
 
     assert ticks == 3, f"ticks continue while the usage pass runs, got {ticks}"
     assert pass_cancelled, "stopping cancels the usage pass in flight"
@@ -1908,7 +1971,13 @@ async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> Non
             third_pass.set()
 
     async with asyncio.timeout(5):
-        await _run_loops(tick=slow_tick, usage_sweep=usage_pass, interval_s=0.01, stop_event=stop)
+        await _run_loops(
+            tick=slow_tick,
+            usage_sweep=usage_pass,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
 
     assert passes >= 3, f"usage passes repeat while the first tick is still running, got {passes}"
 
@@ -1926,7 +1995,11 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
     async with asyncio.timeout(5):
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
-                tick=tick, usage_sweep=crashing_pass, interval_s=0.01, stop_event=asyncio.Event()
+                tick=tick,
+                usage_sweep=crashing_pass,
+                privacy_sweep=unittest.mock.AsyncMock(),
+                interval_s=0.01,
+                stop_event=asyncio.Event(),
             )
 
     assert raised.group_contains(RuntimeError, match="unexpected sweep failure"), (
@@ -1954,6 +2027,7 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
             await _run_loops(
                 tick=crashing_tick,
                 usage_sweep=endless_pass,
+                privacy_sweep=unittest.mock.AsyncMock(),
                 interval_s=0.01,
                 stop_event=asyncio.Event(),
             )
@@ -1962,6 +2036,41 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         "the tick's error propagates out of the loops"
     )
     assert pass_cancelled.is_set(), "the usage pass in flight is cancelled"
+
+
+async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
+    stop = asyncio.Event()
+    upstream_started = asyncio.Event()
+    ticks = 0
+    cancelled = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await upstream_started.wait()
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async def slow_privacy() -> None:
+        nonlocal cancelled
+        upstream_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            usage_sweep=unittest.mock.AsyncMock(),
+            privacy_sweep=slow_privacy,
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks == 3
+    assert cancelled
 
 
 @pytest.mark.parametrize(
@@ -2208,7 +2317,7 @@ async def test_fire_does_not_invite_a_post_into_a_destination_protected_since(
 
     trigger = str(seen["trigger_message"])
     assert "do not post there" in trigger
-    assert "posts the end of your final reply there" not in trigger
+    assert "posts your full final reply there" not in trigger
     assert after.delivery_status == "pending", "the poster still routes it (DM fallback)"
 
 
@@ -2245,7 +2354,7 @@ async def test_fire_does_not_invite_a_post_when_placement_cannot_be_checked(
 
     trigger = str(seen["trigger_message"])
     assert "Do not post to the destination yourself" in trigger
-    assert "posts the end of your final reply there" not in trigger
+    assert "posts your full final reply there" not in trigger
     assert after.delivery_status == "pending", "the poster resolves placement and delivers"
 
 
@@ -2265,7 +2374,7 @@ async def test_fire_still_invites_a_post_when_nothing_relevant_is_protected(
         policy=TenantAccessPolicy(protected_channel_ids=("999",)),
     )
 
-    assert "posts the end of your final reply there" in str(seen["trigger_message"])
+    assert "posts your full final reply there" in str(seen["trigger_message"])
 
 
 async def test_settle_promo_credit_grants_a_due_timed_code(
@@ -2490,3 +2599,47 @@ async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_nam
     else:
         assert after.last_error is None and len(ran) == 1
     await client.close()
+
+
+async def test_run_loops_without_a_usage_sweep_still_runs_privacy_deletes() -> None:
+    """With the usage sweep switched off, ticks and privacy deletion retries still run."""
+    stop = asyncio.Event()
+    ticks = 0
+    privacy_passes = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        ticks += 1
+        await asyncio.sleep(0)
+        if ticks == 3:
+            stop.set()
+
+    async def privacy_sweep() -> None:
+        nonlocal privacy_passes
+        privacy_passes += 1
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            usage_sweep=None,
+            privacy_sweep=privacy_sweep,
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks == 3, f"ticks run without a usage sweep, got {ticks}"
+    assert privacy_passes >= 1, "a pending erasure must not wait on the usage sweep switch"
+
+
+@pytest.mark.parametrize(("enabled", "expected"), [(False, 0), (True, 1)])
+async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) -> None:
+    """`--once` runs the usage pass only when the sweep is switched on."""
+    calls = 0
+
+    async def sweep() -> None:
+        nonlocal calls
+        calls += 1
+
+    await _usage_sweep_once(enabled=enabled, sweep=sweep)
+
+    assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"

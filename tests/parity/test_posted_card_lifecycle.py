@@ -32,6 +32,7 @@ import pytest
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.posted_controls import WRONG_REQUESTER_MESSAGE, build_posted_card, expired_message
+from daimon.core.posted_controls.teams_card import teams_wording
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.agent_mcp_credentials import list_credentials
 from daimon.core.stores.credential_requests import peek_credential_request
@@ -168,6 +169,9 @@ async def test_posted_card_requested_copy_matches_core_renderer(
         expires_at=_SOME_EXPIRY,
         token=token,
     )
+    if driver.param_id == "teams":
+        # A TextBlock shows backticks literally, so Teams words the key name bare.
+        expected = teams_wording(expected)
     posted = _last(driver)
     assert posted.state == "requested", f"a freshly posted card is requested, got {posted.state!r}"
     assert posted.headline == expected.headline, (
@@ -368,12 +372,12 @@ def _mcp_routes(router: MARouter) -> None:
     router.add("POST", rf"/v1/agents/{_MA_AGENT_ID}", _attach_fails)
 
 
-async def test_mcp_attach_failure_publishes_no_token_and_refuses(
+async def test_mcp_attach_failure_publishes_no_token_and_allows_retry(
     driver: PlatformDriver, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     """The attach comes before the agent-wide token is published, so a failed
-    attach stores nothing and the card says nothing was saved, on both
-    platforms."""
+    attach stores nothing and the card offers the same form for retry on all
+    three platforms."""
     install = await _install(driver, db_session_factory)
     router = _agent_router(install)
     _mcp_routes(router)
@@ -410,17 +414,22 @@ async def test_mcp_attach_failure_publishes_no_token_and_refuses(
         value=_SECRET,
     )
 
-    refused = _last(driver)
-    assert refused.state == "refused", (
-        f"an attach that failed must not read as applied, got {refused.state!r}"
+    retry = _last(driver)
+    assert retry.state == "requested", (
+        f"a failed attach must offer the same form again, got {retry.state!r}"
     )
-    assert _SECRET not in "\n".join((refused.headline, *refused.facts)), (
+    assert retry.button_labels
+    assert "Try again" in "\n".join((retry.headline, *retry.facts))
+    assert _SECRET not in "\n".join((retry.headline, *retry.facts)), (
         "no submitted token may ever reach the posted card"
     )
     async with db_session_factory() as session:
         credentials = await list_credentials(
             session, tenant_id=install.tenant_id, agent_id=_agent_uuid(install)
         )
+        request = await peek_credential_request(session, token=token)
+    assert request is not None and request.used_at is None
+    assert request.outcome == "write_failed"
     assert credentials == (), "no agent-wide token is published without an attach"
 
 

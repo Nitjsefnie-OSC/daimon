@@ -25,6 +25,7 @@ from sqlalchemy import (
     LargeBinary,
     Numeric,
     PrimaryKeyConstraint,
+    SmallInteger,
     Text,
     UniqueConstraint,
     func,
@@ -479,8 +480,12 @@ class ThreadSession(Base):
     # or the channel a DM was moved from (`Admission.budget_channel_id`). NULL
     # when unknown; agent reach then counts the session as possibly anywhere.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Immutable copy of the MA billing stamp. Empty means a legacy row whose
+    # stamp is unknown; preparation replaces it before the next billed turn.
+    budget_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     seal_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     watermark_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivered_answer_chunk_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     # Untyped Text on purpose — no CHECK, so widening the vocabulary never needs
     # a lock on a hot table. Values:
     #   'live'       the caller's current session (the only status the
@@ -541,6 +546,7 @@ class ThreadSession(Base):
     # 'live' on every healthy thread forever. Slack needs the channel because a
     # Slack message is addressed by (channel, ts); Discord leaves it NULL since
     # a Discord message id is globally addressable on its own.
+    active_turn_owner_key: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     active_turn_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_turn_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -591,6 +597,7 @@ class TurnCardIntent(Base):
     # NULL while prepared: the platform accepted no response yet, or the
     # process died before it could persist the response's message identifier.
     message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    owner_key: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'prepared'"))
     recovery_failures: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
@@ -1289,6 +1296,19 @@ class PendingFileDelete(Base):
 
     file_id: Mapped[str] = mapped_column(Text, nullable=False)
     delete_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PrivacySessionDelete(Base):
+    """Durable MA erasure target; deliberately survives account and tenant removal."""
+
+    __tablename__ = "privacy_session_deletes"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    pending_session_ids: Mapped[dict[str, list[str]]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2293,22 +2313,22 @@ class PendingSkillAdd(Base):
 
     Written only where no approval card can show because the deployment turned
     them off. Bound to the previewing turn's caller, thread and target agent
-    and to the previewed content. Their next message approves it for that turn
-    (`approved_origin_id`) or cancels it (`consumed_at`); an upload consumes it.
+    and to the previewed content. Their next non-queued message approves it for
+    that turn (`approved_origin_id`) or cancels it (`consumed_at`); an upload
+    consumes it.
     """
 
     __tablename__ = "pending_skill_adds"
     __table_args__ = (
         Index("pending_skill_adds_lookup_idx", "tenant_id", "account_id", "platform", "thread_id"),
         Index("pending_skill_adds_expiry_idx", "expires_at"),
-        # At most one open preview per person, thread and agent: a newer one replaces it.
+        # At most one open preview per person and thread, across all agents.
         Index(
             "uq_pending_skill_adds_open",
             "tenant_id",
             "account_id",
             "platform",
             "thread_id",
-            "ma_agent_id",
             unique=True,
             postgresql_where=text("consumed_at IS NULL"),
         ),
@@ -2529,16 +2549,37 @@ class TurnOutcome(Base):
 
 
 class TenantGitHubRepo(Base):
+    """One confirmed repo: server-wide, or owned by one agent (`scope_agent_id`).
+
+    A repo may be confirmed server-wide and for several agents at once; each
+    row carries its own confirmation and limit. Agents live in Managed Agents,
+    so `scope_agent_id` has no local table to reference.
+    """
+
     __tablename__ = "tenant_github_repos"
     __table_args__ = (
-        PrimaryKeyConstraint("tenant_id", "repo_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "repo_id",
+            "scope_agent_id",
+            name="uq_tenant_github_repos_scope",
+            postgresql_nulls_not_distinct=True,
+        ),
         CheckConstraint("max_access IN ('read', 'write')"),
         CheckConstraint("status IN ('active', 'suspended', 'revoked')"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
     )
     repo_id: Mapped[int] = mapped_column(BigInteger)
+    # Null: any agent in the workspace may be granted it. Set: only that agent.
+    scope_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     owner_id: Mapped[int] = mapped_column(BigInteger)
     installation_id: Mapped[int] = mapped_column(BigInteger)
     repo_full_name: Mapped[str] = mapped_column(Text)
@@ -2575,6 +2616,9 @@ class GitHubConnectInvitation(Base):
     requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     agent_name: Mapped[str | None] = mapped_column(Text)
+    # The target's Managed Agents id, so a channel admin's right to connect
+    # for it can be checked again when the repos are confirmed.
+    agent_ma_id: Mapped[str | None] = mapped_column(Text)
     operator_issued: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -2586,6 +2630,7 @@ class GitHubConnectInvitation(Base):
     origin_ma_agent_id: Mapped[str | None] = mapped_column(Text)
     origin_responder_name: Mapped[str | None] = mapped_column(Text)
     requested_work: Mapped[str | None] = mapped_column(Text)
+    requested_repo: Mapped[str | None] = mapped_column(Text)
     encrypted_origin_followup: Mapped[bytes | None] = mapped_column(LargeBinary)
     origin_followup_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     connected_repos: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB)
@@ -2612,11 +2657,13 @@ class GitHubConnectClickIntent(Base):
     requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_ma_id: Mapped[str | None] = mapped_column(Text)
     origin_parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     origin_thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     origin_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     origin_responder_name: Mapped[str] = mapped_column(Text, nullable=False)
     requested_work: Mapped[str | None] = mapped_column(Text)
+    requested_repo: Mapped[str | None] = mapped_column(Text)
     encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
@@ -2634,6 +2681,7 @@ class GitHubConnectFlow(Base):
     encrypted_invitation_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     encrypted_user_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     github_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -2662,11 +2710,9 @@ class AgentGitHubGrant(Base):
     __tablename__ = "agent_github_grants"
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
-        ForeignKeyConstraint(
-            ["tenant_id", "repo_id"],
-            ["tenant_github_repos.tenant_id", "tenant_github_repos.repo_id"],
-            ondelete="CASCADE",
-        ),
+        # Several confirmations may share (tenant_id, repo_id), so grants no
+        # longer reference one; the stores remove grants with their repo.
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         CheckConstraint("baseline_access IN ('none', 'read', 'write')"),
         CheckConstraint("ceiling_access IN ('read', 'write')"),
         CheckConstraint(
@@ -2694,11 +2740,9 @@ class AgentGitHubGrantDraft(Base):
     __tablename__ = "agent_github_grant_drafts"
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
-        ForeignKeyConstraint(
-            ["tenant_id", "repo_id"],
-            ["tenant_github_repos.tenant_id", "tenant_github_repos.repo_id"],
-            ondelete="CASCADE",
-        ),
+        # Several confirmations may share (tenant_id, repo_id), so grants no
+        # longer reference one; the stores remove grants with their repo.
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         CheckConstraint("operation IN ('upsert', 'remove')"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
@@ -2792,6 +2836,40 @@ class GitHubAccessRequest(Base):
     admin_card_message_id: Mapped[str | None] = mapped_column(Text)
     resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expiry_notice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GitHubGrantProposal(Base):
+    """A repo grant proposed in one chat turn for confirmation in a later turn."""
+
+    __tablename__ = "github_grant_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "requester_account_id",
+            "platform",
+            "requester_platform_user_id",
+            "thread_id",
+            name="uq_github_grant_proposal",
+        ),
+        Index("github_grant_proposals_expiry_idx", "expires_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    repo_name: Mapped[str] = mapped_column(Text, nullable=False)
+    ability: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    approved_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class GitHubAccessRequestDelivery(Base):
@@ -3429,3 +3507,45 @@ class NeutralSkillVersion(Base):
     display_title: Mapped[str] = mapped_column(Text, nullable=False)
     preview: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     zip_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
+class DiscordMessageAdmission(Base):
+    """Durable addressed-message admission, shared by gateway and startup replay."""
+
+    __tablename__ = "discord_message_admissions"
+    __table_args__ = (
+        Index("ix_discord_admissions_activity", "tenant_id", "created_at"),
+        Index("ix_discord_admissions_channel", "tenant_id", "channel_id", "created_at"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    message_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("turn_card_intents.id", ondelete="SET NULL"), nullable=True
+    )
+    handled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DiscordWorkerHeartbeat(Base):
+    """Last confirmed lock ownership, retained across an abrupt connection loss."""
+
+    __tablename__ = "discord_worker_heartbeats"
+    owner_key: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_aware: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
+
+class DiscordGatewayLease(Base):
+    """The last process to hold the Discord gateway lease, and whether it let go cleanly."""
+
+    __tablename__ = "discord_gateway_lease"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    holder_owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

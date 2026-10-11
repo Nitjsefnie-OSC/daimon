@@ -189,6 +189,7 @@ async def submit_mcp_token(
     whether the token was stored.
     """
     check_owned_sessionmaker(sessionmaker)
+    import discord
     from cryptography.fernet import Fernet
     from daimon.adapters.discord.credential_modals import McpCredentialModal
     from daimon.adapters.discord.runtime import DiscordRuntime
@@ -273,7 +274,13 @@ async def submit_mcp_token(
 
     interaction = MagicMock()
     interaction.guild_id = _GUILD_ID
+    # The requester submits as the server admin who asked for the token: connecting
+    # a new MCP server is a mutation of the agent, which needs its owner.
+    interaction.user = MagicMock(spec=discord.Member)
     interaction.user.id = int(_REQUESTER)
+    interaction.user.guild_permissions.administrator = True
+    interaction.user.guild_permissions.manage_guild = False
+    interaction.guild.owner_id = int(_REQUESTER) + 1
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
     interaction.edit_original_response = AsyncMock()

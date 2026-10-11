@@ -114,7 +114,7 @@ async def test_captures_actual_headless_host_return_not_pretool_text_or_truncate
             capture_headless_return(invoke, evidence_id="return-1", clock=lambda: next(ticks)),
             timeout=10,
         )
-    expected = answer[: headless_runner.LAST_RESULT_TAIL_MAX] if answer is not None else ""
+    expected = answer if answer is not None else ""
     assert receipt.text == expected
     assert receipt.has_visible_text == bool(expected) and receipt.returned_s == 2.0
     assert states and any(block.kind == "tool_use" for block in states[0].content)

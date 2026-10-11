@@ -89,6 +89,12 @@
               "message": "ceiling: this turn stopped responding and was abandoned \u2014 start fresh with a new message"
             },
             "finished_tool_ids": [],
+            "long_prompt_usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
             "mcp_failures": [],
             "rate_limit_until": null,
             "retrying_error": null,

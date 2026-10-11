@@ -49,8 +49,11 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.channel_admin_roles import member_roles
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.permissions import readers_limited_at
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
     mark_delivered,
@@ -64,6 +67,8 @@ from daimon.core.support_escalation import (
     ESCALATE,
     OUT_OF_CREDITS,
     RECORDED_UNDELIVERED,
+    SEALED_NOTE_HINT,
+    SEALED_POST_MARKER,
     UNAVAILABLE,
     build_custom_id,
     received_text,
@@ -96,6 +101,41 @@ def discord_channel(support: SupportSettings) -> str | None:
     return None if channel is None or channel.startswith("19:") else channel
 
 
+async def _answer_place(bot: commands.Bot, channel_id: str) -> tuple[str, str | None]:
+    """`(channel, thread)` for the answer's channel id: a thread names its parent."""
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+    except (discord.HTTPException, ValueError):
+        return channel_id, None
+    if isinstance(channel, discord.Thread) and channel.parent_id:
+        return str(channel.parent_id), channel_id
+    return channel_id, None
+
+
+async def answer_is_sealed(
+    runtime: DiscordRuntime, bot: commands.Bot, *, guild_id: str, channel_id: str
+) -> bool:
+    """Whether only turns inside the answer's channel (or its thread) read it.
+
+    The same core check Slack and Teams make (`readers_limited_at`). A policy
+    that cannot be read counts as sealed: the hint and the marker only ask for
+    care, so erring toward them costs nothing.
+    """
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+    channel, thread = await _answer_place(bot, channel_id)
+    try:
+        async with runtime.sessionmaker() as session:
+            policy = await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable:
+        return True
+    return readers_limited_at(policy, channel_id=channel, thread_id=thread)
+
+
+def _sealed_hint() -> str:
+    """The form's hint as subtext, its two lines a blank line apart."""
+    return "\n\n".join(f"-# {line}" for line in SEALED_NOTE_HINT.split("\n\n"))
+
+
 async def post_to_support_channel(
     bot: commands.Bot,
     *,
@@ -119,10 +159,11 @@ async def post_to_support_channel(
         if not isinstance(channel, discord.abc.Messageable):
             _log.warning("support.channel_not_messageable", channel_id=channel_id)
             return False
-        if allowed_mentions is None:
-            await channel.send(body)
-        else:
-            await channel.send(body, allowed_mentions=allowed_mentions)
+        for chunk in split_for_discord_safe(body):
+            if allowed_mentions is None:
+                await channel.send(chunk)
+            else:
+                await channel.send(chunk, allowed_mentions=allowed_mentions)
         return True
     except (discord.HTTPException, ValueError) as exc:
         # A misconfigured id, a channel the bot was removed from, or lost
@@ -147,13 +188,22 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
     """
 
     def __init__(
-        self, *, runtime: DiscordRuntime, guild_id: str, channel_id: str, message_id: str
+        self,
+        *,
+        runtime: DiscordRuntime,
+        guild_id: str,
+        channel_id: str,
+        message_id: str,
+        sealed: bool = False,
     ) -> None:
         super().__init__()
         self._runtime = runtime
         self._guild_id = guild_id
         self._channel_id = channel_id
         self._message_id = message_id
+        self._sealed = sealed
+        if sealed:
+            self.add_item(discord.ui.TextDisplay(_sealed_hint()))
         self.note_input: discord.ui.TextInput[SupportModal] = discord.ui.TextInput(
             label="What do you need help with?",
             # Discord caps a label at 45 characters; Slack says this in its label.
@@ -214,6 +264,14 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
             await interaction.followup.send(_OUT_OF_CREDITS, ephemeral=True)
             return
 
+        # Decided again at submit, as Slack does: the rule may have changed
+        # since the form opened, and the post's marker must match it now.
+        self._sealed = await answer_is_sealed(
+            self._runtime,
+            cast(commands.Bot, interaction.client),
+            guild_id=guild_id,
+            channel_id=self._channel_id,
+        )
         # The row is committed. Everything below is best-effort delivery, and
         # a total failure downgrades the confirmation wording rather than the
         # outcome -- the request is already durable.
@@ -255,22 +313,13 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         link = (
             f"https://discord.com/channels/{self._guild_id}/{self._channel_id}/{self._message_id}"
         )
-        return (
-            f"**Human support requested** by {interaction.user.mention} "
-            f"({interaction.user})\n{link}\n\n{note}"
-        )
+        marker = [f"*{SEALED_POST_MARKER}*"] if self._sealed else []
+        head = f"**Human support requested** by {interaction.user.mention} ({interaction.user})"
+        return "\n\n".join([head, link, *marker, note])
 
     async def _origin_channel_id(self, bot: commands.Bot) -> str:
         """The answer's channel, or a thread's parent, which is what a grant names."""
-        try:
-            channel = bot.get_channel(int(self._channel_id)) or await bot.fetch_channel(
-                int(self._channel_id)
-            )
-        except (discord.HTTPException, ValueError):
-            return self._channel_id
-        if isinstance(channel, discord.Thread) and channel.parent_id:
-            return str(channel.parent_id)
-        return self._channel_id
+        return (await _answer_place(bot, self._channel_id))[0]
 
     async def _dm_admins(
         self, *, interaction: discord.Interaction, note: str, tenant_id: uuid.UUID
@@ -295,12 +344,14 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         policies = self._runtime.settings.direct_message_policies
         policy = policies.get(tenant_id, DirectMessagePolicy())
         body = self._body(interaction, note)
+        chunks = split_for_discord_safe(body)
         for tier in tiers:
             landed = 0
             for user_id in (uid for uid in tier if policy.allows(uid)):
                 try:
                     dm = await bot.open_member_dm(int(self._guild_id), int(user_id))
-                    await dm.send(body, allowed_mentions=discord.AllowedMentions.none())
+                    for chunk in chunks:
+                        await dm.send(chunk, allowed_mentions=discord.AllowedMentions.none())
                     landed += 1
                 except (discord.HTTPException, LookupError, ValueError) as exc:
                     _log.info("support.admin_dm_undelivered", err_type=type(exc).__name__)
@@ -382,12 +433,16 @@ class SupportEscalateButton(
     ) -> None:
         try:
             bot = cast(DaimonBot, interaction.client)
+            sealed = await answer_is_sealed(
+                bot.runtime, bot, guild_id=self.guild_id, channel_id=self.channel_id
+            )
             await interaction.response.send_modal(
                 SupportModal(
                     runtime=bot.runtime,
                     guild_id=self.guild_id,
                     channel_id=self.channel_id,
                     message_id=self.message_id,
+                    sealed=sealed,
                 )
             )
         except Exception as err:

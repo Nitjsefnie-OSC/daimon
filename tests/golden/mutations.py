@@ -47,8 +47,8 @@ def apply(patch: pytest.MonkeyPatch, mutation: str) -> None:
         function = cast(FunctionType, module.SlackApp._orchestrate)
         code = replace_constant(function.__code__, "eyes", "hourglass")
     elif mutation == "discord_eyes":
-        module = importlib.import_module("daimon.adapters.discord.lifecycle")
-        function = cast(FunctionType, module.DiscordTurnLifecycle.on_acknowledgment)
+        module = importlib.import_module("daimon.adapters.discord.bot")
+        function = cast(FunctionType, module.DaimonBot._handle_mention)
         code = replace_constant(function.__code__, "👀", "👁")
     else:
         if mutation == "ledger_dating":

@@ -11,7 +11,7 @@ import httpx
 import pytest
 from anthropic import APIError, APIStatusError, AsyncAnthropic
 from daimon.core import direct_messages, ma, session_preparation_stages, session_snapshot
-from daimon.core.defaults.ma_index import list_agents_by_tenant, list_skills_lenient
+from daimon.core.defaults.ma_index import list_agents_for_privacy_deletion, list_skills_lenient
 from daimon.core.errors import DaimonError
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.stores.direct_messages import DirectMessageRow
@@ -140,7 +140,7 @@ async def test_cleanup_without_opt_in_or_sentinel_never_mutates() -> None:
 
 async def legacy_account_purge(client: AsyncAnthropic) -> ma.SessionDeletionReport:
     targets: set[str] = set()
-    for agent in await list_agents_by_tenant(client, tenant_id=TENANT):
+    for agent in await list_agents_for_privacy_deletion(client, tenant_id=TENANT):
         async for session in client.beta.sessions.list(agent_id=agent.id):
             if session.metadata.get("daimon_account") == str(ACCOUNT):
                 targets.add(session.id)

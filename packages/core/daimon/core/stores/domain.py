@@ -263,11 +263,14 @@ class ThreadSessionRow(BaseModel):
     ma_session_id: str
     ma_agent_id: str | None = None
     channel_id: str | None = None
+    budget_channel_id: str | None = None
     seal_ids: tuple[str, ...] | None = None
     watermark_message_id: str | None
+    delivered_answer_chunk_ids: tuple[str, ...] | None = None
     status: str
     created_at: datetime
     updated_at: datetime
+    active_turn_owner_key: int | None = None
     active_turn_message_id: str | None = None
     active_turn_started_at: datetime | None = None
     active_turn_channel_id: str | None = None
@@ -299,6 +302,7 @@ class TurnCardIntentRow(BaseModel):
     turn_token: uuid.UUID
     channel_id: str | None
     message_id: str | None
+    owner_key: int | None = None
     status: Literal["prepared", "posted", "retired", "unrecoverable"]
     recovery_failures: int = 0
     created_at: datetime

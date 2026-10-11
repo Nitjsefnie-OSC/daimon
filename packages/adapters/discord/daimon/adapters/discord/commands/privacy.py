@@ -20,10 +20,7 @@ from daimon.adapters.discord.checks import resolve_tenant_for_interaction
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.privacy_panel.embeds import build_deleted_state_container
 from daimon.adapters.discord.privacy_panel.panel import PrivacyPanelView
-from daimon.adapters.discord.privacy_panel.read import (
-    load_purge_preview,
-    resolve_privacy_account,
-)
+from daimon.adapters.discord.privacy_panel.read import resolve_privacy_account
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from sqlalchemy.exc import SQLAlchemyError
@@ -75,12 +72,19 @@ class PrivacyCog(commands.Cog):
         try:
             runtime = _get_runtime(interaction)
             user_name = interaction.user.name  # Discord username for typed-confirm
+            bot_display_name = (
+                runtime.settings.discord.bot_display_name
+                if runtime.settings.discord is not None
+                else "daimon"
+            )
             tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
             if tenant_id is None:
                 # DM context or unprovisioned guild — no tenant, so no stored
                 # data for this user under any tenant: render deleted-state.
                 await interaction.followup.send(
-                    view=layout.static_view(build_deleted_state_container(user_name)),
+                    view=layout.static_view(
+                        build_deleted_state_container(user_name, bot_display_name=bot_display_name)
+                    ),
                     allowed_mentions=discord.AllowedMentions.none(),
                     ephemeral=True,
                 )
@@ -94,21 +98,18 @@ class PrivacyCog(commands.Cog):
             if account_id is None:
                 # No principal → render deleted-state and return.
                 await interaction.followup.send(
-                    view=layout.static_view(build_deleted_state_container(user_name)),
+                    view=layout.static_view(
+                        build_deleted_state_container(user_name, bot_display_name=bot_display_name)
+                    ),
                     allowed_mentions=discord.AllowedMentions.none(),
                     ephemeral=True,
                 )
                 return
-            preview = await load_purge_preview(
-                session_factory=runtime.sessionmaker,
-                account_id=account_id,
-            )
             view = PrivacyPanelView(
                 runtime=runtime,
                 account_id=account_id,
                 allowed_user_id=interaction.user.id,
                 user_name=user_name,
-                preview=preview,
             )
             await interaction.followup.send(
                 view=view,

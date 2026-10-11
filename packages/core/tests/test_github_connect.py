@@ -88,9 +88,11 @@ async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
         origin_ma_agent_id="ma-agent",
         origin_responder_name="CallingBot",
         requested_work="Review the issue",
+        requested_repo="Team/Requested",
     )
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
     assert invitation is not None
+    assert invitation.requested_repo == "Team/Requested"
     row = await db_session.get(GitHubConnectInvitation, invitation.token_hash)
     assert row is not None
     row.used_at = datetime.now(UTC)
@@ -285,7 +287,10 @@ async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread
         origin_ma_agent_id="ma-agent",
         origin_responder_name="CallingBot",
         requested_work=None,
+        requested_repo="Team/Requested",
     )
+    stored_intent = await db_session.get(GitHubConnectClickIntent, intent_id)
+    assert stored_intent is not None and stored_intent.requested_repo == "Team/Requested"
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     args = dict(
         intent_id=intent_id,
@@ -321,6 +326,7 @@ async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread
     token = github_connect.decrypt_token(fernet, first[0])
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
     assert invitation is not None
+    assert invitation.requested_repo == "Team/Requested"
     assert invitation.encrypted_origin_followup == b"encrypted-interaction"
     account = await db_session.get(Account, admin_id)
     assert account is not None
@@ -465,9 +471,10 @@ def test_permission_cache_evicts_least_recently_used() -> None:
 
 
 @pytest.mark.asyncio
-async def test_client_pinned_agent_refuses_mint_and_existing_activation(
+async def test_client_pinned_agent_refuses_server_wide_repos(
     db_session: AsyncSession,
 ) -> None:
+    """A pinned agent may use repos connected for it, never a server-wide one."""
     tenant_id, admin_id, agent_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id="client"))
     await db_session.flush()
@@ -486,6 +493,36 @@ async def test_client_pinned_agent_refuses_mint_and_existing_activation(
         TenantAccessPolicyRecord(
             tenant_id=tenant_id,
             policy={"agent_rules": {"ClientBot": {"runs_in": ["client-channel"]}}},
+        )
+    )
+    await db_session.flush()
+    # With nothing granted yet, a link for the pinned agent is allowed.
+    assert await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        agent_id=agent_id,
+        agent_name="ClientBot",
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=5,
+            owner_id=1,
+            installation_id=1,
+            repo_full_name="example/server-wide",
+            max_access="read",
+            authorized_by_github_user_id=1,
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        AgentGitHubGrant(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=5,
+            baseline_access="read",
+            ceiling_access="read",
         )
     )
     await db_session.flush()
@@ -517,7 +554,7 @@ async def test_client_pinned_agent_refuses_mint_and_existing_activation(
     "saved_state", ["binding", "gh_token", "github_token", "working", "skill", "runs_in"]
 )
 @pytest.mark.asyncio
-async def test_self_serve_refuses_every_saved_github_state_at_mint_and_activation(
+async def test_agent_link_allows_saved_github_state_at_mint(
     db_session: AsyncSession, saved_state: str
 ) -> None:
     tenant_id, admin_id, active_agent, mint_agent = (uuid.uuid4() for _ in range(4))
@@ -582,20 +619,164 @@ async def test_self_serve_refuses_every_saved_github_state_at_mint_and_activatio
                     )
                 )
     await db_session.flush()
-    with pytest.raises(github_connect.ClientAgentConnectionError, match="saved GitHub key"):
-        await github_connect.mint_invitation(
-            db_session,
-            tenant_id=tenant_id,
-            requester_account_id=admin_id,
-            agent_id=mint_agent,
-            agent_name="AlreadySaved",
-        )
-    with pytest.raises(github_connect.ClientAgentConnectionError, match="saved GitHub key"):
+    # Whoever manages the agent may start switching it; confirming decides
+    # whether the saved key goes (see the update_pending tests).
+    assert await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        agent_id=mint_agent,
+        agent_name="AlreadySaved",
+    )
+    with pytest.raises(ValueError, match="No authorized repositories remain"):
         await github_connect.activate_confirmed_agent(
             db_session,
             invitation=invitation,
             repos=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_cancel_blocks_concurrent_github_confirmation(
+    db_engine: AsyncEngine,
+    db_clean: None,
+) -> None:
+    del db_clean
+    sessionmaker = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    async with sessionmaker.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id="cancel-race"))
+        await session.flush()
+        session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+        await session.flush()
+        invitation = await github_connect.mint_invitation(
+            session, tenant_id=tenant_id, requester_account_id=admin_id
+        )
+        await github_connect.create_flow(
+            session,
+            invitation_hash=github_connect.digest(invitation),
+            state="cancel-race-state",
+            cookie="cancel-race-cookie",
+            encrypted_verifier=b"encrypted",
+        )
+        assert await github_connect.set_user_token(
+            session, state="cancel-race-state", encrypted_token=b"token", github_user_id=17
+        )
+
+    cancel_locked, release_cancel = asyncio.Event(), asyncio.Event()
+
+    async def cancel() -> None:
+        async with sessionmaker.begin() as session:
+            flow = await github_connect.cancel_flow(
+                session, state="cancel-race-state", cookie="cancel-race-cookie"
+            )
+            assert flow is not None and flow.cancelled_at is not None
+            cancel_locked.set()
+            await release_cancel.wait()
+
+    async def confirm() -> bool:
+        async with sessionmaker.begin() as session:
+            return await github_connect.confirm(
+                session,
+                state="cancel-race-state",
+                cookie="cancel-race-cookie",
+                github_user_id=17,
+                repos=[],
+            )
+
+    cancel_task = asyncio.create_task(cancel())
+    await asyncio.wait_for(cancel_locked.wait(), timeout=5)
+    confirm_task = asyncio.create_task(confirm())
+    await asyncio.sleep(0.05)
+    assert not confirm_task.done(), "confirmation must wait for cancellation's row lock"
+    release_cancel.set()
+    await cancel_task
+    assert not await confirm_task
+
+
+@pytest.mark.asyncio
+async def test_expiry_sweep_rechecks_cancel_after_waiting_for_row_lock(
+    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+) -> None:
+    del db_clean
+    sessionmaker = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with sessionmaker.begin() as session:
+        session.add(
+            Tenant(id=(tenant_id := uuid.uuid4()), platform="discord", external_id="sweep-race")
+        )
+        await session.flush()
+        session.add(Account(id=(admin_id := uuid.uuid4()), tenant_id=tenant_id, role="admin"))
+        await session.flush()
+        invitation = await github_connect.mint_invitation(
+            session, tenant_id=tenant_id, requester_account_id=admin_id
+        )
+        await github_connect.create_flow(
+            session,
+            invitation_hash=github_connect.digest(invitation),
+            state="sweep-race-state",
+            cookie="sweep-race-cookie",
+            encrypted_verifier=b"encrypted",
+        )
+        assert await github_connect.set_user_token(
+            session, state="sweep-race-state", encrypted_token=b"pending-token", github_user_id=17
+        )
+        flow = await session.get(GitHubConnectFlow, github_connect.digest("sweep-race-state"))
+        assert flow is not None
+        flow.expires_at = datetime.now(UTC) + timedelta(seconds=3)
+
+    # The sweep starts against the old committed row while Cancel holds its
+    # update lock. PostgreSQL must recheck the outer DELETE after Cancel commits.
+    async with sessionmaker.begin() as cancel_session:
+        cancelled = await github_connect.cancel_flow(
+            cancel_session, state="sweep-race-state", cookie="sweep-race-cookie"
+        )
+        assert cancelled is not None and cancelled.cancelled_at is not None
+        await asyncio.sleep(max(0, (flow.expires_at - datetime.now(UTC)).total_seconds() + 0.05))
+
+        sweep_pid: int | None = None
+
+        async def sweep() -> int:
+            nonlocal sweep_pid
+            async with sessionmaker.begin() as sweep_session:
+                sweep_pid = await sweep_session.scalar(text("SELECT pg_backend_pid()"))
+                assert sweep_pid is not None
+                sweep_started.set()
+                return await github_connect.delete_expired_flows(
+                    sweep_session, now=datetime.now(UTC)
+                )
+
+        sweep_started = asyncio.Event()
+        sweep_task = asyncio.create_task(sweep())
+        try:
+            await asyncio.wait_for(sweep_started.wait(), timeout=5)
+            assert sweep_pid is not None
+            # Confirm the DELETE reached the row lock before committing Cancel.
+            async with AsyncSession(db_nullpool_engine) as probe:
+                for _ in range(500):
+                    waiting = await probe.scalar(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                            "WHERE pid = :pid AND wait_event_type = 'Lock' "
+                            "AND query LIKE '%DELETE FROM github_connect_flows%')"
+                        ),
+                        {"pid": sweep_pid},
+                    )
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    raise AssertionError("sweep did not wait for Cancel's row lock")
+            assert not sweep_task.done()
+        except BaseException:
+            sweep_task.cancel()
+            raise
+
+    deleted = await asyncio.wait_for(sweep_task, timeout=5)
+    assert deleted == 0
+    async with sessionmaker() as session:
+        retained = await session.get(GitHubConnectFlow, github_connect.digest("sweep-race-state"))
+        assert retained is not None and retained.encrypted_user_token == b"pending-token"
+        assert retained.cancelled_at is not None
 
 
 @pytest.mark.asyncio
@@ -657,8 +838,9 @@ async def test_mint_waits_for_concurrent_agent_key_write(
         await asyncio.wait_for(attempted.wait(), timeout=10)
         release.set()
         await writer
-        with pytest.raises(github_connect.ClientAgentConnectionError):
-            await minter
+        # A link for one agent may switch a saved key, so the mint goes ahead,
+        # but only after the concurrent key write committed.
+        await minter
     finally:
         release.set()
         if not writer.done():
@@ -885,7 +1067,8 @@ async def test_agent_bound_connection_activates_without_a_saved_key_and_waits_wi
         assert [(row.baseline_access, row.ceiling_access, row.staged) for row in grants] == [
             ("write", "write", has_key)
         ]
-        assert status == ("update_pending" if has_key else "activated")
+        assert status is not None
+        assert status.status == ("update_pending" if has_key else "activated")
         assert await github_access.get_agent_mode(
             db_session, tenant_id=tenant_id, agent_id=agent_id
         ) == ("legacy" if has_key else "app")
@@ -1034,12 +1217,10 @@ async def test_repo_credential_agents_wait_for_explicit_update(
         repository_selection="selected",
         suspended_at=None,
     )
-    assert (
-        await github_connect.activate_confirmed_agent(
-            db_session, invitation=invitation, repos=[confirmation]
-        )
-        == "update_pending"
+    pending = await github_connect.activate_confirmed_agent(
+        db_session, invitation=invitation, repos=[confirmation]
     )
+    assert pending is not None and pending.status == "update_pending"
     assert (
         await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
         == "legacy"
@@ -1160,7 +1341,9 @@ async def test_reconfirmation_respects_inactive_repo_choice(
             )
         ],
     )
-    repo = await db_session.get(TenantGitHubRepo, (tenant_id, 101))
+    repo = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
     assert repo is not None
     assert repo.status == "active" and repo.max_access == expected_access
     assert repo.version == 2
@@ -1208,9 +1391,22 @@ async def test_workspace_a_can_connect_org_repo_after_workspace_b(
                 )
             ],
         )
-        assert await db_session.get(TenantGitHubRepo, (tenant_id, index)) is not None
+        assert (
+            await github_access.repo_for_agent(
+                db_session, tenant_id=tenant_id, repo_id=index, agent_id=None
+            )
+            is not None
+        )
         connected.append((tenant_id, index))
-    assert all([await db_session.get(TenantGitHubRepo, key) is not None for key in connected])
+    assert all(
+        [
+            await github_access.repo_for_agent(
+                db_session, tenant_id=tenant, repo_id=repo, agent_id=None
+            )
+            is not None
+            for tenant, repo in connected
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -2119,9 +2315,9 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
         active_turn=True,
     )
     assert mint.await_count == 2
+    # Only the working repo is mounted; the other repo's token lives in the vault.
     assert {path for _, path, _ in writes if "/resources/" in path} == {
         "/v1/sessions/rotating-session/resources/resource-first",
-        "/v1/sessions/rotating-session/resources/resource-second",
     }
     assert {path for _, path, _ in writes if "/credentials/" in path} == {
         f"/v1/vaults/vault-1/credentials/cred-{name}"
@@ -2207,7 +2403,7 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
         agent_id=agent_id,
         fernet=fernet,
     )
-    assert len(current.resources) == 2
+    assert len(current.resources) == 1  # the working repo only
     mint.reset_mock(side_effect=True)
     mint.side_effect = ["narrowed-first"]
     writes.clear()

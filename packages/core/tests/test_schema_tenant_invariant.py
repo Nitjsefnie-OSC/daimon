@@ -28,6 +28,9 @@ from daimon.core import _models
 _TENANT_ID_EXEMPT: dict[str, str] = {
     # The tenant identity table itself; its `id` IS the tenant_id.
     "tenants": "identity table — `id` is the tenant_id",
+    # One row per running Discord worker process, not per tenant.
+    "discord_worker_heartbeats": "process liveness for worker ownership; holds no tenant data",
+    "discord_gateway_lease": "one row per database: which process holds the Discord gateway; no tenant data",
     # Keyed by agent_id, which is uuid5(tenant_id, ma_agent_id) via
     # derive_agent_uuid — tenant-salted, so globally unique per tenant.
     "agent_github_binding": "keyed by tenant-salted agent_id (uuid5)",
@@ -45,6 +48,11 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     "account_github_links": "keyed by account_id (globally unique, maps to one tenant)",
     "github_access_request_deliveries": "keyed by request_id (globally unique FK to a tenant-scoped request); store reads verify that request's tenant",
     "github_connect_flows": "keyed by random state hash and bound by FK to a tenant-scoped invitation",
+    # A privacy deletion work item outlives the account it erases and may span
+    # every tenant the account was linked to, so it lists its tenant ids rather
+    # than belonging to one. Only the privacy purge writes it and only the
+    # scheduler's erasure sweep reads it; nothing tenant-facing queries it.
+    "privacy_session_deletes": "one erasure job per deleted account; lists every linked tenant in tenant_ids",
     # Push delivery receipts and jobs are deployment-wide GitHub metadata, not
     # tenant data. Resync resolves each tenant's bindings and scoped credentials
     # at execution time from the canonical repository/ref.

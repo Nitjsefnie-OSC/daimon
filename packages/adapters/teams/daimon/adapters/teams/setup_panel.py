@@ -67,6 +67,7 @@ from daimon.core.channel_admins import (
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
+from daimon.core.github_panel import load_grants_panel
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import (
     authorize_coding_token,
@@ -104,9 +105,11 @@ log = structlog.get_logger()
 
 GONE = "That agent is no longer available. It may have been deleted."
 NOT_CONFIGURED = "This deployment is not set up for coding-tool access yet. Ask the operator."
+#: Who may mint is an admin, or an admin of every channel the agent's rule runs
+#: it in, binding it to one of them; the refusal names only the way out.
 NEEDS_ADMIN = (
-    "Minting an access token for {name} needs an admin, or an admin of every channel "
-    "its rule runs it in, binding it to one of them."
+    "You can't create this token.\n\n"
+    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
 OPERATOR_NEEDS_ADMIN = "Only an admin can mint or revoke operator tokens."
@@ -361,6 +364,8 @@ class SetupPanel:
                     tenant_id=tenant_id,
                     channel_id=chat,
                     is_admin=is_admin,
+                    platform="teams",
+                    default=self._runtime.deployment_default,
                 )
             )
             return await load_roster(
@@ -406,6 +411,8 @@ class SetupPanel:
                     tenant_id=tenant_id,
                     channel_id=viewer.conversation_id,
                     is_admin=viewer.is_admin,
+                    platform="teams",
+                    default=self._runtime.deployment_default,
                 ),
             )
 
@@ -464,12 +471,21 @@ class SetupPanel:
                 is_admin=actor.is_admin,
                 channel_label=None,
             )
+            github_panel = await load_grants_panel(
+                session,
+                tenant_id=actor.tenant_id,
+                agent_id=derive_agent_uuid(
+                    tenant_id=actor.tenant_id, ma_agent_id=match.ma_agent_id
+                ),
+                agent_name=match.name,
+            )
         coding_tools = mcp.public_url is not None and mcp.jwt_secret is not None
         return cards.details_card(
             details,
             here=actor.conversation_id,
             page=page,
             coding_tools=coding_tools,
+            github_panel=github_panel,
             expanded=expanded,
         )
 
@@ -569,7 +585,14 @@ class SetupPanel:
         details = await self._details(actor, name, 0)
         if ctx.activity.reply_to_id and details is not None:
             await edit_origin_card(ctx, details)  # Like Slack, the panel lands on Details.
-        return dialog_message(f"Created {name}. It does not answer anywhere yet.")
+        return dialog_message(
+            f"Created {name}. It does not answer anywhere yet."
+            + (
+                " An admin can make it answer in this chat; it will then appear in setup here."
+                if details is None and not actor.is_admin
+                else ""
+            )
+        )
 
     async def _mint(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         """Mint at once, or first ask a channel admin which of their channels it runs in."""
@@ -652,7 +675,7 @@ class SetupPanel:
             await self._audit(
                 actor, "coding_token_mint", outcome="denied", reason=f"authz:{decision.reason}"
             )
-            return dialog_message(NEEDS_ADMIN.format(name=name))
+            return dialog_message(NEEDS_ADMIN)
         if target is None:
             return dialog_message(GONE)
         account_id = await get_or_create_account(self._runtime, actor)

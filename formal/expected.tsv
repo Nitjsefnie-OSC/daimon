@@ -2,6 +2,14 @@
 # dir	spec	config	expected verdict	distinct states (TLC -workers 1)	TLC flags (- = none)	what it pins
 # A violates: row is a deliberately unsafe config: its counterexample is the
 # evidence that the model can still see the bug the safe config rules out.
+# ---- GitHub Connect cancellation ----
+github_grant_proposals	GrantProposal	GrantProposalSafe	clean	60	-	user yes in a later turn and current permission required before grant
+github_grant_proposals	GrantProposal	GrantProposalUnsafe	violates:ValidGrant	9	-	model-supplied confirmed=true grants in the proposal turn without human yes
+github_connect_cancel	ConnectCancel	ConnectCancelSafe	clean	31	-	cancellation excludes confirmation and rechecks pending revocation after sweep selection
+github_connect_cancel	ConnectCancel	ConnectCancelNoLock	violates:NoConfirmAfterCancel	9	-	pre-fix cancel leaves the flow confirmable
+github_connect_cancel	ConnectCancel	ConnectCancelDropsToken	violates:PendingTokenRetained	28	-	unsafe expiry sweep deletes a token after failed revocation
+github_connect_cancel	ConnectCancel	ConnectCancelStaleSweep	violates:PendingTokenRetained	28	-	old outer DELETE trusts a stale candidate selected before Cancel commits
+github_connect_cancel	ConnectCancel	ConnectCancelSiblingClear	violates:PendingTokenRetained	9	-	unsafe sibling confirmation clears a canceled flow's pending token
 # ---- GitHub request cards ----
 github_request_cards	RequestCards	RequestCardsSafe	clean	568	-	shared GitHub request card thread lock keeps one card and three mentions per hour
 github_request_cards	RequestCards	RequestCardsNoLock	violates:NoDuplicate	334	-	unlocked concurrent retry posts two cards for one request
@@ -17,6 +25,9 @@ turn_queue	TurnQueue	TurnQueueFull	clean	416349	-	both queue bounds binding: all
 turn_queue	TurnQueue	TurnQueueFullWitness	violates:NoRefusal	257	-	witness: the plain refusal is reachable from a full queue
 turn_queue	TurnQueue	TurnQueueProgress	clean	19795	-	liveness with the max wait off: queued turns resolve, cards settle, slots return (weak fairness)
 turn_queue	TurnQueue	FollowUpsReadmit	clean	3551	-	global cap 1, a two-follow-up thread: each follow-up re-enters admission; all invariants
+turn_queue	TurnQueue	CapChangeFixed	clean	57264	-	current tenant cap after an admin change; no new start above it
+turn_queue	TurnQueue	CapChangeRaised	clean	2897	-	raising the observed tenant cap dispatches queued work before a newcomer
+turn_queue	TurnQueue	CapChangeStaleFollowUp	violates:WithinCaps	1835	-	unsafe: a follow-up restores its saved cap and starts a queued turn above the current cap
 turn_queue	TurnQueue	LeakOnFailure	violates:SlotAccounting	13	-	unsafe: the failure end path forgets its slot
 turn_queue	TurnQueue	LeakStallsQueue	violates:QueuedResolves	823	-	unsafe: the leak without the max wait strands a queued turn
 turn_queue	TurnQueue	GlobalFifoStarves	violates:NoStarvation	127426	-	unsafe: one global FIFO lets a busy tenant overtake another
@@ -38,7 +49,15 @@ approvals	Approvals	ApprovalsQuietLateBeyondBound	violates:ApprovedRunsInTurn	42
 approvals	Approvals	ApprovalsEarlyCard	clean	1034	-	retiring an unsent approval on refusal restores eventual card truth
 approvals	Approvals	ApprovalsEarlyCardOld	violates:EventualCardTruth	1061	-	old refusal path leaves an unsent approved card after turn end
 approvals	Approvals	ApprovalsReplayQueued	violates:NoFalseNotAccepted	1566	-	pre-fix replay counts queued confirmations as taken; the next one-per-pause idle ends the turn as a re-ask
+# ---- test schema cleanup ----
+test_schema_cleanup	SchemaCleanup	SchemaCleanupSafe	clean	9	-	face transaction rollback completes before test schema drop
+test_schema_cleanup	SchemaCleanup	SchemaCleanupUnsafe	violates:NoDropDuringFaceTransaction	6	-	old fixture starts table drop while queued face still holds a transaction
+ci_deploy_gate	CiDeployGate	CiDeployGateSafe	clean	10	-	candidate publish may precede tests but SHA tag waits for staging verdict
+ci_deploy_gate	CiDeployGate	CiDeployGateUnsafe	violates:PromotableOnlyAfterStagingPass	7	-	early SHA tag permits promotion while tests are pending
 # ---- scheduler ----
+privacy_delete	PrivacyDelete	PrivacyDeleteSafe	clean	49	-	durable local commit keeps upstream work across crashes and failures
+privacy_delete	PrivacyDelete	PrivacyDeleteUnsafe	violates:LocalDeletionTracked	2	-	old local commit loses the target immediately
+privacy_delete	PrivacyDelete	PrivacyDeleteProgress	clean	49	-	fair restarts and successful API calls eventually delete the session
 scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
 scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances
 # ---- session preparation ----
@@ -76,6 +95,15 @@ discord_install	DiscordInstall	DiscordInstallSafe	clean	16	-	per-guild lock seri
 discord_install	DiscordInstall	DiscordBootUnsafe	violates:BootRecoveryLive	3	-	pre-fix: on_ready skips a known archived guild still present in cache
 discord_install	DiscordInstall	DiscordBootSafe	clean	16	-	startup recovers a cached archived tenant without replaying install effects
 # ---- billing ----
+metering	BudgetChannelRecovery	BudgetChannelRecoverySafe	clean	6	-	changed channel replaces; checkpoint and recovered turn use their stamped sessions
+metering	BudgetChannelRecovery	BudgetChannelRecoveryUnsafe	violates:CorrectDebit	6	-	pre-fix reuse lets the sweep debit the session's old channel
+metering	BudgetChannelRecovery	BudgetChannelLegacySafe	clean	6	-	legacy stamp read from MA avoids replacement for unchanged channel
+metering	BudgetChannelRecovery	BudgetChannelLegacyChanged	clean	6	-	legacy stamp read from MA causes one replacement for changed channel
+metering	BudgetChannelRecovery	BudgetChannelLegacyUnsafe	violates:NoSpuriousReplacement	3	-	pre-fix unknown stamp replaces an unchanged legacy session
+metering	BudgetChannelRecovery	BudgetChannelCheckpointUnsafe	violates:CheckpointDebit	6	-	pre-fix checkpoint live debit uses new channel while recovery uses old stamp
+metering	BudgetChannelRecovery	BudgetChannelReadFailure	clean	6	-	transient MA stamp read failure leaves legacy mapping unknown and reusable
+metering	ReplacementUsage	ReplacementUsageSafe	clean	6	-	checkpoint and successor observations priced; live rows use old and admission channels without double debit
+metering	ReplacementUsage	ReplacementUsageUnpriced	violates:PricedObservation	3	-	pre-fix checkpoint debit succeeds but its outcome sample has no model price
 billing	Clawback	ClawbackUnlocked	violates:NeverOverClawback	11	-	pre-lock: concurrent clawbacks both read zero and over-debit
 billing	Clawback	ClawbackLocked	clean	13	-	credit-row lock serializes clawbacks
 billing	OutOfOrder	OutOfOrderUnlocked	violates:NoOrphanPending	12	-	pre-lock: refund before credit leaves an orphan pending event
@@ -121,6 +149,8 @@ adapter_recovery	AdapterOverlap	OverlapCASOnly	violates:NoStolenClear	88	-	pre-c
 adapter_recovery	AdapterOverlap	OverlapGated	clean	205	-	c923083 (Slack) / #232 (Discord): admission waits for recovery
 adapter_recovery	AdapterOverlap	OrphanedTurnReuse	violates:NoMessageIntoRunning	135	-	regression, fixed on main by #232: restart orphan kept running, next message ignored
 adapter_recovery	AdapterOverlap	OrphanSweepInterrupts	clean	187	-	#232 (merged): sweep interrupts the orphan
+adapter_recovery	AdapterOverlap	OrphanInterruptFailedUnsafe	violates:NoMessageIntoRunning	135	-	failed interrupt clears the marker but leaves the old MA mapping live
+adapter_recovery	AdapterOverlap	OrphanInterruptFailedDetached	clean	205	-	failed interrupt detaches the old mapping before the next bind
 adapter_recovery	AdapterOverlap	OrphanSendWaits	clean	197	-	alternative: never send into a running session
 adapter_recovery	AdapterOverlap	RollingOverlap	violates:NoStolenClear	86	-	assumption: overlapping processes reap the sibling's live marker
 adapter_recovery	AdapterOverlap	WizardBypassMessage	violates:NoMessageIntoRunning	102	-	accepted limitation: wizard turn beside a mention turn
@@ -193,6 +223,21 @@ skill_sync	BindingIdentity	BindingIdentityNameSubstitution	violates:NoWrongAgent
 skill_sync	BindingIdentity	BindingIdentityTitleRace	violates:NoAmbiguousTitleWrite	13	-	residual: same-name B is present when A's shared-name title is written; collision risk only
 skill_sync	RetryDeadline	RetryDeadline	clean	6	-	provider not-before time dominates ordinary queue backoff before a retry claim
 # ---- Discord webhook posting and card recovery ----
+discord_card_lifecycle	CardLifecycle	CardPre655	violates:TerminalStable	23	-	pre-#655 terminal edit can be overwritten by an older progress request
+discord_card_lifecycle	CardLifecycle	Card655	violates:TerminalStable	23	-	#655 permits an older edit to land after terminal delivery
+discord_card_lifecycle	CardLifecycle	Card655Replacement	violates:NoStaleReplacement	32	-	#655 late missing-card replacement leaves another Working card
+discord_card_lifecycle	CardLifecycle	Card655Handover	violates:RepairScheduled	61	-	#655 loses repair ownership across dead-session handover
+discord_card_lifecycle	CardLifecycle	CardQueue	clean	148	-	late active-process progress schedules terminal repair; excludes process death
+discord_card_lifecycle	CardLifecycle	CardQueueRestart	violates:RestartStable	63	-	process death leaves an on-wire request able to overtake boot retirement
+discord_card_lifecycle	CardLifecycle	CardQueueOrphanDrop	violates:NoWorkingAfterRetirement	21	-	boot cannot edit an orphaned card when its webhook token is unavailable
+discord_card_lifecycle	CardUncertain	CardUncertainSafe	clean	18	-	bounded wait retains terminal outcome and repairs late progress
+discord_card_lifecycle	CardUncertain	CardUncertainDropped	violates:RepairQueued	18	-	12f716c25 drops tracking when timeout precedes successful edit return
+discord_card_lifecycle	CardTerminalReplacement	CardTerminalReplacementSafe	clean	20	-	retained terminal request checks ownership before sending and deletes an in-flight duplicate
+discord_card_lifecycle	CardTerminalReplacement	CardTerminalReplacementBroken	violates:NoStaleReplacement	18	-	6aa14e5ed lets a superseded terminal request post and own a duplicate card
+discord_card_lifecycle	CardHandover	CardHandoverSafe	clean	1564	-	prior sequencer repairs reviewed in-process handover interleavings
+discord_card_lifecycle	CardHandover	CardHandoverUnsafe	violates:NoStaleReplacement	171	-	rejected design leaves a late replacement visible
+discord_card_lifecycle	CardHandover	CardHandoverSuccessorUnsafe	violates:SettledCards	154	-	rejected design ignores successor progress edits
+discord_card_lifecycle	CardHandover	CardHandoverGateUnsafe	violates:RepairQueuedWhenNeeded	379	-	rejected design loses repair when stale replacement drains last
 discord_webhooks	WebhookLoad	LoadSafe	clean	1475	-	three requests per turn, one hook, two turns, retry-after and three-window bound
 discord_webhooks	WebhookLoad	LoadCreateSafe	clean	4	-	a creation 429 with 66-second retry uses bot fallback within the two-second posting bound
 discord_webhooks	WebhookLoad	LoadCreateWaitUnsafe	violates:BoundedPosting	38	-	waiting on a creation 429 delays the first post by 66 seconds
@@ -230,3 +275,31 @@ discord_webhooks	Cadence	CadenceWebhookNoDebounceUnsafe	violates:NoGlobalBacklog
 discord_webhooks	Cadence	CadenceBotNoDebounceUnsafe	violates:NoGlobalBacklog	2	-	counterfactual no-debounce bot edits overload the modeled global bucket
 discord_webhooks	Cadence	CadenceColdBurstGlobalUnsafe	violates:NoGlobalBacklog	2	-	200 simultaneous initial posts can exceed one modeled two-second global window
 discord_webhooks	Cadence	CadenceWebhookSkewUnsafe	violates:NoHookBacklog	2	-	counterfactual no-debounce posts and edits collide on one hook
+# ---- GitHub repository editor ----
+github_repo_editor	RepoEditor	RepoEditorSafe	clean	59	-	atomic browser save, stale snapshot and repeated POST
+github_repo_editor	RepoEditor	RepoEditorStale	violates:NoStaleSave	22	-	atomic browser save, stale snapshot and repeated POST
+github_repo_editor	RepoEditor	RepoEditorReplay	violates:AtMostOneSave	55	-	atomic browser save, stale snapshot and repeated POST
+discord_startup_replay	StartupReplay	ReplaySafe	clean	1020	-	two workers, transient reconnect or bounded fail-stop, and admission dedupe
+discord_startup_replay	StartupReplay	ReplayNoAdmission	violates:NoDuplicate	83	-	without admission, redelivery starts a second turn
+discord_startup_replay	StartupReplay	ReplayNoGrace	violates:NoTakeoverOfLiveWorker	94	-	connection loss lets another worker reclaim before the live owner stops
+discord_startup_replay	StartupReplay	ReplayShortGrace	violates:NoTakeoverOfLiveWorker	234	-	grace shorter than retry plus stop allows live-owner takeover
+discord_startup_replay	StartupReplay	ReplayRecoveryWitness	violates:NoTransientRecovery	36	-	a transient probe failure can recover while the worker stays live
+# ---- Discord gateway handover ----
+discord_gateway_handover	GatewayHandover	GatewaySafe	clean	704	-	designed protocol with a readiness-gated deploy, one connection loss, one SIGKILL: at most one handler, graceful gap only after New is ready
+discord_gateway_handover	GatewayHandover	GatewayProgress	clean	704	-	liveness (weak fairness): New eventually connects, including after a connection loss or SIGKILL
+discord_gateway_handover	GatewayHandover	GatewayThree	clean	8638	-	three processes (a second restart): at most one handler
+discord_gateway_handover	GatewayHandover	GatewayTrustLockNoLoss	clean	112	-	lock alone suffices when the holder's connection never drops
+discord_gateway_handover	GatewayHandover	GatewayUnlockBeforeCloseAccepting	clean	1574	-	early release still keeps accepting new work to one process (draining Old rejects mentions)
+discord_gateway_handover	GatewayHandover	GatewayStopFirst	violates:GapBounded	8	-	today's stop-first deploy: the gap includes New's start-up
+discord_gateway_handover	GatewayHandover	GatewayNoWaitReady	violates:GapBounded	26	-	start New alongside but SIGTERM Old before New has built its runtime: same gap
+discord_gateway_handover	GatewayHandover	GatewayUnlockBeforeClose	violates:AtMostOneHandler	252	-	lease released before the gateway closes: New connects while Old is still connected
+discord_gateway_handover	GatewayHandover	GatewayTrustLockOnly	violates:AtMostOneHandler	33	-	lock without lease check: Old's connection drops, New connects while Old still on the gateway
+discord_gateway_handover	GatewayHandover	GatewayShortGrace	violates:AtMostOneHandler	208	-	heartbeat grace shorter than the holder's fail-stop: New connects before Old stops
+discord_gateway_handover	GatewayHandover	GatewayStaleRelease	violates:AtMostOneHandler	2244	-	released_at not cleared on take: a third process trusts a stale release
+discord_gateway_handover	GatewayHandover	GatewayWitnessLoss	violates:NoUncleanHandover	203	-	witness: New can connect after Old's owner connection is lost
+discord_gateway_handover	GatewayHandover	GatewayWitnessKill	violates:NoKillHandover	186	-	witness: New can connect after Old is SIGKILLed
+discord_gateway_handover	GatewayHandover	GatewayWitnessRecovery	violates:NoRecovery	7	-	witness: a holder can recover its connection and keep serving
+discord_gateway_handover	GatewayHandover	GatewayWitnessWait	violates:NoWaiting	33	-	witness: New can find a holder unreleased and wait for owner_is_alive to clear
+discord_gateway_handover	GatewayHandover	GatewayBootstrap	clean	439	-	legacy (pre-lease) Old plus the bootstrap rule: New waits until no other owner is alive
+discord_gateway_handover	GatewayHandover	GatewayBootstrapProgress	clean	439	-	liveness with a legacy Old: New eventually connects
+discord_gateway_handover	GatewayHandover	GatewayBootstrapNoWait	violates:AtMostOneHandler	73	-	legacy Old, no bootstrap rule: an empty lease row lets New connect beside Old

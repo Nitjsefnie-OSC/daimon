@@ -257,7 +257,7 @@ second call is a restart). The memory store runs them in
 `packages/mux/tests`, and Daimon's Postgres store runs the same checks.
 
 Daimon's Postgres store is `daimon.core.stores.mux_state.PostgresStateStore`,
-over the tables of migration `0077_neutral_state`. Races are settled by the
+over the tables of migration `0087_neutral_state`. Races are settled by the
 database (unique constraints, row locks, and an advisory lock per usage
 observation), and lease expiry follows the database's wall clock, read
 after the locks a decision depends on are held. Its module
@@ -1238,7 +1238,7 @@ Teams renders root neutral snapshots and ordered previews locally, retaining its
 
 The host's `PostgresNeutralCatalog` retains OpenAI/Gemini agent revisions and checked skill bundles within an authorized tenant, account and provider workspace. Agent edits publish a new immutable native agent with a compare-and-swap host revision; historical revisions retain their native references and skill pins. The host revision does not change a provider's native revision. Exact-version bundles preserve their bytes, title and owning agent. Upload ownership is retained with each immutable version; callers commit a checked bundle before attachment.
 
-This store requires additive migration `0079_neutral_catalog`. It supplies storage for explicitly selected alternate resource helpers; callers still perform policy rechecks, native creation and attachment. The default Anthropic resource path uses its existing storage and requests. Downgrading drops only the alternate catalog tables and their retained content. Retained versions store bounded skill archives in Postgres; storage grows with published versions. Account deletion cascades to both catalog tables.
+This store requires additive migration `0089_neutral_catalog`. It supplies storage for explicitly selected alternate resource helpers; callers still perform policy rechecks, native creation and attachment. The default Anthropic resource path uses its existing storage and requests. Downgrading drops only the alternate catalog tables and their retained content. Retained versions store bounded skill archives in Postgres; storage grows with published versions. Account deletion cascades to both catalog tables.
 
 ### Scoped host resource helpers
 

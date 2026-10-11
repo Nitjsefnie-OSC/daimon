@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -10,16 +11,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.adapters.discord.agent_setup import github_add_repos as add_module
 from daimon.adapters.discord.agent_setup import github_new_repo as notice_module
 from daimon.adapters.discord.agent_setup import github_repos as repos_module
 from daimon.adapters.discord.agent_setup import github_requests as request_module
-from daimon.adapters.discord.agent_setup.github_add_repos import GitHubAddReposView
-from daimon.adapters.discord.agent_setup.github_home import GitHubHomeView, GitHubLinkView
-from daimon.adapters.discord.agent_setup.github_manage import GitHubManageView
+from daimon.adapters.discord.agent_setup.github_home import GitHubHomeView
 from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
 from daimon.adapters.discord.agent_setup.github_waiting import GitHubWaitingView
-from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.commands.github import GitHubCog
 from daimon.core.github_panel import GrantsPanel, RepoChoice
@@ -242,265 +239,93 @@ def _panel() -> GrantsPanel:
     )
 
 
-def test_discord_grants_view_shows_staged_state_and_switch() -> None:
+def _helper_state(**changes: object) -> PanelState:
     agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
-    state = PanelState(
-        roster=[],
-        selected=None,
-        account_id=uuid.uuid4(),
-        is_admin=True,
-        guild_id=123,
-        channel_id=456,
-        selected_agent=agent,
-    )
-    view = GitHubReposView(
-        state, runtime=MagicMock(), allowed_user_id=7, agent=agent, panel=_panel()
-    )
-    labels = [item.label for item in view.walk_children() if isinstance(item, discord.ui.Button)]
-    text = _embed_text(view)
-    assert labels == ["◀ Back"]
-    assert "This agent uses a saved GitHub key" in text
-
-
-def test_discord_github_home_and_destructive_confirmations() -> None:
-    agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
-    state = PanelState(
-        roster=[],
-        selected=None,
-        account_id=uuid.uuid4(),
-        is_admin=True,
-        guild_id=123,
-        channel_id=456,
-        selected_agent=agent,
-    )
-    home = GitHubHomeView(state, runtime=MagicMock(), allowed_user_id=7, connected_count=2)
-    assert isinstance(home, discord.ui.View)
-    assert home.embed.title == "GitHub"
-    assert home.embed.footer.text == "GitHub on Daimon"
-    assert any(field.name == "Personal link" for field in home.embed.fields)
-    assert home.to_components()
-    labels = [item.label for item in home.walk_children() if isinstance(item, discord.ui.Button)]
-    assert "Choose agent" in labels and "Connect more repos" in labels
-    assert "Manage connected repos" in labels
-    empty_home = GitHubHomeView(state, runtime=MagicMock(), allowed_user_id=7, connected_count=0)
-    empty_labels = {
-        item.label for item in empty_home.walk_children() if isinstance(item, discord.ui.Button)
+    values: dict[str, object] = {
+        "roster": [],
+        "selected": None,
+        "account_id": uuid.uuid4(),
+        "is_admin": True,
+        "guild_id": 123,
+        "channel_id": 456,
+        "selected_agent": agent,
     }
-    assert "Connect GitHub" in empty_labels
-    assert (
-        next(
-            item
-            for item in empty_home.walk_children()
-            if isinstance(item, discord.ui.Button) and item.label == "Connect GitHub"
-        ).emoji.name
-        == "🔗"
+    values.update(changes)
+    return PanelState(**values)  # type: ignore[arg-type]
+
+
+def _live_panel(*names: str, ceiling: str = "write") -> GrantsPanel:
+    return GrantsPanel(
+        mode="app",
+        working_repo=None,
+        has_pat=False,
+        repos=tuple(
+            RepoChoice(
+                index,
+                name,
+                "write",
+                ceiling,  # type: ignore[arg-type]
+                ceiling,  # type: ignore[arg-type]
+                False,
+                False,
+                live_baseline=ceiling,  # type: ignore[arg-type]
+                live_ceiling=ceiling,  # type: ignore[arg-type]
+            )
+            for index, name in enumerate(names, start=1)
+        ),
     )
-    pending = GitHubHomeView(
-        state,
-        runtime=MagicMock(),
-        allowed_user_id=7,
-        connected_count=2,
-        pending_url="https://example.invalid/connect",
-    )
-    pending_labels = [
-        item.label for item in pending.walk_children() if isinstance(item, discord.ui.Button)
+
+
+def _labels(view: discord.ui.LayoutView) -> list[str]:
+    return [
+        item.label or "" for item in view.walk_children() if isinstance(item, discord.ui.Button)
     ]
-    assert "Connect GitHub" in pending_labels and "Start over" in pending_labels
-    assert "Choose agent" not in pending_labels
-    link = GitHubLinkView("https://example.invalid/connect")
-    assert {item.label for item in link.children if isinstance(item, discord.ui.Button)} == {
-        "Connect GitHub",
-    }
-    assert link.children[0].emoji.name == "🔗"
 
 
-@pytest.mark.asyncio
-async def test_discord_setup_opens_embed_in_separate_private_message() -> None:
-    state = PanelState(roster=[], selected=None, account_id=uuid.uuid4(), guild_id=123)
-    runtime = MagicMock()
-    source = PanelViewBase(state, runtime=runtime, allowed_user_id=7)
-    target = GitHubHomeView(state, runtime=runtime, allowed_user_id=7, connected_count=0)
-    interaction = MagicMock()
-    interaction.response.is_done.return_value = True
-    message = MagicMock()
-    message.edit = AsyncMock()
-    interaction.followup.send = AsyncMock(return_value=message)
-
-    await source.swap_to(interaction, target)
-
-    sent = interaction.followup.send.await_args.kwargs
-    assert sent["embed"] is target.embed
-    assert sent["ephemeral"] is True
-    assert sent["wait"] is True
-    await target.on_timeout()
-    assert message.edit.await_args.kwargs["view"] is None
-
-
-def test_discord_member_github_home_shows_only_personal_link() -> None:
-    state = PanelState(roster=[], selected=None, account_id=uuid.uuid4(), guild_id=123)
+def test_discord_github_panels_are_read_only() -> None:
+    agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
     home = GitHubHomeView(
-        state,
+        _helper_state(),
         runtime=MagicMock(),
         allowed_user_id=7,
-        connected_count=0,
+        agent_counts=((agent, 2),),
         linked_login="carlos",
     )
-    labels = {item.label for item in home.walk_children() if isinstance(item, discord.ui.Button)}
-    assert {"Use another account", "Unlink", "◀ Back"} <= labels
-    assert "Connect GitHub" not in labels
-    assert "Manage connected repos" not in labels
-
-
-def test_discord_manage_connected_repos_requires_confirmation() -> None:
-    state = PanelState(
-        roster=[],
-        selected=None,
-        account_id=uuid.uuid4(),
-        guild_id=123,
-        channel_id=456,
-    )
-    repo = _connected_repo()
-    listing = GitHubManageView(state, runtime=MagicMock(), allowed_user_id=7, repos=(repo,))
-    labels = [item.label for item in listing.walk_children() if isinstance(item, discord.ui.Button)]
-    assert "Change" in labels and "Disconnect" in labels
-    confirm = GitHubManageView(
-        state,
-        runtime=MagicMock(),
-        allowed_user_id=7,
-        repos=(repo,),
-        selected_id=repo.repo_id,
-        step="disconnect",
-    )
-    text = _embed_text(confirm)
-    assert "Disconnect example/work?\nAgents using it lose it." in text
-    assert "◀ Back" in [
-        item.label for item in confirm.walk_children() if isinstance(item, discord.ui.Button)
-    ]
-
-
-def test_discord_agent_settings_show_one_choice_at_a_time() -> None:
-    agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
-    state = PanelState(
-        roster=[], selected=None, account_id=uuid.uuid4(), guild_id=123, channel_id=456
-    )
-    panel = GrantsPanel(
-        mode="app",
-        working_repo="example/work",
-        has_pat=False,
-        repos=(
-            RepoChoice(
-                1,
-                "example/work",
-                "write",
-                "write",
-                "write",
-                False,
-                True,
-                live_baseline="write",
-                live_ceiling="write",
-            ),
-        ),
-    )
-
-    def labels(choice: str | None) -> set[str]:
-        view = GitHubReposView(
-            state,
-            runtime=MagicMock(),
-            allowed_user_id=7,
-            agent=agent,
-            panel=panel,
-            settings=True,
-            settings_choice=choice,  # type: ignore[arg-type]
-        )
-        return {item.label for item in view.walk_children() if isinstance(item, discord.ui.Button)}
-
-    menu = labels(None)
-    assert {
-        "Change what it can do",
-        "Remove repos",
-        "Turn off GitHub for helper",
-    } <= menu
-    assert "Read only" not in menu
-    assert "Read only" in labels("ability")
-    assert "Change who can use these" not in menu
-    assert "Remove repos" in labels("remove")
-
-
-def test_discord_add_repos_defaults_working_repo_and_uses_one_screen() -> None:
-    agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
-    state = PanelState(
-        roster=[],
-        selected=None,
-        account_id=uuid.uuid4(),
-        guild_id=123,
-        channel_id=456,
-        channel_name="readme",
-        selected_agent=agent,
-        is_admin=True,
-    )
-    panel = GrantsPanel(
-        mode="legacy",
-        working_repo="example/work",
-        has_pat=False,
-        repos=(
-            RepoChoice(1, "example/work", "write", None, None, False, True),
-            RepoChoice(2, "example/readme", "read", None, None, False, False),
-        ),
-    )
-    pick = GitHubAddReposView(
-        state, runtime=MagicMock(), allowed_user_id=7, agent=agent, panel=panel
-    )
-    selector = next(item for item in pick.walk_children() if isinstance(item, discord.ui.Select))
-    assert [option.value for option in selector.options if option.default] == []
-    labels = [item.label for item in pick.walk_children() if isinstance(item, discord.ui.Button)]
-    assert "Add repos" in labels and "Change" in labels and "Review repos" not in labels
-    text = _embed_text(pick)
-    assert "Can: Read and write" in text
-    assert "Used by:" not in text
-    assert "Suggested: example/readme" in text
-    assert "Add" in labels
-    empty = GitHubAddReposView(
-        state,
+    assert "helper: 2 repos" in _embed_text(home)
+    assert _labels(home) == ["Connect GitHub", "◀ Back"]
+    panel = dataclasses.replace(_live_panel("ana/thesis", "ben/scraper"), working_repo="ana/thesis")
+    view = GitHubReposView(
+        _helper_state(),
         runtime=MagicMock(),
         allowed_user_id=7,
         agent=agent,
-        panel=GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False),
+        panel=panel,
+        connect_url="https://example.invalid/oauth/github/connect/token",
     )
-    empty_labels = [
-        item.label for item in empty.walk_children() if isinstance(item, discord.ui.Button)
-    ]
-    assert "Connect GitHub" in empty_labels
-    assert "Add repos" not in empty_labels
-
-
-@pytest.mark.asyncio
-async def test_discord_agent_setup_shows_saved_key_refusal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    message = "This agent uses a saved GitHub key. Ask your Daimon operator to switch it."
-    monkeypatch.setattr(add_module, "is_guild_admin", lambda _interaction: True)
-    monkeypatch.setattr(add_module, "sync_connect_admin", AsyncMock())
-    monkeypatch.setattr(add_module, "connect_link", AsyncMock(side_effect=ValueError(message)))
-    agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
-    state = PanelState(
-        roster=[], selected=None, account_id=uuid.uuid4(), guild_id=123, is_admin=True
+    text = _embed_text(view)
+    assert "ana/thesis\nben/scraper" in text
+    assert "Working repo: ana/thesis" in text
+    assert (
+        "Open Connect GitHub to add or remove repos and choose a working repo, or ask helper in chat."
+        in text
     )
-    view = GitHubAddReposView(
-        state,
+    assert " · " not in text
+    assert _labels(view) == ["Connect GitHub", "◀ Back"]
+    empty = GitHubReposView(
+        _helper_state(),
         runtime=MagicMock(),
         allowed_user_id=7,
         agent=agent,
-        panel=GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False),
+        panel=GrantsPanel(mode="app", repos=(), working_repo=None, has_pat=False),
     )
-    interaction = MagicMock()
-    interaction.guild_id = 123
-    interaction.user.id = 7
-    interaction.user.display_name = "Carlos"
-    interaction.response.defer = AsyncMock()
-    interaction.followup.send = AsyncMock()
-    await view._on_connect_more(interaction)
-    assert interaction.followup.send.await_args.args[0] == message
-    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+    assert "No working repo" in _embed_text(empty)
+    for stale in ("_on_remove", "_on_confirm", "_on_deactivate", "_setter", "_on_activate"):
+        assert not hasattr(view, stale)
+
+
+@asynccontextmanager
+async def _fake_begin():  # type: ignore[no-untyped-def]
+    yield MagicMock()
 
 
 @pytest.mark.asyncio

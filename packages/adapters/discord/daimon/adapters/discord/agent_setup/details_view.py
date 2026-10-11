@@ -429,7 +429,10 @@ class DetailsView(PanelViewBase):
         self.add_item(container)
 
     async def _on_github_repos(self, interaction: discord.Interaction) -> None:
-        from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
+        from daimon.adapters.discord.agent_setup.github_repos import (
+            GitHubReposView,
+            mint_agent_connect_url,
+        )
         from daimon.core.github_panel import GrantsPanel, load_grants_panel
         from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 
@@ -443,9 +446,9 @@ class DetailsView(PanelViewBase):
             panel=GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False),
         )
         if not await gate.allowed(interaction):
-            await interaction.followup.send(
-                "You cannot view this agent's GitHub repos.", ephemeral=True
-            )
+            from daimon.core.github_connect_cards import ask_manager_line
+
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
             return
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
@@ -453,20 +456,12 @@ class DetailsView(PanelViewBase):
             panel = await load_grants_panel(
                 session, tenant_id=tenant_id, agent_id=agent_id, agent_name=self.agent.name
             )
-        if not any(repo.live_ceiling is not None for repo in panel.repos) and not panel.saved_state:
-            from daimon.adapters.discord.agent_setup.github_add_repos import GitHubAddReposView
-
-            await self.swap_to(
-                interaction,
-                GitHubAddReposView(
-                    self.state,
-                    runtime=self.runtime,
-                    allowed_user_id=self.allowed_user_id,
-                    agent=self.agent,
-                    panel=panel,
-                ),
+        try:
+            connect_url = await mint_agent_connect_url(
+                interaction, runtime=self.runtime, state=self.state, agent=self.agent
             )
-            return
+        except ValueError:
+            connect_url = None
         await self.swap_to(
             interaction,
             GitHubReposView(
@@ -475,6 +470,7 @@ class DetailsView(PanelViewBase):
                 allowed_user_id=self.allowed_user_id,
                 agent=self.agent,
                 panel=panel,
+                connect_url=connect_url,
             ),
         )
 

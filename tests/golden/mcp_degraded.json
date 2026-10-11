@@ -152,6 +152,12 @@
             ],
             "error": null,
             "finished_tool_ids": [],
+            "long_prompt_usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
             "mcp_failures": [
               {
                 "error_type": "mcp_authentication_failed_error",
@@ -198,6 +204,12 @@
             ],
             "error": null,
             "finished_tool_ids": [],
+            "long_prompt_usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
             "mcp_failures": [
               {
                 "error_type": "mcp_authentication_failed_error",

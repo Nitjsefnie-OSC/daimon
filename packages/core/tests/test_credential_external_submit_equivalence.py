@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import json
+import re
 import subprocess
 import sys
 import types
@@ -25,10 +26,12 @@ import pytest
 import structlog
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.credential_submit import note_credential_save_failure
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.discovery import McpProbe
-from daimon.core.posted_controls import card_for_request, card_text
+from daimon.core.mcp_token_check import TokenRejection, rejected_token_message
+from daimon.core.posted_controls import RECEIVED_FOOTER, card_for_request, card_text
 from daimon.core.scope import DeploymentDefault
 from daimon.core.security_audit import capture_decision
 from daimon.core.stores import agent_mcp_credentials, mcp_oauth_flows
@@ -53,6 +56,31 @@ ROOT = "https://daimon.example.com"
 REPO = "https://github.com/acme/skills"
 KINDS = ("mcp", "skill_repo", "repo", "mcp_oauth")
 POLICIES = ("open", "pinned_inside", "pinned_outside", "sealed", "pinned_sealed")
+#: Refusals reworded since BASE on purpose (plain words, batch 1 section 4):
+#: the historical adapter's copy maps to today's before the two are compared.
+RENAMED_COPY = (
+    (
+        "This agent answers for other people here, so changing its repo or its keys needs an "
+        "admin. Ask me and I'll write the request for them, or ask me to make you a new agent "
+        "of your own.",
+        "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+        "Ask me to draft a request for an admin, or to make you a new agent.",
+    ),
+    (
+        "This agent answers for other people here, so adding skills to it needs an admin. Ask "
+        "me and I'll write the request for them, or ask me to fork it and add them to the fork.",
+        "Other people use this agent. Adding skills needs an admin.\n\n"
+        "Ask me to draft a request for an admin, or to make you a new agent.",
+    ),
+)
+#: The replace-refused reply, reworded the same way; it names agent and admin.
+RENAMED_REPLACE_REFUSAL = (
+    re.compile(
+        r"(\S+) already has `[^`]*` \(or a token for that URL\) and is shared here, so "
+        r"replacing it needs a (server|workspace) admin\. Nothing was saved\."
+    ),
+    "\\1 already has this connection. Nothing was saved.\n\nOnly a \\2 admin can replace it.",
+)
 
 
 @cache
@@ -274,23 +302,21 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
     async def edit(*args, row=None, state=None, outcome=None, **kwargs):
         if row is None:
             row, state = args[:2]
-        messages.append(
-            (
-                "card",
-                state,
-                card_text(
-                    card_for_request(
-                        row,
-                        state=state,
-                        outcome=outcome,
-                        refusal=kwargs.get("refusal", kwargs.get("reason")),
-                    )
-                ),
-            )
+        if state == "partial":
+            note_credential_save_failure(row, outcome)
+        card = card_for_request(
+            row,
+            state=state,
+            outcome=outcome,
+            refusal=kwargs.get("refusal", kwargs.get("reason")),
+            retry_reason=kwargs.get("retry_reason"),
         )
+        messages.append(("card", state, card_text(card), bool(card.buttons)))
 
     async def private(*args, **kwargs):
-        messages.append(("private", kwargs.get("text", args[0] if args else "")))
+        text = kwargs.get("text", args[0] if args else "")
+        pattern, replacement = RENAMED_REPLACE_REFUSAL
+        messages.append(("private", pattern.sub(replacement, text)))
 
     async def dispatch(*args, **kwargs):
         messages.append(("dispatch",))
@@ -302,6 +328,14 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
         return f"inline-pat:{row.agent_id}"
 
     with monkeypatch.context() as patch:
+        if module.__name__.endswith("_external_base") and hasattr(module, "rejected_token_message"):
+            # The historical adapter passes the URL; today's reply takes the
+            # rejection (and names no URL). The fixture's server offers no sign-in.
+            patch.setattr(
+                module,
+                "rejected_token_message",
+                lambda _url: rejected_token_message(TokenRejection(supports_sign_in=False)),
+            )
         # Replace only platform role lookups and external GitHub/skill work.
         for name in ("is_guild_admin", "resolve_is_admin"):
             if hasattr(module, name):
@@ -449,7 +483,10 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
                         )
                     )
                 )
-                messages.append(("dialog", str(response.model_dump())))
+                dialog = json.dumps(response.model_dump())
+                for old, new in RENAMED_COPY:
+                    dialog = dialog.replace(json.dumps(old)[1:-1], json.dumps(new)[1:-1])
+                messages.append(("dialog", dialog))
                 for task in spawned:
                     await task
 
@@ -531,6 +568,71 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
     )
 
 
+def _assert_retry_lifecycle_change(base, current, *, outcome):
+    """Accept only the intended failure lifecycle delta from the historical adapter.
+
+    Bindings, access proofs, skill credentials, MCP tokens, OAuth flows,
+    upstream writes and live authorization decisions still match exactly.
+    """
+    assert current[0] is False, "failed saves must not burn the form"
+    assert current[1] == outcome, "every failure records its outcome"
+    assert current[2] is None, "failed attempts must not occupy the retry's continuation"
+    assert base[2] is None or base[2][2] is None, "historical failures owed no work either"
+    assert current[3:7] == base[3:7], "credential data and proofs are unchanged"
+    assert current[8] == base[8], "upstream side effects are unchanged"
+    assert current[10] == base[10], "live authorization decisions are unchanged"
+
+    def audit_fields(audits):
+        # The new boundary logs only exception types, without raw traceback data.
+        fields = tuple(
+            {k: v for k, v in audit.items() if k not in ("log_level", "exc_info")}
+            for audit in audits
+        )
+        for audit in fields:
+            if audit.get("note") == (
+                "Attaching them did not finish. Try again using the same form."
+            ):
+                audit["note"] = "Attaching them did not finish. Ask again to retry."
+            # The built-in refusal was reworded on purpose (plain words, GitHub cards).
+            note = audit.get("note")
+            if isinstance(note, str):
+                audit["note"] = re.sub(
+                    r"`(\S+)` is a built-in agent\. Fork it and add them to the fork\.",
+                    "\\1 is a built-in agent.\n\nAsk me to make a copy and add them there.",
+                    note,
+                )
+        return fields
+
+    assert audit_fields(current[9]) == audit_fields(base[9])
+    cards = [message for message in current[7] if message[0] == "card"]
+    assert cards and cards[-1][1] == "requested" and cards[-1][3], "same form offered again"
+    assert "Try again" in cards[-1][2] and RECEIVED_FOOTER not in cards[-1][2]
+    assert "fixture-token" not in repr(current[7]), "no submitted token in receipts"
+
+
+def _assert_teams_rejection_answers_in_the_dialog(base, current):
+    """Intentional drift: Teams asks the server while the dialog is still open.
+
+    The dialog is Teams' one private reply, so a rejected token now answers
+    there with Discord's and Slack's words and spends nothing, where the
+    historical adapter consumed, refused and released the form behind a closed
+    dialog. Everything that is not the reply's timing still matches.
+    """
+    assert current[0] is False, "a rejected token spends nothing"
+    assert current[1] == "token_rejected", "the rejection is recorded"
+    assert current[2] is None, "no work is owed on a rejected token"
+    assert current[3:7] == base[3:7], "credential data and proofs are unchanged"
+    assert current[8] == base[8], "upstream side effects are unchanged"
+    assert current[10] == base[10], "live authorization decisions are unchanged"
+    dialog = next(message for message in current[7] if message[0] == "dialog")
+    assert "That token didn't work. Nothing was saved." in dialog[1]
+    assert "Check the token and try the form again." in dialog[1]
+    cards = [message for message in current[7] if message[0] == "card"]
+    assert cards and cards[-1][1] == "requested" and cards[-1][3], "same form offered again"
+    assert "Try again" in cards[-1][2] and RECEIVED_FOOTER not in cards[-1][2]
+    assert "fixture-token" not in repr(current[7]), "no submitted token in receipts"
+
+
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("admin", (False, True), ids=("member", "admin"))
@@ -550,12 +652,28 @@ async def test_external_submit_matches_real_base(
         results.append(
             await _run(db_session_factory, module, tenant, row, agent, admin, monkeypatch)
         )
-    assert results[0] == results[1]
+    if kind == "mcp" and results[1][1] == "policy_refused":
+        # Intentional drift: a denied new connection is a permission receipt,
+        # not a failed write. Keep historical adapter side effects equivalent.
+        assert results[0][1] == "write_failed"
+        assert results[0][0] == results[1][0] is True
+        assert results[0][2:7] == results[1][2:7]
+        assert results[0][8:] == results[1][8:]
+        assert results[1][8] == ()
+        assert ("dispatch",) not in results[1][7]
+        assert "admin of every channel named by its rule" in str(results[1][7])
+        assert "does not have that permission" in str(results[1][7])
+    elif kind == "skill_repo" and shared is True and admin and results[1][1] == "write_failed":
+        # Imported skills cannot attach to the built-in target; the confirmed
+        # import stays identical, while its failed form becomes reusable.
+        _assert_retry_lifecycle_change(results[0], results[1], outcome="write_failed")
+    else:
+        assert results[0] == results[1]
     if kind == "mcp" and policy == "open" and shared and not admin:
         assert results[1][0] is True
-        assert results[1][1] == ("applied" if existing == "new" else "write_failed")
-        if existing != "new":
-            assert results[1][8] == ()
+        # A private token never grants permission to attach even a new server.
+        assert results[1][1] == ("policy_refused" if existing == "new" else "write_failed")
+        assert results[1][8] == ()
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))
@@ -585,7 +703,17 @@ async def test_external_failures_match_real_base(
         results.append(
             await _run(db_session_factory, module, tenant, row, agent, True, monkeypatch, fault)
         )
-    assert results[0] == results[1]
+    if fault == "race":
+        assert results[0] == results[1], "policy refusals stay terminal"
+    elif platform == "teams" and kind == "mcp" and fault == "rejected":
+        _assert_teams_rejection_answers_in_the_dialog(results[0], results[1])
+    else:
+        outcome = (
+            "token_rejected"
+            if fault == "rejected" and (kind != "repo" or platform == "teams")
+            else "write_failed"
+        )
+        _assert_retry_lifecycle_change(results[0], results[1], outcome=outcome)
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))
@@ -618,7 +746,10 @@ async def test_repo_credential_precedence_matches_real_base(
         results.append(
             await _run(db_session_factory, module, tenant, row, agent, True, monkeypatch, fault)
         )
-    assert results[0] == results[1]
+    if fault in ("stored_denied", "private"):
+        _assert_retry_lifecycle_change(results[0], results[1], outcome="write_failed")
+    else:
+        assert results[0] == results[1]
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))

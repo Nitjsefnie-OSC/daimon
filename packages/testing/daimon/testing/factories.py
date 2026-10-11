@@ -558,6 +558,7 @@ async def make_thread_session(
     ma_session_id: str | None = None,
     ma_agent_id: str | None = None,
     channel_id: str | None = None,
+    budget_channel_id: str | None = None,
     watermark_message_id: str | None = None,
     created_at: datetime | None = None,
 ) -> ThreadSessionRow:
@@ -575,6 +576,7 @@ async def make_thread_session(
         ma_session_id=ma_session_id,
         ma_agent_id=ma_agent_id,
         channel_id=channel_id,
+        budget_channel_id=budget_channel_id,
         watermark_message_id=watermark_message_id,
         created_at=created_at,
     )

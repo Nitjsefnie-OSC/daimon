@@ -123,6 +123,12 @@ only code; `init` still seeds `defaults/` from your checkout, so check out the
 matching tag first (`git checkout v0.2.0`). Upgrading is checking out the
 next tag, editing the override and running those two commands again.
 
+The report-host image is built from the `report-host` dependency closure in the
+repository's `uv.lock`. Its build checks every installed distribution against
+that lock, including platform markers, and starts the installed application
+directly so startup cannot resolve different packages. Build it from the
+repository root with `docker build -f apps/report-host/Dockerfile .`.
+
 ### Running the processes by hand
 
 Requires [`uv`](https://docs.astral.sh/uv/):
@@ -187,9 +193,11 @@ The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
-The admin gets a private, agent-bound link; the selected repos activate for
-that agent when confirmed. Self-serve links refuse legacy-mode agents with a
-saved GitHub key, working repo or skill repo credential, or a channel pin. An
+A server admin, or a channel admin of the channels an agent is limited to,
+gets a private link bound to that agent; the selected repos are for that agent
+only and activate for it when confirmed. If the agent has a saved GitHub key,
+the key is retired once its working repo and private skill repos are among
+its repos; until then the repos wait in the agent's GitHub panel. An
 operator can issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
 --requester <platform-user-id> --agent <agent-uuid> --agent-name <agent-name>`.
 That link stages an update. After the recipient confirms repos on the web, run
@@ -838,3 +846,38 @@ dead tuples can still contain plaintext. Normal VACUUM makes dead tuple space
 reusable; it is not a secure erasure guarantee. Apply secret-retention controls
 to backups and storage. Application encryption protects database-only access;
 access to both the database and the key ring permits decryption.
+
+## Worker shutdown during deployment
+
+For worker compose files, set `stop_grace_period: 90s` on Discord, Slack,
+Teams and scheduler. This leaves time for the adapters' 60-second in-flight
+drain and cleanup before Docker sends SIGKILL. When recreating containers, use
+`docker compose up -d --remove-orphans --timeout 95` so the CLI timeout exceeds
+the compose grace. The managed deploy fetches its worker compose asset from
+GCS; its source lives in `pymc-labs/daimon-infra` and an operator uploads changes
+with OpenTofu before the next app deployment.
+
+### Discord overlap during deployment
+
+Recreating the Discord container stop-first leaves the gateway closed until the
+new process has started (about 14 seconds), and a button or slash command used in
+that gap gets no response. The managed deploy therefore starts the new Discord
+container beside the old one (`docker compose up -d --no-deps --no-recreate
+--scale discord=N+1 discord`), waits until it answers its liveness port, then
+stops and removes the old container with a 95-second timeout, and only then
+recreates the other services. Compose numbers the new container one higher than
+the highest existing one, so the Discord container is not always
+`daimon-discord-1`.
+
+Only one Discord process may be connected to the gateway. The new process starts
+fully, then waits on a gateway lease: a PostgreSQL session advisory lock taken on
+the connection it already holds for worker ownership, with the holder recorded in
+`discord_gateway_lease`. The old process keeps handling everything, including
+button clicks for its in-flight turns, while it drains. It releases the lease
+after it has closed its gateway, and the standby connects at once. If the old
+process dies without releasing, the standby waits until that process's ownership
+heartbeat has expired (the same bound the worker-ownership fail-stop uses)
+before connecting. A standby that receives SIGTERM exits without touching the
+lease. A holder that loses its owner connection and cannot retake the lease stops.
+The first process to take the lease with no earlier holder recorded also waits for any Discord process from before the lease to exit, so the first deploy of this change still replaces the container stop-first. The deploy script falls back to stop-first for an image that lacks the lease, so a rollback to an older image behaves as it did before. To use the same pattern with your own deploy scripts, start the new Discord
+container before stopping the old one and give it the same database.

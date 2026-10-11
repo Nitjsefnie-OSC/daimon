@@ -27,7 +27,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import DEFAULT_AGENT_MODEL
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.roster import load_roster
@@ -77,24 +77,18 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
         self.runtime = runtime
         self.allowed_user_id = allowed_user_id
         self._panel_render_seq = state.render_seq
-        # Each TextInput's own `label=` is redundant with the wrapping Label's
-        # `text=` (Discord's modern Label-wrapped modal fields), but is kept
-        # so `scripts/lint_discord_modals.py`'s unconditional missing-label
-        # rule passes; discord.py's constructor writes it straight into the
-        # underlying component dataclass rather than through the deprecated
-        # `TextInput.label` property, so it costs nothing at runtime.
+        # The wrapping Label names each input. Discord rejects the whole modal
+        # (400 "Cannot set label on a TextInput in a Label component") when
+        # the TextInput carries its own `label=` too.
         self.name_label: discord.ui.Label[NewAgentModal] = discord.ui.Label(
             text="Name",
             description="lowercase, dashes ok",
-            component=discord.ui.TextInput(
-                label="Name", placeholder="churn-explorer", max_length=64
-            ),
+            component=discord.ui.TextInput(placeholder="churn-explorer", max_length=64),
         )
         self.prompt_label: discord.ui.Label[NewAgentModal] = discord.ui.Label(
             text="What should it help with?",
             description="one or two sentences",
             component=discord.ui.TextInput(
-                label="What should it help with?",
                 style=discord.TextStyle.paragraph,
                 max_length=2000,
                 required=False,
@@ -153,7 +147,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 account_id=self.state.guild_account_id,
             )
             if created.anthropic_id is None:
-                raise DaimonError(
+                raise UserFacingError(
                     "Could not confirm the new agent. "
                     "Reopen `/agent-setup` to check before retrying."
                 )
@@ -187,15 +181,22 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             agent = next(
                 (row for row in roster.rows if row.ma_agent_id == created.anthropic_id), None
             )
+            if agent is None and not self.state.is_admin:
+                await interaction.followup.send(
+                    f"**{new_name}** was created. Not answering in any channel yet. "
+                    "An admin can make it answer in this channel; "
+                    "it will then appear in setup here.",
+                    ephemeral=True,
+                )
+                return
             if agent is None and viewer is not None and viewer.inside_channel_id is not None:
-                raise DaimonError(
-                    f"**{new_name}** was created. This channel is kept to its own agents, so it "
+                raise UserFacingError(
+                    "The agent was created. This channel is kept to its own agents, so it "
                     "shows here once it is set as the channel's agent."
                 )
             if agent is None:
-                raise DaimonError(
-                    f"**{new_name}** was created but is not listed yet. "
-                    "Reopen `/agent-setup` to see it."
+                raise UserFacingError(
+                    "The agent was created but is not listed yet. Reopen `/agent-setup` to see it."
                 )
             details = await load_details_for(self.runtime, state=self.state, agent=agent)
             if self._panel_render_seq != self.state.render_seq:

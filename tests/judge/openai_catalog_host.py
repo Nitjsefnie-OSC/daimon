@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from anthropic import AsyncAnthropic
 from daimon.core.channel_backend import check_backend
 from daimon.core.errors import TurnError
-from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX
 from daimon.core.mux_backend import TurnBackendRequest
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.openai_host import OpenAIHostRuntime
@@ -201,7 +200,7 @@ async def run_openai_turn(
             states.append(state)
             if state.error is not None:
                 raise state.error
-            return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]
+            return extract_final_response(state.content)
 
         async def captured() -> None:
             nonlocal output

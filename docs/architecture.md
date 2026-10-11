@@ -15,10 +15,23 @@ setting; [self-hosting.md](self-hosting.md) has the deployment.
 Discord, Slack, scheduler and MCP emit `runtime.health` every 30 seconds with
 Anthropic response attempts, database pool use, event loop lag and active turns.
 The Discord process also reports Discord 429 retries by route and longest retry wait.
-An opening Discord mention gets no reply in the parent channel while its thread
-opens. If naming and creation take over three seconds, the mention gets a ⌛
-reaction, removed once the thread exists. A thread that cannot be opened gets
-one plain reply under the mention.
+A Discord mention gets a best-effort 👀 reaction before turn admission resolves
+its agent and environment. The reaction clears when the turn completes, fails
+or is cancelled. A queued follow-up uses ⌛ instead, cleared after its batch
+settles. An opening mention gets no reply in the parent channel while its thread
+opens, and its existing acknowledgment covers naming and creation. A thread
+that cannot be opened gets one plain reply under the mention.
+
+Credential cards on Discord, Slack and Teams remove their form button while
+saving an MCP or GitHub token. A rejected token or failed save records an
+outcome, updates the card with a short error and restores the same form for a
+retry, with a fresh 30-minute form expiry. Each retry rechecks the requester, expiry, agent rules and replacement
+permissions. After 90 seconds the card says "Still saving; we'll update this
+card when it finishes." The save continues with the form consumed, including
+long skill imports throttled by the Skills API. Completion replaces that notice
+with success or a safe error; only a finished failure restores the form. Confirmed partial progress stays on the card. Successful saves consume
+the request and resume waiting work once; failed attempts do not queue work.
+Browser OAuth flows have their own lifecycle.
 
 ## The shape
 
@@ -206,6 +219,16 @@ app header. A missing face is queued for generation after the turn proceeds;
 the current picture remains in use until it is stored. Slack is expected to keep the header when the status card is edited into an
 answer; each new turn post is recorded under the turn's agent and card intent.
 
+Discord and Slack render a failure as two plain lines, what happened and what
+to do, chosen by cause: the AI service busy, unreachable or refusing the
+request, the usage limit, a missing Slack permission or unreadable token, a
+platform rejection, or "Something went wrong on our side." A small third line,
+`Ref` and the last six characters of the request id, lets support find the
+`error.rendered` log line that carries the full id and the exception. Provider
+JSON, exception bodies and tool details stay out of failure copy. A failed
+reply can still be followed by files created during the turn. The output sweep suppresses an oversize notice when
+the same filename and size were already attached by Daimon in that turn.
+
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
 application-owned webhook post in the same tenant and channel. With agent
 identity off, the reply must be to a turn post the bot itself sent (the card or
@@ -217,6 +240,93 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
+The turn driver closes Discord progress generation before cancelling the render
+loop. A shared per-message queue then lets each already-sent progress edit and
+missing-card replacement finish before sending the answer, stop notice or
+error to that card. The five-second local settle wait does not let a terminal
+write overtake a request still in the queue. A dead-session recovery lifecycle
+adopts the same queue and card; stale writes queued by the old lifecycle are
+dropped. A defensive repair reasserts the final render if a stale completion is
+detected. The bot's outer error boundary finishes the card through the same
+lifecycle. Long answers keep their summary on the last chunk, and failed turns
+preserve sealed answer text before showing the error card. Process death loses
+the in-memory queue: a request already sent to Discord may still arrive after
+the new process edits an orphaned card to its restarted notice.
+
+A Discord Unknown Message (10008) while editing a turn card posts a fresh
+message if the answer has not arrived yet. Once an answer is delivered, a
+stale edit is logged and ignored. Stop still interrupts the turn when its
+card has been deleted; restart recovery treats a card deleted between its
+lookup and edit as already resolved. Other edit failures still propagate.
+
+On gateway readiness, Discord scans recently active channels and threads for
+missed addressed messages. The window and per-guild/channel limits are
+configurable (`discord.startup_replay_*`). Replay defaults to off
+(`discord.startup_replay_minutes=0`). Replayed messages use the same protection,
+mention/reply, provisioning and admission gates as live events.
+The `discord_message_admissions` ledger deduplicates each tenant/message ID;
+queued follow-ups remain pending until a card intent is committed or the
+request reaches a visible terminal outcome. A PostgreSQL session advisory
+lock identifies each process for its lifetime, using one dedicated database
+connection outside the turn connection pool. On a failed or slow probe the
+guard invalidates the connection and retries `pg_try_advisory_lock` with the
+same key and exponential backoff (1–10 seconds) for 90 seconds. Transient
+failures leave the adapter running; exhausted recovery signals the entrypoint
+to drain in-flight turns through `_drain_and_close` before closing the gateway.
+Another worker can reclaim a pending message only after
+that owner's lock disappears. Inputs whose card intent was committed before a crash
+but never posted are requeued only after two complete no-card history reads
+separated by a minute; the ledger reset and intent retirement commit together.
+Turn markers and card intents also carry the owner,
+so startup never retires another live worker's cards.
+Channels whose ledger predates the replay window scan that whole window using
+per-message dedupe. Legacy-only channels retain their stored answer boundary
+during the first rollout.
+
+Rollout and rollback procedure: on the first deployment of this ledger, set
+`DAIMON_DISCORD__STARTUP_REPLAY_MINUTES=0`. Keep that setting for at least the
+intended replay window while the new image records live admissions, then
+enable replay. Follow the same procedure on roll-forward after running any
+older image that did not write receipts: disable replay for the first boot
+and wait a full window before enabling it. Otherwise already answered
+parent-channel mentions or mentions handled by the rolled-back image may
+be answered again. This bootstrap interval intentionally does not replay
+downtime messages. If a crash occurs after Discord creates a thread but
+before the card intent is committed, replay can still fail to reopen that
+thread; the visible notice asks the user to mention Daimon again.
+
+An hourly sweep removes receipts older than the maximum 60-minute replay
+window, retaining live pending inputs and one oldest receipt per channel.
+That channel checkpoint preserves the ledger's start boundary when pruning;
+all other expired inputs owned by exited workers can be removed. The ledger
+has both tenant/activity and tenant/channel/activity indexes. Deduplication
+of non-opening messages outside the replay horizon is not guaranteed.
+The database connection must be direct or use a session-mode pooler;
+transaction-mode pooling does not support these session advisory locks.
+
+Orphan recovery runs at most four rows concurrently. Successful completed
+provider text is delivered by editing the existing card, with a text attachment
+for replies over Discord's message length limit. It verifies the provider's
+latest user message belongs to the interrupted turn before recovering its
+answer. Other orphaned turns edit that card to explain the restart and invite
+a retry, then interrupt the old session. Both recovery edits use the same
+terminal card write sequencer as live turns, with no replacement post. If the
+provider interrupt errors or times out, recovery marks the old thread-session
+mapping dead. The next turn creates a fresh session instead of reusing a
+possibly busy one.
+Marker cleanup and the dead mark commit together. The orphan card still shows
+the restart notice. Provider result reads are bounded to five seconds and card
+fetch/edit work to thirty seconds per row. Recovery
+serializes edits across workers and conditionally clears the original marker;
+a newer turn keeps its marker and its running session. Cards that are already
+terminal retain their formatted answer and feedback controls. A retryable
+Discord fetch/edit failure retains the marker; a 30-second periodic sweep
+retries only the original failed orphan rows, with the same owner and marker
+checks. Missing cards and permanent permission/identity failures clear the
+marker without posting a replacement. Recovery never sends
+a new model request. Generated-file recovery and resuming a still-running
+provider session are not part of this text-recovery path.
+
 Restart recovery keeps a card intent active when a pending card cannot be
 edited. It does not post a replacement status card, because the original
 button could remain. A definite missing-webhook, missing-token, permission or
@@ -239,6 +349,17 @@ cap and channel budget checks, then the metered classifier. A `respond`
 verdict runs an ordinary turn through `admit()` as the burst's newest author,
 with every notice withheld. Teams also counts a quote of the bot's message as
 a mention.
+
+With `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT=true` (off by default), a person's
+first unmentioned reply in a thread the bot opened, in a thread that isn't
+followed, gets a 🔔 reaction and no turn: only a mention continues the
+conversation. The hint shows once per thread per
+`DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H` (in memory, so a restart
+allows one more), never on a reply that mentions someone else, never to any
+bot, and never where the channel's protection state forbids posting. Every
+Discord thread turn carries a `<delivery>` element telling the agent what
+starts a turn and that other threads are separate sessions, so it does not
+tell someone an earlier message never reached it.
 
 Discord, Slack and Teams limit simultaneous chat turns per tenant, and Discord
 also has an optional process-wide limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`,
@@ -460,6 +581,14 @@ a resumed one) runs in no channel, so it is outside every agent rule, as a DM
 is: the policy is read on every call, and an agent with a rule is refused
 before any session is created or message sent. Only the operator's internal
 tokens, which carry no platform user, bypass it.
+
+Agent discovery uses the effective routing at the caller's verified location.
+A member's setup panel and MCP agent lookups show the channel and current thread
+responders, plus agents whose explicit rules allow that channel. Unrouted agents
+and shadowed workspace or deployment defaults are hidden. Aliases and channels
+kept to their own agents remain enforced. A missing or unverified location cannot
+expose unrestricted agents. In the hub, members see the effective workspace
+responder; stored workspace and channel admin exemptions remain unchanged.
 
 Cross-agent separation is complete only for agents with a rule: an agent
 without one still answers wherever the cascade sends it, so give every client
@@ -825,9 +954,11 @@ GitHub App mode uses the agent's live grants and the current asker's linked
 GitHub permissions when assembling a turn. External askers get no App token.
 Each effective installation and permission profile gets an ID-scoped token,
 recorded before minting and checked again after delivery. The session mounts
-one repository resource per effective repo and its own vault for `GH_TOKEN`
-and Copilot. A changed repository set replaces the session; unchanged mounts
-receive refreshed tokens through resource updates. Legacy sessions continue to
+only the selected working repository, if there is one, and uses its own vault
+for `GH_TOKEN` and Copilot. Other granted repos are available through tokens
+for cloning by name. A change to the working mount or the token repository
+set replaces the session on its next turn; unchanged sets receive refreshed
+tokens through resource updates. Legacy sessions continue to
 use their existing binding and credential path.
 
 **Stage three, `run_prepared_turn()` —
@@ -852,6 +983,11 @@ per-hook cost contract:
 `on_render` is the answer-text delivery path and may talk to the network,
 because it runs on its own task and cannot stall the pump; `on_sse_event` is
 awaited inline in the consume loop and must stay a cheap local tap.
+
+Stop also opens its SSE subscription before sending `user.interrupt`, so an
+immediate idle acknowledgement is observed. The interrupt and acknowledgement
+wait are bounded by the same 120-second timeout; the subscription closes when
+the wait finishes or fails.
 
 After a tool-using Discord or Slack turn, the adapter starts a detached,
 per-MA-session-chained sweep of downloadable session files through
@@ -982,6 +1118,14 @@ search tools return JSON rows, so their results carry the same marker as
 `trust` and `trust_note` fields instead. The paragraph in the agent guidance
 block (`packages/core/daimon/core/agent_guidance.py`) tells every agent what
 the marker means. Only the `<user_query>` is the request.
+
+For a new Discord thread started by a channel mention, the channel backfill
+keeps 25 messages. A separate untrusted `recent_channel_files` block lists up
+to 10 attachments older than that window, from at most 200 channel messages
+within 24 hours of the mention. It includes live attachment URLs, filenames,
+uploaders, upload times and message links, but no older message text. Both
+reads use the same parent channel; a failed older read leaves the 25-message
+context intact.
 
 Third-party MCP tool results travel from Managed Agents straight to the model
 without passing through Daimon, so they carry no marker; the guidance
@@ -1129,6 +1273,10 @@ in FK-safe order in one transaction, and
 `packages/core/daimon/core/privacy.py` is its read-only mirror for the preview
 panel. A schema-reflecting drift-guard test fails when a new person-scoped
 table joins one path and not the other.
+Account erasure also queues its account and tenant IDs in the same transaction
+before removing principals. The scheduler retries Managed Agents session deletion
+on each tick, retaining the queue row through upstream errors and failed deletes
+until all enumerated sessions are deleted or confirmed gone.
 
 **In Managed Agents.** One deployment runs on one Anthropic key, so tenant
 separation inside the MA workspace is carried by metadata stamps defined in
@@ -1247,20 +1395,42 @@ admission before any of this runs.
 
 - **GitHub connection invitations** are issued with `daimon github connect-link`
   for a tenant admin, `/github connect` on Discord and Slack, or the
-  `github_connect` MCP tool from a conversation. They can target one agent;
-  self-serve links are refused for legacy-mode agents with a saved GitHub key,
-  working or skill repo credential, or a channel pin. An operator-issued agent
-  link may stage an update for an operator to finish with
-  `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
+  `github_connect` MCP tool from a conversation. They can target one agent.
+  Repos confirmed through a link for one agent belong to that agent
+  (`tenant_github_repos.scope_agent_id`): no other agent can be granted them
+  or get them in a token, and the same repo on two agents is two rows. A
+  server admin, or a channel admin for a non-managed agent local to and held
+  by their channels (the `github_grant` terms), may make such a link; the
+  confirm step checks again that the requester still manages the agent. A
+  confirmed link retires the agent's saved GitHub key only when its working
+  repo (with write) and private skill repos are among its repos; otherwise the
+  repos stay staged until a later connection supplies the required repos. An
+  agent limited to channels by a rule may use only repos connected for it.
+  In a setup conversation the agent asks whether it should keep one working
+  repo in its filesystem. `set_working_repo` selects an existing grant or
+  clears it with `none`; other grants provide token access for clones by name.
+  The tool checks the live server or channel-admin permission for that agent.
+  A clear request in chat gives an agent access to an already connected repo:
+  `github_connect` grants read access (write only when requested) if the caller
+  may grant it. Otherwise it posts the Connect GitHub browser link for that repo.
+  Chat changes need no separate confirmation turn; the agent says what changed
+  and how to undo it. Browser edits apply only after **Save changes**.
+  An operator-issued agent link may stage an update for an operator to finish
+  with `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
   credentials and
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
   `/oauth/github/confirm`. The browser flow checks the confirming person's
   GitHub admin access before authorizing tenant repositories. These routes
   are absent when GitHub connection is unconfigured.
-  Discord `/github home` and Slack `/github`, plus `/agent-setup` on both,
-  expose connected repos, agent grants, personal links, waiting requests, and
-  disconnects.
+  Discord `/github home` and Slack `/github`, plus agent setup on Discord,
+  Slack, and Teams, show GitHub repositories without grant controls. Each agent's
+  section lists one repo per line, names its working repo (or says there is none),
+  and directs changes to Connect GitHub or the setup conversation. Server-admin GitHub home screens
+  list agents and repo counts without grant controls. The Connect GitHub browser
+  link opens the browser editor. The setup conversation also supports
+  `github_connect`, `remove_repo` and `set_working_repo`, with the same grant
+  stores and live manager checks.
   Connect links appear as buttons where the person asked. Discord slash
   commands answer ephemerally; a conversational mention posts a requester-bound
   button in the thread and mints the single-use invitation only when that
@@ -1272,8 +1442,34 @@ admission before any of this runs.
   Discord uses an interaction follow-up until it expires and then a count-only
   line in the origin thread or channel. Failed notices back off and expire
   after eight attempts or 24 hours.
-  The connection page offers a searchable repo picker and confirms each repo
-  against the signed-in GitHub account. The same browser can safely repeat a
+  For one agent, the connection page is titled "<Agent>'s repos". It lists
+  every recorded repo grant with its access, working-repo marker, and staged
+  or unavailable status, including repos the signed-in GitHub account cannot
+  edit. The person may add repos, remove repos, and select or clear the one
+  working repo, then confirm with **Save changes**. **Add repos** opens a
+  centered dialog on desktop and a bottom sheet on mobile. Tick repos, select
+  **Add 1 repo** (or **Add N repos**) in the dialog, then **Save changes** on the
+  page. When the card came from a chat ask that named one repo, the dialog
+  opens with that repo already ticked if the person can add it. Each addition has
+  its own access choice, defaulting to Read only. Added and removed rows stay
+  visible as pending changes, and removals can be undone before saving.
+  Working-repo actions live on the repo row. Adding permits at most ten repos
+  per save and never lowers existing access.
+  Canceling shows **No changes saved** and leaves connected repos unchanged.
+  A missing working or skill repo remains visible as a setup requirement.
+  Repos that need more access can be confirmed again to finish setup.
+  The invitation requester must still manage the agent when the page opens
+  and when it saves. The signed-in GitHub account needs current admin access
+  to each affected repo, including the previous working repo when changing
+  or clearing that selection. Other repos stay visible without edit controls.
+  Each save consumes one invitation and applies its changes in one database
+  transaction. A signed snapshot rejects edits made against an outdated page;
+  the person reloads if chat has changed the repo list or working selection.
+  Removing the working repo clears that selection. The saved page shows the
+  current list. The read-only setup panel and chat use the same stores.
+  Setting an agent as a default in more places adds
+  "<Agent>'s repos come too." to `set_agent_default`'s confirmation when the
+  agent has repos. The same browser can safely repeat a
   successful submission; a signed invitation receipt also handles concurrent
   submissions. New installation repos appear in the GitHub setup panel after
   the UTC day closes. Confirmed installation removal cancels affected requests
@@ -1458,8 +1654,9 @@ creates leave the token stable; unrelated and OAuth credentials are preserved.
 The core driver calls an optional `on_acknowledgment` lifecycle hook with
 `accepted` after the initial event send and `done` after successful answer
 delivery. Missing hooks are no-ops; reaction failures are bounded and do not
-fail the turn. Opted-in Discord and Slack tenants react with eyes, then a check
-mark on success. Unprompted Discord turns stay silent; failures and cancellation
+fail the turn. Discord and Slack acknowledge admitted mentions with eyes; queued Discord
+follow-ups use an hourglass. These markers clear on every terminal path.
+Opted-in tenants also get a check mark on success. Unprompted Discord turns stay silent; failures and cancellation
 do not get a completion marker. Continuations without a trigger message skip
 reactions.
 
@@ -1471,7 +1668,9 @@ An unprompted Discord turn cancelled before it has an answer stays silent.
 Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 `{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
 answer as a fresh thread reply mentioning only the requester. Missing or false
-entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
+entries keep the existing in-place answer. Discord adds eyes before admission;
+Slack adds eyes at admission. Both clear eyes independently of completion pings.
+Recovery lifecycles retain this policy;
 continuity notices and feedback target the new answer. Teams posts the answer fresh (with
 an @mention in a channel), then sets its card to "Done."; bots cannot
 react there.
@@ -1846,3 +2045,13 @@ bytes through `deliver_provider_output`. The caller owns admitted tenant/session
 validation. Uploads reuse answer attachment edits, Slack's external upload flow,
 and Teams Graph or requester-bound consent with SharePoint PUT. These edges
 perform no provider selection, native payload parsing or artifact deletion.
+
+Discord passes through only explicitly audited `UserFacingError` guidance. Raise
+that marker with deliberate copy, never exception text, provider bodies, secrets
+or internal identifiers. Known domain errors map to fixed next steps; unmarked
+exceptions keep a generic public fallback and diagnostics in logs. Both Discord
+and shared New Agent creators use the typed name-collision refusal, as does
+agent copying. Shared setup-responder, agent-visibility and DM routing refusals
+mark their fixed guidance explicitly. Terminal
+failure cards retain audited guidance as their next step, including an expired
+setup context encountered during reconnection.

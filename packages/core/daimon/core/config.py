@@ -378,6 +378,32 @@ class DiscordSettings(BaseModel):
     bot_token: SecretStr = Field(
         description="Discord bot token. Required to run the Discord adapter.",
     )
+    startup_replay_minutes: int = Field(
+        default=0,
+        ge=0,
+        le=60,
+        description=(
+            "Recent Discord activity window in minutes scanned on startup for "
+            "missed mentions and replies. Set 0 to disable catch-up."
+        ),
+    )
+    startup_replay_channels_per_guild: int = Field(
+        default=25,
+        ge=1,
+        le=100,
+        description=(
+            "Maximum recently active Discord channels and threads scanned per guild on startup."
+        ),
+    )
+    startup_replay_messages_per_channel: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum recent Discord messages scanned per channel or thread on startup. "
+            "Current message gates and durable admissions prevent duplicate turns."
+        ),
+    )
     thread_open_notice_after_s: float = Field(
         default=3.0,
         ge=0,
@@ -386,6 +412,26 @@ class DiscordSettings(BaseModel):
             "Discord thread is still opening. Includes thread naming and Discord rate-limit "
             "waits. Set to 0 to react immediately. The reaction is removed when creation "
             "finishes; a failed creation is answered with a visible error reply."
+        ),
+    )
+    unmentioned_reply_hint: bool = Field(
+        default=False,
+        description=(
+            "React with 🔔 to a person's reply that does not @mention the bot in a thread the "
+            "bot opened, as a hint that only mentions start a turn. The message itself is "
+            "never answered. At most once per thread per unmentioned_reply_hint_cooldown_h, "
+            "never on a message that mentions someone else, never to any bot, never where the "
+            "agent may not post, and never while the thread is followed (thread "
+            "participation on). Off by default: the cooldown is kept in memory, so each "
+            "restart allows one more hint per thread."
+        ),
+    )
+    unmentioned_reply_hint_cooldown_h: float = Field(
+        default=24.0,
+        gt=0,
+        description=(
+            "Hours before the unmentioned-reply hint may be shown again in the same thread. "
+            "Kept in memory, so a restart allows one more."
         ),
     )
     max_concurrent_turns_per_tenant: int = Field(
@@ -1214,6 +1260,17 @@ class ThreadNamingSettings(BaseModel):
     )
 
 
+class PrivacySettings(BaseModel):
+    delete_enabled: bool = Field(
+        default=True,
+        description=(
+            "Show account deletion in Discord, Slack, and Teams privacy panels and allow "
+            "delete confirmations. Set DAIMON_PRIVACY__DELETE_ENABLED=false to pause "
+            "deletion during an event; Policy and Export remain available."
+        ),
+    )
+
+
 class ArtifactsSettings(BaseModel):
     """Optional private object storage for hosted-client artifacts."""
 
@@ -1358,7 +1415,9 @@ class Settings(BaseSettings):
         default_factory=dict[uuid.UUID, bool],
         description=(
             "Per-tenant completion notification policy, keyed by tenant UUID. "
-            "True enables accepted/done reactions and posts the final answer as a fresh reply "
+            "Discord and Slack acknowledge mentions independently of this setting and clear "
+            "the acknowledgment when the turn settles. True adds a success check mark and "
+            "posts the final answer as a fresh reply "
             "mentioning only the requester "
             "on Discord and Slack. On Teams it closes the status card and posts the answer "
             "fresh, mentioning the requester in channels (Teams bots cannot react). "
@@ -1402,6 +1461,7 @@ class Settings(BaseSettings):
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
         ),
     )
+    privacy: PrivacySettings = Field(default_factory=PrivacySettings)
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)

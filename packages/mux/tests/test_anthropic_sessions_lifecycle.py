@@ -15,7 +15,7 @@ from mux.contracts.resources import ResourceBinding, SessionSpec
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 from mux.errors import ProviderError, ScopeViolation
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"
@@ -116,7 +116,8 @@ async def test_retrieve_retains_native_not_found_as_provider_error_cause() -> No
     assert isinstance(caught.value.__cause__, NotFoundError)
 
 
-async def test_override_cannot_select_another_agent() -> None:
+@pytest.mark.parametrize("model_fields", [{}, {"model": None}, {"model": "claude-haiku-5-5"}])
+async def test_override_cannot_select_another_agent(model_fields: dict[str, JsonValue]) -> None:
     transport = ScriptedTransport()
     config = ExtensionConfig(
         namespace="anthropic.session_create",
@@ -125,6 +126,7 @@ async def test_override_cannot_select_another_agent() -> None:
             "agent": {
                 "type": "agent_with_overrides",
                 "id": "foreign",
+                **model_fields,
                 "tools": [],
                 "mcp_servers": [],
             }
@@ -141,12 +143,16 @@ async def test_override_cannot_select_another_agent() -> None:
     assert not transport.requests
 
 
-async def test_create_preserves_override_tool_key_order_in_request_bytes() -> None:
+@pytest.mark.parametrize("model_fields", [{}, {"model": None}, {"model": "claude-haiku-5-5"}])
+async def test_create_preserves_override_tool_key_order_in_request_bytes(
+    model_fields: dict[str, JsonValue],
+) -> None:
     # SDK response models dump configs/default_config before the type tag;
     # schema reserialization would reorder those keys and change the request.
     agent: dict[str, JsonValue] = {
         "type": "agent_with_overrides",
         "id": "ag_1",
+        **model_fields,
         "mcp_servers": [{"name": "server", "type": "url", "url": "https://mcp.example"}],
         "tools": [
             {
@@ -184,6 +190,32 @@ async def test_create_preserves_override_tool_key_order_in_request_bytes() -> No
     old.assert_consumed()
     new.assert_consumed()
     assert old.requests == new.requests
+
+
+@pytest.mark.parametrize(
+    "override_fields",
+    [{"model": 42}, {"model": False}, {"model": {"id": "claude-haiku-5-5"}}, {"unapproved": True}],
+)
+async def test_create_rejects_invalid_override_fields_before_io(
+    override_fields: dict[str, JsonValue],
+) -> None:
+    transport = ScriptedTransport()
+    extension = ExtensionConfig(
+        namespace="anthropic.session_create",
+        version=1,
+        value={"agent": {"type": "agent_with_overrides", "id": "ag_1", **override_fields}},
+    )
+    async with transport.client() as client:
+        port = AnthropicSessions(
+            client,
+            "org",
+            ResourceAuthorization(SCOPE, frozenset({("agent", "ag_1"), ("environment", "env_1")})),
+        )
+        with pytest.raises(ValidationError):
+            await port.create(
+                SCOPE, spec(extensions={extension.namespace: extension}), key="create"
+            )
+    assert not transport.requests
 
 
 @pytest.mark.parametrize(

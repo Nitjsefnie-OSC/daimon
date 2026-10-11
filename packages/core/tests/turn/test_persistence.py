@@ -497,8 +497,8 @@ async def test_cancel_ack_cannot_complete_the_journal_but_independent_stop_can(
     await store.put_binding(BINDING, expected_generation=0)
     transport = ScriptedTransport()
     transport.queue(
-        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
         ScriptedReply.stream("/v1/sessions/session/events/stream", []),
+        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
     )
     first = context(store)
     async with transport.client() as client:
@@ -719,6 +719,9 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
     path = "/v1/sessions/session/archive" if archive else "/v1/sessions/session/events"
     reply = session_response(session_id=SESSION.id) if archive else send_events_response()
     transport = ScriptedTransport()
+    interrupt = kind in {"cancel", "recovery-stop"}
+    if interrupt:
+        transport.queue(ScriptedReply.stream("/v1/sessions/session/events/stream", []))
     transport.queue(
         ScriptedReply("POST", path, httpx.ReadError("provider accepted; acknowledgement lost")),
         ScriptedReply("POST", path, reply),
@@ -743,7 +746,7 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
             if archive:
                 await io.archive()
             elif kind in {"cancel", "recovery-stop"}:
-                await io.interrupt(timeout_s=0)
+                await io.interrupt(timeout_s=10)
             else:
                 await io.send(inputs)
 
@@ -751,7 +754,9 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
             await persistence.run(pump)
         assert client.max_retries == MA_MAX_RETRIES
     assert not transport.violations
-    assert len(transport.requests) == 1 and transport.requests[0].method == "POST"
+    assert [request.method for request in transport.requests] == (
+        ["GET", "POST"] if interrupt else ["POST"]
+    )
     assert len(transport.replies) == 1
     operation_kind = "send" if kind == "recovery-send" else kind
     if kind == "recovery-archive":

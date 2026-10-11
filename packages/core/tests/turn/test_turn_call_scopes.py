@@ -79,10 +79,10 @@ async def test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_
             ScriptedReply(
                 "GET", "/v1/sessions/session/events", list_response([idle.model_dump(mode="json")])
             ),
-            ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
             ScriptedReply.stream(
                 "/v1/sessions/session/events/stream", [idle.model_dump(mode="json")]
             ),
+            ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
         )
         async with transport.client() as client:
             if migrated:
@@ -93,10 +93,10 @@ async def test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_
                 events = [
                     event async for event in client.beta.sessions.events.list(session_id="session")
                 ]
+                stream = await client.beta.sessions.events.stream(session_id="session")
                 await client.beta.sessions.events.send(
                     "session", events=[{"type": "user.interrupt"}]
                 )
-                stream = await client.beta.sessions.events.stream(session_id="session")
                 async for event in stream:
                     if event.type == "session.status_idle":
                         break
@@ -140,7 +140,6 @@ async def test_interrupt_timeout_keeps_its_original_error_and_scope(
 
     monkeypatch.setattr(ma, "LegacyTurnTransport", StalledTransport)
     transport = ScriptedTransport()
-    transport.queue(ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()))
     async with transport.client() as client:
         with pytest.raises(TurnError) as error:
             await ma.send_interrupt_and_wait(
@@ -149,4 +148,5 @@ async def test_interrupt_timeout_keeps_its_original_error_and_scope(
     assert error.value.kind == "interrupt_timeout"
     assert isinstance(error.value.__cause__, TimeoutError)
     assert seen == [SCOPE]
+    assert transport.requests == []
     transport.assert_consumed()

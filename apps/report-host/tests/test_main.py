@@ -55,6 +55,22 @@ async def test_health_returns_200_with_no_credential(
     assert resp.json() == {"ok": True}
 
 
+async def test_assembled_app_serves_the_viewer_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
+    # index.html loads /viewer/app.css and /viewer/app.js; without them the
+    # page never leaves "Loading…". FastAPI before 0.137 drops a router's
+    # Mount in include_router, so this must hold on the assembled app.
+    app = main_mod.create_app(_settings(tmp_path=tmp_path, monkeypatch=monkeypatch))
+    async with fake_seam_lifespan(app), await _client(app) as client:
+        css = await client.get("/viewer/app.css")
+        js = await client.get("/viewer/app.js")
+    assert css.status_code == 200
+    assert css.headers["content-type"].startswith("text/css")
+    assert js.status_code == 200
+    assert "javascript" in js.headers["content-type"]
+
+
 async def test_lifespan_runs_resume_pass_exactly_once_and_starts_stops_the_sweep_cleanly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

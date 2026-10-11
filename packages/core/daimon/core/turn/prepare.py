@@ -52,6 +52,7 @@ from daimon.core.session_snapshot import (
     fingerprint_identity,
     fingerprint_mutable,
     hash_env_bytes,
+    session_skills,
     snapshot_from_created_session,
 )
 from daimon.core.sessions import create_session
@@ -64,7 +65,8 @@ from daimon.core.shared_threads import (
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
-from daimon.core.stores.github_access import get_agent_mode
+from daimon.core.stores.github_access import get_agent_mode, list_authorized_repos
+from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
@@ -122,6 +124,28 @@ class ContinuityOutcome:
         lost = _LOST_BY_TRANSFER.get(self.transfer_kind, ())
         return SessionState(state=self.state, applied=self.applied, lost=lost)
 
+    def announces_replacement(self) -> bool:
+        """Whether the person should be told this bind replaced their session.
+
+        Only what a person would notice is announced: a different agent or
+        model now answering (`NOTICEABLE_REPLACEMENT_REASONS`), or something
+        that did not come across (anything short of a full transfer). Every
+        other reason -- instructions, skills, tools, MCP servers, `.env`, repo
+        token age, GitHub mode or repositories (including ones the person just
+        connected), memory, vault, environment -- carried everything over and
+        changes nothing they can see, so a notice would only puzzle them.
+        """
+        if self.state != "replaced" or self.transfer_kind is None:
+            return False
+        if self.transfer_kind != "full":
+            return True
+        return any(reason in NOTICEABLE_REPLACEMENT_REASONS for reason in self.applied)
+
+
+#: The replacement reasons a person notices on their own: a different agent
+#: or a different model answers. Only these, or a transfer that lost
+#: something, are announced (`ContinuityOutcome.announces_replacement`).
+NOTICEABLE_REPLACEMENT_REASONS: frozenset[ChangeReason] = frozenset({"agent_identity", "model"})
 
 _LOST_BY_TRANSFER: dict[TransferKind | None, tuple[str, ...]] = {
     "transcript": ("working files",),
@@ -385,6 +409,35 @@ async def create_ma_session(
         isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
         for resource in ma_session.resources
     )
+    # App tokens sit in the vault even when no working repo is mounted; record an
+    # issue time only when this session was actually delivered some.
+    has_app_tokens = False
+    token_repo_urls: tuple[str, ...] = ()
+    if github_mode == "app":
+        async with deps.sessionmaker() as session:
+            delivered = [
+                row
+                for row in await list_session_tokens(session, session_id=ma_session.id)
+                if row.status == "delivered"
+            ]
+            has_app_tokens = bool(delivered)
+            if delivered:
+                names = {
+                    repo.repo_id: repo.repo_full_name
+                    for repo in await list_authorized_repos(
+                        session, tenant_id=tenant_id, agent_id=agent_uuid
+                    )
+                }
+                token_repo_urls = tuple(
+                    sorted(
+                        {
+                            f"https://github.com/{names[repo_id]}"
+                            for row in delivered
+                            for repo_id in row.repo_ids
+                            if repo_id in names
+                        }
+                    )
+                )
     snapshot = snapshot_from_created_session(
         ma_session,
         env_sha256=env_sha256,
@@ -394,14 +447,15 @@ async def create_ma_session(
         env_file_id=None,
         # `resolve_clone_token` minted the repo credential inside the
         # `create_session` call above, so "now" is when it was issued.
-        repo_token_issued_at=int(time.time()) if has_repo else None,
+        repo_token_issued_at=int(time.time()) if has_repo or has_app_tokens else None,
         vault_id=(
             ma_session.vault_ids[-1]
             if github_mode == "app" and ma_session.vault_ids
             else next(iter(ma_session.vault_ids), None)
         ),
+        sent_skills=session_skills(admission.agent, admission.channel_skills),
         github_mode=github_mode,
-    )
+    ).model_copy(update={"token_repo_urls": token_repo_urls})
     return CreatedSession(
         ma_session_id=ma_session.id,
         snapshot=snapshot,
@@ -442,6 +496,7 @@ async def insert_mapping(
         ma_session_id=created.ma_session_id,
         ma_agent_id=admission.agent.id,
         channel_id=admission.budget_channel_id,
+        budget_channel_id=admission.budget_channel_id,
         effective_config=snapshot,
         seal_ids=created.seal_ids,
         identity_fingerprint=fingerprint_identity(snapshot),
