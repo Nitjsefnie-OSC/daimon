@@ -1464,3 +1464,29 @@ cannot promote a root failure. Anthropic's existing outcome behavior is unchange
 Gemini native `incomplete` is `session_terminated`, including when its real stream
 or restart replay refuses the failed root before display delivery. That refusal
 remains nonretryable and does not permit billing success or a recovery send.
+### Typed provider-action cards
+
+Discord renders the scoped provider-action callback as separate browser-origin and authentication cards. It returns the exact offered response object after checking the requester and bound destination. Origin access offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when the provider supplies that response. Expiry and turn Stop retire the controls. Native action payloads and credentials never enter card components, and Anthropic prepared calls attach no provider-action callback.
+
+Slack attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
+Teams attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
+### Neutral lifecycle event identity
+
+The optional `on_provider_event(Event)` lifecycle tap receives non-Anthropic
+normalized frames. Its per-turn identity ledger survives reconnects and is
+separate from the native compatibility display ledger, so a revised media item
+can reach the tap without replaying the native display event. Missing hooks are
+a no-op. The recovery lifecycle wrapper forwards the optional tap; the
+Anthropic native callback keeps its existing order and payload.
+
+### Platform backend-selection callbacks
+
+The Discord, Slack and Teams adapters provide explicitly imported offline
+`backend_conformance` callbacks over their normal admission and binding paths.
+They return the actual prepared turn or the normally rendered admission refusal
+for host conformance collectors; they do not select revisions, inject bindings
+or change application startup. Use dedicated idle applications and scripted
+transports. Each adapter's `BACKEND-CONFORMANCE.md` describes its input boundary
+and the independent database and SDK mutation controls.

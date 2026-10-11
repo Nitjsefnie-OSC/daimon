@@ -892,6 +892,9 @@ async def _pump(
     pending_confirmation_reconnects = 0
     pending_confirmation_retry_ids: frozenset[str] = frozenset()
     delivered_event_ids: set[str] = set()
+    # Normalized records have their own identity: distinct revisions can share
+    # one compatibility display id. Keep their tap ledger across reconnects.
+    delivered_provider_event_ids: set[str] = set()
     # Per-turn billing dedup, shared by the live consume loop and both replay
     # folds: a model call MA emitted while no stream was attached exists only
     # in the replay, and must be billed there, once, by this turn's recorder.
@@ -1005,6 +1008,7 @@ async def _pump(
                                 accepted_tool_use_ids=accepted_tool_use_ids,
                                 seen_requires_action_event_ids=seen_requires_action_event_ids,
                                 delivered_event_ids=delivered_event_ids,
+                                delivered_provider_event_ids=delivered_provider_event_ids,
                                 billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
                             )
@@ -1470,6 +1474,7 @@ async def _consume_with_reconnect(
     accepted_tool_use_ids: set[str],
     seen_requires_action_event_ids: set[str],
     delivered_event_ids: set[str],
+    delivered_provider_event_ids: set[str],
     billed_event_ids: set[str],
     stream_read_timeout_s: float,
 ) -> None:
@@ -1605,11 +1610,12 @@ async def _consume_with_reconnect(
             if (
                 normalized is not None
                 and normalized.native.provider != "anthropic"
-                and (event is None or event.id not in delivered_event_ids)
+                and normalized.id not in delivered_provider_event_ids
             ):
                 hook = getattr(lifecycle, "on_provider_event", None)
                 if hook is not None:
                     await cast(Callable[[Event], Awaitable[None]], hook)(normalized)
+                    delivered_provider_event_ids.add(normalized.id)
             if event is None:
                 # Usage-only native frames have no display event to decode.
                 # N4's codec edge owns the optional native field declaration.

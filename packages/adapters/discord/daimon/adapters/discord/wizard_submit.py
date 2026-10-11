@@ -79,6 +79,10 @@ from daimon.adapters.discord.checks import is_member_guild_admin, member_role_id
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.adapters.discord.provider_actions import (
+    discord_provider_action_hook,
+    provider_action_options,
+)
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.turn_card_recovery import (
@@ -759,6 +763,14 @@ async def run_wizard_submit_turn_observed(
                 render_interval_s=2.0,
                 deadline=turn_deadline_at,
                 confirm_write=discord_confirmation_hook(channel),
+                **provider_action_options(
+                    prepared,
+                    lambda: discord_provider_action_hook(
+                        channel,
+                        thread_id=thread_id,
+                        channel_id=channel.id,
+                    ),
+                ),
             )
         finally:
             if outcome is not None and outcome.mapping_id is not None:

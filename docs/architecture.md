@@ -1831,6 +1831,14 @@ Slack consumes the same optional neutral-event tap for alternate-provider drafts
 
 Teams consumes neutral snapshots and draft fragments through the optional lifecycle tap for alternate providers. Terminal callbacks retire the progress card and deliver authoritative answers; unprompted drafts remain silent. Unknown alternate-provider cost stays absent from the summary instead of becoming an Anthropic usage meter.
 
+### Typed provider-action cards
+
+Discord attaches the typed provider-action callback only to prepared non-Anthropic sessions. Browser-origin cards return the supplied approve, deny or cancel response; authentication cards offer completion only when the provider supplies a verified response. Requester and destination checks precede selection, and expiry or Stop retires the controls without granting permission. Native action payloads stay out of cards.
+
+Slack attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
+Teams attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
 ### Neutral output upload edges
 
 Discord, Slack and Teams output-delivery modules accept verified `DeliverableFile`
