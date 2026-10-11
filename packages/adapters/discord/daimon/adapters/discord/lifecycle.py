@@ -346,6 +346,7 @@ class DiscordTurnLifecycle:
         budget_channel_id: str | None = None,
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
+        waiting_for_tenant_slot: Callable[[], bool] | None = None,
     ) -> None:
         self._requester_id = requester_id
         self._turn_id = turn_id
@@ -363,6 +364,8 @@ class DiscordTurnLifecycle:
         self._budget_channel_id = budget_channel_id
         self._on_initial_progress = on_initial_progress
         self._alert_webhook_url = alert_webhook_url
+        self._waiting_for_tenant_slot = waiting_for_tenant_slot
+        self._queue_card_shown = False
         self._edit = edit
         self._urgent_edit = urgent_edit
         self._delete = delete
@@ -507,6 +510,24 @@ class DiscordTurnLifecycle:
         if self._unprompted:
             return
         await self._maybe_flush(initial=True)
+
+    async def on_slot_started(self) -> None:
+        """Clear opted-in queue wording on the existing card after the real wait."""
+        if not self._queue_card_shown or self._terminal or self._message_ref is None:
+            return
+        self._waiting_for_tenant_slot = None
+        now = self._clock()
+        try:
+            await self._edit_message(
+                self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
+            )
+        except Exception:
+            # Cosmetic wording must not prevent an admitted turn from running.
+            # The ordinary render/terminal path will try this same card again.
+            log.info("turn.queue_card_clear_failed", exc_info=True)
+            return
+        self._last_flush = now
+        self._queue_card_shown = False
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract (D-11):
@@ -838,7 +859,11 @@ class DiscordTurnLifecycle:
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the one status embed: headline, tool lines and the latest draft."""
-        return [build_discord_embed(to_embed_data(self._state, now=now))]
+        embed = build_discord_embed(to_embed_data(self._state, now=now))
+        if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
+            embed.title = "Queued — waiting for a free slot…"
+            self._queue_card_shown = True
+        return [embed]
 
     async def _maybe_flush(self, *, initial: bool = False) -> None:
         """Post or edit the embeds, subject to debounce. No-op after terminal."""

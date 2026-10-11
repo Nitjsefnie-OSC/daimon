@@ -2091,3 +2091,12 @@ agent copying. Shared setup-responder, agent-visibility and DM routing refusals
 mark their fixed guidance explicitly. Terminal
 failure cards retain audited guidance as their next step, including an expired
 setup context encountered during reconnection.
+
+### Opt-in Discord waiting cards
+
+`discord.tenant_cap_waiting_card` defaults to false. When enabled, an initial
+mention's admitted ticket shows “Queued — waiting for a free slot…” on its
+existing progress card while it waits behind the tenant cap. The same card
+returns to ordinary progress when the slot is granted. Stop, queue limits and
+FIFO admission are unchanged, and the card displays no tenant identities or
+queue counts. Drained follow-up turns keep their existing card wording.

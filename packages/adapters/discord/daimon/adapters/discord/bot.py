@@ -60,6 +60,7 @@ from daimon.adapters.discord.provider_actions import (
     discord_provider_action_hook,
     provider_action_options,
 )
+from daimon.adapters.discord.queue_card import queue_card_ticket, tenant_slot_waiter
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
@@ -2596,7 +2597,12 @@ class DaimonBot(commands.Bot):
                 await message.channel.send(GLOBAL_CAP_NOTICE)
                 return
 
-            with holding(ticket):
+            with (
+                holding(ticket),
+                queue_card_ticket(ticket)
+                if self.runtime.settings.discord.tenant_cap_waiting_card
+                else contextlib.nullcontext(),
+            ):
                 # Channel-level mentions each open their own thread + MA session, so
                 # they run in parallel — no serialization (bounded by the
                 # per-tenant and optional process-wide slots claimed above).
@@ -3950,6 +3956,12 @@ class DaimonBot(commands.Bot):
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_id
                 ),
+                waiting_for_tenant_slot=(
+                    tenant_slot_waiter(self.turn_queue, tenant_id)
+                    if self.runtime.settings.discord is not None
+                    and self.runtime.settings.discord.tenant_cap_waiting_card
+                    else None
+                ),
             )
 
         turn_card_intent, lifecycle = await post_initial_turn_card(
@@ -3999,9 +4011,8 @@ class DaimonBot(commands.Bot):
 
         surface.end_card = _end_card_with_error
 
-        # Over a cap the turn waits here, behind its ordinary card: the queue
-        # is never shown. Stop ends the wait like any turn; the max wait is a
-        # safeguard that ends the card with the ordinary error.
+        # Over a cap the turn waits behind its existing card. Queue wording
+        # is explicitly opt-in; Stop and timeout keep their existing paths.
         assert self.runtime.settings.discord is not None
         slot = await wait_for_slot(
             cancel,
@@ -4029,6 +4040,12 @@ class DaimonBot(commands.Bot):
                 no_post_confirmed=not lifecycle.first_post_attempted,
             )
             return
+
+        if (
+            self.runtime.settings.discord is not None
+            and self.runtime.settings.discord.tenant_cap_waiting_card
+        ):
+            await lifecycle.on_slot_started()
 
         # D-03 boundary: the per-turn ceiling clock starts here, once admission
         # has passed and the turn holds its slot, and covers session

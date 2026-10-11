@@ -470,6 +470,15 @@ class DiscordSettings(BaseModel):
             "on the shared Anthropic key."
         ),
     )
+    tenant_cap_waiting_card: bool = Field(
+        default=False,
+        description=(
+            "Opt in to queue wording on the existing initial Discord mention card while "
+            "its admitted turn waits behind the tenant concurrency cap. The same card "
+            "returns to ordinary progress when the turn starts. Admission, Stop and queue "
+            "limits are unchanged; no other tenant information is displayed."
+        ),
+    )
     max_concurrent_turns: int | None = Field(
         default=None,
         ge=1,

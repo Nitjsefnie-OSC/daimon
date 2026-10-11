@@ -499,6 +499,15 @@ memory, so a restart allows one more.
 Maximum number of agent turns a single tenant (Discord guild) may have in flight at
 once. Caps one noisy guild from starving others on the shared Anthropic key.
 
+### `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD`
+
+`bool` · optional · default `False`
+
+Opt in to queue wording on the existing initial Discord mention card while its admitted
+turn waits behind the tenant concurrency cap. The same card returns to ordinary progress
+when the turn starts. Admission, Stop and queue limits are unchanged; no other tenant
+information is displayed.
+
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS`
 
 `int | None` · optional · default unset
