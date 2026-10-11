@@ -100,7 +100,8 @@ def test_candidate_is_not_promotable_until_staging_gates_pass() -> None:
     ):
         assert names.index(gate) < promotable
     script = deploy[promotable]["run"]
-    assert script.count("gcloud artifacts docker tags add") == 3
+    assert "gcloud artifacts tags create" in script
+    assert "gcloud artifacts docker tags add" not in script
     assert script.rfind("steps.tags.outputs.daimon") > script.rfind("steps.tags.outputs.report")
     assert deploy[promotable]["if"] == "steps.images.outputs.prebuilt == 'true'"
 
