@@ -123,6 +123,12 @@ only code; `init` still seeds `defaults/` from your checkout, so check out the
 matching tag first (`git checkout v0.2.0`). Upgrading is checking out the
 next tag, editing the override and running those two commands again.
 
+The report-host image is built from the `report-host` dependency closure in the
+repository's `uv.lock`. Its build checks every installed distribution against
+that lock, including platform markers, and starts the installed application
+directly so startup cannot resolve different packages. Build it from the
+repository root with `docker build -f apps/report-host/Dockerfile .`.
+
 ### Running the processes by hand
 
 Requires [`uv`](https://docs.astral.sh/uv/):
