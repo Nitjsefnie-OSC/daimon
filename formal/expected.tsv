@@ -57,6 +57,8 @@ ci_deploy_gate	CiDeployGate	CiDeployGateUnsafe	violates:PromotableOnlyAfterStagi
 staging_tag	StagingTag	StagingTagSafe	clean	20	-	atomic create preserves an existing different digest
 staging_tag	StagingTag	StagingTagSame	clean	20	-	identical rerun accepts the published digest
 staging_tag	StagingTag	StagingTagUnsafe	violates:ImmutableTag	20	-	replacement after a concurrent create changes the canonical tag
+staging_ssh_overlap	StagingSSHJoin	StagingSSHJoinSafe	clean	30	-	registration success or failure is joined before either VM refresh
+staging_ssh_overlap	StagingSSHJoin	StagingSSHJoinMissingJoin	violates:NoRefreshBeforeJoin	8	-	unsafe workflow starts refresh while IAP registration is still running
 # ---- scheduler ----
 privacy_delete	PrivacyDelete	PrivacyDeleteSafe	clean	49	-	durable local commit keeps upstream work across crashes and failures
 privacy_delete	PrivacyDelete	PrivacyDeleteUnsafe	violates:LocalDeletionTracked	2	-	old local commit loses the target immediately
