@@ -705,3 +705,11 @@ Discord consumes the typed provider-action callback for prepared foreign session
 Slack attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
 
 Teams attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
+The manual conformance budget guard supports one lead-signed hold for a backend
+column of up to 53 fully executable cells. Recorded counters size a conservative
+token/runtime bound; disjoint complete native evidence settles each claimed
+cell exactly once, using decimal precision 80 from measurement through totals.
+Terminal closure releases never-started cells and retains
+unknown usage as held. Runner adoption and native spending controls remain
+separate from this offline API. See the [column admission contract](mux/conformance/README.md#whole-column-admission).
