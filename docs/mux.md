@@ -1611,3 +1611,10 @@ the runtime manifest.
 `python -m daimon.testing.a7_anthropic` prepares an explicit offline probe pack, a state-aware legacy/mux replay benchmark and a native admission inventory. It is never imported by the app. The mock SDK client refuses ambient Anthropic settings before allocation, copy and dispatch; the database guard checks every sessionmaker bind through the shared owned-sessionmaker policy. The benchmark times actual SDK/driver/journal/claim/lease work on fresh binding slots and compares request/event/state digests. Existing-client quiet runs require explicit lead GO, a clean pinned checkout, 200 measured plus 20 warmup pairs and fixed CPU/load limits. Cold or loaded diagnostics cannot certify latency; no mode reads keys or executes a live request. Recipe readiness stays PENDING until native callbacks, supported limit acknowledgement, canonical budget reservation, disposable scope and cleanup are provided by the owners. This latency gate is separate from the complete M0 certificate and live token/dollar equivalence.
 
 Use a new evidence directory: `uv run python -m daimon.testing.a7_anthropic --mode offline-probes --output /tmp/a7-offline-unique`. `--mode live-plan` checks immutable native recipes only. `--mode quiet-benchmark --quiet-window-go` is opt-in and remains entirely offline; run it detached after the lead declares the host quiet. Preserve raw timings and failed results.
+### Discord restart recovery reads
+
+Discord startup replay reads the session authorized by its durable tenant and
+account mapping through the native session-read extension. The recovery edge
+retains SDK partial-response behavior and consumes only the session status before
+replaying events. It keeps the existing read deadline, SDK retries, event ordering
+and completed-current-turn checks, and adds no provider lookup or turn write.
