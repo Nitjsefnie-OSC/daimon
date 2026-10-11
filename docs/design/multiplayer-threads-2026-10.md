@@ -5,6 +5,12 @@ implemented. The earlier credential-free pilot was rejected as too limited to be
 useful. This proposal keeps credentials and MCP access. Its product choices have
 not been accepted, and it authorizes no implementation, merge or deployment.
 
+Status, 2026-10-11: build decisions are paused, not rejected, pending a broader
+one-page credential and identity model covering GitHub, shared threads, browser
+site logins and tenant-wide MCP keys. This proposal is input to that model. The
+three choices below remain open until that model exists; recommendations and
+estimates here do not authorize a build.
+
 ## 1. Recommendation and decisions
 
 Use one fresh shared sandbox per opted-in thread, retaining reviewed agent-wide
@@ -569,5 +575,6 @@ where confirmation is required. The first connected slice is estimated at
 on agreeing the three choices in section 1. Required new proxy/gateway work must
 be estimated before that range can be treated as a build plan.
 
-This replaces the rejected credential-free pilot. It is a design for decision;
-no build, merge, deployment or live experiment is authorized.
+This replaces the rejected credential-free pilot. The connected proposal remains
+open, with build decisions paused pending the broader identity model. No build,
+merge, deployment or live experiment is authorized.
