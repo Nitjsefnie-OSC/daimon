@@ -33,6 +33,8 @@ def test_missing_required_native_observation_is_pending(tmp_path: Path) -> None:
     assert document["checks"][1]["status"] == "PENDING"
     assert document["minutes"] == 1.5
     assert document["app_input_tokens"] == 0
+    assert document["controller_input_tokens"] == 0
+    assert document["controller_output_tokens"] == 0
     assert document["judge_output_tokens"] == 0
 
 

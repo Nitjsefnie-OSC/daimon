@@ -61,6 +61,8 @@ class RunReport:
     finished_at: datetime | None = None
     app_input_tokens: int = 0
     app_output_tokens: int = 0
+    controller_input_tokens: int = 0
+    controller_output_tokens: int = 0
     judge_input_tokens: int = 0
     judge_output_tokens: int = 0
     checks: list[Check] = field(default_factory=list[Check])
