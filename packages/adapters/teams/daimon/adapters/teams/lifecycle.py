@@ -28,6 +28,7 @@ import httpx
 import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.adapters.teams import card
+from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.adapters.teams.provider_events import ProviderDraft
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
@@ -139,6 +140,7 @@ class TeamsTurnLifecycle:
         markup: Decimal = Decimal(1),
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         budget_channel_id: str | None = None,
+        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
     ) -> None:
         self._sender = sender
         # Support is on: the controls below the answer offer Ask a human.
@@ -150,6 +152,7 @@ class TeamsTurnLifecycle:
         self._markup = markup
         self._sessionmaker = sessionmaker
         self._budget_channel_id = budget_channel_id
+        self._on_initial_progress = on_initial_progress
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
         self._agent_name_prefix = agent_name_prefix
@@ -218,8 +221,20 @@ class TeamsTurnLifecycle:
         """Post the card now, before session setup, so Cancel exists from the start."""
         if self._unprompted:
             return
-        self._message_id = await self._send(self._status(), message_id=self._message_id)
+        activity = self._status()
+        operation = "edit" if self._message_id is not None else "send"
+        self._message_id = await self._send(activity, message_id=self._message_id)
         self._last_flush = self._clock()
+        if self._on_initial_progress is not None:
+            self._on_initial_progress(
+                InitialProgressReceipt(
+                    operation=operation,
+                    destination_id=self._conversation_id,
+                    message_id=self._message_id,
+                    rendered_json=activity.model_dump_json(by_alias=True, exclude_none=True),
+                    observed_s=self._clock(),
+                )
+            )
 
     def _status(self) -> MessageActivityInput:
         return card.status_card(self._state, now=self._clock(), cancel_key=self._cancel_key)

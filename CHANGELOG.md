@@ -59,6 +59,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add opt-in Discord credential-form expiry with durable retirement, retryable verified edits of the original card, and no background job by default.
 - Report separate default and opt-in QA product profiles, with explicit per-cell profile results and an opt-in PASS tally that never changes default-profile totals.
 
+- Deliver neutral provider lifecycle records by their own event identity across reconnects, so media revisions sharing a compatibility display ID reach the optional tap once while native delivery stays unchanged.
+- Add explicit offline Discord, Slack and Teams callbacks that expose actual
+  admission and session binding for backend-selection conformance.
+- Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
+
+- Add optional accepted initial progress-card receipts for Discord, Slack and Teams, with offline SDK delivery controls and unchanged default rendering.
+- Observe concurrent offline Discord ingress through actual busy-thread and tenant-cap queues, timestamped reactions and scoped binding/card readback, without changing adapter defaults.
+- Validate all offline Discord thread-permission hook dependencies and database fixture ownership before observation.
+- Refuse opaque provider runtimes in offline Discord title/admission hooks and check fixture database ownership before any connection.
 - Prove OpenAI C04 offline with real SDK delivery, fenced intent/ack crashes and restart recovery that retains unknown input identity without resending.
 - Prove OpenAI interaction preparation offline across skill upload/pinning, MCP and input-file binding, retaining typed unavailable execution and the canonical C11 gaps.
 - Skip offline admin proof fixtures on a contributor's plain local database while retaining strict isolated CI and routed-bind checks.
@@ -87,6 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add lead-signed whole-column QA budget admission with conservative receipt-based bounds, disjoint monotonic per-cell settlement and terminal release of never-started holds; incomplete usage stays held.
 - Route the shared no-retry Anthropic test builder through isolated SDK admission, retaining its handler/router API, native request bytes, SDK timeout and zero-retry behavior.
 - Add an owned-test read-only turn accounting API with native usage revisions, explicit dated rate/model attribution, infrastructure unknowns and independent coverage/settlement completeness across Anthropic, OpenAI and Gemini.
+- Add opt-in in-process Discord gateway ingress with explicit HTTP/clock dependencies and real admission, queue, title-request and history observations; validate nested admission dependencies at the real callback while ordinary construction remains unchanged.
+- Add explicit offline Discord Forbidden-path conformance observation with real ingress, serialized parent notices, configured backend readback and mutation-sensitive provider-turn write checks that retain default host naming.
 
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.

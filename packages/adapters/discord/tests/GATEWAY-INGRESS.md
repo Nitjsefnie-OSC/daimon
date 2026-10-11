@@ -1,0 +1,149 @@
+# Explicit offline Discord ingress
+
+`daimon.testing.discord_ingress.DiscordIngress` feeds original gateway
+`MESSAGE_CREATE` payloads into discord.py's real parser, dispatcher and scheduled
+`DaimonBot.on_message` callback. It uses normal admission, production queue state,
+thread creation and title generation. No caller-provided XML, pre-created
+`qa-thread`, synthetic turn-to-thread map, rewritten message ID or automatic
+completion certificate exists.
+
+Construct it with an owned `DiscordRuntime`, explicit tenant/account `Scope`,
+fresh `IngressHTTP` and the runtime's actual isolated `ScriptedTransport`.
+`open(guild=..., channel=..., bot_user=...)` validates actual DB ownership and
+configured backend before initializing the owned gateway cache. Primary and all
+routed database binds use the shared ownership guard, including the registered
+isolated-CI exception. Contributor tests skip plain local shared databases.
+
+`deliver(payload)` preserves source event order and message identity and returns
+without waiting for a turn to finish. Distinct equal-text messages remain
+separate production events and can queue behind an active thread callback.
+`wait()` awaits the actual scheduled callbacks. `receipt()` reads actual queue
+state, thread-create requests/replies, complete captured post operations, native
+title request bytes, real naming-meter rows and HTTP history reads. A changed
+backend or unbound SDK transport is refused. `close()` cancels unfinished owned
+callbacks; it does not report cancellation as successful native completion.
+
+`IngressHTTP` accepts only the owned parent and threads actually created through
+Discord's SDK edge. Thread IDs follow Discord's originating-message identity.
+History returns the original gateway payloads through actual SDK history reads;
+production context builders decide what reaches the native send. The controlled
+Anthropic fixture verifies the original preceding context and trigger ID in the
+actual native events request, then completes through the real host driver. This
+is a host-wiring control, not an independently pinned catalog completion tape.
+
+The fixture's optional `hold_first_post=True` pauses after the first serialized
+card is accepted, before native session allocation. This exposes real admission,
+queue claims and title evidence without sending into an unbound provider. With
+no hold, only the captured Anthropic SDK path is authorized by this slice. The runner
+must suppress its own external Sentry transport. The fake HTTP fixture has no
+fallback to a live Discord connection.
+
+`DaimonBot` accepts optional `http_client` and UTC `clock` dependencies. Omission
+keeps the existing HTTP client and `datetime.now(UTC)` at ordinary admission and
+turn-deadline calculation. The injected clock does not virtualize core timeouts,
+scheduler jobs or title timeout waits. The capture HTTP's monotonic clock remains
+separate and explicitly injected.
+
+For the first C7 slice, six A/O/G probes use the frozen I6 and NEW9 steps. I6
+retains the preceding context event but the existing title path sees only the
+bare trigger: it skips naming and opens `Chat with qa-agent`. That static name
+passes I6's literal forbidden-pattern/length assertion, without proving a
+context-derived model title. NEW9 executes the real shared Haiku title call,
+meters it to the original requester/message, and opens under the SDK response.
+A/O/G share this existing ancillary title path; no provider-native root is
+inferred from it. The controlled title response passes NEW9's title predicate.
+
+All six whole catalog cells remain **PENDING**: the paused probes have no
+source-pinned native root/terminal and independent full-oracle join. Initial card
+visibility or title predicate success cannot certify NEW9's complete transient
+text/count assertions or source `wait_done`. N3/N9 own that join; this ingress
+module provides the callable edge. Frozen YAML is unchanged.
+
+Mutations remove production ingress, substitute a valid-looking title without
+its SDK call/meter, and corrupt the generated title before real thread creation.
+Their observations lose the required path or fail the literal title predicate.
+The equal-text control reads actual production `_pending` messages and queue
+claims, with independent pooled DB connections for concurrent callbacks.
+
+Concurrent DB reads in production may reverse the pending queue order relative
+to gateway dispatch order. The hook records both original dispatch and actual
+production pending IDs without sorting or repairing either. This first slice
+preserves event delivery and identities; it does not certify queue-order policy.
+
+
+The explicit ingress guard validates both the current outer runtime sessionmaker
+and the actual admission `turn_deps.sessionmaker`, including every routed bind,
+before bot allocation, open, dispatch and receipt reads. Outer, nested Anthropic
+and optional Messages dependencies must share the actual captured isolated SDK
+client and its owned MockTransport, without mounted fallback transports. The
+real scheduled `on_message` callback repeats this check before product admission;
+replacing a frozen bundle after delivery does not authorize its new dependencies.
+Negative controls reach every boundary, trap foreign connections before connect,
+and retain a separate isolated SDK trace to detect uncaptured requests. A nested
+routed-bind control also proves refusal before bot allocation. The supplied SDK
+uses the shared construction guard, including the N8 no-retry and TLS/proxy
+follow-up; no local environment policy is duplicated.
+
+The shared `daimon.testing.discord_runtime_capture` validator fails closed on
+opaque injected provider dependencies: `turn_runtime_factory` must be None,
+`turn_runtimes` an ordinary empty dict, and `backend`, `backend_session_ref` and
+`state_store` all None. The default store uses the validated sessionmaker.
+The title/admission slice never authorizes native deployment construction;
+`release_first_post` permits only the captured Anthropic path in this slice.
+Alternate-provider completion requires a separate explicit offline capture
+binding. A pause does not authorize an otherwise unsafe runtime. Negatives use
+unheld construction and a released first-post gate at scheduled callback entry,
+including the genuine default factory, an uncaptured SDK backend, and a real
+foreign PostgresStateStore with a connection trap.
+
+The fixture uses product-default thread naming and a neutral unused settings
+DSN; actual connections use its owned factory. A session-autouse local preflight
+runs before any DB engine/session/cleanup fixture and uses shared owned-engine
+admission, including registered isolated CI. It skips only a plain local
+contributor DB outside exact CI. Child pytest tests install connection traps
+before the actual ingress fixture graph, proving foreign refusal and contributor
+skip happen without connection. The temporary local preflight will be replaced
+by N8's shared fixture once merged. This hook certifies neither a live provider
+nor a whole cell; A/O/G I6/NEW9 title facets retain their prior observations and
+whole-cell PENDING verdicts.
+
+
+### Concurrent offline Discord ingress
+
+`daimon.testing.discord_ingress.DiscordConcurrentDriver` adds `checkpoint`,
+`wait_for` and `deliver_while_busy` to the opt-in ingress boundary. Checkpoints
+read the actual production pending queue, turn-slot counts, original gateway
+IDs, timestamped SDK reaction history and posted HTTP payloads. Legacy session
+rows and provider-native binding slots/leases are read through scoped, read-only
+queries; a running OpenAI/Gemini turn is never inferred from an Anthropic row.
+The driver refuses concurrent delivery before an actual active host binding.
+
+The runner owns the native runtime, wire and clocks. Hold the actual first root
+at its running stream gate, deliver the second original event without waiting
+for the first callback, observe the real queued message/reaction, then release
+and capture the real continuation. For the tenant-cap case, use the signed
+`AdminBindings.execute` turn-cap/default source binding against the owned tenant,
+hold two actual roots, observe the third actual card/queue ticket, then release
+one root while the other remains active. Clock advancement is an interleaving
+control; it does not alone certify an elapsed native interval or a timeout.
+
+The controlled native Anthropic fixture exercises these adapter paths and actual
+session reuse/release through the installed isolated SDK. OpenAI/Gemini cases
+are PENDING until an explicit owned native capture binding can pass the same
+dependency guard; their fixtures skip before ingress allocation. The Anthropic
+records are not independent QA recipe/oracle pins, and do not prove execution
+of the requested bash sleep. All whole-cell verdicts remain PENDING. The
+NEW6 probe retains a full 15-second real waiting-card history: an ordinary
+progress card is accepted, but the existing product path does not display queue
+copy. Report this observed predicate failure separately from whole-cell credit.
+Production enqueue/cap mutations must break the corresponding queue witness;
+a cosmetic hourglass or a caller-owned gate flag alone is not admission proof.
+No production policy, reducer, provider request, routing or default changes.
+
+The concurrent fixture retains the first slice's explicit settings: init-only
+placeholder authentication and unused configuration DSN, owned tenant credit,
+`thread_open_notice_after_s=0` (product default 3), mux path and channel backend
+selection enabled, and external Sentry disabled. Naming uses the product-default
+`ThreadNamingSettings()`. Only the owned tenant's cap is changed through the real
+admin binding and restored to default on exit; ordinary runtime construction
+does not import or instantiate this driver.

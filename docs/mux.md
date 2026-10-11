@@ -1618,3 +1618,57 @@ account mapping through the native session-read extension. The recovery edge
 retains SDK partial-response behavior and consumes only the session status before
 replaying events. It keeps the existing read deadline, SDK retries, event ordering
 and completed-current-turn checks, and adds no provider lookup or turn write.
+### Adapter initial progress receipts
+
+Discord, Slack and Teams lifecycles expose optional `on_initial_progress` for
+accepted `post_initial` sends/edits before native session binding. Default
+construction observes nothing. The closed receipt carries the actual public
+card reference, route, native render input and injected clock; it is joined to
+independent wire, binding and fresh-root evidence by QA owners. Initial UI alone
+does not certify running provider work or release a completion gate. See each
+adapter's `PROGRESS-RECEIPTS.md` for the observation boundary and failure rules.
+
+### Explicit in-process Discord ingress
+
+Discord's test package provides an opt-in gateway harness that delivers original
+message events through discord.py dispatch and the real admission, queue and
+thread-title paths. Its HTTP and admission/deadline clock dependencies are
+explicit; ordinary bot construction retains the existing behavior. Captured
+thread-create requests, title-call bytes, naming-meter rows and original history
+reads are host observations. Full native completion and catalog assertion joins
+remain independent runner responsibilities; a title or initial card never
+certifies a provider turn. No routing context or message identity is synthesized.
+
+The title/admission harness refuses opaque provider runtime factories, injected
+backends and stores before real gateway callbacks. Its allowed SDK and DB
+dependencies must be the actual captured client and owned factories, including
+nested admission dependencies. Native alternate-provider completion requires a
+separate explicit offline binding; initial-card pauses do not authorize it.
+
+### Offline Discord thread-permission observation
+
+Discord's explicitly imported test support can bind an owned parent channel to
+an offline `discord.Forbidden` thread-creation edge, invoke normal ingress and
+capture the actual serialized parent notice plus native HTTP trace. Default
+host naming stays enabled and its exact Messages request remains visible;
+only that named host request is excluded from provider-turn writes. It checks
+real tenant/account rows and configured backend selection before invocation.
+The source text/deadline predicates remain independent of the receipt; an offline
+result does not certify live Discord permission settings. Product error copy and
+default behavior are unchanged. See the Discord test support's
+`FORBIDDEN-CONFORMANCE.md` for the explicit runner contract.
+
+
+### Concurrent offline Discord ingress observations
+
+The opt-in `daimon.testing.discord_ingress.DiscordConcurrentDriver` captures
+actual production thread/tenant queues, gateway IDs, timestamped reactions,
+posts, durable provider bindings and leases while native roots remain gated.
+It requires an actual active host binding before concurrent delivery, retains
+observed ordering and leaves native gate/oracle ownership with the runner.
+The owned cap probe uses the signed admin turn-cap/default mutation/readback;
+an isolated Anthropic SDK transport exercises real host continuation/release.
+Alternate-provider capture bindings and independent native recipe pins remain
+separate from these adapter observations.
+A full real waiting-card interval distinguishes missing queue copy from
+successful queue release. No adapter policy or default path changes.

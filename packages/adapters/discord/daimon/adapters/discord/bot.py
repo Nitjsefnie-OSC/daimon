@@ -208,6 +208,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 from discord.ext import commands
+from discord.http import HTTPClient
 
 log = structlog.get_logger()
 
@@ -617,8 +618,21 @@ async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[
 class DaimonBot(commands.Bot):
     """Discord bot process. Slash commands + turn pipeline."""
 
-    def __init__(self, *, runtime: DiscordRuntime, intents: discord.Intents) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: DiscordRuntime,
+        intents: discord.Intents,
+        http_client: HTTPClient | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         super().__init__(command_prefix=[], intents=intents)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
+        # Explicit in-process ingress only; normal gateway/HTTP and time remain
+        # untouched when neither dependency is supplied.
+        if http_client is not None:
+            self.http = http_client
+            self._connection.http = http_client
+        self._ingress_clock = clock
         self.runtime = with_budget_notifier(
             runtime, self.open_member_dm, self.is_closed, client=self
         )
@@ -3677,7 +3691,7 @@ class DaimonBot(commands.Bot):
                 platform_role_ids=member_role_ids(author)
                 if isinstance(author, discord.Member)
                 else None,
-                now=datetime.now(UTC),
+                now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
             )
@@ -4020,7 +4034,9 @@ class DaimonBot(commands.Bot):
         # has passed and the turn holds its slot, and covers session
         # bind/create (bind_session) plus the driver pump (run_prepared_turn)
         # as ONE shared budget -- admit() and the queue wait are outside it.
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+        turn_deadline_at = turn_deadline(
+            now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC)
+        )
 
         discord_settings = self.runtime.settings.discord
         assert discord_settings is not None, (
