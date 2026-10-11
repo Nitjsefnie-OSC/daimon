@@ -59,7 +59,7 @@ from daimon.core.turn.lifecycle import (
     acknowledge,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.posture import Billed
+from daimon.core.turn.posture import Billed, UsageRecorder
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
     CreatedSession,
@@ -71,8 +71,36 @@ from daimon.core.turn.prepare import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.usage_reconcile import ReconcileTrigger, reconcile_unbilled
+from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger(__name__)
+
+
+async def _reconcile_unbilled(
+    deps: TurnDeps, *, session_id: str, record: UsageRecorder, trigger: ReconcileTrigger
+) -> None:
+    """Debit model calls on `session_id` that no live stream metered.
+
+    Named boundary: a failed backfill must not fail or block the user's turn.
+    Recording is idempotent, so the next reconcile on the session (or the
+    scheduler sweep) retries whatever this one could not write.
+    """
+    try:
+        await reconcile_unbilled(
+            anthropic=deps.anthropic,
+            sessionmaker=deps.sessionmaker,
+            managed_session_id=session_id,
+            record=record,
+            trigger=trigger,
+        )
+    except _anthropic.NotFoundError:
+        # A dead session: the turn's own dead-session recovery handles it, and
+        # its events can no longer be listed.
+        log.info("billing.reconcile_skipped", managed_session_id=session_id, trigger=trigger)
+    except (_anthropic.APIError, SQLAlchemyError):
+        log.exception("billing.reconcile_failed", managed_session_id=session_id, trigger=trigger)
+
 
 __all__ = ["RunOutcome", "run_prepared_turn"]
 
@@ -688,6 +716,10 @@ async def run_prepared_turn_impl(
     active_mapping_id_cell: list[uuid.UUID | None] = [prepared.mapping_id]
     recovered_cell: list[bool] = [False]
     continuity_cell: list[ContinuityOutcome] = [prepared.continuity]
+    # The recorder bound to the session in `active_session_id_cell`, for the
+    # turn-end reconcile: after recovery it is the replacement's, priced at
+    # the replacement's model.
+    active_record_cell: list[UsageRecorder] = [prepared._record]  # pyright: ignore[reportPrivateUsage]
 
     # A replacement session's first user message opens with daimon's framing
     # for the work it inherited (`daimon.core.handoff_context`). Empty for
@@ -698,6 +730,17 @@ async def run_prepared_turn_impl(
     async def _run() -> RunOutcome:
         ma_session_id = prepared.ma_session_id
         mapping_id = prepared.mapping_id
+
+        # A reused session may have kept working after the worker streaming
+        # its last turn went away (a deploy, a crash); those model calls
+        # reached no recorder. Debit them before this turn adds more.
+        if prepared.reused:
+            await _reconcile_unbilled(
+                deps,
+                session_id=ma_session_id,
+                record=prepared._record,  # pyright: ignore[reportPrivateUsage]
+                trigger="attach",
+            )
 
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
         state = await run_turn(
@@ -806,6 +849,8 @@ async def run_prepared_turn_impl(
                 channel_id=(recovery.admission or prepared.admission).budget_channel_id,
             )
 
+            active_record_cell[0] = new_record
+
             log.info(
                 "turn.session_recovered",
                 old_session_id=ma_session_id,
@@ -869,41 +914,55 @@ async def run_prepared_turn_impl(
             continuity=continuity_cell[0],
         )
 
-    try:
-        return await asyncio.wait_for(_run(), timeout=remaining_s(effective_deadline, now=now()))
-    except TimeoutError:
-        active_session_id = active_session_id_cell[0]
-        active_mapping_id = active_mapping_id_cell[0]
-        recovered = recovered_cell[0]
-        err = ceiling_error()
-
-        log.error(
-            "turn.ceiling_exceeded",
-            phase="run_prepared_turn",
-            session_id=active_session_id,
-            mapping_id=str(active_mapping_id) if active_mapping_id is not None else None,
-            thread_id=thread_id,
-            platform=platform,
-            deadline=effective_deadline.isoformat(),
-        )
-
-        if active_mapping_id is not None:
-            async with deps.sessionmaker() as session:
-                await mark_dead(session, id=active_mapping_id)
-                await session.commit()
-
-        ceiling_state = TurnState(error=err, termination=TerminationReason.CEILING)
+    async def _run_within_ceiling() -> RunOutcome:
         try:
-            await lifecycle.on_terminal_failure(ceiling_state, err)
-        except Exception as render_err:
-            # Rendering is delivery, not correctness -- a broken adapter hook
-            # must not mask the ceiling error itself.
-            log.warning("turn.ceiling_render_failed", error=str(render_err))
+            return await asyncio.wait_for(
+                _run(), timeout=remaining_s(effective_deadline, now=now())
+            )
+        except TimeoutError:
+            active_session_id = active_session_id_cell[0]
+            active_mapping_id = active_mapping_id_cell[0]
+            recovered = recovered_cell[0]
+            err = ceiling_error()
 
-        return RunOutcome(
-            state=ceiling_state,
-            ma_session_id=active_session_id,
-            mapping_id=active_mapping_id,
-            recovered=recovered,
-            continuity=continuity_cell[0],
-        )
+            log.error(
+                "turn.ceiling_exceeded",
+                phase="run_prepared_turn",
+                session_id=active_session_id,
+                mapping_id=str(active_mapping_id) if active_mapping_id is not None else None,
+                thread_id=thread_id,
+                platform=platform,
+                deadline=effective_deadline.isoformat(),
+            )
+
+            if active_mapping_id is not None:
+                async with deps.sessionmaker() as session:
+                    await mark_dead(session, id=active_mapping_id)
+                    await session.commit()
+
+            ceiling_state = TurnState(error=err, termination=TerminationReason.CEILING)
+            try:
+                await lifecycle.on_terminal_failure(ceiling_state, err)
+            except Exception as render_err:
+                # Rendering is delivery, not correctness -- a broken adapter hook
+                # must not mask the ceiling error itself.
+                log.warning("turn.ceiling_render_failed", error=str(render_err))
+
+            return RunOutcome(
+                state=ceiling_state,
+                ma_session_id=active_session_id,
+                mapping_id=active_mapping_id,
+                recovered=recovered,
+                continuity=continuity_cell[0],
+            )
+
+    outcome = await _run_within_ceiling()
+    # Turn end: anything this session billed nowhere -- calls MA made while no
+    # stream generation was attached, or before a ceiling cut the turn off.
+    await _reconcile_unbilled(
+        deps,
+        session_id=active_session_id_cell[0],
+        record=active_record_cell[0],
+        trigger="turn_end",
+    )
+    return outcome

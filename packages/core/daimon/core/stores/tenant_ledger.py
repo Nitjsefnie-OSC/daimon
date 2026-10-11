@@ -62,6 +62,14 @@ async def insert_entry(
     return cast(CursorResult[Any], result).rowcount > 0
 
 
+async def sum_for_idempotency_keys(session: AsyncSession, *, keys: Sequence[str]) -> Decimal:
+    """SUM(delta_usd) over the rows carrying any of `keys`. No match -> Decimal('0')."""
+    stmt = select(func.coalesce(func.sum(TenantLedger.delta_usd), Decimal("0"))).where(
+        TenantLedger.idempotency_key.in_(keys)
+    )
+    return (await session.execute(stmt)).scalar_one()  # type: ignore[no-any-return]
+
+
 async def get_balance(session: AsyncSession, *, tenant_id: uuid.UUID) -> Decimal:
     """Balance = SUM(delta_usd). Empty ledger -> Decimal('0'). Negative allowed."""
     stmt = select(func.coalesce(func.sum(TenantLedger.delta_usd), Decimal("0"))).where(

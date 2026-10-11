@@ -352,6 +352,92 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     assert len(session_bodies) == 0, "no create_session call on the happy path"
 
 
+async def test_reattaching_to_a_session_debits_calls_no_worker_streamed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#17: a deploy killed the worker streaming the last turn while the MA session
+    kept making model calls. The next turn on the reused session debits those calls
+    (live path's key and price) before sending, and the turn-end pass finds nothing
+    left to bill."""
+    from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+        BetaManagedAgentsSpanModelRequestEndEvent,
+    )
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-gap",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+    gap = [
+        BetaManagedAgentsSpanModelRequestEndEvent(
+            id=f"evt_gap_{i}",
+            is_error=False,
+            model_request_start_id=f"start_{i}",
+            model_usage=ma_model_usage(input_tokens=1000, output_tokens=100),
+            processed_at=_NOW,
+            type="span.model_request_end",
+        ).model_dump(mode="json")
+        for i in range(2)
+    ]
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(
+        session_bodies=[],
+        dead_session_ids=set(),
+        sent_batches=sent,
+        events_by_session={"sess_1": gap},
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    admission = _admission(
+        account_id=account.id,
+        agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+        env=ma_environment(id="env_1", tenant_id=tenant.id),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-gap",
+            external_user_id="user-1",
+            user_message="hello again",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    assert outcome.state.error is None
+    async with db_session_factory() as s:
+        rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
+    assert sorted(r.event_id for r in rows) == ["evt_gap_0", "evt_gap_1"], (
+        "every call the dead worker never streamed is metered on reattach"
+    )
+    reconciled = [e for e in logs if e["event"] == "billing.reconciled_unbilled"]
+    assert [(e["trigger"], e["debited"]) for e in reconciled] == [("attach", 2)], (
+        "debited once at attach; the turn-end pass has nothing left to bill"
+    )
+    assert sent, "the turn still sent its message"
+
+
 async def test_a_dead_session_replacement_is_sealed_when_its_seal_cannot_be_read(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
