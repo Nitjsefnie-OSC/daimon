@@ -83,6 +83,7 @@ class Executor:
         self.watch_pool: ThreadPoolExecutor | None = None
         self.burst_timeout = backend.fallback_watch_s
         self.burst_workers = 0
+        self.watch_mentions = False
 
     def run(self, scenario: CatalogScenario) -> Result:
         run_id = f"{utcnow().strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
@@ -196,9 +197,19 @@ class Executor:
                 self.context.values["channel_id"] = channel
             try:
                 steps = [*scenario.setup, *scenario.steps]
-                self.burst_workers = sum(len(s.texts) for s in steps if s.do == "burst")
+                self.burst_workers = sum(
+                    len(s.texts) if s.do == "burst" else 1
+                    for s in steps
+                    if s.do in {"burst", "mention", "thread_reply"}
+                )
+                # Only queue scenarios need background observation for ordinary
+                # mentions: a follow-up precedes their first wait_done.
+                first_wait = next(
+                    (i for i, s in enumerate(steps) if s.do == "wait_done"), len(steps)
+                )
+                self.watch_mentions = any(s.do == "thread_reply" for s in steps[:first_wait])
                 for index, step in enumerate(steps):
-                    if step.do == "burst":
+                    if step.do in {"burst", "mention", "thread_reply"}:
                         self.burst_timeout = next(
                             (s.timeout_s for s in steps[index + 1 :] if s.do == "wait_done"),
                             self.backend.fallback_watch_s,
@@ -208,10 +219,10 @@ class Executor:
                 for turn in result.turns:
                     if turn.ended_at is None:
                         self.collect(turn, self.backend.fallback_watch_s)
-            except WatchTimeout:
+            except WatchTimeout as exc:
                 # A silent/stuck bot is a failed observation, not missing coverage.
                 # Preserve the messages and evaluate latency/card assertions below.
-                result.checks.append(Check("watch", "FAIL", "watch ended without terminal proof"))
+                result.checks.append(self.watch_timeout(result, exc.turn))
             assertions = list(scenario.assertions)
             for turn in result.turns:
                 assertions.extend(
@@ -244,13 +255,12 @@ class Executor:
             )
         finally:
             # Finish read-only watchers before deleting their owned channels.
-            for future in self.watchers.values():
+            timed_out: list[int] = []
+            for number, future in self.watchers.items():
                 try:
                     future.result()
                 except WatchTimeout:
-                    result.checks.append(
-                        Check("watch", "FAIL", "watch ended without terminal proof")
-                    )
+                    timed_out.append(number)
                 except BaseException as exc:
                     harness_failed = True
                     result.errors.append(exception_evidence(exc, "watcher"))
@@ -258,6 +268,9 @@ class Executor:
                         Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
                     )
             self.watchers.clear()
+            # Judge timeouts only after every watcher finished: a successor's
+            # collector marks its predecessor's evidence unattributed on exit.
+            result.checks.extend(self.watch_timeout(result, number) for number in timed_out)
             if self.watch_pool:
                 self.watch_pool.shutdown(wait=True)
                 self.watch_pool = None
@@ -336,6 +349,13 @@ class Executor:
         result.finalize()
         return result
 
+    def start_watcher(self, turn: Turn) -> None:
+        if self.watch_pool is None:
+            self.watch_pool = ThreadPoolExecutor(max_workers=max(1, self.burst_workers))
+        started = threading.Event()
+        self.watchers[turn.number] = self.watch_pool.submit(self.watch, turn, started)
+        started.wait()
+
     def watch(self, turn: Turn, started: threading.Event) -> None:
         started.set()
         self.collect(turn, self.burst_timeout)
@@ -344,23 +364,39 @@ class Executor:
         turn.settled = False
         try:
             self.backend.collect(turn, timeout)
-        except WatchTimeout:
+        except WatchTimeout as exc:
             turn.settled = False
             turn.ended_at = turn.ended_at or utcnow()
+            exc.turn = turn.number
             raise
+
+    @staticmethod
+    def watch_timeout(result: Result, number: int | None) -> Check:
+        """A watch without terminal proof FAILs unless its evidence is unattributed."""
+        turn = next((t for t in result.turns if t.number == number), None)
+        if turn is not None and turn.attribution_pending:
+            return Check(
+                "watch",
+                "PENDING",
+                "watch ended without terminal proof; " + turn.attribution_pending,
+                number,
+            )
+        return Check("watch", "FAIL", "watch ended without terminal proof", number)
 
     def join_watchers(self, result: Result) -> None:
         errors: list[tuple[int, BaseException]] = []
+        timed_out: list[int] = []
         for number, future in self.watchers.items():
             try:
                 future.result()
             except WatchTimeout:
-                result.checks.append(
-                    Check("watch", "FAIL", "watch ended without terminal proof", number)
-                )
+                timed_out.append(number)
             except BaseException as exc:
                 errors.append((number, exc))
         self.watchers.clear()
+        # Judge timeouts only after every watcher finished: a successor's
+        # collector marks its predecessor's evidence unattributed on exit.
+        result.checks.extend(self.watch_timeout(result, number) for number in timed_out)
         if errors:
             for number, exc in errors[1:]:
                 if not isinstance(exc, Pending):
@@ -403,6 +439,7 @@ class Executor:
             if step.channel and step.channel not in self.channels:
                 raise Pending(f"unknown channel reference: {step.channel}")
             reply_id: str | None = None
+            queue_prior: Turn | None = None
             if step.reply_to:
                 reference = re.fullmatch(r"turn([1-9][0-9]*)\.chunk([1-9][0-9]*)", step.reply_to)
                 assert reference is not None
@@ -413,7 +450,22 @@ class Executor:
                 reply_id = str(message["id"])
                 destination = str(message.get("channel_id") or prior.thread_id or prior.channel_id)
             elif kind == "thread_reply":
-                destination = next((t.thread_id for t in reversed(result.turns) if t.thread_id), "")
+                prior = result.turns[-1] if result.turns else None
+                if prior is not None and prior.number in self.watchers:
+                    # Wait only for this turn's live observed thread, never for
+                    # its terminal answer and never substitute a guessed ID.
+                    deadline = time.monotonic() + min(10, self.burst_timeout)
+                    future = self.watchers[prior.number]
+                    while not prior.thread_id and not future.done() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    if not prior.thread_id:
+                        raise Pending("active turn thread was not observed before follow-up")
+                    destination = prior.thread_id
+                    queue_prior = prior
+                else:
+                    destination = next(
+                        (t.thread_id for t in reversed(result.turns) if t.thread_id), ""
+                    )
                 if not destination:
                     raise Pending("thread_reply requires an observed thread")
             if kind == "channel_message" and not step.mention and not step.reply_to:
@@ -421,6 +473,19 @@ class Executor:
                 result.seed_messages.append({"message_id": message, "channel_id": destination})
                 return
             self.backend.verify_model(destination)
+            if queue_prior is not None and (
+                queue_prior.settled
+                or self.watchers[queue_prior.number].done()
+                or queue_prior.done_s is not None
+                or "working" not in queue_prior.verdicts
+            ):
+                # The follow-up must be sent while its predecessor is positively
+                # running (a working card on its latest poll and no terminal
+                # observation); a watcher still in its settle window is not busy.
+                raise Pending(
+                    "predecessor turn was not observed running when the queued follow-up "
+                    "was due; queue coverage is unproven"
+                )
             started_at = utcnow()
             self.trigger_attempted = True
             message = self.backend.send(
@@ -439,6 +504,8 @@ class Executor:
                         thread_id=destination if kind == "thread_reply" else None,
                     )
                 )
+                if self.watch_mentions:
+                    self.start_watcher(result.turns[-1])
         elif kind == "burst":
             destination = next(
                 (t.thread_id for t in reversed(result.turns) if t.thread_id), channel
@@ -466,9 +533,7 @@ class Executor:
                     thread_id=destination if destination != channel else None,
                 )
                 result.turns.append(turn)
-                started = threading.Event()
-                self.watchers[turn.number] = self.watch_pool.submit(self.watch, turn, started)
-                started.wait()
+                self.start_watcher(turn)
         elif kind == "wait":
             time.sleep(step.s or 0)
         elif kind == "wait_done":

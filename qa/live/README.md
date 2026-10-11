@@ -417,3 +417,43 @@ A known busy deploy that outlasts the quiet wait remains a silent not-quiet
 outcome. A snapshot begun near the wait deadline has a separate, bounded
 60-second query grace budget; the quiet wait remains 15 minutes and genuine
 GitHub transport or authentication failures remain alertable harness PENDING.
+
+Queue scenarios that send a thread follow-up before the first `wait_done` start
+watching mentions immediately. The follow-up uses the preceding turn's observed
+thread and never waits for its terminal answer or guesses a thread ID. Watchers
+finish before assertions, teardown, and accounting.
+The follow-up is sent only while its predecessor is positively running (a
+working card on its latest poll and no terminal observation); otherwise the
+scenario is PENDING and nothing is sent. A follow-up is linked to every turn
+still unfinished in that thread, including in-thread predecessors, before its
+POST is issued (bounded by the send time until the trigger id returns), so a
+delayed POST receipt can't let the predecessor settle on the follow-up's
+messages. A failed POST rolls the link back.
+Overlapping turns in one thread are attributed by the product's serial order:
+messages created before the follow-up trigger belong to the predecessor, and the
+follow-up owns messages from its first card observed working that was created
+after every predecessor card finalized. A predecessor's late chunks before that
+card stay with the predecessor. The follow-up cannot settle before its
+predecessor. If no follow-up card is observed working, evidence after its
+trigger is unattributed and both turns' checks are PENDING; a watch timeout on
+such a turn is PENDING too, while a silent or stuck bot still FAILs.
+
+`progress_text_seen {turn, pattern, within_s}` checks frozen non-terminal card
+text at the actual poll time. JSON retains `progress_text_history`, first-poll
+time, and observation coverage. Creation/edit timestamps do not backdate text
+seen on a late poll. Missing early coverage is PENDING; a completed observation
+without a matching early progress message FAILs. Tenant-cap mutation still needs
+an explicitly configured isolated QA operator hook.
+
+Progress text includes nested Discord V2 type-10 text displays. A component-only
+card whose running/terminal state the driver cannot identify is retained as
+`component_state_unknown`; it can only produce PENDING, never a false progress
+PASS or FAIL.
+
+`card_text_now` reads legacy message/embed copy and nested Discord V2 type-10
+text displays from refreshed messages. Unreadable current messages are PENDING
+for both presence and absence checks; button labels do not count as card copy.
+Observer fingerprints include components so component-only edits remain visible.
+This card-only extraction does not add component footer text to answer matching:
+anchored answers still match the whole content after removing only a recorded
+QA-agent subtext header.

@@ -1059,3 +1059,535 @@ def test_collect_gives_every_card_in_a_poll_the_same_listing_time(
     a, b = turn.card_history
     assert a["listed_at"] == b["listed_at"]
     assert a["listed_at"] <= a["observed_at"] < b["observed_at"]
+
+
+def test_progress_text_snapshot_survives_final_card_edit(
+    backend: DiscordBackend,
+    driver: FakeDriver,
+) -> None:
+    from contextlib import suppress
+
+    from qa.live.types import WatchTimeout
+
+    polls = 0
+
+    def messages(channel_id: str, *, after: str, daimon_id: str) -> list[Message]:
+        nonlocal polls
+        polls += 1
+        return [
+            {
+                "id": "x",
+                "channel_id": "thread",
+                "content": "Queued" if polls == 1 else "Done",
+                "working": polls == 1,
+            }
+        ]
+
+    driver.turn_messages = messages  # type: ignore[method-assign]
+    turn = Turn(1, "trigger", "parent", utcnow())
+    backend.owned.add("parent")
+    with suppress(WatchTimeout):
+        backend.collect(turn, 0.1)
+    assert turn.messages[0]["content"] == "Done"
+    assert len(turn.progress_text_history) == 1
+    snapshot = turn.progress_text_history[0]
+    assert snapshot["classification"] == "working"
+    assert isinstance(snapshot["elapsed_s"], float)
+    frozen = snapshot["message"]
+    assert isinstance(frozen, dict) and frozen["content"] == "Queued"
+    assert turn.progress_first_poll_s is not None
+
+
+def test_component_only_progress_retains_unknown_state_instead_of_inventing_working(
+    backend: DiscordBackend,
+    driver: FakeDriver,
+) -> None:
+    from contextlib import suppress
+
+    from qa.live.types import WatchTimeout
+
+    backend.owned.add("parent")
+    driver.current = [
+        {
+            "id": "x",
+            "channel_id": "thread",
+            "components": [{"type": 17, "components": [{"type": 10, "content": "Queued"}]}],
+        }
+    ]
+    turn = Turn(1, "trigger", "parent", utcnow())
+    with suppress(WatchTimeout):
+        backend.collect(turn, 0.1)
+    assert turn.progress_text_history[0]["classification"] == "component_state_unknown"
+
+
+class SharedThread:
+    """One Daimon thread stream read concurrently by two real collectors."""
+
+    def __init__(self, backend: DiscordBackend, driver: FakeDriver) -> None:
+        from datetime import timedelta
+
+        self.now = utcnow()
+        self.delta = timedelta
+        self.rows: list[Message] = []
+        backend.owned.add("parent")
+        backend.threads.add("thread")
+        backend.thread_parents["thread"] = "parent"
+        backend.config.settle_s = 0.05
+        driver.turn_messages = lambda *args, **kwargs: [dict(m) for m in self.rows]  # type: ignore[method-assign]
+        self.first_card: Message = {
+            "id": "first-card",
+            "channel_id": "thread",
+            "working": True,
+            "content": "Running first turn",
+            "timestamp": self.at(-7),
+        }
+        self.rows = [dict(self.first_card)]
+        self.first = Turn(1, "first-trigger", "parent", self.now - self.delta(seconds=8))
+        self.first.thread_id = "thread"
+        self.second = Turn(2, "second-trigger", "thread", self.now, thread_id="thread")
+        # As DiscordBackend.send records it when the follow-up is posted.
+        backend.baselines["second-trigger"] = {fingerprint(self.first_card)}
+        backend.baseline_ids["second-trigger"] = {"first-card"}
+
+    def at(self, seconds: float) -> str:
+        return (self.now + self.delta(seconds=seconds)).isoformat()
+
+
+def run_concurrently(backend: DiscordBackend, stream: SharedThread, timeout: float) -> list:
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(max_workers=2)
+    futures = [
+        pool.submit(backend.collect, stream.first, timeout),
+        pool.submit(backend.collect, stream.second, timeout),
+    ]
+    pool.shutdown(wait=False)
+    return futures
+
+
+def test_overlapping_followup_never_claims_predecessor_card_and_waits_for_its_own(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    """REVIEW-723-f6ed588 P1: predecessor card edit plus a delayed second answer."""
+    import time
+
+    from qa.live.evaluate import evaluate
+    from qa.live.tests.conftest import FakeJudge
+
+    stream = SharedThread(backend, driver)
+    first, second = stream.first, stream.second
+    futures = run_concurrently(backend, stream, 5)
+    time.sleep(0.1)
+    # The predecessor finishes after the follow-up was queued: its card edit
+    # changes the fingerprint and postdates the follow-up trigger. Its second
+    # chunk lands after the card edit, before the follow-up's turn starts.
+    stream.rows = [
+        {
+            **stream.first_card,
+            "working": False,
+            "content": "FIRST-DONE",
+            "edited_timestamp": stream.at(0.5),
+        },
+        {
+            "id": "first-tail",
+            "channel_id": "thread",
+            "content": "FIRST-TAIL",
+            "timestamp": stream.at(0.6),
+        },
+    ]
+    futures[0].result(timeout=5)
+    # Well past the settle interval, the second answer has still not arrived.
+    time.sleep(0.3)
+    assert first.settled and [m["content"] for m in first.messages] == ["FIRST-DONE", "FIRST-TAIL"]
+    assert not second.settled and second.messages == []
+    second_card: Message = {
+        "id": "second-card",
+        "channel_id": "thread",
+        "working": True,
+        "content": "Running second turn",
+        "timestamp": stream.at(1),
+    }
+    stream.rows = [*stream.rows, second_card]
+    time.sleep(0.3)
+    stream.rows = [
+        *stream.rows[:2],
+        {
+            **second_card,
+            "working": False,
+            "content": "SECOND-DONE",
+            "edited_timestamp": stream.at(2),
+        },
+    ]
+    futures[1].result(timeout=5)
+    assert second.settled and [m["content"] for m in second.messages] == ["SECOND-DONE"]
+    assert [m["content"] for m in first.messages] == ["FIRST-DONE", "FIRST-TAIL"]
+    assert first.attribution_pending is None and second.attribution_pending is None
+    turns = [first, second]
+
+    def check(turn: int, pattern: str) -> str:
+        assertion = Assertion(kind="text_present", turn=turn, pattern=pattern)
+        return evaluate(assertion, turns, backend, FakeJudge()).status
+
+    assert check(2, "SECOND-DONE") == "PASS" and check(2, "FIRST-DONE") == "FAIL"
+    assert check(1, "FIRST-DONE") == "PASS" and check(1, "SECOND-DONE") == "FAIL"
+
+
+def test_followup_card_never_seen_working_leaves_both_turns_pending(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    import time
+
+    from qa.live.evaluate import evaluate
+    from qa.live.tests.conftest import FakeJudge
+    from qa.live.types import WatchTimeout
+
+    stream = SharedThread(backend, driver)
+    futures = run_concurrently(backend, stream, 1)
+    time.sleep(0.1)
+    # Both turns finish between polls; the follow-up card is never observed
+    # working, so nothing after its trigger can be attributed.
+    stream.rows = [
+        {
+            **stream.first_card,
+            "working": False,
+            "content": "FIRST-DONE",
+            "edited_timestamp": stream.at(0.5),
+        },
+        {
+            "id": "second-card",
+            "channel_id": "thread",
+            "content": "SECOND-DONE",
+            "timestamp": stream.at(1),
+        },
+    ]
+    futures[0].result(timeout=5)
+    with pytest.raises(WatchTimeout):
+        futures[1].result(timeout=5)
+    assert stream.second.messages == []
+    assert stream.first.attribution_pending and stream.second.attribution_pending
+    turns = [stream.first, stream.second]
+    for turn, pattern in ((1, "FIRST-DONE"), (2, "SECOND-DONE")):
+        assertion = Assertion(kind="text_present", turn=turn, pattern=pattern)
+        result = evaluate(assertion, turns, backend, FakeJudge())
+        assert result.status == "PENDING" and "unattributed" in result.reason
+
+
+def test_sequential_thread_followup_is_not_partitioned(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    stream = SharedThread(backend, driver)
+    stream.rows = [{**stream.first_card, "working": False, "content": "FIRST-DONE"}]
+    backend.collect(stream.first, 1)
+    assert stream.first.settled
+    # A later follow-up, sent after the first turn finished, is not linked.
+    later = Turn(2, "later-trigger", "thread", utcnow(), thread_id="thread")
+    stream.rows = [
+        {
+            "id": "later-card",
+            "channel_id": "thread",
+            "content": "LATER",
+            "timestamp": utcnow().isoformat(),
+        }
+    ]
+    backend.collect(later, 1)
+    assert later.settled and [m["content"] for m in later.messages] == ["LATER"]
+    assert "later-trigger" not in backend.predecessors
+
+
+def test_followup_with_unwatched_in_flight_predecessor_card_stays_unattributed(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    """The reviewer's single-watcher reproduction: no collector for the first turn."""
+    from qa.live.types import WatchTimeout
+
+    stream = SharedThread(backend, driver)
+    stream.first_card["author"] = {"id": backend.target.daimon_id}
+    driver.baseline = [dict(stream.first_card)]
+    trigger = backend.send(
+        "thread", Step(do="thread_reply", text="SECOND-DONE", mention=True), mention=True
+    )
+    assert [m["id"] for m in backend.inflight[trigger]] == ["first-card"]
+    stream.rows = [
+        {
+            **stream.first_card,
+            "working": False,
+            "content": "FIRST-DONE",
+            "edited_timestamp": utcnow().isoformat(),
+        }
+    ]
+    second = Turn(2, trigger, "thread", stream.now, thread_id="thread")
+    with pytest.raises(WatchTimeout):
+        backend.collect(second, 0.2)
+    assert not second.settled and second.messages == []
+
+
+def join_as_runner(
+    tmp_path: Path, futures: dict[int, object], turns: list[Turn], backend: DiscordBackend
+) -> object:
+    from qa.live.evaluate import evaluate
+    from qa.live.report import Result
+    from qa.live.runner import Executor
+    from qa.live.tests.conftest import FakeBackend, FakeJudge
+
+    pricing = Pricing(per_turn_usd=0.25, judge_input_per_million=1, judge_output_per_million=5)
+    executor = Executor(
+        FakeBackend(), FakeJudge(), Ledger(tmp_path / "ledger.jsonl"), pricing, "staging"
+    )
+    executor.watchers = futures  # type: ignore[assignment]
+    result = Result("offline", "QA-NEW5-THREAD-QUEUE-WHILE-BUSY", "staging", turns=turns)
+    executor.join_watchers(result)
+    for turn in turns:
+        pattern = "FIRST-DONE" if turn.number == 1 else "SECOND-DONE"
+        assertion = Assertion(kind="text_present", turn=turn.number, pattern=pattern)
+        result.checks.append(evaluate(assertion, turns, backend, FakeJudge()))
+    result.finalize()
+    return result
+
+
+def test_unattributed_followup_timeout_is_pending_through_the_runner(
+    backend: DiscordBackend, driver: FakeDriver, tmp_path: Path
+) -> None:
+    """REVIEW-723-3c81958 P1: watch timeout on unattributed evidence is not a FAIL."""
+    import time
+
+    stream = SharedThread(backend, driver)
+    futures = run_concurrently(backend, stream, 0.5)
+    time.sleep(0.1)
+    stream.rows = [
+        {
+            **stream.first_card,
+            "working": False,
+            "content": "FIRST-DONE",
+            "edited_timestamp": stream.at(0.5),
+        },
+        {
+            "id": "second-card",
+            "channel_id": "thread",
+            "content": "SECOND-DONE",
+            "timestamp": stream.at(1),
+        },
+    ]
+    result = join_as_runner(
+        tmp_path, {1: futures[0], 2: futures[1]}, [stream.first, stream.second], backend
+    )
+    watch = [c for c in result.checks if c.kind == "watch"]  # type: ignore[attr-defined]
+    assert [(c.status, c.turn) for c in watch] == [("PENDING", 2)]
+    assert "unattributed" in watch[0].reason
+    assert result.status == "PENDING"  # type: ignore[attr-defined]
+
+
+def test_silent_followup_timeout_without_overlap_evidence_still_fails(
+    backend: DiscordBackend, driver: FakeDriver, tmp_path: Path
+) -> None:
+    import time
+
+    stream = SharedThread(backend, driver)
+    futures = run_concurrently(backend, stream, 0.5)
+    time.sleep(0.1)
+    # The predecessor finishes; the follow-up never produces anything at all.
+    stream.rows = [
+        {
+            **stream.first_card,
+            "working": False,
+            "content": "FIRST-DONE",
+            "edited_timestamp": stream.at(-0.5),
+        },
+    ]
+    result = join_as_runner(
+        tmp_path, {1: futures[0], 2: futures[1]}, [stream.first, stream.second], backend
+    )
+    assert stream.second.attribution_pending is None
+    watch = [c for c in result.checks if c.kind == "watch"]  # type: ignore[attr-defined]
+    assert [(c.status, c.turn) for c in watch] == [("FAIL", 2)]
+    assert result.status == "FAIL"  # type: ignore[attr-defined]
+
+
+def test_same_thread_second_and_third_turns_stay_disjoint(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    """REVIEW-723-3c81958 P1: turn 2 queued during turn 1, turn 3 sent while turn 2 works."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from qa.live.evaluate import evaluate
+    from qa.live.tests.conftest import FakeJudge
+
+    stream = SharedThread(backend, driver)
+    daimon = {"id": backend.target.daimon_id}
+    first_card: Message = {
+        **stream.first_card,
+        "working": False,
+        "content": "FIRST-DONE",
+        "edited_timestamp": stream.at(-1.5),
+        "author": daimon,
+    }
+
+    def card(
+        identity: str, created: float, text: str, *, working: bool, edited: float | None = None
+    ) -> Message:
+        row: Message = {
+            "id": identity,
+            "channel_id": "thread",
+            "content": text,
+            "working": working,
+            "timestamp": stream.at(created),
+            "author": daimon,
+        }
+        if edited is not None:
+            row["edited_timestamp"] = stream.at(edited)
+        return row
+
+    second_card = card("second-card", -1, "SECOND running", working=True)
+    stream.rows = [first_card, second_card]
+    first = stream.first
+    first.messages = [first_card]
+    first.ended_at = stream.now - stream.delta(seconds=0.5)
+    first.settled = True
+    backend.collected.append(first)
+    second = Turn(
+        2, "second-trigger", "thread", stream.now - stream.delta(seconds=2), thread_id="thread"
+    )
+    backend.baselines["second-trigger"] = {fingerprint(first_card)}
+    backend.baseline_ids["second-trigger"] = {"first-card"}
+
+    def until(predicate: object) -> None:
+        deadline = time.monotonic() + 2
+        while not predicate() and time.monotonic() < deadline:  # type: ignore[operator]
+            time.sleep(0.005)
+        assert predicate()  # type: ignore[operator]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f2 = pool.submit(backend.collect, second, 2)
+        until(lambda: second.progress_seen_s is not None)
+        driver.baseline = [dict(m) for m in stream.rows]
+        trigger = backend.send(
+            "thread", Step(do="thread_reply", text="THIRD-DONE", mention=True), mention=True
+        )
+        assert backend.predecessors[trigger] == [second]
+        third = Turn(3, trigger, "thread", stream.now, thread_id="thread")
+        f3 = pool.submit(backend.collect, third, 2)
+        until(lambda: third in backend.collected)
+        second_done = card("second-card", -1, "SECOND-DONE", working=False, edited=0.1)
+        stream.rows = [
+            first_card,
+            second_done,
+            card("third-card", 0.2, "THIRD running", working=True),
+        ]
+        until(lambda: third.progress_seen_s is not None)
+        stream.rows = [
+            first_card,
+            second_done,
+            card("third-card", 0.2, "THIRD-DONE", working=False, edited=0.3),
+        ]
+        f2.result(timeout=3)
+        f3.result(timeout=3)
+    assert second.settled and third.settled
+    assert [m["content"] for m in second.messages] == ["SECOND-DONE"]
+    assert [m["content"] for m in third.messages] == ["THIRD-DONE"]
+    turns = [first, second, third]
+
+    def check(turn: int, pattern: str) -> str:
+        assertion = Assertion(kind="text_present", turn=turn, pattern=pattern)
+        return evaluate(assertion, turns, backend, FakeJudge()).status
+
+    assert check(2, "SECOND-DONE") == "PASS" and check(2, "THIRD-DONE") == "FAIL"
+    assert check(3, "THIRD-DONE") == "PASS" and check(3, "SECOND-DONE") == "FAIL"
+
+
+def test_delayed_followup_post_receipt_cannot_pollute_predecessor(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    """REVIEW-723-69bb364 P1: Discord accepts the follow-up, its receipt is delayed."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from qa.live.evaluate import evaluate
+    from qa.live.tests.conftest import FakeJudge
+
+    stream = SharedThread(backend, driver)
+    first = stream.first
+    accepted = threading.Event()
+    release = threading.Event()
+    real_call = driver.call
+
+    def delayed(method: str, path: str, **kwargs: object) -> JsonValue:
+        if method == "POST":
+            accepted.set()
+            assert release.wait(5)
+            # The trigger's snowflake dates it at the send, like Discord's.
+            millis = int(stream.now.timestamp() * 1000) - 1420070400000
+            return {"id": str(millis << 22)}
+        return real_call(method, path, **kwargs)  # type: ignore[arg-type]
+
+    driver.call = delayed  # type: ignore[method-assign]
+    second_card = {
+        "id": "second-card",
+        "channel_id": "thread",
+        "content": "Running second",
+        "working": True,
+        "timestamp": stream.at(0.2),
+    }
+    first_done = {
+        **stream.first_card,
+        "working": False,
+        "content": "FIRST-DONE",
+        "edited_timestamp": stream.at(0.1),
+    }
+    second_done = {
+        **second_card,
+        "working": False,
+        "content": "SECOND-DONE",
+        "edited_timestamp": stream.at(0.3),
+    }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        collecting = pool.submit(backend.collect, first, 5)
+        deadline = time.monotonic() + 2
+        while first.progress_seen_s is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        posted = pool.submit(
+            backend.send,
+            "thread",
+            Step(do="thread_reply", text="SECOND-DONE", mention=True),
+            mention=True,
+        )
+        assert accepted.wait(1)
+        # While the POST receipt is outstanding the predecessor finishes and the
+        # follow-up's card runs and answers, all before send() returns.
+        stream.rows = [first_done, second_card]
+        while "second-card" not in backend.ever_working and time.monotonic() < deadline:
+            time.sleep(0.005)
+        stream.rows = [first_done, second_done]
+        while not first.settled and time.monotonic() < deadline + 2:
+            time.sleep(0.005)
+        assert first.settled
+        assert [m["content"] for m in first.messages] == ["FIRST-DONE"]
+        release.set()
+        trigger = posted.result(timeout=2)
+        collecting.result(timeout=2)
+    assert backend.successors["first-trigger"][0][0] == trigger
+    assert not any(key.startswith("pending-") for key in backend.predecessors)
+    second = Turn(2, trigger, "thread", stream.now, thread_id="thread")
+    backend.collect(second, 2)
+    assert second.settled and [m["content"] for m in second.messages] == ["SECOND-DONE"]
+    assert first.attribution_pending is None
+    wrong = Assertion(kind="text_present", turn=1, pattern="SECOND-DONE")
+    assert evaluate(wrong, [first, second], backend, FakeJudge()).status == "FAIL"
+
+
+def test_failed_followup_post_rolls_back_its_overlap_link(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    stream = SharedThread(backend, driver)
+    backend.collected.append(stream.first)
+
+    def refused(method: str, path: str, **kwargs: object) -> JsonValue:
+        assert method == "POST"
+        assert any(key.startswith("pending-") for key in backend.predecessors)
+        raise SystemExit("HTTP 403 on POST " + path + ": denied")
+
+    driver.call = refused  # type: ignore[method-assign]
+    with pytest.raises(SystemExit):
+        backend.send("thread", Step(do="thread_reply", text="SECOND", mention=True), mention=True)
+    assert backend.predecessors == {}
+    assert backend.successors.get("first-trigger", []) == []

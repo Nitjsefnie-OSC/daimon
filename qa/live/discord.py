@@ -9,8 +9,10 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.parse
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
@@ -24,7 +26,18 @@ from qa.live.config import Config, Target
 from qa.live.deploy_quiet import QuietGate
 from qa.live.errors import redact
 from qa.live.schema import Assertion, Step
-from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
+from qa.live.types import (
+    Message,
+    Pending,
+    Turn,
+    Usage,
+    WatchTimeout,
+    component_text,
+    obj,
+    objects,
+    text_of,
+    utcnow,
+)
 
 CHANNEL_MARKER = "daimon-live-qa"
 TRANSPORT_FAILURE = re.compile(
@@ -95,6 +108,7 @@ def fingerprint(message: Message) -> str:
                 "id",
                 "content",
                 "embeds",
+                "components",
                 "attachments",
                 "edited_timestamp",
             )
@@ -150,6 +164,16 @@ class DiscordBackend:
         self.fallback_watch_s = config.fallback_watch_s
         self.bindings: dict[str, str] = {}
         self.billing_cache: dict[str, BillingEvidence] = {}
+        # Overlapping same-thread turns (a queued follow-up sent while its
+        # predecessor is still running) share one message stream; attribution
+        # between them is tracked here across concurrent watchers.
+        self.overlap_lock = threading.Lock()
+        self.collected: list[Turn] = []
+        self.predecessors: dict[str, list[Turn]] = {}
+        # Successor triggers keyed by predecessor trigger: (trigger id, send time).
+        self.successors: dict[str, list[tuple[str, datetime]]] = {}
+        self.ever_working: set[str] = set()
+        self.inflight: dict[str, list[Message]] = {}
 
     @property
     def driver(self) -> Driver:
@@ -327,12 +351,45 @@ class DiscordBackend:
         self._owned(channel)
         self.driver.set_role(step.role)
         baseline = self.driver.messages(channel, after=None, limit=100)
+        sent_at = utcnow()
         content = (f"<@{self.target.daimon_id}> " if mention else "") + (step.text or "")
         payload: Message = {"content": content}
         if reply_message_id:
             payload["message_reference"] = {"message_id": reply_message_id, "channel_id": channel}
         if step.file and reply_message_id:
             raise Pending("file with reply reference is not yet supported by qa.py")
+        pending = f"pending-{uuid.uuid4().hex}" if step.do == "thread_reply" else None
+        if pending is not None:
+            # Register the successor boundary BEFORE the POST: Discord can accept
+            # the trigger while its receipt is delayed, and the predecessor's
+            # watcher must not settle on this follow-up's messages meanwhile.
+            # Until the real trigger id is known, the send time bounds it.
+            with self.overlap_lock:
+                self._link(pending, channel, sent_at, followup=True)
+        try:
+            message_id = self._post(channel, step, content, payload)
+        except BaseException:
+            if pending is not None:
+                with self.overlap_lock:
+                    self._unlink(pending)
+            raise
+        self.baselines[message_id] = {fingerprint(m) for m in baseline}
+        self.baseline_ids[message_id] = {str(m.get("id")) for m in baseline}
+        if pending is not None:
+            # A Daimon card still working when the follow-up is posted proves
+            # an in-flight predecessor, even if no watcher is collecting it.
+            with self.overlap_lock:
+                self.inflight[message_id] = [
+                    m
+                    for m in baseline
+                    if str(obj(m.get("author")).get("id")) == self.target.daimon_id
+                    and self.classify(m) == "working"
+                ]
+                self._rename(pending, message_id)
+        self.driver.set_role("user")
+        return message_id
+
+    def _post(self, channel: str, step: Step, content: str, payload: Message) -> str:
         if step.file:
             # Reuse qa.py's multipart upload; only the emitted message ID is captured.
             import contextlib
@@ -355,12 +412,159 @@ class DiscordBackend:
             message_id = str(result["id"])
         if not message_id.isdigit():
             raise ValueError("driver did not return a Discord message id")
-        self.baselines[message_id] = {fingerprint(m) for m in baseline}
-        self.baseline_ids[message_id] = {str(m.get("id")) for m in baseline}
-        self.driver.set_role("user")
         return message_id
 
+    def _unlink(self, trigger_id: str) -> None:
+        """Roll back a pre-POST link whose follow-up was never sent. Lock held."""
+        for prior in self.predecessors.pop(trigger_id, []):
+            self.successors[prior.trigger_id] = [
+                link for link in self.successors.get(prior.trigger_id, []) if link[0] != trigger_id
+            ]
+
+    def _rename(self, pending: str, trigger_id: str) -> None:
+        """Rekey a pre-POST link to the posted trigger id. Lock held."""
+        for prior in self.predecessors.pop(pending, []):
+            self.predecessors.setdefault(trigger_id, []).append(prior)
+            self.successors[prior.trigger_id] = [
+                (trigger_id, sent) if link == pending else (link, sent)
+                for link, sent in self.successors.get(prior.trigger_id, [])
+            ]
+
+    def _link(self, trigger_id: str, channel: str, sent_at: datetime, *, followup: bool) -> None:
+        """Link a trigger to every turn still unfinished in the thread it was sent to.
+
+        Called with `overlap_lock` held. A thread follow-up (`followup`) links to
+        in-thread predecessors too; a turn otherwise links only to the parent
+        mention whose thread it was sent into, so in-thread bursts are unchanged.
+        """
+        for prior in self.collected:
+            if prior.trigger_id == trigger_id:
+                continue
+            if channel == prior.channel_id and not followup:
+                continue
+            if channel not in {prior.thread_id, prior.trigger_id}:
+                continue
+            if prior.ended_at is not None and prior.ended_at <= sent_at:
+                continue
+            if prior not in self.predecessors.get(trigger_id, []):
+                self.predecessors.setdefault(trigger_id, []).append(prior)
+                self.successors.setdefault(prior.trigger_id, []).append((trigger_id, sent_at))
+
+    def _link_overlaps(self, turn: Turn) -> None:
+        with self.overlap_lock:
+            followup = turn.trigger_id in self.inflight
+            self._link(turn.trigger_id, turn.channel_id, turn.started_at, followup=followup)
+            if turn not in self.collected:
+                self.collected.append(turn)
+
+    @staticmethod
+    def _trigger_time(turn: Turn) -> datetime:
+        return message_created_at({"id": turn.trigger_id}) or turn.started_at
+
+    def _boundary(self, successor: Turn, messages: list[Message]) -> datetime | None:
+        return self._boundary_at(self._trigger_time(successor), messages)
+
+    def _boundary_at(self, start: datetime, messages: list[Message]) -> datetime | None:
+        """Creation time of the follow-up's first card, if positively observed.
+
+        The product runs a thread's turns serially: a queued follow-up's card is
+        created only after its predecessor finishes. The boundary is the first
+        card created after the follow-up trigger that was observed working and
+        that postdates the finalization of every pre-trigger predecessor card.
+        A predecessor card still working means no follow-up card can exist yet.
+        """
+        finalized = start
+        for message in messages:
+            created = message_created_at(message)
+            if created is None or created >= start:
+                continue
+            if self.classify(message) == "working":
+                return None
+            edited = message.get("edited_timestamp")
+            if isinstance(edited, str):
+                stamp = datetime.fromisoformat(edited.replace("Z", "+00:00"))
+                finalized = max(finalized, stamp)
+        cards = [
+            created
+            for m in messages
+            if (created := message_created_at(m)) is not None
+            and created >= finalized
+            and str(m.get("id")) in self.ever_working
+        ]
+        return min(cards) if cards else None
+
+    def _attribute(self, turn: Turn, messages: list[Message]) -> list[Message]:
+        """Partition one overlapping thread stream between predecessor and follow-up."""
+        with self.overlap_lock:
+            self.ever_working.update(
+                str(m.get("id")) for m in messages if self.classify(m) == "working"
+            )
+            predecessors = list(self.predecessors.get(turn.trigger_id, []))
+            successors = list(self.successors.get(turn.trigger_id, []))
+            inflight = list(self.inflight.get(turn.trigger_id, []))
+        if predecessors or inflight:
+            start = self._trigger_time(turn)
+            # The predecessor's own latest view supplies its card even when the
+            # follow-up's time-window read no longer lists it.
+            pool = {str(m.get("id")): m for m in inflight}
+            pool.update({str(m.get("id")): m for p in predecessors for m in p.messages})
+            pool.update({str(m.get("id")): m for m in messages})
+            boundary = self._boundary(turn, list(pool.values()))
+            if boundary is None:
+                return []
+            messages = [
+                m
+                for m in messages
+                if (created := message_created_at(m)) is not None
+                and created >= start
+                and created >= boundary
+            ]
+        for trigger_id, sent_at in successors:
+            start = message_created_at({"id": trigger_id}) or sent_at
+            boundary = self._boundary_at(start, messages)
+            messages = [
+                m
+                for m in messages
+                if (created := message_created_at(m)) is None
+                or created < start
+                or boundary is None
+                or created < boundary
+            ]
+        return messages
+
+    def _unsettled_predecessor(self, turn: Turn) -> bool:
+        with self.overlap_lock:
+            return any(not p.settled for p in self.predecessors.get(turn.trigger_id, []))
+
+    def _finish_overlap(self, turn: Turn) -> None:
+        with self.overlap_lock:
+            predecessors = self.predecessors.get(turn.trigger_id, [])
+            if predecessors and not turn.messages:
+                # No follow-up card was positively observed: messages after its
+                # trigger cannot be split between the two turns.
+                start = self._trigger_time(turn)
+                for prior in predecessors:
+                    late = [
+                        m
+                        for m in prior.messages
+                        if (created := message_created_at(m)) is not None and created >= start
+                    ]
+                    if late:
+                        reason = (
+                            "overlapping follow-up evidence unattributed: no follow-up card "
+                            "was observed after the predecessor finished"
+                        )
+                        prior.attribution_pending = reason
+                        turn.attribution_pending = reason
+
     def collect(self, turn: Turn, timeout: float) -> None:
+        self._link_overlaps(turn)
+        try:
+            self._collect(turn, timeout)
+        finally:
+            self._finish_overlap(turn)
+
+    def _collect(self, turn: Turn, timeout: float) -> None:
         # An end timestamp bounds evidence; only terminal stability proves it complete.
         turn.settled = False
         self._owned(turn.channel_id)
@@ -370,6 +574,9 @@ class DiscordBackend:
         deadline = time.monotonic() + timeout
         stable_since: float | None = None
         previous = ""
+        progress_snapshots = {
+            fingerprint(obj(row.get("message"))) for row in turn.progress_text_history
+        }
         while time.monotonic() < deadline:
             # Sample acknowledgements before the slower message/thread reads.
             # Keep history: successful turns remove their transient reactions.
@@ -437,6 +644,7 @@ class DiscordBackend:
                 for m in candidates
                 if fingerprint(m) not in self.baselines.get(turn.trigger_id, set())
             ]
+            messages = self._attribute(turn, messages)
             elapsed = (utcnow() - turn.started_at).total_seconds()
             for message in messages:
                 event = message_visible_at(
@@ -477,15 +685,16 @@ class DiscordBackend:
             if thread_ids:
                 if len(thread_ids) != 1:
                     raise ValueError("turn unexpectedly answered in multiple threads")
-                turn.thread_id = next(iter(thread_ids))
-                self.threads.add(turn.thread_id)
+                observed_thread = next(iter(thread_ids))
+                self.threads.add(observed_thread)
                 parent = (
                     turn.channel_id
                     if turn.channel_id in self.owned
                     else self.thread_parents.get(turn.channel_id)
                 )
                 if parent:
-                    self.thread_parents[turn.thread_id] = parent
+                    self.thread_parents[observed_thread] = parent
+                turn.thread_id = observed_thread
             turn.verdicts = [self.classify(m) for m in messages]
             for message, verdict in zip(messages, turn.verdicts, strict=True):
                 # Every positively classified working card is sampled on every
@@ -493,10 +702,40 @@ class DiscordBackend:
                 # chunk needs proof it ran this turn (chunks_gap_max_s).
                 if verdict == "working":
                     self.sample_running_card(turn, message, listed_at=listed_at)
+
+            observed_at = utcnow()
+            observed_s = max(0, (observed_at - trigger_at).total_seconds())
+            if turn.progress_first_poll_s is None:
+                turn.progress_first_poll_s = observed_s
+            turn.progress_observed_until_s = observed_s
+            for message, verdict in zip(messages, turn.verdicts, strict=True):
+                snapshot = fingerprint(message)
+                unknown_components = bool(component_text(message)) and not message.get("embeds")
+                if (
+                    verdict in {"working", "other_embed"} or unknown_components
+                ) and snapshot not in progress_snapshots:
+                    # Content may disappear on a final card edit. Freeze it at
+                    # the actual poll time; a snowflake cannot date edited text.
+                    frozen = obj(json.loads(json.dumps(message)))
+                    turn.progress_text_history.append(
+                        {
+                            "message": frozen,
+                            "classification": "component_state_unknown"
+                            if unknown_components
+                            else verdict,
+                            "observed_at": observed_at.isoformat(),
+                            "elapsed_s": observed_s,
+                        }
+                    )
+                    progress_snapshots.add(snapshot)
             if "working" in turn.verdicts and turn.progress_seen_s is None:
                 turn.progress_seen_s = elapsed
             terminal = bool(messages) and all(v in self.driver.TERMINAL for v in turn.verdicts)
             current = json.dumps(messages, sort_keys=True)
+            if terminal and self._unsettled_predecessor(turn):
+                # A follow-up cannot prove terminal stability before its
+                # predecessor has claimed its own late messages.
+                terminal = False
             if terminal:
                 if turn.done_s is None:
                     turn.done_s = elapsed
