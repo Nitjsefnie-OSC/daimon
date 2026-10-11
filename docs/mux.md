@@ -1369,6 +1369,12 @@ Inspecting the runtime mapping's size or profile names never constructs a
 provider runtime. `PreparedTurn.runtime` is optional and defaults to `None`;
 its private usage recorder remains outside the public prepared-turn fields.
 
+`PreparedTurn.native_footer_cost` is an optional public field that defaults to
+`None`. Explicit native footer-cost opt-in populates it with a fresh context
+bound to the admitted OpenAI or Gemini session and turn attempt, which passes
+through to billing and adapter rendering. Default and Anthropic turns leave it
+unset.
+
 ### OpenAI deployment runtime
 
 Install the `daimon-mux[openai]` extra in deployments that explicitly enable

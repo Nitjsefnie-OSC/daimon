@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Pin the separately signed F2-R2 workload and zero-message acceptance envelopes; reject rewritten financial approvals and retain merged A7 claim/output evidence.
+- Document the optional native footer-cost context in the prepared-turn public contract and verify its unset default.
+
 - Add an explicit offline D11 native-turn binding that records real usage and joins accepted adapter posts to owned per-turn accounting; opt-in results retain their profile label and default missing-cost footers fail.
 
 - Add default-off native OpenAI/Gemini footer costs from complete settled usage and verified rates; unknown or partial costs are explicit, and Anthropic footers stay unchanged.
