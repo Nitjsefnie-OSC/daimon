@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2286,
+  "files_scanned": 2295,
   "parse_errors": [],
   "calls": [
     {
@@ -10488,6 +10488,15 @@
       "category": "test"
     },
     {
+      "file": "packages/adapters/discord/tests/test_backend_conformance.py",
+      "line": 20,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/adapters/discord/tests/test_credential_button.py",
       "line": 16,
       "module": "anthropic.types.beta",
@@ -10665,6 +10674,29 @@
       "module": "anthropic.types.beta",
       "names": [
         "FileMetadata"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_provider_event_tap.py",
+      "line": 13,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_provider_event_tap.py",
+      "line": 14,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsAgentMessageEvent",
+        "BetaManagedAgentsEventParams",
+        "BetaManagedAgentsSessionEndTurn",
+        "BetaManagedAgentsSessionEvent",
+        "BetaManagedAgentsSessionStatusIdleEvent",
+        "BetaManagedAgentsTextBlock"
       ],
       "category": "test"
     },
@@ -12090,6 +12122,15 @@
       "category": "test"
     },
     {
+      "file": "packages/adapters/slack/tests/test_backend_conformance.py",
+      "line": 19,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/adapters/slack/tests/test_billing_checkout.py",
       "line": 27,
       "module": "anthropic",
@@ -12349,6 +12390,15 @@
       "module": "anthropic.types.beta",
       "names": [
         "SkillListResponse"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_backend_conformance.py",
+      "line": 19,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "test"
     },
