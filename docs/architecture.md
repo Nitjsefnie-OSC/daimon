@@ -252,18 +252,25 @@ lookup and edit as already resolved. Other edit failures still propagate.
 
 A turn stops when its own thread is lost. Discord answering a write to the
 thread with Unknown Channel (10003), or a thread-delete event for a thread with
-a running turn, marks the thread gone; a write refused because the thread is
-archived (50083) marks it closed. Either sets the turn's Stop event, so the
-driver takes its normal interrupt path and bills what was already consumed.
-From then on the turn writes nothing: no progress edit, terminal card,
-replacement card or error, and nothing in the parent channel. Messages queued
-behind it are not started, their admission rows are finished so startup replay
-skips them, and no reaction is added or removed in the lost thread. One
-`turn.thread_gone` log records the first signal (reason `gone` or `closed`).
-A gone thread's live sessions are marked dead and its in-flight marker cleared,
-including when a delete event arrives with no turn running; a closed thread
-keeps its sessions. Unknown Webhook (10015) is not a lost thread. The turn's
-stored outcome is the ordinary interrupted one.
+a running turn, marks the thread gone. A send still refused as archived (50083)
+after the transport's unarchive-and-retry marks it closed; an edit or delete
+refused as archived does not, because a thread can auto-archive during a slow
+turn and the final send unarchives it. Either stop sets the turn's Stop event,
+so the driver takes its normal interrupt path and bills what was already
+consumed; the bot then sends the turn's session one best-effort interrupt in
+case the stop landed before any event was read. From then on the turn writes
+nothing: no progress edit, terminal card, replacement card or error, and
+nothing in the parent channel. The transport rechecks the stop before each
+Discord call, after any webhook lookup. Messages queued behind it are not
+started, their admission rows are finished so startup replay skips them, and
+no reaction is added or removed in the lost thread. One `turn.thread_gone` log
+records the first signal (reason `gone` or `closed`). The stop record outlives
+the turn's release, so a reaction call still in flight sees it; the next turn
+to claim the thread clears a `closed` record, and a late error from an earlier
+turn cannot close the new turn. A gone thread's live sessions are marked dead
+and its in-flight marker cleared, including when a delete event arrives with no
+turn running; a closed thread keeps its sessions. Unknown Webhook (10015) is
+not a lost thread. The turn's stored outcome is the ordinary interrupted one.
 
 On gateway readiness, Discord scans recently active channels and threads for
 missed addressed messages. The window and per-guild/channel limits are
