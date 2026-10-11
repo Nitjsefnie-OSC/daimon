@@ -847,6 +847,15 @@ reusable; it is not a secure erasure guarantee. Apply secret-retention controls
 to backups and storage. Application encryption protects database-only access;
 access to both the database and the key ring permits decryption.
 
+## Managed staging image promotion
+
+The managed staging deploy publishes canonical short-commit tags only after its
+deployment gates pass. It tags notebook-host and report-host first, then Daimon
+last; the Daimon tag marks the tested set as ready for promotion. A rerun accepts
+an existing tag only when it points to the same tested digest. If the tag points
+elsewhere or the registry cannot be checked, the deploy fails. New tags are
+created without replacing or deleting existing tags.
+
 ## Worker shutdown during deployment
 
 For worker compose files, set `stop_grace_period: 90s` on Discord, Slack,

@@ -568,9 +568,64 @@ jobs:
 
       - name: Mark tested staging images promotable
         if: steps.images.outputs.prebuilt == 'true'
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
         run: |
           # promote.yml recognizes only the canonical short-SHA daimon tag.
           # Publish that tag last, after all three images and deploy gates pass.
-          gcloud artifacts docker tags add "${{ steps.images.outputs.notebook }}" "${{ steps.tags.outputs.notebook }}" --quiet
-          gcloud artifacts docker tags add "${{ steps.images.outputs.report }}" "${{ steps.tags.outputs.report }}" --quiet
-          gcloud artifacts docker tags add "${{ steps.images.outputs.daimon }}" "${{ steps.tags.outputs.daimon }}" --quiet
+          lookup_tag() {
+            local package="$1" tag="$2"
+            gcloud artifacts tags list --package="$package" --repository="$REPO" \
+              --location="$REGION" --project="$PROJECT_ID" \
+              --filter="name=\"projects/$PROJECT_ID/locations/$REGION/repositories/$REPO/packages/$package/tags/$tag\"" \
+              --limit=1 --format='value(version)'
+          }
+          promote_tag() {
+            local package="$1" image="$2" tag_ref="$3" expected tag current
+            expected="${image##*@}"
+            tag="${tag_ref##*:}"
+            if [[ ! "$expected" =~ ^sha256:[0-9a-f]{64}$ || \
+                  "$tag_ref" != "$AR_HOST/$PROJECT_ID/$REPO/$package:$tag" ]]; then
+              echo "Invalid promotable image or tag for $package" >&2
+              return 1
+            fi
+            if ! current="$(lookup_tag "$package" "$tag")"; then
+              echo "Could not inspect canonical tag for $package" >&2
+              return 1
+            fi
+            if [[ "$current" == "$expected" ]]; then
+              echo "$package:$tag already points to the tested digest"
+              return 0
+            fi
+            if [[ -n "$current" ]]; then
+              echo "Canonical tag $package:$tag points to $current, expected $expected" >&2
+              return 1
+            fi
+            # Create is atomic and refuses an existing tag. A second runner
+            # may publish the same tag between our lookup and this call.
+            if ! gcloud artifacts tags create "$tag" --package="$package" \
+              --version="$expected" --repository="$REPO" --location="$REGION" \
+              --project="$PROJECT_ID" --quiet; then
+              if ! current="$(lookup_tag "$package" "$tag")"; then
+                echo "Could not inspect tag after creation failed for $package" >&2
+                return 1
+              fi
+              if [[ "$current" == "$expected" ]]; then
+                echo "$package:$tag was concurrently published at the tested digest"
+                return 0
+              fi
+              echo "Could not safely publish canonical tag $package:$tag (found: ${current:-missing})" >&2
+              return 1
+            fi
+            if ! current="$(lookup_tag "$package" "$tag")"; then
+              echo "Could not verify canonical tag for $package" >&2
+              return 1
+            fi
+            if [[ "$current" != "$expected" ]]; then
+              echo "Canonical tag $package:$tag is $current after creation, expected $expected" >&2
+              return 1
+            fi
+          }
+          promote_tag notebook-host "${{ steps.images.outputs.notebook }}" "${{ steps.tags.outputs.notebook }}"
+          promote_tag report-host "${{ steps.images.outputs.report }}" "${{ steps.tags.outputs.report }}"
+          promote_tag daimon "${{ steps.images.outputs.daimon }}" "${{ steps.tags.outputs.daimon }}"
