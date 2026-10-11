@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2428,
+  "files_scanned": 2432,
   "parse_errors": [],
   "calls": [
     {
@@ -18465,7 +18465,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/a7_anthropic.py",
-      "line": 29,
+      "line": 30,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -18474,7 +18474,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/a7_anthropic.py",
-      "line": 30,
+      "line": 31,
       "module": "anthropic.types",
       "names": [
         "RawMessageStreamEvent"
@@ -18483,7 +18483,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/a7_anthropic.py",
-      "line": 31,
+      "line": 32,
       "module": "anthropic.types.beta.session_create_params",
       "names": [
         "SessionCreateParams"
@@ -18492,7 +18492,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/a7_anthropic.py",
-      "line": 32,
+      "line": 33,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -18505,6 +18505,16 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test-support"
+    },
+    {
+      "file": "packages/testing/daimon/testing/anthropic_live.py",
+      "line": 24,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic",
+        "AsyncStream"
       ],
       "category": "test-support"
     },
@@ -19036,6 +19046,24 @@
         "AsyncAnthropic"
       ],
       "category": "test-support"
+    },
+    {
+      "file": "packages/testing/tests/test_anthropic_live.py",
+      "line": 1032,
+      "module": "anthropic",
+      "names": [
+        "AsyncStream"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/testing/tests/test_anthropic_live.py",
+      "line": 1462,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsSpanModelRequestEndEvent"
+      ],
+      "category": "test"
     },
     {
       "file": "packages/testing/tests/test_channel_accounting.py",
