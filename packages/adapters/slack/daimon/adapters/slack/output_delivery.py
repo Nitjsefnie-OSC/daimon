@@ -20,6 +20,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.output_delivery import (
     DeliverableFile,
+    NoticedFiles,
     OutputPostingUnavailable,
     SkippedFile,
     render_oversize_notice,
@@ -164,18 +165,26 @@ async def deliver_session_outputs(
     thread_ts: str,
     notice_keys: NoticeKeys,
     team_id: str,
+    noticed_files: NoticedFiles | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Sweep the session's outputs into the thread, degrading on abort codes.
 
     ``notice_keys`` is the instance-level bounded registry owned by ``SlackApp``,
     keyed per thread for notices and per workspace for the warning log.
+    ``noticed_files`` records the kept oversize outputs already announced, so
+    a file over the limit gets one notice rather than one per sweep.
     """
     post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)
     on_skip = _build_skip_notice(web_client, channel_id=channel_id, thread_ts=thread_ts)
     try:
         await sweep_session_outputs(
-            anthropic_client, session_id=session_id, post=post, on_skip=on_skip, sleep=sleep
+            anthropic_client,
+            session_id=session_id,
+            post=post,
+            on_skip=on_skip,
+            sleep=sleep,
+            noticed=noticed_files,
         )
     except OutputPostingUnavailable as exc:
         code = _abort_code(exc)

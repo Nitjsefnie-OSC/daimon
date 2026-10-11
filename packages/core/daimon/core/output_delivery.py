@@ -16,6 +16,11 @@ the turn's final seconds. The sweep therefore never concludes — neither
 "settled with files" nor "give up empty" — before ``_MIN_SETTLE_S`` of
 cumulative poll time has elapsed.
 
+An output over the per-file delivery cap is never deleted: the sweep leaves it
+listed, so the file stays downloadable and in the agent's workspace, and asks
+the poster to say so once per file (``noticed``). Only a delivered file, or an
+empty one, leaves the listing.
+
 Two trade-offs are accepted by design: the MA-side copy of a file is destroyed
 after a successful post, and a crash between the post and the delete
 (including a SIGTERM that kills a detached sweep mid-flight) can double-post
@@ -26,6 +31,7 @@ silently loses files instead.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -84,13 +90,55 @@ class OutputDeliveryDeferred(DaimonError):
     """
 
 
-def render_oversize_notice(skipped: SkippedFile) -> str:
-    """The chat notice for an output over the per-file delivery cap."""
+def _mb(size_bytes: int) -> str:
+    # Binary megabytes labelled MB, as Discord and Slack quote their own limits.
+    return f"{size_bytes / _MIB:.1f}".removesuffix(".0")
+
+
+def render_oversize_notice(skipped: SkippedFile, *, max_bytes: int = MAX_BYTES_PER_FILE) -> str:
+    """The chat notice for an output over the per-file delivery cap.
+
+    The file is kept, so the notice says so and names what the person can ask
+    for instead; it never offers a download it cannot give.
+    """
+    limit = _mb(max_bytes)
     return (
-        f"I couldn't attach `{sanitize_title(skipped.filename)}` — it is "
-        f"{skipped.size_bytes / _MIB:.1f} MiB, over the "
-        f"{MAX_BYTES_PER_FILE // _MIB} MiB delivery limit."
+        f"`{sanitize_title(skipped.filename)}` is {_mb(skipped.size_bytes)} MB, over the "
+        f"{limit} MB upload limit here, so I couldn't attach it. It's still saved in my "
+        "workspace: ask me for a smaller version, or to split it into parts under "
+        f"{limit} MB, and I'll attach those."
     )
+
+
+class NoticedFiles:
+    """Bounded app-lifetime record of the kept oversize outputs already announced.
+
+    A kept file is listed on every later sweep of its session; this stops each
+    of those sweeps repeating the notice. Least recently seen ids fall out
+    first, and a restart forgets them all, so a long-lived kept file can be
+    announced once more after either.
+    """
+
+    def __init__(self, *, max_ids: int = 4096) -> None:
+        if max_ids < 1:
+            raise ValueError("max_ids must be positive")
+        self._max_ids = max_ids
+        self._ids: OrderedDict[str, None] = OrderedDict()
+
+    def __contains__(self, file_id: object) -> bool:
+        if not isinstance(file_id, str) or file_id not in self._ids:
+            return False
+        self._ids.move_to_end(file_id)
+        return True
+
+    def __len__(self) -> int:
+        return len(self._ids)
+
+    def add(self, file_id: str) -> None:
+        self._ids[file_id] = None
+        self._ids.move_to_end(file_id)
+        while len(self._ids) > self._max_ids:
+            self._ids.popitem(last=False)
 
 
 async def _poll_until_settled(
@@ -113,11 +161,12 @@ async def _poll_until_settled(
             await sleep(delay)
         elapsed += delay
         polls += 1
-        page = await anthropic_client.beta.files.list(
-            scope_id=session_id, betas=[_MA_BETA], limit=1000
-        )
         added_new_id = False
-        for meta in page.data:
+        # Every page, not just the first: kept oversize entries never leave
+        # the listing, so a first page full of them must not hide a newer file.
+        async for meta in anthropic_client.beta.files.list(
+            scope_id=session_id, betas=[_MA_BETA], limit=1000
+        ):
             if meta.downloadable is True and meta.id not in seen:
                 seen[meta.id] = meta
                 added_new_id = True
@@ -168,6 +217,8 @@ async def sweep_session_outputs(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     max_bytes: int = MAX_BYTES_PER_FILE,
     exclude_filename_prefixes: tuple[str, ...] = (HANDOFF_FILENAME_PREFIX,),
+    noticed: NoticedFiles | None = None,
+    discard_skipped_up_to: int = 0,
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
 
@@ -182,6 +233,15 @@ async def sweep_session_outputs(
     :mod:`daimon.core.workspace_transfer`, not to the user. The listing is
     basename-only (capability matrix P4.a), so a name prefix is the whole
     available key.
+
+    An output over ``max_bytes`` is kept listed, never downloaded, and
+    passed to ``on_skip`` unless ``noticed`` already holds its id; it is
+    recorded there once ``on_skip`` returns, so a failed notice retries on
+    the next sweep. Without ``noticed`` every sweep repeats the notice.
+    ``discard_skipped_up_to`` is for a caller whose ``max_bytes`` means
+    "cannot deliver anything here right now" (``max_bytes=0``): a skipped
+    file no larger than it is deleted after its notice, as before, while a
+    larger one, which no destination could take, is still kept.
     """
     settled = await _poll_until_settled(anthropic_client, session_id=session_id, sleep=sleep)
 
@@ -213,9 +273,10 @@ async def sweep_session_outputs(
                     size_bytes=meta.size_bytes,
                     max_bytes=max_bytes,
                 )
-                if on_skip is not None:
-                    # Notice before delete: if the notice fails, the per-file
-                    # boundary below keeps the entry listed so it retries.
+                if on_skip is not None and (noticed is None or meta.id not in noticed):
+                    # Notice before any delete: if the notice fails, the
+                    # per-file boundary below keeps the entry listed and
+                    # unrecorded, so the next sweep retries it.
                     await on_skip(
                         SkippedFile(
                             file_id=meta.id,
@@ -223,7 +284,14 @@ async def sweep_session_outputs(
                             size_bytes=meta.size_bytes,
                         )
                     )
-                await delete_output_file(anthropic_client, session_id=session_id, file_id=meta.id)
+                    if noticed is not None:
+                        noticed.add(meta.id)
+                if meta.size_bytes <= discard_skipped_up_to:
+                    await delete_output_file(
+                        anthropic_client, session_id=session_id, file_id=meta.id
+                    )
+                # Otherwise kept: the person was told how to get it, and the
+                # agent can still compress or split the file it wrote.
                 continue
 
             await post(

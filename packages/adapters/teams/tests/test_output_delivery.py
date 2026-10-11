@@ -487,7 +487,7 @@ async def test_an_unprompted_turn_posts_no_links_message_when_the_answer_cannot_
 async def test_oversize_output_in_a_dm_is_only_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The per-file cap is core's: no consent card, no note, a log line, then delete."""
+    """The per-file cap is core's: no consent card, no note, a log line; the file is kept."""
     harness = _harness(db_session_factory, [_csv(size=21 * 1024 * 1024)])
     appended: list[str] = []
 
@@ -500,4 +500,32 @@ async def test_oversize_output_in_a_dm_is_only_logged(
 
     assert appended == [] and harness.sender.activities == [], "nothing posted"
     assert any(e["event"] == "teams.output.oversize" for e in logs)
-    assert harness.deletes == ["file_csv"]
+    assert harness.deletes == [], "an oversize file stays listed rather than being lost"
+
+
+async def test_a_channel_without_file_access_keeps_an_oversize_output(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No channel could take the oversize file either, so it is kept; a file
+    under the cap still goes down the log-and-delete path."""
+    listing = [_csv("file_big", size=20 * 1024 * 1024 + 1, filename="render.mp4"), _csv()]
+    harness = _harness(db_session_factory, listing)
+
+    await harness.delivery.sweep(make_inbound(kind="channel", conversation=THREAD_ID), "sesn_1")
+
+    assert harness.sender.sent == [] and harness.uploads == []
+    assert harness.deletes == ["file_csv"], "only the file under the cap is removed"
+
+
+async def test_a_channel_with_file_access_keeps_an_oversize_output(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    listing = [_csv("file_big", size=20 * 1024 * 1024 + 1, filename="render.mp4"), _csv()]
+    harness = _harness(db_session_factory, listing, channel_files=_channel_files(_uploaded))
+
+    async def append(text: str) -> bool:
+        return True
+
+    await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    assert harness.deletes == ["file_csv"], "the uploaded file leaves; the oversize one stays"

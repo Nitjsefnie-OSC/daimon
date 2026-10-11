@@ -111,6 +111,7 @@ from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.output_delivery import NoticedFiles
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
@@ -637,6 +638,8 @@ class DaimonBot(commands.Bot):
         self._bg_tasks: set[asyncio.Task[None]] = set()
         self._output_sweeps: dict[str, asyncio.Task[None]] = {}
         self._delivery_notice_thread_ids: set[int] = set()
+        # Oversize outputs stay listed; each is announced once, not every sweep.
+        self._noticed_output_files = NoticedFiles()
         # Drain flag — set by _drain_and_close on SIGTERM/SIGINT.
         # While True, on_message rejects new mentions; existing turns finish.
         self.draining: bool = False
@@ -710,6 +713,7 @@ class DaimonBot(commands.Bot):
                 session_id=session_id,
                 may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
                 notice_thread_ids=self._delivery_notice_thread_ids,
+                noticed_files=self._noticed_output_files,
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
                 answer=lifecycle.answer_message if lifecycle is not None else None,
             )

@@ -3,7 +3,8 @@
 A turn's files go onto its answer: the message that carries the summary line
 and the vote emoji. Each file is added by editing that message, so the answer
 stays the turn's last word. A file that cannot go there (the message is full,
-or the edit fails) is posted on its own below it, as before.
+or the edit fails) is posted on its own below it, as before. A file over the
+guild's upload limit is kept in the session and announced once.
 """
 
 from __future__ import annotations
@@ -19,15 +20,16 @@ from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.output_delivery import (
     MAX_BYTES_PER_FILE,
     DeliverableFile,
+    NoticedFiles,
     OutputPostingUnavailable,
     SkippedFile,
+    render_oversize_notice,
     sweep_session_outputs,
 )
 
 import discord
 
 log = structlog.get_logger(__name__)
-_MIB = 1024 * 1024
 # Discord's limit on attachments per message, counting the ones already there.
 MAX_ATTACHMENTS_PER_MESSAGE = 10
 _ATTACH_NOTICE = (
@@ -55,6 +57,7 @@ async def deliver_session_outputs(
     session_id: str,
     may_post: Callable[[], Awaitable[bool]],
     notice_thread_ids: set[int],
+    noticed_files: NoticedFiles | None = None,
     turn_window: tuple[int, int] | None = None,
     answer: AnswerMessage | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -65,7 +68,8 @@ async def deliver_session_outputs(
     end. A file the agent already attached itself inside it, same name and
     bytes, counts as delivered and is cleared without a second copy.
     Without ``answer``, or when a file cannot be added to it, the file is
-    posted on its own.
+    posted on its own. A file over the guild's upload limit stays listed
+    and gets one notice per ``noticed_files`` lifetime.
     """
     max_bytes = min(MAX_BYTES_PER_FILE, thread.guild.filesize_limit)
     already_posted: dict[tuple[str, int], list[discord.Attachment]] | None = None
@@ -111,9 +115,7 @@ async def deliver_session_outputs(
             log.info("discord.output_delivery.skipped_already_posted", filename=name)
             return
         await thread.send(
-            f"I couldn't attach `{sanitize_title(skipped.filename)}` — it is "
-            f"{skipped.size_bytes / _MIB:.1f} MiB, over the "
-            f"{max_bytes / _MIB:g} MiB delivery limit.",
+            render_oversize_notice(skipped, max_bytes=max_bytes),
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -125,6 +127,7 @@ async def deliver_session_outputs(
             on_skip=on_skip,
             sleep=sleep,
             max_bytes=max_bytes,
+            noticed=noticed_files,
         )
     except OutputPostingUnavailable as exc:
         reason = str(exc)

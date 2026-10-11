@@ -262,11 +262,14 @@ def _paginate(items: list[dict[str, Any]], params: httpx.QueryParams) -> httpx.R
 
 
 def _page_response(items: list[FileMetadata], params: httpx.QueryParams) -> httpx.Response:
-    """`{data, has_more, first_id, last_id}` envelope for files.list
-    (`SyncPage[FileMetadata]`) -- distinct from the cursor-page shape above,
-    per the installed SDK's `pagination.SyncPage`."""
+    """`{data, has_more, first_id, last_id, next_page}` envelope for files.list.
+
+    Carries both spellings: the id-window fields of the older `SyncPage` and the
+    `next_page` cursor the installed SDK's `AsyncPageCursor` follows."""
     limit = int(params.get("limit", "20"))
-    after_id = params.get("after_id")
+    # The installed SDK pages files.list by cursor (`AsyncPageCursor`: it sends
+    # `page=<next_page>`); `after_id` is the older envelope's spelling.
+    after_id = params.get("page") or params.get("after_id")
     before_id = params.get("before_id")
     if after_id is not None:
         idx = next((i for i, m in enumerate(items) if m.id == after_id), None)
@@ -280,6 +283,7 @@ def _page_response(items: list[FileMetadata], params: httpx.QueryParams) -> http
         "has_more": len(items) > limit,
         "first_id": page_items[0].id if page_items else None,
         "last_id": page_items[-1].id if page_items else None,
+        "next_page": page_items[-1].id if page_items and len(items) > limit else None,
     }
     return httpx.Response(200, json=body)
 

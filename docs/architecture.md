@@ -1045,8 +1045,17 @@ only if a new attachment holds its exact bytes, and the next edit starts from
 what is there. A file the answer cannot take (Discord's
 10-attachment limit, or a failed edit) is posted on its own below it, and a
 turn that ended without an answer (stopped or failed) gets its files as
-separate posts. Discord uses the guild's upload limit, skips oversize files
-with an in-thread notice, and checks the channel's writers before posting. A
+separate posts. Discord uses the guild's upload limit and checks the
+channel's writers before posting. A file over the limit (the guild's on
+Discord, 20 MB on Slack) is never deleted: it stays listed and in the
+agent's workspace, and the thread gets one notice naming the file, its size
+and the limit, and offering a smaller version or parts under the limit.
+Each adapter remembers which kept files it has announced (bounded, per
+process), so later sweeps that list the file again stay quiet; a restart can
+announce a kept file once more. Teams only logs an oversize file and keeps
+it too, including in a channel without file access, where files under the
+limit are still logged and removed. The sweep reads every page of the
+listing, so kept files never hide a newer one. A
 file Daimon already attached in the thread after the turn's card (the agent
 sent it itself), with the same name and bytes, is cleared from the listing
 without a second copy. The session listing is shared by every turn and the
