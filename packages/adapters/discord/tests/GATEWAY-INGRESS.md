@@ -147,3 +147,48 @@ selection enabled, and external Sentry disabled. Naming uses the product-default
 `ThreadNamingSettings()`. Only the owned tenant's cap is changed through the real
 admin binding and restored to default on exit; ordinary runtime construction
 does not import or instantiate this driver.
+
+### Channel bursts, authored twins and chunk replies
+
+`parsed_replies` records reference/target/channel/author IDs read from the real
+scheduled discord.py `Message`, before invoking the unchanged production
+callback. `message_fetches` records the owned HTTP request target and original
+response JSON. The fake HTTP bot-author payload includes the required nullable
+`avatar` field so the SDK constructs an actual User in a resolved reference.
+These observations certify neither native completion nor a source assertion.
+
+NEW3 preserves one source parent channel and three distinct authored mentions.
+Three separate real threads, sessions and roots remain concurrently gated before
+release; production admission is never replaced by completed sequential turns.
+The injected source clock records offsets 0/1/2 seconds. Real native gates and
+bounded waits remain independent; these logical offsets do not certify live
+network latency. Serializing production channel callbacks loses the real queue
+and persisted-binding witness even though all three events were delivered.
+
+NEW4 retains both original equal-text messages with distinct IDs at source
+offsets 0/1. The actual path creates two threads and two accepted answers. Both
+frozen max-one predicates FAIL as expected by the catalog; there is no repeated
+ID, probe dedupe or invented billing readback.
+
+NEW10 sends the original no-tools prompt, then a controlled authored native
+120-line response through the installed isolated Anthropic SDK and real chunk
+renderer. Accepted overflow messages have individually balanced fences, a
+captured gap check and the summary on the last chunk. Every non-fence body line
+is retained in native order, including all later overflow, and compared against
+the actual native stream record. The runner fetches actual
+chunk 2 through `discord.Thread.fetch_message`, uses its SDK reference and exact
+HTTP reply in the next original gateway event, and observes the real parser's
+resolved target/author plus same-session native continuation and CHUNK-OK post.
+Overflow-drop and parser-reference-drop mutations lose the witnesses. Dropping
+just later overflow is detected even when two balanced chunks and a last-chunk
+footer still satisfy the catalog's minimum shape checks. A missing parsed
+reference can still answer an explicit mention but cannot claim reference binding.
+An actual-SDK missing-avatar regression detects malformed fake author payloads.
+
+Anthropic NEW3/NEW10 adapter facets PASS; their whole cells remain PENDING for an
+independent native recipe/oracle join. Anthropic NEW4 is an executed expected
+FAIL on its actual threads/answers predicates. All three O/G native cases remain
+PENDING and skip before ingress allocation; the shared runtime validator does
+not admit opaque alternate-provider dependencies. Shared ownership admission and
+the authorized temporary fixture preflight remain unchanged. Source YAML,
+product requests, routing, queue policy and ordinary defaults are unchanged.

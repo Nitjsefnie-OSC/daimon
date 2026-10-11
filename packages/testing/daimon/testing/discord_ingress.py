@@ -101,6 +101,24 @@ class ReactionEvent(Observation):
     observed_s: float = Field(ge=0)
 
 
+class ParsedReply(Observation):
+    """Reference facts read from discord.py's actual scheduled Message object."""
+
+    message_id: str
+    channel_id: str
+    reference_message_id: str | None
+    resolved_message_id: str | None
+    resolved_channel_id: str | None
+    resolved_author_id: str | None
+
+
+class MessageFetch(Observation):
+    channel_id: str
+    message_id: str
+    observed_s: float = Field(ge=0)
+    response_json: str
+
+
 class DiscordIngressReceipt(Observation):
     offline_only: Literal[True] = True
     backend_revision: ConfigRevision
@@ -120,6 +138,8 @@ class DiscordIngressReceipt(Observation):
     pending_threads: tuple[PendingThread, ...]
     errors: tuple[str, ...]
     reaction_history: tuple[ReactionEvent, ...] = ()
+    parsed_replies: tuple[ParsedReply, ...] = ()
+    message_fetches: tuple[MessageFetch, ...] = ()
     # A native root/terminal fact must come from the runner's actual wire gate,
     # not from the title response or this ingress receipt.
     completion_certificate: Literal[False] = False
@@ -155,6 +175,7 @@ class IngressHTTP:
         self.history_reads: list[HistoryRead] = []
         self.reactions: list[tuple[str, int, int, str]] = []
         self.reaction_history: list[ReactionEvent] = []
+        self.message_fetches: list[MessageFetch] = []
         self.first_post = asyncio.Event()
         self.release_first_post = asyncio.Event()
         if not hold_first_post:
@@ -255,8 +276,19 @@ class IngressHTTP:
         self.surface(channel_id)
         for payload in self.history[channel_id]:
             if int(payload["id"]) == message_id:
-                return cast("MessagePayload", json.loads(json.dumps(payload)))
-        return await self.surface(channel_id).get_message(channel_id, message_id)
+                result = cast("MessagePayload", json.loads(json.dumps(payload)))
+                break
+        else:
+            result = await self.surface(channel_id).get_message(channel_id, message_id)
+        self.message_fetches.append(
+            MessageFetch(
+                channel_id=str(channel_id),
+                message_id=str(message_id),
+                observed_s=self.clock(),
+                response_json=json.dumps(result),
+            )
+        )
+        return result
 
     async def logs_from(
         self,
@@ -347,10 +379,32 @@ class _ObservedBot(DaimonBot):
         self.message_tasks: list[asyncio.Task[None]] = []
         self.dispatched_ids: list[str] = []
         self.ingress_errors: list[str] = []
+        self.parsed_replies: list[ParsedReply] = []
 
     async def on_message(self, message: discord.Message) -> None:
         # Gateway callbacks are scheduled: an owner can replace deps after deliver.
         _require_runtime_bound(self.runtime, self.native)
+        reference = message.reference
+        if isinstance(reference, discord.MessageReference):
+            resolved = reference.resolved
+            self.parsed_replies.append(
+                ParsedReply(
+                    message_id=str(message.id),
+                    channel_id=str(message.channel.id),
+                    reference_message_id=str(reference.message_id)
+                    if reference.message_id is not None
+                    else None,
+                    resolved_message_id=str(resolved.id)
+                    if isinstance(resolved, discord.Message)
+                    else None,
+                    resolved_channel_id=str(resolved.channel.id)
+                    if isinstance(resolved, discord.Message)
+                    else None,
+                    resolved_author_id=str(resolved.author.id)
+                    if isinstance(resolved, discord.Message)
+                    else None,
+                )
+            )
         await super().on_message(message)
 
     def _schedule_event(
@@ -552,6 +606,8 @@ class DiscordIngress:
             ),
             errors=tuple(self.bot.ingress_errors),
             reaction_history=tuple(self.http.reaction_history),
+            parsed_replies=tuple(self.bot.parsed_replies),
+            message_fetches=tuple(self.http.message_fetches),
         )
 
     async def close(self) -> None:

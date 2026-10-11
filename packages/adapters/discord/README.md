@@ -25,3 +25,8 @@ separate from independently pinned alternate-provider completion.
 reaction, binding/lease and card checkpoints for concurrent busy-thread and
 owned tenant-cap probes. See [the ingress contract](tests/GATEWAY-INGRESS.md).
 Native gates and independent scenario verdicts remain runner-owned.
+
+Ingress receipts also expose actual HTTP message-fetch replies and discord.py's
+parsed message references. Channel bursts retain each authored identity and
+separate production admission; chunk replies bind to an actually emitted SDK
+message. See the source-pinned burst/chunk controls in the ingress contract.

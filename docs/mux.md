@@ -1672,3 +1672,11 @@ Alternate-provider capture bindings and independent native recipe pins remain
 separate from these adapter observations.
 A full real waiting-card interval distinguishes missing queue copy from
 successful queue release. No adapter policy or default path changes.
+
+### Offline channel burst and chunk reply observations
+
+Discord testing ingress captures actual message-fetch responses and the SDK's
+parsed reply references alongside production admission, queue and card facts.
+Authored equal-text mentions retain distinct identities and their real separate
+threads. A reply to a later answer chunk uses its emitted message identifier and
+resolved SDK author, with native completion evidence supplied independently.

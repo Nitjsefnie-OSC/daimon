@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
 
 - Add optional accepted initial progress-card receipts for Discord, Slack and Teams, with offline SDK delivery controls and unchanged default rendering.
+- Capture offline Discord channel bursts and actual chunk-reply references through SDK admission, preserving distinct authored equal-text messages and complete fixture author payloads.
 - Observe concurrent offline Discord ingress through actual busy-thread and tenant-cap queues, timestamped reactions and scoped binding/card readback, without changing adapter defaults.
 - Validate all offline Discord thread-permission hook dependencies and database fixture ownership before observation.
 - Refuse opaque provider runtimes in offline Discord title/admission hooks and check fixture database ownership before any connection.
