@@ -49,12 +49,9 @@ def db_session_factory(
     A plain local `daimon_test` outside CI is not an owned lane DB, so these
     bindings would refuse it: skip there, as the guard's own tests do.
     """
-    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.headless_bindings import owned_or_skip_plain_local
 
-    try:
-        require_owned_sessionmaker(db_session_factory)
-    except ValueError:
-        pytest.skip("needs an owned lane test DB or a registered isolated CI schema")
+    owned_or_skip_plain_local(db_session_factory)
     return db_session_factory
 
 
