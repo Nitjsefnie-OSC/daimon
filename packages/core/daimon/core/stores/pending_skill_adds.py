@@ -82,12 +82,18 @@ async def record_pending_skill_add(
 
 
 async def resolve_pending_skill_adds(
-    session: AsyncSession, *, origin: TurnOriginRow, message_text: str, now: datetime
+    session: AsyncSession,
+    *,
+    origin: TurnOriginRow,
+    message_text: str,
+    now: datetime,
+    message_created_at: datetime | None = None,
 ) -> None:
     """Settle this person's one open preview in this thread with their new message.
 
     An explicit yes (`is_affirmative`) approves it for ``origin`` alone;
-    anything else cancels it. Either way their next message has been used.
+    anything else cancels it. A preview created after this message arrived
+    cannot be settled by it, even when queueing delays the turn.
     """
     still_open = (
         PendingSkillAdd.tenant_id == origin.tenant_id,
@@ -98,6 +104,8 @@ async def resolve_pending_skill_adds(
         PendingSkillAdd.approved_origin_id.is_(None),
         PendingSkillAdd.expires_at > now,
     )
+    if message_created_at is not None:
+        still_open += (PendingSkillAdd.created_at <= message_created_at,)
     settled = (
         {"approved_origin_id": origin.id} if is_affirmative(message_text) else {"consumed_at": now}
     )

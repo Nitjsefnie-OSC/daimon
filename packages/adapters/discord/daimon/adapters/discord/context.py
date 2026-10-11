@@ -208,6 +208,7 @@ async def build_context_xml(
     unprompted: bool = False,
     key_names: Sequence[str] = (),
     query_text: str | None = None,
+    query_message_ids: Sequence[int] = (),
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from thread history for the turn driver.
 
@@ -231,7 +232,8 @@ async def build_context_xml(
     """
     messages = [m async for m in thread.history(limit=limit)]
     messages.sort(key=lambda m: m.created_at)
-    messages = [m for m in messages if m.id != trigger.id]
+    excluded_ids = {trigger.id, *query_message_ids}
+    messages = [m for m in messages if m.id not in excluded_ids]
 
     # Prepend the thread-starter message once if it exists, is not the trigger,
     # and is not already present in the fetched history.  thread.history() omits
@@ -248,7 +250,7 @@ async def build_context_xml(
             starter = None
     if (
         starter is not None
-        and starter.id != trigger.id
+        and starter.id not in excluded_ids
         and starter.id not in {m.id for m in messages}
     ):
         messages.insert(0, starter)
@@ -306,6 +308,7 @@ async def build_delta_xml(
     key_names: Sequence[str] = (),
     excluded_message_ids: Sequence[str] = (),
     query_text: str | None = None,
+    query_message_ids: Sequence[int] = (),
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -347,6 +350,7 @@ async def build_delta_xml(
             unprompted=unprompted,
             key_names=key_names,
             query_text=query_text,
+            query_message_ids=query_message_ids,
         )
 
     after_obj = discord.Object(id=after_message_id)
@@ -356,7 +360,11 @@ async def build_delta_xml(
     # No backfill, no thread-starter prepend, no coalescing — the reused MA session
     # already holds prior context server-side; re-injecting it duplicates tokens and
     # re-triggers image replay from earlier turns.
-    excluded_ids = {trigger.id, *(int(msg_id) for msg_id in excluded_message_ids)}
+    excluded_ids = {
+        trigger.id,
+        *query_message_ids,
+        *(int(msg_id) for msg_id in excluded_message_ids),
+    }
     messages = [m for m in messages if m.id not in excluded_ids]
     messages.sort(key=lambda m: m.created_at)
 

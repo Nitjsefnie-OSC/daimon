@@ -99,6 +99,27 @@ def _make_thread(
     return thread
 
 
+@pytest.mark.parametrize("delta", [False, True])
+async def test_merged_query_messages_are_absent_from_history(delta: bool) -> None:
+    first = _make_message(msg_id=11, content="first queued instruction")
+    second = _make_message(msg_id=12, content="second queued instruction")
+    earlier = _make_message(msg_id=10, content="earlier context")
+    thread = _make_thread([earlier, first, second])
+    kwargs = dict(
+        query_text="first queued instruction\nsecond queued instruction", query_message_ids=(11, 12)
+    )
+    if delta:
+        result, _ = await build_delta_xml(thread, first, after_message_id=9, **kwargs)
+    else:
+        result, _ = await build_context_xml(thread, first, **kwargs)
+    history = result.split("</thread_history>" if not delta else "</thread_delta>")[0]
+    assert "earlier context" in history
+    assert "first queued instruction" not in history
+    assert "second queued instruction" not in history
+    assert "first queued instruction" in result.split("<user_query")[1]
+    assert "second queued instruction" in result.split("<user_query")[1]
+
+
 def _make_text_channel(messages: list[discord.Message]) -> discord.TextChannel:
     """Build a mock discord.TextChannel with a history async iterator."""
     channel = MagicMock(spec=discord.TextChannel)

@@ -4101,6 +4101,7 @@ class DaimonBot(commands.Bot):
                         else ()
                     ),
                     query_text=content_override,
+                    query_message_ids=tuple(int(i) for i in admitted_message_ids),
                 )
             else:
                 user_message, _ = await build_context_xml(
@@ -4113,6 +4114,7 @@ class DaimonBot(commands.Bot):
                     unprompted=unprompted,
                     key_names=key_names,
                     query_text=content_override,
+                    query_message_ids=tuple(int(i) for i in admitted_message_ids),
                 )
         else:
             if content_override is not None:
@@ -4293,6 +4295,7 @@ class DaimonBot(commands.Bot):
                 role=role,
                 is_setup=admission.config.thread_binding_kind == "setup",
                 message_text=message.content,
+                message_created_at=message.created_at,
             ) as origin:
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,

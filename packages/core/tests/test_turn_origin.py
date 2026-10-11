@@ -2,11 +2,15 @@
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.pending_skill_adds import (
+    consume_pending_skill_add,
+    record_pending_skill_add,
+)
 from daimon.core.stores.turn_origins import get_active_origin, update_origin_target
 from daimon.core.turn_origin import (
     MAX_REQUESTED_WORK_CHARS,
@@ -19,6 +23,60 @@ from daimon.core.turn_origin import (
 )
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@pytest.mark.parametrize("first_text", ["add this skill", "yes"])
+async def test_queued_yes_cannot_approve_preview_created_after_it_arrived(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    first_text: str,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    arrived = datetime.now(UTC) - timedelta(seconds=10)
+    kwargs = dict(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="parent",
+        thread_id="thread",
+        responder_ma_agent_id="agent",
+        responder_name="Agent",
+        role=Role.USER,
+    )
+    async with (
+        turn_origin(
+            db_session_factory,
+            **kwargs,
+            message_text=first_text,
+            message_created_at=arrived,
+        ) as first,
+        db_session_factory.begin() as session,
+    ):
+        await record_pending_skill_add(
+            session,
+            origin=first,
+            ma_agent_id="agent",
+            content_hash="preview",
+            now=datetime.now(UTC),
+        )
+    async with (
+        turn_origin(
+            db_session_factory,
+            **kwargs,
+            message_text="yes",
+            message_created_at=arrived + timedelta(seconds=1),
+        ) as second,
+        db_session_factory.begin() as session,
+    ):
+        assert not await consume_pending_skill_add(
+            session,
+            origin=second,
+            ma_agent_id="agent",
+            content_hash="preview",
+            now=datetime.now(UTC),
+        )
 
 
 async def test_simultaneous_origins_keep_separate_snapshots_and_cleanup(
