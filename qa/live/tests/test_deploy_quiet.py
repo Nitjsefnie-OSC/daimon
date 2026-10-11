@@ -1,6 +1,6 @@
 import json
 import subprocess
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -31,9 +31,13 @@ def test_active_deploy_outside_recent_list_blocks_and_completed_age_is_required(
         calls.append(args)
         assert args[-2:] == ["--repo", "pymc-labs/daimon"]
         if args[1:3] == ["run", "list"]:
-            rows = [{"databaseId": 1, "status": "completed"}]
+            rows = [{"databaseId": 1, "status": "completed", "attempt": 1}]
             if "--status" in args:
-                rows = [{"databaseId": 200, "status": "in_progress"}] if active[0] else []
+                rows = (
+                    [{"databaseId": 200, "status": "in_progress", "attempt": 1}]
+                    if active[0]
+                    else []
+                )
             data = rows
         else:
             assert args[1:3] == ["run", "view"]
@@ -102,7 +106,16 @@ def test_unavailable_github_never_proves_quiet(monkeypatch: pytest.MonkeyPatch) 
     assert not isinstance(exc.value, DeployNotQuiet)
 
 
-@pytest.mark.parametrize("bad", [{}, [{"status": "completed"}]])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {},
+        [{"status": "completed"}],
+        [{"databaseId": 1, "status": "completed"}],
+        [{"databaseId": 1, "status": "completed", "attempt": 0}],
+        [{"databaseId": 1, "status": "completed", "attempt": True}],
+    ],
+)
 def test_malformed_run_inventory_never_proves_quiet(
     monkeypatch: pytest.MonkeyPatch, bad: object
 ) -> None:
@@ -129,7 +142,9 @@ def test_missing_or_skipped_completion_cannot_supply_deploy_age(
     def query(self: QuietGate, args: list[str]) -> object:
         if args[:2] == ["run", "view"]:
             return {"jobs": [job]}
-        return [] if "--status" in args else [{"databaseId": 1, "status": "completed"}]
+        return (
+            [] if "--status" in args else [{"databaseId": 1, "status": "completed", "attempt": 1}]
+        )
 
     monkeypatch.setattr(QuietGate, "query", query)
     gate = QuietGate()
@@ -142,8 +157,6 @@ def test_missing_or_skipped_completion_cannot_supply_deploy_age(
 
 
 def test_real_reusable_deploy_shape_and_shared_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    from datetime import datetime
-
     now = datetime.fromisoformat("2026-10-10T14:00:00+00:00")
     active = [True]
     views: list[str] = []
@@ -152,9 +165,9 @@ def test_real_reusable_deploy_shape_and_shared_cache(monkeypatch: pytest.MonkeyP
         if args[:2] == ["run", "list"]:
             if "--status" in args:
                 if args[args.index("--status") + 1] == "queued" and active[0]:
-                    return [{"databaseId": 200, "status": "queued"}]
+                    return [{"databaseId": 200, "status": "queued", "attempt": 1}]
                 return []
-            return [{"databaseId": 38056819962, "status": "completed"}]
+            return [{"databaseId": 38056819962, "status": "completed", "attempt": 1}]
         identity = args[2]
         views.append(identity)
         if identity == "200":
@@ -228,10 +241,10 @@ def test_real_query_busy_deploy_outlasts_wait_without_harness_error(
             raise subprocess.TimeoutExpired(args, float(budget))
         clock[0] += duration
         if args[1:3] == ["run", "list"]:
-            rows = [{"databaseId": 1, "status": "completed"}]
+            rows = [{"databaseId": 1, "status": "completed", "attempt": 1}]
             if "--status" in args:
                 rows = (
-                    [{"databaseId": 2, "status": "in_progress"}]
+                    [{"databaseId": 2, "status": "in_progress", "attempt": 1}]
                     if args[args.index("--status") + 1] == "in_progress"
                     else []
                 )
@@ -304,3 +317,104 @@ def test_real_github_outage_during_query_grace_is_alertable(
     with pytest.raises(Pending, match="GitHub deployment evidence unavailable") as exc:
         gate.wait(timeout_s=55)
     assert not isinstance(exc.value, DeployNotQuiet)
+
+
+class RerunCI:
+    """Real `gh` subprocess shape for one run id across workflow rerun attempts."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+        self.attempt = 1
+        self.status = "completed"
+        self.deploy_age = {1: 600}
+        self.views: list[tuple[str, str]] = []
+
+    def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[-2:] == ["--repo", "pymc-labs/daimon"]
+        if args[1:3] == ["run", "list"]:
+            assert args[args.index("--json") + 1] == "databaseId,status,attempt"
+            rows = [
+                {"databaseId": 42, "status": self.status, "attempt": self.attempt},
+                {"databaseId": 41, "status": "completed", "attempt": 1},
+            ]
+            if "--status" in args:
+                rows = [r for r in rows if r["status"] == args[args.index("--status") + 1]]
+            data: object = rows
+        else:
+            identity, attempt = args[3], args[args.index("--attempt") + 1]
+            self.views.append((identity, attempt))
+            name = DEPLOY_JOB + " / " + DEPLOY_JOB
+            if identity == "41":
+                job = {"name": name, "status": "completed", "conclusion": "success"}
+                job["completedAt"] = (self.now - timedelta(seconds=900)).isoformat()
+            elif int(attempt) == self.attempt and self.status != "completed":
+                job = {"name": name, "status": "in_progress"}
+            else:
+                age = self.deploy_age[int(attempt)]
+                job = {"name": name, "status": "completed", "conclusion": "success"}
+                job["completedAt"] = (self.now - timedelta(seconds=age)).isoformat()
+            data = {"jobs": [job]}
+        return subprocess.CompletedProcess(args, 0, json.dumps(data), "")
+
+
+def test_cached_run_rerun_active_then_completed_refuses_until_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [datetime.fromisoformat("2026-10-11T14:00:00+00:00")]
+    ci = RerunCI(now[0])
+    monkeypatch.setattr(subprocess, "run", ci)
+    monkeypatch.setattr("qa.live.deploy_quiet.utcnow", lambda: now[0])
+    first = QuietGate().snapshot()
+    assert first["quiet"] is True and first["age_s"] == 600
+    ci.attempt, ci.status = 2, "in_progress"
+    active = QuietGate().snapshot()
+    assert active["quiet"] is False
+    assert active["busy"] == [{"run_id": "42", "attempt": 2, "status": "in_progress"}]
+    ci.status, ci.deploy_age[2] = "completed", 60
+    done = QuietGate().snapshot()
+    assert done["quiet"] is False and done["age_s"] == 60
+    with pytest.raises(DeployNotQuiet):
+        QuietGate().wait(timeout_s=0)
+    # Once the new attempt's deploy has settled, the cached attempt-2 jobs suffice.
+    now[0] += timedelta(seconds=120)
+    settled = QuietGate().snapshot()
+    assert settled["quiet"] is True and settled["age_s"] == 180
+    assert ci.views == [("42", "1"), ("41", "1"), ("42", "2"), ("42", "2")]
+
+
+def test_rerun_completed_entirely_between_snapshots_uses_new_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.fromisoformat("2026-10-11T14:00:00+00:00")
+    ci = RerunCI(now)
+    monkeypatch.setattr(subprocess, "run", ci)
+    monkeypatch.setattr("qa.live.deploy_quiet.utcnow", lambda: now)
+    assert QuietGate().snapshot()["age_s"] == 600
+    ci.attempt, ci.deploy_age[2] = 2, 179
+    rerun = QuietGate().snapshot()
+    assert rerun["quiet"] is False and rerun["age_s"] == 179
+    assert rerun["last_completed"] == (now - timedelta(seconds=179)).isoformat()
+    with pytest.raises(DeployNotQuiet):
+        QuietGate().wait(timeout_s=0)
+    assert ("42", "2") in ci.views and set(COMPLETED_JOBS) == {("41", 1), ("42", 1), ("42", 2)}
+
+
+def test_rerun_starting_between_inventories_uses_newest_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    views: list[list[str]] = []
+
+    def query(self: QuietGate, args: list[str]) -> object:
+        if args[:2] == ["run", "list"]:
+            if "--status" not in args:
+                return [{"databaseId": 7, "status": "completed", "attempt": 1}]
+            if args[args.index("--status") + 1] == "queued":
+                return [{"databaseId": 7, "status": "queued", "attempt": 2}]
+            return []
+        views.append(args)
+        return {"jobs": [{"name": DEPLOY_JOB, "status": "queued"}]}
+
+    monkeypatch.setattr(QuietGate, "query", query)
+    with pytest.raises(Pending, match="no actual staging deployment"):
+        QuietGate().snapshot()
+    assert views == [["run", "view", "7", "--attempt", "2", "--json", "jobs"]]

@@ -15,7 +15,9 @@ from qa.live.types import Message, Pending, obj, objects, utcnow
 
 REPOSITORY = "pymc-labs/daimon"
 DEPLOY_JOB = "Deploy to GCP (staging)"
-COMPLETED_JOBS: dict[str, list[Message]] = {}
+# Keyed by (run id, attempt): a rerun keeps its run id but gets a new attempt,
+# and its jobs (and deploy completion time) must be read afresh.
+COMPLETED_JOBS: dict[tuple[str, int], list[Message]] = {}
 
 
 class DeployNotQuiet(Pending):
@@ -52,7 +54,12 @@ class QuietGate:
     def snapshot(self) -> Message:
         def inventory(value: JsonValue) -> list[Message]:
             if not isinstance(value, list) or any(
-                not isinstance(row, dict) or not row.get("databaseId") or not row.get("status")
+                not isinstance(row, dict)
+                or not row.get("databaseId")
+                or not row.get("status")
+                or not isinstance(row.get("attempt"), int)
+                or isinstance(row.get("attempt"), bool)
+                or cast(int, row["attempt"]) < 1
                 for row in value
             ):
                 raise Pending("main CI run inventory is incomplete")
@@ -70,7 +77,7 @@ class QuietGate:
                     "--limit",
                     "100",
                     "--json",
-                    "databaseId,status",
+                    "databaseId,status,attempt",
                 ]
             )
         )
@@ -90,14 +97,25 @@ class QuietGate:
                         "--limit",
                         "1000",
                         "--json",
-                        "databaseId,status",
+                        "databaseId,status,attempt",
                     ]
                 )
             )
             if len(rows) >= 1000:
                 raise Pending("active main CI inventory may be incomplete")
             active.extend(rows)
-        runs = {str(r["databaseId"]): r for r in recent + active if r.get("databaseId")}
+        runs: dict[str, Message] = {}
+        for row in recent + active:
+            identity = str(row["databaseId"])
+            seen = runs.get(identity)
+            # A rerun may start between the two inventories; the newest
+            # attempt is the one whose deploy job matters.
+            if seen is None or cast(int, row["attempt"]) >= cast(int, seen["attempt"]):
+                runs[identity] = row
+
+        def key(identity: str) -> tuple[str, int]:
+            return identity, cast(int, runs[identity]["attempt"])
+
         if not runs:
             raise Pending("main CI deployment history is unavailable")
         busy: list[JsonValue] = []
@@ -105,11 +123,14 @@ class QuietGate:
         unread = [
             identity
             for identity, run in runs.items()
-            if run.get("status") != "completed" or identity not in self.completed_jobs
+            if run.get("status") != "completed" or key(identity) not in self.completed_jobs
         ]
 
         def read_jobs(identity: str) -> tuple[str, list[Message]]:
-            data = obj(self.query(["run", "view", identity, "--json", "jobs"]))
+            attempt = str(runs[identity]["attempt"])
+            data = obj(
+                self.query(["run", "view", identity, "--attempt", attempt, "--json", "jobs"])
+            )
             if not isinstance(data.get("jobs"), list):
                 raise Pending("CI jobs response is incomplete")
             return identity, objects(data["jobs"])
@@ -117,9 +138,9 @@ class QuietGate:
         with ThreadPoolExecutor(max_workers=8) as pool:
             observed = dict(pool.map(read_jobs, unread))
         for identity, run in runs.items():
-            jobs = observed.get(identity, self.completed_jobs.get(identity, []))
+            jobs = observed.get(identity, self.completed_jobs.get(key(identity), []))
             if identity in observed and run.get("status") == "completed":
-                self.completed_jobs[identity] = jobs
+                self.completed_jobs[key(identity)] = jobs
             for job in jobs:
                 name = str(job.get("name") or "")
                 if name != DEPLOY_JOB and not name.startswith(DEPLOY_JOB + " / "):
@@ -127,7 +148,13 @@ class QuietGate:
                 if job.get("conclusion") == "skipped":
                     continue
                 if job.get("status") != "completed":
-                    busy.append({"run_id": identity, "status": job.get("status")})
+                    busy.append(
+                        {
+                            "run_id": identity,
+                            "attempt": run["attempt"],
+                            "status": job.get("status"),
+                        }
+                    )
                 else:
                     if not isinstance(job.get("completedAt"), str):
                         raise Pending("deployment completion timestamp is missing")

@@ -385,7 +385,8 @@ existing deploy-interrupted retry policy still applies to turns already posted.
 The service timeout is one hour to cover quiet waits, observation, and one retry.
 
 The deploy gate matches bare caller and expanded reusable-workflow job names.
-Completed job metadata is cached across scenarios and retries in the process;
+Completed job metadata is cached across scenarios and retries in the process, keyed
+by run id and attempt, so a rerun is read afresh and its new deploy must settle;
 active, queued, waiting, requested, and pending runs are refreshed each time.
 Missing tools, authentication, or deployment history fail fast as harness PENDING.
 HTTP-only staging results retain the gate evidence under `deployment.quiet`.
