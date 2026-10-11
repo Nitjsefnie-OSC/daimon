@@ -247,6 +247,7 @@ async def test_github_connect_real_page_matches_committed_grant(
         assert "DELETE /applications/client/token" in github_calls
         assert (artifact_dir / "github-picker.png").stat().st_size > 0
         assert (artifact_dir / "github-connected.png").stat().st_size > 0
+        assert (artifact_dir / "github-deliberate-change-diff.png").stat().st_size > 0
         assert (artifact_dir / "report.json").is_file()
         print(f"owned-page QA artifacts: {artifact_dir}")
     finally:

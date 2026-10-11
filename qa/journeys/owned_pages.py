@@ -18,7 +18,13 @@ from daimon.core.stores import github_access
 from daimon.core.stores.security_audit import list_events
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from qa.journeys.evidence import Check, Observation, RunReport, write_report
+from qa.journeys.evidence import (
+    Check,
+    Observation,
+    RunReport,
+    compare_screenshots,
+    write_report,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -254,6 +260,33 @@ async def _github_connect_journey(
                     "one read grant and audit event",
                     backend_path.name,
                 ),
+            ],
+        )
+    )
+    # Test the image comparator against a deliberate browser-only mutation.
+    # The unmodified screenshot is a test control, not a human accepted baseline.
+    await page.locator("h1").evaluate("heading => heading.textContent = 'Changed test heading'")
+    changed_png = artifact_dir / "github-deliberate-change.png"
+    await page.screenshot(path=str(changed_png), full_page=True)
+    comparison = compare_screenshots(
+        changed_png, done_png, artifact_dir, "github-deliberate-change"
+    )
+    assert comparison.status == "FAIL" and comparison.changed is True
+    assert comparison.changed_pixels is not None and comparison.changed_pixels > 0
+    assert comparison.artifact is not None
+    report.checks.append(
+        Check(
+            name="deliberate rendered change is flagged",
+            status="PASS",
+            detail="Unmodified browser screenshot is a test control, not an accepted baseline.",
+            observations=[
+                Observation(
+                    "browser_pixel",
+                    True,
+                    True,
+                    f"{comparison.changed_pixels} changed pixels; side-by-side diff",
+                    Path(comparison.artifact).name,
+                )
             ],
         )
     )
