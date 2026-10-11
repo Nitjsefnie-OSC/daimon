@@ -86,6 +86,35 @@ only from explicitly supplied values, once; no environment variable is read.
 
 Focused verification: `uv run pytest tests/judge/test_catalog_runner.py`.
 
+The matrix report separates the ordinary product profile from an explicit
+`opt-in-product` QA profile. `daimon.testing.product_profiles` controls exactly
+seven settings: notebook/report `html_link_errors`, MCP
+`require_routine_destination`, Discord `credential_form_expiry` / `writers_none_notice` /
+`tenant_cap_waiting_card`, and turn `native_footer_cost`. It copies
+declared fields without reconstructing settings from the environment, changing
+product defaults, enabling table rendering, or constructing clients. Actual QA
+fixture factories consume `current_product_profile().apply(settings, service=...)`;
+the returned configuration receipt is not an outcome or source assertion.
+
+`run_product_profiles` runs separate default and opt-in fixture callbacks in
+one job. Each board retains the same frozen 159-cell matrix. The combined report
+keeps default metadata, cells and `scored_counts` at the top level, lists both
+profiles within every cell, and exposes `default_board`, `opt_in_board` and
+`opt_in_scored_counts`. An opt-in PASS is labelled **PASS under opt-in profile**;
+it never increases the default PASS tally. Missing flag declarations are
+`PRODUCT_PROFILE_UNAVAILABLE` with no opt-in dispatch. If a callback only selects
+a profile without applying all seven settings, its board stays unbound/PENDING
+and retains actual request/evidence diagnostics. Exceptions after execution starts
+propagate instead of being turned into invented empty execution receipts.
+
+The CLI produces both boards in the same invocation. Its opt-in callback uses
+the same catalog runner under the selected context; owner-provided product
+bindings must consume that context before these source cases can execute.
+Absent form/root/tool/HTTP bindings remain PENDING under either profile, and
+configuration alone never promotes a catalog cell. Release owners retain the
+default-flag decision. Focused verification:
+`uv run pytest packages/testing/tests/test_product_profiles.py tests/judge/test_product_profile_reporting.py`.
+
 `headless_executor.py` executes the frozen scored matrix offline, starting with
 Anthropic. It always rebuilds plans from catalog files with the frozen target
 pin, checks each authored tape's source hash and exact expanded request text,

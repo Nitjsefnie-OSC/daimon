@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
+- Explicit mux runtime configuration now refuses reserved provider-prefixed credential references before the first turn; deployment examples use host-scoped key names. Default settings and private SDK environment guards are unchanged.
+
+- QA opt-in reports declare all six granted product switches, combine both Discord settings, and retain unavailable profiles as PENDING until their product declarations land.
+- QA opt-in reports declare all seven granted product switches, including Discord tenant-cap waiting cards, combine all Discord settings, and retain unavailable profiles as PENDING until their product declarations land.
+
+- Compose the signed backend selector, host conformance evidence and explicitly configured Gemini runtime; deployment clients refuse ambient routing and TLS settings without changing default Anthropic behavior.
 
 - Support explicit manual-probe cash hold floors and single settlement of disjoint Anthropic session pairs, preserving incomplete usage holds and exact decimal arithmetic.
 - Deliver neutral provider lifecycle records by their own event identity across reconnects, so media revisions sharing a compatibility display ID reach the optional tap once while native delivery stays unchanged.
@@ -16,10 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
 - Keep shared database preflight admission separate for each resolved schema fixture when running multiple test packages together; document owned local databases and skipped shared fixtures on plain local `daimon_test`.
 
+- Add an opt-in, rate-limited Discord stop reaction for explicit mentions denied by a confirmed writers=none rule; default denial behavior stays silent.
+
+- Report separate default and opt-in QA product profiles, with explicit per-cell profile results and an opt-in PASS tally that never changes default-profile totals.
 - Validate shared test database ownership before fixture setup, and bind metered channel proofs to the run's exact persisted usage identity.
 
 - Add an owned offline metered-turn seam with controlled prices and independent channel ledger/budget readback through the real host billing path.
 - Document the clean provider/TLS environment required by isolated SDK tests and the local `AmbientSDKConfigurationError` refusal.
+- Keep authorized mux threads on their persisted provider and configuration revision after channel backend changes; refuse missing retained registrations before provider effects.
+- Add opt-in HTML pages for unavailable notebook and report document links, preserving existing status codes, authentication and default JSON responses.
+- Add an opt-in requirement for destinations on MCP routine creation, warning before agent lookup or saving while preserving record-only defaults.
+- Add opt-in Discord credential-form expiry with durable retirement, retryable verified edits of the original card, and no background job by default.
+- Report separate default and opt-in QA product profiles, with explicit per-cell profile results and an opt-in PASS tally that never changes default-profile totals.
 
 - Prove OpenAI C04 offline with real SDK delivery, fenced intent/ack crashes and restart recovery that retains unknown input identity without resending.
 - Prove OpenAI interaction preparation offline across skill upload/pinning, MCP and input-file binding, retaining typed unavailable execution and the canonical C11 gaps.
@@ -36,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Refresh offline QA Gemini tapes for explicit interaction tools on current integration, retaining strict wire equality and separate expected-failure reporting.
 - Refuse nine ambient TLS/proxy settings by name before test SDK construction, preventing invented TLS key-log paths from being opened; owned clean Gemini contexts have no key-log filename.
+- Prepare offline Anthropic A7 probes and a state-aware, opt-in quiet-host replay benchmark without credential reads or live requests.
 
 ### Added
 

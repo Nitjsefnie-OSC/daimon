@@ -15,6 +15,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_host import OpenAIHostRuntime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest
+from daimon.core.turn.runtime_manifest import ApiKeyEnvironment
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import SessionSpec
@@ -42,7 +43,7 @@ class OpenAIDeployment(BaseModel):
     project: Nonblank
     agent_id: Nonblank
     environment_id: Nonblank
-    api_key_env: Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
+    api_key_env: ApiKeyEnvironment
     spend_limit_usd_cents: Annotated[int, Field(gt=0, strict=True)] | None = None
     skill_ids: tuple[Nonblank, ...] = ()
 

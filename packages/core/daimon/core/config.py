@@ -156,6 +156,15 @@ class McpSettings(BaseModel):
             "Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter."
         ),
     )
+    require_routine_destination: bool = Field(
+        default=False,
+        description=(
+            "Require an explicit destination when the MCP create_routine tool is called. "
+            "When enabled, a missing destination is refused before agent lookup or creation, "
+            "with a warning that the routine would not post. Default false preserves "
+            "record-only routines; existing routines and updates are unaffected."
+        ),
+    )
     public_url: HttpUrl | None = Field(
         default=None,
         description=(
@@ -402,6 +411,25 @@ class DiscordSettings(BaseModel):
         description=(
             "Maximum recent Discord messages scanned per channel or thread on startup. "
             "Current message gates and durable admissions prevent duplicate turns."
+        ),
+    )
+    writers_none_notice: bool = Field(
+        default=False,
+        description=(
+            "Opt in to one stop reaction on an explicit bot mention refused by a confirmed "
+            "writers=none rule. Only the posting owner reacts, with per-requester, channel "
+            "and bot-wide cooldowns. No text, DM or agent turn is sent. Unknown protection "
+            "stays silent. Limits are process-local and reset on restart."
+        ),
+    )
+    credential_form_expiry: bool = Field(
+        default=False,
+        description=(
+            "Automatically retire expired, unclicked credential cards in place. "
+            "Requires the existing single-posting-process wake poller switch. "
+            "Default false starts no expiry task and adds no database or Discord calls. "
+            "Failed card edits remain pending for retry; "
+            "no credentials or waiting work are applied."
         ),
     )
     thread_open_notice_after_s: float = Field(
@@ -1534,7 +1562,12 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
     `_env_file` exists to give tests a way to disable `.env` loading
     (`_env_file=None`) so they only see `monkeypatch.setenv` values.
     """
-    return Settings(_env_file=_env_file)  # pyright: ignore[reportCallIssue]
+    settings = Settings(_env_file=_env_file)  # pyright: ignore[reportCallIssue]
+    if settings.turn.path == "mux" and settings.turn.channel_backends:
+        from daimon.core.turn.runtime_manifest import validate_configured_runtime_manifest
+
+        validate_configured_runtime_manifest()
+    return settings
 
 
 class _CryptoSettingsSource(BaseSettings):
@@ -1570,4 +1603,9 @@ class _TurnSettingsSource(BaseSettings):
 
 def load_turn_settings(*, _env_file: str | None = ".env") -> TurnSettings:
     """Read the same turn flag without unrelated API/database configuration."""
-    return _TurnSettingsSource(_env_file=_env_file).turn  # pyright: ignore[reportCallIssue]
+    turn = _TurnSettingsSource(_env_file=_env_file).turn  # pyright: ignore[reportCallIssue]
+    if turn.path == "mux" and turn.channel_backends:
+        from daimon.core.turn.runtime_manifest import validate_configured_runtime_manifest
+
+        validate_configured_runtime_manifest()
+    return turn

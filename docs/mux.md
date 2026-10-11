@@ -1393,7 +1393,7 @@ resources for one exact tenant, account, channel and backend configuration diges
     "project": "<actual OpenAI project ID>",
     "agent_id": "<provisioned OpenAI agent ID>",
     "environment_id": "<provisioned OpenAI environment template ID>",
-    "api_key_env": "OPENAI_CHANNEL_KEY",
+    "api_key_env": "DAIMON_CHANNEL_OPENAI_KEY",
     "skill_ids": []
   }
 ]
@@ -1490,3 +1490,124 @@ for host conformance collectors; they do not select revisions, inject bindings
 or change application startup. Use dedicated idle applications and scripted
 transports. Each adapter's `BACKEND-CONFORMANCE.md` describes its input boundary
 and the independent database and SDK mutation controls.
+
+### Offline host turn conformance evidence
+
+`daimon.testing.turn_conformance` exposes optional evidence collectors for backend selection (C14) and durable wake
+fencing (C17). Provider harnesses supply authorized callbacks using normal host
+admission and the real provider driver. The collectors return independent
+binding, journal and wake facts; they never return a conformance verdict.
+Application startup and unconfigured channels do not import these collectors.
+
+C14 callbacks must use normal current-config admission. On explicitly configured mux channels, admission selects an authorized existing binding and validates its persisted provider/profile/revision before preparing the turn. A new thread selects the current channel revision. Missing retained configuration or an unavailable original registration is refused as `backend_unsupported` before provider effects. Legacy and unconfigured admission do not read native bindings. C17
+requires an independently expected native event in the journal, durable wake
+claim takeover, stale generation refusal and released driver leases. Missing
+provider envelopes remain PENDING. Wake probes refuse non-isolated databases
+before connection. The shared `daimon_test` name is allowed only with both
+GitHub Actions CI flags and `isolated_test_schema()` builder provenance for the
+current process; a missing registry getter fails closed. Scripted host persistence controls are
+reported separately from complete provider/live conformance. The C18 terminal-failure
+fix is separate from the optional outcome evidence collector.
+
+These explicit C17 envelopes call the shared `daimon.testing.db.require_owned_sessionmaker()` before accessing their store or constructing a session. The shared guard validates the primary bind and every model/table route, including connection binds; each engine must independently satisfy the lane or registered isolated-CI policy.
+
+The owned-database host hook test fixture skips the contributor default local `daimon_test` before tenant provisioning. Exact isolated GitHub Actions CI still validates registered schema provenance and all database routes before provisioning.
+
+### Committed termination evidence
+
+`daimon.testing.turn_conformance.TerminationCase` and `termination_evidence`
+collect typed C18 facts under an explicitly supplied authorized scope and owned
+database. Provider harnesses declare reachable reasons and expected outcomes
+before running normal host callbacks. The collector activates a fresh observation,
+drains its detached writer and reads the exact committed outcome ID. Expected
+account/session values do not populate actual attribution. Recovery preserves
+the host finalizer's once-only write. Missing rows, wrong attribution, unfinalized
+states and incomplete case coverage remain visible; there is no verdict field.
+Absent provider envelopes remain PENDING. No application defaults change.
+
+### Gemini deployment runtime
+
+Install `daimon-mux[gemini]` only for deployments selecting
+`gemini.inline_reuse` with `gemini-3.8-flash`. Enable the same explicit mux and
+channel-backend flags used for OpenAI. `DAIMON_TURN__PROVIDER_RUNTIME_FILE` may
+contain both providers; selection requires the exact admitted profile, tenant,
+platform, channel, account and configuration digest.
+
+A Gemini entry uses the common selector fields plus:
+
+```json
+{
+  "profile": "gemini.inline_reuse",
+  "tenant_id": "<tenant UUID>",
+  "platform": "slack",
+  "channel_id": "<channel ID>",
+  "account_id": "<authorized account UUID>",
+  "config_digest": "<admitted ConfigRevision.digest>",
+  "project": "<actual Gemini project associated with this key>",
+  "api_key_env": "DAIMON_CHANNEL_GEMINI_KEY",
+  "agent_name": "configured-agent",
+  "system": "<explicit native system instruction>",
+  "tools": [],
+  "environment": {"name": "inline-workspace"},
+  "records_path": "/var/lib/daimon/gemini-records.sqlite",
+  "holds_path": "/var/lib/daimon/gemini-holds.sqlite",
+  "hold_usd": "0.05",
+  "cap_usd": "0.25"
+}
+```
+
+`tools` is required: `[]` sends an explicitly empty native list. Omitted/null
+tools refuse before key access. Search, URL context, execution or custom tools
+run only when an operator explicitly lists a supported `ToolSpec`. The separate
+Gemini explicit-tools product also protects older requests; it is required
+before live deployment. Unsupported workspace/MCP/confirmation policies refuse.
+Anthropic admission agent/environment IDs never become Gemini identities.
+
+Provision the parent directories and persistent local volumes before enabling
+the channel. SQLite commits the complete driver record transaction and
+serializes workers sharing the same database; all workers for a provider
+account must share the paths. Account data is partitioned by authorized tenant,
+account and project. The two paths must be absolute and distinct, so a durable
+hold can commit before native dispatch without deadlocking a record transaction.
+These files are created only when the configured provider uses them; no store,
+manifest or provider key is read on the default path. Newly created files are
+private to the process owner. Multi-host storage requires a separate adapter.
+
+Each Flash attempt first persists an explicit operator hold, then retains its
+accepted/refused/unknown receipt. Holds are estimates, not actual spend. They
+remain reserved until an accounting reconciler supplies verified provider and
+infrastructure actuals; this slice never treats a refusal as a free call or
+releases an unknown outcome. Exhausting the configured hold cap refuses further
+attempts. The provider usage outbox preserves native usage with unknown prices
+and infrastructure costs pending. Automatic actual settlement/hold release is a
+follow-up; this runtime is not a live certificate or QA parity claim.
+
+Credential discovery happens only in the selected authorized transport factory.
+Private request-owned SDK clients use the explicit key, pinned Google origin,
+`vertexai=False`, no environment proxies and no native mutation retries. Stream
+completion, close, cancellation and close failure dispose the client lifetime.
+
+## Runtime credential reference validation
+
+Use host-scoped credential names such as `DAIMON_CHANNEL_OPENAI_KEY` and
+`DAIMON_CHANNEL_GEMINI_KEY` in `api_key_env`. Reserved provider prefixes
+`OPENAI_`, `ANTHROPIC_`, `GOOGLE_` and `GEMINI_` are refused case-insensitively: the
+SDK isolation guard rejects ambient provider variables, including custom names
+under those prefixes. The guard remains in force.
+
+With the mux path and channel backends explicitly enabled, the settings loaders
+check an explicitly configured runtime manifest before the first turn and raise
+`ProviderRuntimeConfigurationError` for a reserved reference. This check reads
+manifest metadata only; it does not look up a key, construct a runtime or open
+provider storage. Provider plan validation applies the same reference policy.
+Missing manifests retain the selected-turn refusal. Scope/digest, complete native
+policy and key availability still require admission; no credential is read for
+unconfigured channels. Legacy or disabled channel-backend settings do not inspect
+the runtime manifest.
+
+
+### Offline A7 Anthropic preparation
+
+`python -m daimon.testing.a7_anthropic` prepares an explicit offline probe pack, a state-aware legacy/mux replay benchmark and a native admission inventory. It is never imported by the app. The mock SDK client refuses ambient Anthropic settings before allocation, copy and dispatch; the database guard checks every sessionmaker bind through the shared owned-sessionmaker policy. The benchmark times actual SDK/driver/journal/claim/lease work on fresh binding slots and compares request/event/state digests. Existing-client quiet runs require explicit lead GO, a clean pinned checkout, 200 measured plus 20 warmup pairs and fixed CPU/load limits. Cold or loaded diagnostics cannot certify latency; no mode reads keys or executes a live request. Recipe readiness stays PENDING until native callbacks, supported limit acknowledgement, canonical budget reservation, disposable scope and cleanup are provided by the owners. This latency gate is separate from the complete M0 certificate and live token/dollar equivalence.
+
+Use a new evidence directory: `uv run python -m daimon.testing.a7_anthropic --mode offline-probes --output /tmp/a7-offline-unique`. `--mode live-plan` checks immutable native recipes only. `--mode quiet-benchmark --quiet-window-go` is opt-in and remains entirely offline; run it detached after the lead declares the host quiet. Preserve raw timings and failed results.

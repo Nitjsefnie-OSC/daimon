@@ -34,42 +34,25 @@ def clients_for(
     handler: Callable[[httpx.Request], httpx.Response],
 ) -> list[AsyncOpenAI]:
     clients: list[AsyncOpenAI] = []
+    original = deployment._ConfiguredTransport._client  # pyright: ignore[reportPrivateUsage]
 
-    def factory(
-        *,
-        api_key: str,
-        project: str,
-        organization: str,
-        base_url: str,
-        max_retries: int,
-    ) -> AsyncOpenAI:
-        assert api_key == "offline" and project == "selected-project"
-        assert organization == "" and base_url == "https://api.openai.com/v1"
-        assert max_retries == 0
-        client = AsyncOpenAI(
-            api_key=api_key,
-            project=project,
-            organization=organization,
-            base_url=base_url,
-            max_retries=max_retries,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        )
+    def factory(self: deployment._ConfiguredTransport) -> AsyncOpenAI:  # pyright: ignore[reportPrivateUsage]
+        client = original(self)
         clients.append(client)
         return client
 
-    monkeypatch.setattr(deployment, "AsyncOpenAI", factory)
+    # Exercise the product SDK, constructor guard and owned HTTP client. Only
+    # its native network boundary is replaced with the offline transport.
+    monkeypatch.setattr(deployment, "_http_transport", lambda: httpx.MockTransport(handler))
+    monkeypatch.setattr(deployment._ConfiguredTransport, "_client", factory)  # pyright: ignore[reportPrivateUsage]
     return clients
 
 
 @pytest.mark.parametrize("operation", ["request", "multipart"])
-async def test_no_inherited_provider_routing_and_owned_request_close(
+async def test_explicit_provider_routing_and_owned_request_close(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://other-project.invalid/v1")
-    monkeypatch.setenv("OPENAI_PROJECT_ID", "another-project")
-    monkeypatch.setenv("OPENAI_ORG_ID", "another-organization")
-    monkeypatch.setenv("OPENAI_API_KEY", "unselected-offline-key")
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -109,7 +92,7 @@ async def test_ambient_custom_headers_refused_before_sdk_construction(
         pytest.fail("ambient headers reached SDK construction")
 
     monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
-    monkeypatch.setattr(deployment, "AsyncOpenAI", forbidden)
+    monkeypatch.setattr(deployment, "_DeploymentAsyncOpenAI", forbidden)
     transport = deployment.configured_transport(api_key="offline", project="selected-project")
     monkeypatch.setenv(
         "OPENAI_CUSTOM_HEADERS",
@@ -211,3 +194,34 @@ async def test_open_or_request_failure_closes_owned_client(
             stream = await transport.download("/files/native/content")
             await anext(stream)
     assert len(clients) == 1 and clients[0].is_closed()
+
+
+@pytest.mark.parametrize("operation", ["request", "multipart"])
+@pytest.mark.parametrize(
+    "name", ["OPENAI_BASE_URL", "OPENAI_PROJECT_ID", "OPENAI_ORG_ID", "OPENAI_API_KEY"]
+)
+@pytest.mark.parametrize("value", ["", "offline-hostile"])
+async def test_late_ambient_routing_refused_before_sdk_copy(
+    monkeypatch: pytest.MonkeyPatch, operation: str, name: str, value: str
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("ambient configuration reached native I/O")
+
+    clients = clients_for(monkeypatch, handle)
+    transport = deployment.configured_transport(api_key="offline", project="selected-project")
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="ambient OpenAI configuration is unsupported"):
+        if operation == "request":
+            await transport.request("POST", "/agents/sessions", body={}, key="claimed")
+        else:
+            await transport.multipart(
+                "/files",
+                files=(("file", "test.txt", b"test", "text/plain"),),
+                fields={"purpose": "agents"},
+                key="claimed",
+            )
+    assert not requests
+    assert clients == []

@@ -165,6 +165,7 @@ source_modules = [
     "daimon.core.continuity",
     "daimon.core.context_prompt",
     "daimon.core.credential_env",
+    "daimon.core.credential_form_expiry",
     "daimon.core.credential_requests",
     "daimon.core.credential_submit",
     "daimon.core.cron",

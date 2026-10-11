@@ -1,5 +1,11 @@
 # Architecture
 
+The MCP `create_routine` tool can require an explicit destination when
+`DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`. Missing destinations are
+refused after authentication and destination-pair validation, before agent
+lookup or creation. This option defaults to `false`; existing routines and
+routine updates retain their current behavior.
+
 Daimon is built on
 [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart).
 Managed Agents (MA) owns the agent, its sandbox, its skills and the session
@@ -228,6 +234,15 @@ platform rejection, or "Something went wrong on our side." A small third line,
 JSON, exception bodies and tool details stay out of failure copy. A failed
 reply can still be followed by files created during the turn. The output sweep suppresses an oversize notice when
 the same filename and size were already attached by Daimon in that turn.
+
+With `DAIMON_DISCORD__WRITERS_NONE_NOTICE=true`, the single posting owner may
+add one ⛔ reaction to an explicit bot mention refused by a confirmed
+`writers=none` rule. This host signal sends no text or DM and starts no agent
+turn. The default is off; unreadable protection and unresolved categories
+remain silent. Attempts are limited to one per requester in a parent channel
+per five minutes, one per parent channel per 30 seconds, and ten per minute
+across the posting process. Failed attempts consume the cooldown; no fallback
+message is sent. Limits are process-local and reset on restart.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
 application-owned webhook post in the same tenant and channel. With agent
@@ -1307,6 +1322,21 @@ agent code execution or a redirected connector through a key value or name.
 
 ## Sessions and Managed Agents
 
+Discord credential-card expiry is separately opt-in through
+`DiscordSettings.credential_form_expiry` (default false) and the existing
+single posting-owner switch. `core/credential_form_expiry.py` exposes
+`poll_credential_form_expiries_once(sessionmaker, now=..., edit=...)` for
+production and clocked offline execution. The store atomically retires a
+bounded batch with `used_at IS NULL`, recording `expired_card_pending` in
+the existing outcome column; a consume or supersede that won first is left
+alone. That transaction commits before Discord HTTP. The result-returning
+`edit_expired_posted_card` verifies the persisted tenant/thread/message and
+forbids webhook replacement; an acknowledged edit CAS changes the outcome
+to `expired_card_updated`. Failures remain pending and a bounded cursor
+allows later cards to progress before retries. These outcomes never mean
+credential application. The click helper, default TTL, token-consumption
+predicates and other platform paths are unchanged; no migration is needed.
+
 A turn does not create a session per message. `thread_sessions` maps
 `(tenant, platform, thread)` to one MA session id, and its `status` column
 carries the lifecycle: `live` is the caller's current session, `dead` is one MA
@@ -1557,6 +1587,12 @@ host admits uploads only from the tenants the operator lists in
 `DAIMON_NOTEBOOK__TENANTS`, matched against the tenant named in the bot's
 signed upload token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
+Each host can opt into a static HTML page for unavailable document links:
+`DAIMON_NOTEBOOK__HTML_LINK_ERRORS=true` applies only to unresolved
+`GET /n/{slug}/` requests (404), and `DAIMON_REPORT__HTML_LINK_ERRORS=true`
+applies only to refused `GET /r/{slug}` requests (403). Both default to
+`false`. Token and expiry checks, successful pages, and API/file/admin
+responses retain their existing behavior.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach Daimon over HTTP with capability tokens, and the
 `must not import daimon` contracts keep it that way.

@@ -270,6 +270,15 @@ Both fields are optional so deployments that don't run the MCP adapter keep work
 
 Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter.
 
+### `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION`
+
+`bool` · optional · default `False`
+
+Require an explicit destination when the MCP create_routine tool is called. When
+enabled, a missing destination is refused before agent lookup or creation, with a
+warning that the routine would not post. Default false preserves record-only routines;
+existing routines and updates are unaffected.
+
 ### `DAIMON_MCP__PUBLIC_URL`
 
 `HttpUrl | None` · **required to run the MCP adapter** · default unset
@@ -437,6 +446,24 @@ Maximum recently active Discord channels and threads scanned per guild on startu
 
 Maximum recent Discord messages scanned per channel or thread on startup. Current
 message gates and durable admissions prevent duplicate turns.
+
+### `DAIMON_DISCORD__WRITERS_NONE_NOTICE`
+
+`bool` · optional · default `False`
+
+Opt in to one stop reaction on an explicit bot mention refused by a confirmed
+writers=none rule. Only the posting owner reacts, with per-requester, channel and bot-
+wide cooldowns. No text, DM or agent turn is sent. Unknown protection stays silent.
+Limits are process-local and reset on restart.
+
+### `DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY`
+
+`bool` · optional · default `False`
+
+Automatically retire expired, unclicked credential cards in place. Requires the existing
+single-posting-process wake poller switch. Default false starts no expiry task and adds
+no database or Discord calls. Failed card edits remain pending for retry; no credentials
+or waiting work are applied.
 
 ### `DAIMON_DISCORD__THREAD_OPEN_NOTICE_AFTER_S`
 
@@ -1460,6 +1487,14 @@ shared env file would set both.
 
 `str | None` · optional · default unset
 
+### `DAIMON_NOTEBOOK__HTML_LINK_ERRORS`
+
+`bool` · optional · default `False`
+
+Opt in to a static HTML page for unavailable notebook document links (GET /n/{slug}/,
+status 404). Other routes and methods keep their existing responses. Disabled by
+default.
+
 ### `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES`
 
 `int` · optional · default `1048576`
@@ -1625,6 +1660,13 @@ Cap on concurrently running turns across one report's threads.
 `int` · optional · default `90`
 
 How long a per-recipient link remains valid before expiring.
+
+### `DAIMON_REPORT__HTML_LINK_ERRORS`
+
+`bool` · optional · default `False`
+
+Opt in to a static HTML page for refused report document links (GET /r/{slug}, status
+403). API, file and admin routes keep their existing responses. Disabled by default.
 
 ### `DAIMON_REPORT__THREAD_IDLE_ARCHIVE_HOURS`
 

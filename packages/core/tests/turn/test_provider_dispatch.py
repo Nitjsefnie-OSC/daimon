@@ -29,6 +29,7 @@ from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionRequester
 from daimon.core.turn.run import _turn_port_kwargs
+from daimon.testing.isolated_sdk import build_async_openai
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -40,7 +41,6 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
-from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TENANT = uuid.UUID(int=4404)
@@ -73,9 +73,7 @@ async def openai_backend() -> AsyncIterator[OpenAIDriver]:
     def refuse(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"unexpected OpenAI I/O: {request.method} {request.url.path}")
 
-    async with AsyncOpenAI(
-        api_key="offline", http_client=httpx.AsyncClient(transport=httpx.MockTransport(refuse))
-    ) as sdk:
+    async with build_async_openai(transport=httpx.MockTransport(refuse), api_key="offline") as sdk:
         yield OpenAIDriver(
             SDKTransport(sdk),
             account_scope_id=SESSION.account_scope_id,

@@ -7,9 +7,11 @@ import contextlib
 import functools
 import io
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any, Final, Literal
 
 import aiohttp
@@ -98,6 +100,7 @@ from daimon.core.continuity.messages import (
     render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
+from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
@@ -111,8 +114,10 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
+from daimon.core.permissions import channel_permissions
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.discord_message_admissions import (
     claim_message,
@@ -123,6 +128,7 @@ from daimon.core.stores.discord_message_admissions import (
     unposted_thread_for_message,
 )
 from daimon.core.stores.domain import (
+    CredentialRequestRow,
     Role,
     TaskContinuationRow,
     TenantRow,
@@ -254,6 +260,43 @@ _TURN_CARD_RECOVERY_CONCURRENCY = 4
 
 
 THREAD_OPENING_REACTION = "⌛"
+
+
+def _positive_discord_id(value: object) -> bool:
+    return isinstance(value, int) and value > 0
+
+
+class _WritersNoneNoticeLimiter:
+    """Bound attempts before I/O, on the single posting owner; not a distributed lease."""
+
+    MAX_ENTRIES = 2048
+
+    def __init__(self) -> None:
+        self._until: dict[tuple[str, ...], float] = {}
+        self._attempts: deque[float] = deque()
+
+    def reserve(
+        self, *, tenant: str, channel: str, requester: str, message: str, now: float
+    ) -> bool:
+        # No await: concurrent handlers reserve before either can perform I/O.
+        self._until = {key: expiry for key, expiry in self._until.items() if expiry > now}
+        while self._attempts and self._attempts[0] <= now - 60:
+            self._attempts.popleft()
+        limits = (
+            (("requester", tenant, channel, requester), 300),
+            (("channel", tenant, channel), 30),
+            (("message", tenant, message), 300),
+        )
+        if (
+            len(self._attempts) >= 10
+            or any(key in self._until for key, _ in limits)
+            or len(self._until) + len(limits) > self.MAX_ENTRIES
+        ):
+            return False
+        for key, ttl in limits:
+            self._until[key] = now + ttl
+        self._attempts.append(now)
+        return True
 
 
 async def _open_thread_with_notice(
@@ -854,6 +897,11 @@ class DaimonBot(commands.Bot):
             log.warning("discord.drain_retained_card_tasks_pending", remaining=retained)
         await self.close()
 
+    async def _edit_expired_credential_card(self, row: CredentialRequestRow) -> bool:
+        from daimon.adapters.discord.posted_controls import edit_expired_posted_card
+
+        return await edit_expired_posted_card(self, row=row)
+
     async def setup_hook(self) -> None:
         """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""
         self.start_orphan_recovery()
@@ -909,6 +957,17 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
+            if (
+                self.runtime.settings.discord is not None
+                and self.runtime.settings.discord.credential_form_expiry is True
+            ):
+                self._spawn(
+                    run_credential_form_expiry_poller(
+                        self.runtime.sessionmaker,
+                        edit=self._edit_expired_credential_card,
+                        should_stop=lambda: self.draining or self.is_closed(),
+                    )
+                )
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
@@ -2191,6 +2250,77 @@ class DaimonBot(commands.Bot):
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
         )
 
+    async def _notice_writers_none(self, message: discord.Message, tenant_id: uuid.UUID) -> None:
+        """Opted-in, non-content host signal; never authorizes a post or a turn."""
+        settings = self.runtime.settings.discord
+        if (
+            settings is None
+            or settings.writers_none_notice is not True
+            or self.wake_poller_enabled is not True
+            or self.user is None
+            or message.guild is None
+            or derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
+            != tenant_id
+            or not any(user.id == self.user.id for user in message.mentions)
+            or not should_process_message(
+                author_is_bot=message.author.bot,
+                author_id=str(message.author.id),
+                bot_mentioned=True,
+                author_is_webhook=isinstance(message.webhook_id, int),
+                guild_id=str(message.guild.id),
+                self_user_id=str(self.user.id),
+                qa_bot_user_ids=settings.qa_bot_user_ids,
+            )
+        ):
+            return
+        channel = message.channel
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return
+        if channel.guild.id != message.guild.id:
+            return
+        parent_id = channel.parent_id if isinstance(channel, discord.Thread) else channel.id
+        if not all(
+            _positive_discord_id(value)
+            for value in (channel.id, parent_id, message.id, message.author.id)
+        ):
+            return
+        limiter = getattr(self, "_writers_none_notice_limiter", None)
+        if not isinstance(limiter, _WritersNoneNoticeLimiter):
+            limiter = _WritersNoneNoticeLimiter()
+            self._writers_none_notice_limiter = limiter
+        if not limiter.reserve(
+            tenant=str(tenant_id),
+            channel=str(parent_id),
+            requester=str(message.author.id),
+            message=str(message.id),
+            now=monotonic(),
+        ):
+            return
+        try:
+            async with asyncio.timeout(3):
+                async with self.runtime.sessionmaker() as session:
+                    policy = await load_access_policy(session, tenant_id=tenant_id)
+                category_id, _ = await _resolve_category(channel, fetch=False)
+                # Unresolved-category protection is conservative, not evidence
+                # of a real writers=none rule at this origin. Never fetch here.
+                confirmed = (
+                    channel_permissions(
+                        policy,
+                        channel_id=str(channel.id),
+                        parent_channel_id=(
+                            str(parent_id) if isinstance(channel, discord.Thread) else None
+                        ),
+                        category_id=category_id,
+                        category_unresolved=False,
+                    ).writers
+                    == "none"
+                )
+                if confirmed:
+                    await message.add_reaction("⛔")
+        except Exception as exc:
+            # Keep the reservation on failure: no retry or fallback post/DM.
+            log.warning("discord.writers_none_notice_failed", error_type=type(exc).__name__)
+
     async def on_message(
         self,
         message: discord.Message,
@@ -2329,6 +2459,13 @@ class DaimonBot(commands.Bot):
                 user_id=str(message.author.id),
                 state=post_state.value,
             )
+            if (
+                post_state is ProtectionState.PROTECTED
+                and discord_settings is not None
+                and discord_settings.writers_none_notice is True
+                and self.wake_poller_enabled is True
+            ):
+                await self._notice_writers_none(message, tenant_id)
             return
         claimed_message = False
         queued_message = False
@@ -3582,14 +3719,21 @@ class DaimonBot(commands.Bot):
                 return
             target = thread or message.channel
             if err.reason == "writers_none":
-                # Nothing may be posted into a protected channel, a refusal
-                # included; the log is the only trace.
+                # No refusal post. The explicit opt-in permits only a static
+                # host reaction after confirmation of the current real rule.
                 log.info(
                     "turn.skipped.writers_none",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
                 )
+                notice_settings = self.runtime.settings.discord
+                if (
+                    notice_settings is not None
+                    and notice_settings.writers_none_notice is True
+                    and self.wake_poller_enabled is True
+                ):
+                    await self._notice_writers_none(message, tenant_id)
             elif err.reason == "invoker_not_allowed":
                 log.info(
                     "turn.skipped.invoker_not_allowed",
