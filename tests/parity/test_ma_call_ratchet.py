@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-# Main sync: two remaining main-added calls; credential guidance uses the resource port.
-MAX_OUTSIDE_DRIVERS = 2
+# Two main-added calls remain after the legacy budget-stamp session read is ported.
+MAX_OUTSIDE_DRIVERS = 1
 SPEC = importlib.util.spec_from_file_location("ma_inventory", ROOT / "scripts/ma_inventory.py")
 assert SPEC is not None and SPEC.loader is not None
 inventory = importlib.util.module_from_spec(SPEC)

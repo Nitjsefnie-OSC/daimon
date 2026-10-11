@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2432,
+  "files_scanned": 2433,
   "parse_errors": [],
   "calls": [
     {
@@ -1435,20 +1435,6 @@
         "type"
       ],
       "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/session_preparation.py",
-      "line": 602,
-      "end": 602,
-      "scope": "_resolve_legacy_budget_stamp",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "deps.anthropic.beta.sessions.retrieve(row.ma_session_id)",
-      "request_keys": [],
-      "response_access": [
-        "observed.metadata",
-        "observed.metadata.get"
-      ]
     },
     {
       "file": "packages/core/tests/contracts/test_agents.py",
@@ -5416,6 +5402,47 @@
       "category": "test",
       "resource": "files.delete",
       "call": "legacy.beta.files.delete('file_ttl')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_session_budget_stamp_port_requests.py",
+      "line": 109,
+      "end": 109,
+      "scope": "test_budget_native_read_preserves_sdk_request_reply_and_tenant_scope",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "legacy.beta.sessions.retrieve(SESSION)",
+      "request_keys": [],
+      "response_access": [
+        "original.metadata",
+        "original.metadata.get",
+        "original.model_dump",
+        "original.model_fields_set"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_session_budget_stamp_port_requests.py",
+      "line": 150,
+      "end": 150,
+      "scope": "test_budget_native_read_keeps_legacy_missing_metadata_failure",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "legacy.beta.sessions.retrieve(SESSION)",
+      "request_keys": [],
+      "response_access": [
+        "original.metadata",
+        "original.metadata.get"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_session_budget_stamp_port_requests.py",
+      "line": 178,
+      "end": 178,
+      "scope": "test_budget_native_read_preserves_sdk_failure_retry_marker_and_notice",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "legacy.beta.sessions.retrieve(SESSION)",
       "request_keys": [],
       "response_access": []
     },
@@ -13844,6 +13871,15 @@
     {
       "file": "packages/core/daimon/core/session_preparation.py",
       "line": 44,
+      "module": "anthropic._models",
+      "names": [
+        "construct_type_unchecked"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/session_preparation.py",
+      "line": 45,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsSession"
@@ -16336,6 +16372,15 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_session_budget_stamp_port_requests.py",
+      "line": 13,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsSession"
       ],
       "category": "test"
     },

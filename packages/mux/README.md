@@ -768,3 +768,8 @@ transport only.
 OpenAI also refuses ambient TLS/proxy settings before context creation, including
 `SSLKEYLOGFILE`, so configured channels cannot enable TLS session-key files.
 Credential-guidance backfills use the existing tenant-authorized agent update port. The host keeps its version check, prompt-only patch and best-effort boot behavior.
+Legacy session budget-stamp backfill uses `anthropic.session_reads@1` with
+the tenant/account scope authorized by the mapping lookup. Its native snapshot
+keeps the SDK's partial metadata and exception behavior without projecting a
+generic session binding. The host still commits the stamp before preparation
+locks the mapping and leaves unreadable stamps for the next bind to retry.
