@@ -81,7 +81,7 @@ async def test_new27_runs_through_the_admin_callback(
     assert (receipt.status, receipt.operation, receipt.code) == ("executed", MCP_TOKEN_CALL, None)
     assert receipt.observations["outcome"] == "token_rejected"
     assert receipt.observations["probe_statuses"] == [401]
-    assert receipt.observations["used"] is True
+    assert receipt.observations["used"] is False  # released for a retry since main's #611
     # The cell's own assertion then runs on the values the step produced.
     with pytest.raises(DbCheckInvalid, match="SQLSTATE 42703"):
         await db_check(db_session_factory, NEW27_SQL, receipt.values)
