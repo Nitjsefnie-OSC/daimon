@@ -6,11 +6,12 @@ import asyncio
 import contextlib
 import types
 import uuid
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic as _anthropic
@@ -103,7 +104,9 @@ def _make_runtime(
     # "'async for' requires an object with __aiter__ method". Empty history
     # degrades it to the history-only rung, same as before that rescue path
     # existed.
-    anthropic.beta.sessions.events.list = MagicMock(return_value=_AsyncIter([]))
+    # The turn-end billing catch-up (`daimon.core.usage_reconcile`) awaits the
+    # same call for its first page, as the SDK's paginator allows.
+    anthropic.beta.sessions.events.list = MagicMock(side_effect=lambda *a, **k: _EmptyEventList())
     from daimon.core.ma_resolver import new_resolver_cache
 
     resolver_cache = new_resolver_cache()
@@ -147,6 +150,32 @@ def _make_turn_deps(
         resolver_cache=resolver_cache,
         billing_config=None,
     )
+
+
+class _EmptyEventPage:
+    """An SDK cursor page with no events and nothing after it."""
+
+    data: list[object] = []
+
+    def has_next_page(self) -> bool:
+        return False
+
+
+class _EmptyEventList:
+    """Stands in for the SDK's `AsyncPaginator` over an empty event log: it can
+    be iterated (`async for`) or awaited for its first page, as the real one can."""
+
+    def __aiter__(self) -> _EmptyEventList:
+        return self
+
+    async def __anext__(self) -> object:
+        raise StopAsyncIteration
+
+    def __await__(self) -> Generator[Any, None, _EmptyEventPage]:
+        async def _first() -> _EmptyEventPage:
+            return _EmptyEventPage()
+
+        return _first().__await__()
 
 
 class _AsyncIter:

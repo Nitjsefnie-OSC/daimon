@@ -62,8 +62,12 @@ async def record_turn_usage(
     pricing: ModelRates | None = None,
     reason: TurnLedgerReason = "turn_debit",
     channel_id: str | None = None,
-) -> None:
+) -> Decimal | None:
     """Write one usage_events row and one debit ledger row.
+
+    Returns the USD this call debited, or None when it wrote no ledger row
+    (a DM turn, or the key was already debited by another writer), so a
+    caller can report what it actually billed.
 
     `markup` and `pricing` are keyword-only params for the transactional debit
     (TOPUP-01). Writes a negative delta_usd row to tenant_ledger in the SAME
@@ -85,7 +89,7 @@ async def record_turn_usage(
     tenant_id=None is the DM signal — no tenant, no usage row, no ledger row.
     """
     if tenant_id is None:
-        return  # DM turn — no tenant to bill, skip write
+        return None  # DM turn — no tenant to bill, skip write
     async with sessionmaker() as s, s.begin():
         await usage_events.record(
             s,
@@ -99,7 +103,7 @@ async def record_turn_usage(
         )
         cost = cost_of(event.model_usage, pricing)
         debit = debit_amount(cost, markup=markup)
-        await tenant_ledger.insert_entry(
+        inserted = await tenant_ledger.insert_entry(
             s,
             tenant_id=tenant_id,
             delta_usd=-debit,
@@ -110,6 +114,7 @@ async def record_turn_usage(
             # lands inside the timed promo window the call was made in.
             occurred_at=event.processed_at,
         )
+    return debit if inserted else None
 
 
 async def _record_tool_model_usage(

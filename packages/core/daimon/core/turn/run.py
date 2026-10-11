@@ -71,19 +71,22 @@ from daimon.core.turn.prepare import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
-from daimon.core.usage_reconcile import ReconcileTrigger, reconcile_unbilled
+from daimon.core.usage_reconcile import reconcile_unbilled
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger(__name__)
 
 
-async def _reconcile_unbilled(
-    deps: TurnDeps, *, session_id: str, record: UsageRecorder, trigger: ReconcileTrigger
-) -> None:
+async def _reconcile_unbilled(deps: TurnDeps, *, session_id: str, record: UsageRecorder) -> None:
     """Debit model calls on `session_id` that no live stream metered.
 
-    Named boundary: a failed backfill must not fail or block the user's turn.
-    Recording is idempotent, so the next reconcile on the session (or the
+    Runs once the turn is over -- after its answer or failure was rendered --
+    so it never delays the user's message or spends the turn's ceiling.
+    `reconcile_unbilled` bounds itself (pages and one wall-clock budget over
+    MA and database work); its durable cursor lets the next turn resume.
+
+    Named boundary: a failed backfill must not fail the user's turn.
+    Recording is idempotent, so the next pass on the session (or the
     scheduler sweep) retries whatever this one could not write.
     """
     try:
@@ -92,14 +95,12 @@ async def _reconcile_unbilled(
             sessionmaker=deps.sessionmaker,
             managed_session_id=session_id,
             record=record,
-            trigger=trigger,
         )
     except _anthropic.NotFoundError:
-        # A dead session: the turn's own dead-session recovery handles it, and
-        # its events can no longer be listed.
-        log.info("billing.reconcile_skipped", managed_session_id=session_id, trigger=trigger)
+        # A deleted session: its events can no longer be listed.
+        log.info("billing.reconcile_skipped", managed_session_id=session_id)
     except (_anthropic.APIError, SQLAlchemyError):
-        log.exception("billing.reconcile_failed", managed_session_id=session_id, trigger=trigger)
+        log.exception("billing.reconcile_failed", managed_session_id=session_id)
 
 
 __all__ = ["RunOutcome", "run_prepared_turn"]
@@ -731,17 +732,6 @@ async def run_prepared_turn_impl(
         ma_session_id = prepared.ma_session_id
         mapping_id = prepared.mapping_id
 
-        # A reused session may have kept working after the worker streaming
-        # its last turn went away (a deploy, a crash); those model calls
-        # reached no recorder. Debit them before this turn adds more.
-        if prepared.reused:
-            await _reconcile_unbilled(
-                deps,
-                session_id=ma_session_id,
-                record=prepared._record,  # pyright: ignore[reportPrivateUsage]
-                trigger="attach",
-            )
-
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
         state = await run_turn(
             anthropic=deps.anthropic,
@@ -958,11 +948,9 @@ async def run_prepared_turn_impl(
 
     outcome = await _run_within_ceiling()
     # Turn end: anything this session billed nowhere -- calls MA made while no
+    # worker was streaming it (an earlier turn whose worker died), while no
     # stream generation was attached, or before a ceiling cut the turn off.
     await _reconcile_unbilled(
-        deps,
-        session_id=active_session_id_cell[0],
-        record=active_record_cell[0],
-        trigger="turn_end",
+        deps, session_id=active_session_id_cell[0], record=active_record_cell[0]
     )
     return outcome

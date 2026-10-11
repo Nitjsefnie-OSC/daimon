@@ -3270,3 +3270,23 @@ class DiscordGatewayLease(Base):
     holder_owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UsageReconcileProgress(Base):
+    """How far the turn-end billing catch-up has read one MA session.
+
+    `covered_through` is the newest `span.model_request_end` `processed_at`
+    the catch-up has metered (or confirmed metered), so the next pass resumes
+    there instead of rereading the session from the start
+    (`daimon.core.usage_reconcile`). A missing row means "never read".
+
+    Private to `daimon.core.stores.**` per the import-linter ORM contract.
+    """
+
+    __tablename__ = "usage_reconcile_progress"
+
+    managed_session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    covered_through: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

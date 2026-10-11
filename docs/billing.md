@@ -53,7 +53,51 @@ the model calls in that replayed suffix through the same recorder, and a
 per-turn set of billed event ids keeps every call to one recorder invocation
 whether it arrives live, in a replay, or both. Calls made after an interrupt
 or a turn ceiling, or while the adapter process is down, are not seen by the
-driver at all; those are left to [the sweep](#the-tables).
+driver at all; the [turn-end catch-up](#the-turn-end-catch-up) bills them
+the next time a chat turn on that session ends, and
+[the sweep](#the-tables) is the backstop for sessions no turn revisits.
+
+### The turn-end catch-up
+
+The adapter process can go away mid-turn (a deploy restarts it, it crashes)
+while the Managed Agents session keeps running and making model calls that
+no recorder sees. The next message in that thread reuses the session, but
+its driver replays only its own turn, so those calls would stay unbilled.
+`packages/core/daimon/core/usage_reconcile.py` closes that hole for chat
+turns (`run_prepared_turn`, Discord, Slack and Teams).
+
+When a chat turn is over — after its answer, failure or ceiling message has
+been rendered — the turn reads the session's `span.model_request_end` events
+oldest first and bills every one with no `usage_events` row through the
+turn's own recorder. Price, markup, budget channel, the `turn_debit` reason
+and the `turn:<session>:<event>` ledger key are the live path's, so a call
+the live stream or the sweep also records is debited once. It never runs in
+front of the user's message and does not count against the turn ceiling.
+
+- **Bounds.** At most 10 pages of 100 calls per turn, and a single 5-second
+  budget over the whole pass, Managed Agents reads and database work
+  together. A pass that runs out of either keeps what it has committed.
+- **Resuming.** `usage_reconcile_progress` stores, per session, the newest
+  call time the catch-up has covered. The next pass resumes there (less a
+  5-minute overlap for calls that become listable late), so a long backlog is
+  worked through over successive turns instead of rereading the same pages,
+  and a caught-up session costs one small read per turn.
+- **Failures.** A Managed Agents or database error is logged as
+  `billing.reconcile_failed` (a deleted session as `billing.reconcile_skipped`)
+  and never fails the turn; the next turn on the session retries.
+- **Evidence.** A pass that finds a missing call or runs out of budget logs
+  `billing.reconciled_unbilled` with `managed_session_id`, `scanned`,
+  `missing` (calls with no usage row when read), `debited` and `debit_usd`
+  (ledger rows this pass actually inserted), `pages`, `truncated` and
+  `elapsed_s`.
+- **Attribution.** A recovered call's `usage_events` row carries the platform
+  user of the turn that caught it up, which is not necessarily the person
+  whose turn was cut off; the tenant debit and channel budget are unaffected.
+  It is not part of that turn's own cost in its turn outcome or footer.
+- **What it does not reach.** A session no chat turn touches again (a thread
+  nobody writes in after the crash, a headless or MCP `start_turn` session,
+  a session replaced or deleted before the next turn) is recovered only by
+  the sweep, which is off by default.
 
 The posture is a union in `packages/core/daimon/core/turn/posture.py`:
 `Billed(record=...)` or `BillingExempt(reason=...)`. There is deliberately no
@@ -480,6 +524,7 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 | --- | --- |
 | `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique `idempotency_key` prevents replayed writes; top-ups also check the payment intent to recognize older event-keyed credits. Debits carry the `channel_id` they count against, if any. |
 | `usage_events` | token counts per model call, with the same `channel_id`. No money column; cost is computed on read. |
+| `usage_reconcile_progress` | per Managed Agents session, the newest model call the [turn-end catch-up](#the-turn-end-catch-up) has covered, so the next pass resumes there. |
 | `payment_events` | Stripe webhook dedup, keyed by the Stripe event id, with the compare-and-set `credited_at`. Explicitly not a ledger. |
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
@@ -503,7 +548,8 @@ which drained the workspace request rate limit and stalled turn admission.
 While it is off, three things pause: usage from MCP `start_turn` sessions
 (and other headless sessions with no live recorder) is not debited; usage a
 live adapter missed (a crashed adapter, an interrupted turn) is not
-recovered; and absorbed spend for exempt sessions is not logged. Turning it
+recovered unless a later chat turn on the same session runs the
+[turn-end catch-up](#the-turn-end-catch-up); and absorbed spend for exempt sessions is not logged. Turning it
 back on replays what was missed, because recording is idempotent and the
 startup pass reads every stamped session, but only for sessions and events
 still present in the workspace. A scoped replacement that reads only recently

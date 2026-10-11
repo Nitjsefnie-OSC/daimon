@@ -349,7 +349,9 @@ async def _build_fire(
         # (session_id, model_id) are known after create_session.
         platform_user_id = row.created_by_user_id
 
-        def usage_record_factory(session_id: str, model_id: str) -> Callable[..., Awaitable[None]]:
+        def usage_record_factory(
+            session_id: str, model_id: str
+        ) -> Callable[..., Awaitable[object]]:
             return functools.partial(
                 record_turn_usage,
                 sessionmaker=sm,

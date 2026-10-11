@@ -127,7 +127,7 @@ async def run_turn(
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
     account_id: uuid.UUID | None = None,
-    usage_record_factory: Callable[[str, str], Callable[..., Awaitable[None]]] | None = None,
+    usage_record_factory: Callable[[str, str], Callable[..., Awaitable[object]]] | None = None,
     tenant_id: uuid.UUID | None = None,
     agent_uuid: uuid.UUID | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -218,7 +218,7 @@ async def run_turn_impl(
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
     account_id: uuid.UUID | None = None,
-    usage_record_factory: Callable[[str, str], Callable[..., Awaitable[None]]] | None = None,
+    usage_record_factory: Callable[[str, str], Callable[..., Awaitable[object]]] | None = None,
     tenant_id: uuid.UUID | None = None,
     agent_uuid: uuid.UUID | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -362,7 +362,7 @@ async def run_turn_impl(
             observation.session_id = session.id
             observation.model_by_session[session.id] = session.agent.model.id
 
-        usage_record: Callable[..., Awaitable[None]] | None = None
+        usage_record: Callable[..., Awaitable[object]] | None = None
         if usage_record_factory is not None:
             usage_record = usage_record_factory(session.id, session.agent.model.id)
 
