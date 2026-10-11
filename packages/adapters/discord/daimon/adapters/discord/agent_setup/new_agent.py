@@ -77,24 +77,18 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
         self.runtime = runtime
         self.allowed_user_id = allowed_user_id
         self._panel_render_seq = state.render_seq
-        # Each TextInput's own `label=` is redundant with the wrapping Label's
-        # `text=` (Discord's modern Label-wrapped modal fields), but is kept
-        # so `scripts/lint_discord_modals.py`'s unconditional missing-label
-        # rule passes; discord.py's constructor writes it straight into the
-        # underlying component dataclass rather than through the deprecated
-        # `TextInput.label` property, so it costs nothing at runtime.
+        # The wrapping Label names each input. Discord rejects the whole modal
+        # (400 "Cannot set label on a TextInput in a Label component") when
+        # the TextInput carries its own `label=` too.
         self.name_label: discord.ui.Label[NewAgentModal] = discord.ui.Label(
             text="Name",
             description="lowercase, dashes ok",
-            component=discord.ui.TextInput(
-                label="Name", placeholder="churn-explorer", max_length=64
-            ),
+            component=discord.ui.TextInput(placeholder="churn-explorer", max_length=64),
         )
         self.prompt_label: discord.ui.Label[NewAgentModal] = discord.ui.Label(
             text="What should it help with?",
             description="one or two sentences",
             component=discord.ui.TextInput(
-                label="What should it help with?",
                 style=discord.TextStyle.paragraph,
                 max_length=2000,
                 required=False,

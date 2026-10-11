@@ -3,8 +3,8 @@
 Catches Discord-API violations before they reach send_modal: labels longer
 than 45 codepoints (on a `Label` or on a legacy `TextInput`), `Label`
 descriptions longer than 100, Modals containing more than 5 top-level
-components, and TextInputs carrying neither a label kwarg nor an enclosing
-`Label`.
+components, TextInputs carrying neither a label kwarg nor an enclosing
+`Label`, and TextInputs carrying both (Discord rejects the whole modal).
 
 `discord.ui.Label` is how a modal input is labelled from discord.py 2.6 on
 (`TextInput.label` is deprecated), so a `TextInput` that is the `component=`
@@ -306,6 +306,18 @@ def _walk_modal_class(
                 ),
             )
             continue
+        if id(call) in label_wrapped:
+            yield Finding(
+                file=source_path,
+                line=lineno,
+                rule="discord/label-inside-label",
+                message=(
+                    f"{cls.name}: TextInput inside a Label sets its own label; Discord "
+                    f"rejects the modal (400 Cannot set label on a TextInput in a Label "
+                    f"component). Drop the TextInput's label."
+                ),
+            )
+            continue
         label = _literal_str(label_node)
         if label is None:
             yield Finding(
@@ -415,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
         "discord/label-description-too-long",
         "discord/too-many-components",
         "discord/missing-label",
+        "discord/label-inside-label",
         "discord/max-length-too-large",
         "discord/non-literal-max-length",
         "syntax-error",

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The **New agent** button in `/agent-setup` opens its form again. Discord had been rejecting the form, so clicking the button showed "This interaction failed" and no agent could be created from the panel.
 - Deploys no longer leave Discord buttons and slash commands unanswered for about 14 seconds: the new Discord container starts beside the old one and takes over the gateway through a database lease as soon as the old one has drained and closed.
 - The report viewer loads its stylesheet and script on installs that resolve FastAPI before 0.137, instead of staying on "Loading…".
 - Replacement checkpoints now report priced model calls in turn outcomes while retaining their predecessor-channel debits.

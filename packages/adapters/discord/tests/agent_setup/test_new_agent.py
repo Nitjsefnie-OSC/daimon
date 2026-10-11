@@ -200,6 +200,21 @@ def test_new_agent_modal_has_three_children(account_id: uuid.UUID) -> None:
     assert len(modal.children) == 3, "NewAgentModal must have exactly 3 top-level components"
 
 
+def test_new_agent_modal_payload_labels_inputs_only_through_their_label(
+    account_id: uuid.UUID,
+) -> None:
+    """Discord answers 400 "Cannot set label on a TextInput in a Label component"
+    when a wrapped input names itself too, so the button never opened the form."""
+    modal = _modal(_state(account_id), runtime=_runtime(build_stub_anthropic()))
+    payload = modal.to_components()
+    assert [row["type"] for row in payload] == [18, 18, 18], "every field is a Label"
+    assert [row["label"] for row in payload] == ["Name", "What should it help with?", "Model"]
+    for row in payload:
+        assert row["component"].get("label") is None, (
+            f"the input inside Label {row['label']!r} must not carry its own label"
+        )
+
+
 def test_new_agent_modal_model_select_options_match_catalog(account_id: uuid.UUID) -> None:
     modal = _modal(_state(account_id), runtime=_runtime(build_stub_anthropic()))
     model_field = modal.model_label.component
