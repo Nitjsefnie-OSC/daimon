@@ -713,6 +713,7 @@ cell exactly once, using decimal precision 80 from measurement through totals.
 Terminal closure releases never-started cells and retains
 unknown usage as held. Runner adoption and native spending controls remain
 separate from this offline API. See the [column admission contract](mux/conformance/README.md#whole-column-admission).
+
 Gemini resource administration can explicitly select
 `resource_catalog_enabled=True` with an owned `AgentCatalogTransport`. The
 native catalog adapter compiles concrete bundle pins, fences creation before
