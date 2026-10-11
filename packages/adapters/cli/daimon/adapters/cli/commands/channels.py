@@ -19,9 +19,10 @@ from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import (
     FACE_WAIT_S,
     CliRuntime,
+    ResourceHostMismatch,
     authorized_openai_deployments,
     build_runtime,
-    cli_principal_id,
+    request_resource_host,
 )
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
@@ -485,7 +486,7 @@ _ANTHROPIC_PROFILE = "anthropic.managed_agents"
 
 async def _copy_resource_host(
     rt: CliRuntime, *, tenant_id: uuid.UUID, platform: str, channel: str
-) -> NeutralResourceHost | None:
+) -> tuple[NeutralResourceHost, uuid.UUID] | None:
     """The OpenAI host a channel's own copy is made through, or None for the existing path.
 
     Only with the operator capability (`rt.resource_hosts`). The channel's
@@ -516,12 +517,18 @@ async def _copy_resource_host(
     ]
     if len(authorized) != 1:
         return None
-    return factory(
-        tenant_id=tenant_id,
-        account_id=uuid.UUID(authorized[0].account_id),
-        principal_id=cli_principal_id(rt),
-        operation_key=f"cli-channel-copy:{uuid.uuid4()}",
-    )
+    account_id = uuid.UUID(authorized[0].account_id)
+    try:
+        host = request_resource_host(
+            rt,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            workspace=authorized[0].project,
+            operation_key=f"cli-channel-copy:{uuid.uuid4()}",
+        )
+    except ResourceHostMismatch as exc:
+        raise ChannelRuleRefused("invalid", message=str(exc)) from exc
+    return host, account_id
 
 
 def _ids(
@@ -1066,7 +1073,7 @@ async def channels_rule_set(
     )
     public_url = rt.settings.mcp.public_url if copy_from is not None else None
     try:
-        resource_host = (
+        hosted = (
             await _copy_resource_host(rt, tenant_id=tenant_id, platform=platform, channel=channel)
             if copy_from is not None and not thread
             else None
@@ -1086,7 +1093,9 @@ async def channels_rule_set(
             channel_label=label,
             public_url=str(public_url) if public_url is not None else None,
             release_agents=release_agents,
-            resource_host=resource_host,
+            resource_host=hosted[0] if hosted is not None else None,
+            # The authorized deployment's account: core binds the host's scope to it.
+            actor_account_id=hosted[1] if hosted is not None else None,
         )
     except ChannelRuleRefused as exc:
         console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")

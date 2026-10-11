@@ -20,6 +20,7 @@ from daimon.adapters.cli.runtime import (
     authorized_openai_deployments,
     build_runtime,
     cli_principal_id,
+    request_resource_host,
 )
 from daimon.adapters.cli.tenant import (
     TenantSelector,
@@ -246,10 +247,12 @@ async def _hosted_agent(
         ]
         if not named:
             continue
-        host = factory(
+        # Refuses, rather than falls back, if the host is for any other scope.
+        host = request_resource_host(
+            rt,
             tenant_id=tenant_id,
             account_id=uuid.UUID(account),
-            principal_id=cli_principal_id(rt),
+            workspace=factory.account_scope_id,
             operation_key=f"cli-agent-get:{uuid.uuid4()}",
         )
         view = await host.find(name)
