@@ -70,7 +70,7 @@ def build_connect_card(
         or f"{root}/web/daimon-face.png",
         description="Nothing is connected yet.\n\n"
         + (
-            f"Tap the button. On the page, click Add repos, tick {requested_repo}, "
+            f"Tap the button. On the page, click Add repos, make sure {requested_repo} is ticked, "
             "click Add 1 repo, then Save changes."
             if requested_repo
             else f"Tap the button and tick the repos {shown or 'this agent'} can use."

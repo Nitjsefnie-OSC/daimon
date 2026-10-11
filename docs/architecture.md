@@ -1434,7 +1434,8 @@ admission before any of this runs.
   working repo, then confirm with **Save changes**. **Add repos** opens a
   centered dialog on desktop and a bottom sheet on mobile. Tick repos, select
   **Add 1 repo** (or **Add N repos**) in the dialog, then **Save changes** on the
-  page. Each addition has
+  page. When the card came from a chat ask that named one repo, the dialog
+  opens with that repo already ticked if the person can add it. Each addition has
   its own access choice, defaulting to Read only. Added and removed rows stay
   visible as pending changes, and removals can be undone before saving.
   Working-repo actions live on the repo row. Adding permits at most ten repos

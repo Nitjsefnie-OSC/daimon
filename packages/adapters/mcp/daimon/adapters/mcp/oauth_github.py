@@ -383,6 +383,9 @@ _EDITOR_SCRIPT = """
   const list = document.getElementById("connected-repos");
   const dialog = document.getElementById("repo-picker");
   const options = [...dialog.querySelectorAll(".gh-picker-choice")];
+  const preselected = new Set(options.filter(option =>
+    option.querySelector(".gh-picker-toggle").checked
+  ).map(option => option.dataset.repoId));
   const search = document.getElementById("search-repos");
   const save = document.getElementById("save-repos");
   const stage = document.getElementById("stage-repos");
@@ -483,10 +486,11 @@ _EDITOR_SCRIPT = """
   function resetPicker() {
     for (const option of options) {
       const id = option.dataset.repoId;
-      option.querySelector(".gh-picker-toggle").checked = staged.has(id);
+      option.querySelector(".gh-picker-toggle").checked = staged.has(id) || preselected.has(id);
       option.querySelector(".gh-picker-access").value = staged.get(id) ||
         (option.dataset.requiredWrite === "true" ? "write" : "read");
-      option.querySelector(".gh-choice-access").hidden = !staged.has(id);
+      option.querySelector(".gh-choice-access").hidden =
+        !staged.has(id) && !preselected.has(id);
     }
     search.value = "";
     for (const option of options) option.hidden = false;
@@ -525,6 +529,7 @@ _EDITOR_SCRIPT = """
   stage.addEventListener("click", () => {
     const selected = options.filter(o => o.querySelector(".gh-picker-toggle").checked);
     if (!selected.length || selected.length > 10) return;
+    preselected.clear();
     staged.clear();
     for (const option of selected) {
       const id = option.dataset.repoId;
@@ -618,6 +623,7 @@ def _agent_editor_page(
     cancel_url: str,
     install_url: str,
     needed: Mapping[int, bool] | None = None,
+    requested_repo: str | None = None,
     missing_names: tuple[str, ...] = (),
     selection_error: str | None = None,
     clients_present: bool = False,
@@ -633,6 +639,14 @@ def _agent_editor_page(
     available = sorted(
         (repo for repo_id, repo in admin.items() if repo_id not in current),
         key=lambda repo: repo.full_name.casefold(),
+    )
+    requested_id = next(
+        (
+            repo.id
+            for repo in available
+            if requested_repo and repo.full_name.casefold() == requested_repo.casefold()
+        ),
+        None,
     )
     repairable = [
         repo for repo in grants if repo.repo_id in admin and (repo.staged or repo.repo_id in needed)
@@ -786,7 +800,9 @@ def _agent_editor_page(
             f'<div class="gh-picker-choice" data-repo-id="{repo_id}" '
             f'data-name="{esc(name, quote=True)}" '
             f'data-required-write="{str(required_write).lower()}">'
-            '<label class="gh-picker-label"><input class="gh-picker-toggle" type="checkbox">'
+            '<label class="gh-picker-label"><input class="gh-picker-toggle" type="checkbox"'
+            + (" checked" if repo_id == requested_id else "")
+            + ">"
             f"<span>{esc(name)}"
             + ("<small>Finish setup</small>" if repair else "")
             + '</span></label><div class="gh-choice-access" hidden>'
@@ -860,7 +876,9 @@ def _agent_editor_page(
             )
     for repo in available:
         parts.append(
-            f'<label><input type="checkbox" name="repo" value="{repo.id}">'
+            f'<label><input type="checkbox" name="repo" value="{repo.id}"'
+            + (" checked" if repo.id == requested_id else "")
+            + ">"
             f"Add {esc(repo.full_name)}</label>"
             f'<select name="access_{repo.id}" '
             f'aria-label="Access for {esc(repo.full_name, quote=True)}">'
@@ -1032,6 +1050,7 @@ def _confirmation_page(
     selection_error: str | None = None,
     already_added: frozenset[int] = frozenset(),
     needed: Mapping[int, bool] | None = None,
+    requested_repo: str | None = None,
 ) -> Response:
     """Render the same picker used by the live route and screenshot capture.
 
@@ -1103,7 +1122,17 @@ def _confirmation_page(
             parts.append(
                 f'<label class="gh-choice repo-choice{" is-added" if added else ""}">'
                 f'<input type="checkbox" name="repo" value="{repo.id}"'
-                + (" checked disabled" if added else " checked" if repo.id in needed else "")
+                + (
+                    " checked disabled"
+                    if added
+                    else " checked"
+                    if repo.id in needed
+                    or (
+                        requested_repo is not None
+                        and repo.full_name.casefold() == requested_repo.casefold()
+                    )
+                    else ""
+                )
                 + ">"
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
                 f'<span class="gh-repo-name">{html.escape(name)}</span>'
@@ -1700,6 +1729,7 @@ def build_oauth_github_routes(
                     cancel_url=cancel_url,
                     install_url=install_url,
                     needed=needed,
+                    requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
                     clients_present=clients_present,
                     pending_installation=pending_installation,
@@ -1794,6 +1824,7 @@ def build_oauth_github_routes(
                     cancel_url=cancel_url,
                     install_url=install_url,
                     needed=needed,
+                    requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
                     clients_present=clients_present,
                     selection_error="Choose a change to save.",
@@ -1977,6 +2008,7 @@ def build_oauth_github_routes(
                     selection_error=selection_error,
                     already_added=already_added,
                     needed=needed,
+                    requested_repo=invitation.requested_repo,
                 )
             visible = {
                 repo.id: repo for install in installations for repo in install.repos if repo.admin
@@ -2196,6 +2228,7 @@ def build_oauth_github_routes(
             agent_name=invitation.agent_name,
             already_added=already_added,
             needed=needed,
+            requested_repo=invitation.requested_repo,
         )
 
     return connect, callback, setup, confirm

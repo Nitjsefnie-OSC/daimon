@@ -104,6 +104,6 @@ def test_card_names_the_requested_repo_and_the_exact_clicks() -> None:
     )
     assert card.description == (
         "Nothing is connected yet.\n\n"
-        "Tap the button. On the page, click Add repos, tick acme/data, "
+        "Tap the button. On the page, click Add repos, make sure acme/data is ticked, "
         "click Add 1 repo, then Save changes."
     )
