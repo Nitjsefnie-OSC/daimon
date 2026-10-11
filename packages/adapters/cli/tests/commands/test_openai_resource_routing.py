@@ -1,19 +1,26 @@
 """OpenAI agents and channel copies through the operator's resource-host capability.
 
 Routing only: which path a command takes, read fresh, and when a host is
-requested. The fork, CAS and readback themselves are the core host's (tested
-in packages/core/tests/test_neutral_resource_host.py).
+requested. A host is requested only under the capability and for a tenant or
+channel the operator's deployment manifest authorizes; everything else keeps
+the existing path. The fork, CAS and native readback themselves are the core
+host's (packages/core/tests/test_neutral_resource_host.py). Every SDK client
+here comes from the isolated test factory.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 import typer
 from anthropic import AsyncAnthropic
@@ -22,24 +29,19 @@ from daimon.adapters.cli.commands.agents import agents_get
 from daimon.adapters.cli.commands.channels import channels_rule_set
 from daimon.adapters.cli.runtime import CliRuntime, ResourceHostFactory
 from daimon.core.channel_backend import channel_ref, set_channel_backend
-from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import neutral_catalog
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.neutral_catalog import AgentRevision
+from daimon.core.stores.neutral_catalog import AgentRevision, PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.tenants import get_tenant
 from daimon.testing import ma_agent
-from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
-    FakeMAState,
-    MARouter,
-    build_fake_anthropic,
-    list_response,
-    make_fake_ma_handler,
-)
-from mux.contracts.config import BackendConfig
-from mux.contracts.ids import ModelRef, ResourceRef, Revision, SkillRef
+from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_anthropic
+from daimon.testing.ma import FakeMAState, MARouter, list_response, make_fake_ma_handler
+from mux.contracts.config import BackendConfig, ConfigRevision
+from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -48,17 +50,35 @@ from ..harness import FakeCliSettings, build_cli_runtime
 
 GUILD = "900000000000000001"
 CHANNEL = "900000000000000002"
-
+PROJECT = "project"
 OPENAI = BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna")
 GEMINI = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
 ANTHROPIC = BackendConfig()
+DEPLOYMENT_FILE = "DAIMON_TURN__PROVIDER_RUNTIME_FILE"
 
 
 def _out(console: Console) -> str:
     return cast(StringIO, console.file).getvalue()
 
 
-def _settings() -> SimpleNamespace:
+def _console() -> Console:
+    return Console(file=StringIO(), force_terminal=False, highlight=False, width=200)
+
+
+def _isolated(handler: Callable[[httpx.Request], httpx.Response]) -> AsyncAnthropic:
+    """A test Anthropic client that takes nothing from the environment."""
+    return build_async_anthropic(transport=httpx.MockTransport(handler))
+
+
+def _ma(tenant_id: uuid.UUID, *names: str) -> AsyncAnthropic:
+    state = FakeMAState()
+    for name in names:
+        agent = ma_agent(id=f"agent_{name}", name=name, tenant_id=tenant_id)
+        state.agents[agent.id] = agent.model_dump(mode="json")
+    return _isolated(make_fake_ma_handler(state))
+
+
+def _channel_settings() -> SimpleNamespace:
     return SimpleNamespace(
         cli=FakeCliSettings.cli,
         discord=SimpleNamespace(bot_token=SimpleNamespace(get_secret_value=lambda: "t")),
@@ -67,12 +87,67 @@ def _settings() -> SimpleNamespace:
     )
 
 
-def _ma(tenant_id: uuid.UUID, *names: str) -> AsyncAnthropic:
-    state = FakeMAState()
-    for name in names:
-        agent = ma_agent(id=f"agent_{name}", name=name, tenant_id=tenant_id)
-        state.agents[agent.id] = agent.model_dump(mode="json")
-    return build_fake_anthropic(make_fake_ma_handler(state))
+class _GetSettings:
+    cli = FakeCliSettings.cli
+    mcp = SimpleNamespace(public_url=None)
+
+
+class _Factory:
+    """Records every host request; the host it returns is a stand-in."""
+
+    account_scope_id = PROJECT
+
+    def __init__(self, host: object) -> None:
+        self.host = host
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return self.host
+
+
+class _Stop(Exception):
+    pass
+
+
+def _with(rt: CliRuntime, factory: _Factory | None) -> CliRuntime:
+    return dataclasses.replace(rt, resource_hosts=cast(ResourceHostFactory | None, factory))
+
+
+def _manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    digest: str,
+) -> None:
+    """The operator's deployment manifest (#767) authorizing one channel revision."""
+    row = {
+        "profile": "openai.persistent_workspace",
+        "tenant_id": str(tenant_id),
+        "platform": platform,
+        "channel_id": channel_id,
+        "account_id": str(account_id),
+        "config_digest": digest,
+        "project": PROJECT,
+        "agent_id": "agent_deployed",
+        "environment_id": "env_deployed",
+        "api_key_env": "QA_UNSET_DEPLOYMENT_KEY",
+    }
+    path = tmp_path / "deployments.json"
+    path.write_text(json.dumps([row]))
+    monkeypatch.setenv(DEPLOYMENT_FILE, str(path))
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_manifest(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+    monkeypatch.delenv(DEPLOYMENT_FILE, raising=False)
+
+
+# channels rule set --copy-from
 
 
 async def _isolatable(sessions: async_sessionmaker[AsyncSession]) -> uuid.UUID:
@@ -89,37 +164,13 @@ async def _isolatable(sessions: async_sessionmaker[AsyncSession]) -> uuid.UUID:
     return tenant.id
 
 
-class _Factory:
-    """Records every host request; the host it returns is a stand-in."""
-
-    account_scope_id = "project"
-
-    def __init__(self, host: object) -> None:
-        self.host = host
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
-        return self.host
-
-
-class _Stop(Exception):
-    pass
-
-
-def _console() -> Console:
-    return Console(file=StringIO(), force_terminal=False, highlight=False, width=200)
-
-
 async def _configure(
     sessions: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, config: BackendConfig
-) -> None:
+) -> ConfigRevision:
     async with sessions.begin() as session:
-        await set_channel_backend(session, channel_ref(tenant_id, "discord", CHANNEL), config)
-
-
-def _with(rt: CliRuntime, factory: _Factory | None) -> CliRuntime:
-    return dataclasses.replace(rt, resource_hosts=cast(ResourceHostFactory | None, factory))
+        return await set_channel_backend(
+            session, channel_ref(tenant_id, "discord", CHANNEL), config
+        )
 
 
 @pytest.fixture
@@ -150,45 +201,106 @@ async def _copy(rt: CliRuntime) -> Console:
     return console
 
 
+def _channel_rt(
+    sessions: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, factory: _Factory | None
+) -> CliRuntime:
+    rt = build_cli_runtime(
+        sessions, anthropic=_ma(tenant_id, "shared"), settings=_channel_settings()
+    )
+    return _with(rt, factory)
+
+
 @pytest.mark.parametrize("config", [OPENAI, GEMINI, ANTHROPIC, None])
 async def test_without_the_capability_every_channel_copies_on_the_existing_path(
     config: BackendConfig | None,
     seen: list[object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _isolatable(db_session_factory)
     if config is not None:
-        await _configure(db_session_factory, tenant_id, config)
-    rt = build_cli_runtime(
-        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_settings()
-    )
-    assert rt.resource_hosts is None
+        revision = await _configure(db_session_factory, tenant_id, config)
+        _manifest(
+            tmp_path,
+            monkeypatch,
+            tenant_id=tenant_id,
+            account_id=uuid.uuid4(),
+            platform="discord",
+            channel_id=CHANNEL,
+            digest=revision.digest,
+        )
     with pytest.raises(_Stop):
-        await _copy(rt)
+        await _copy(_channel_rt(db_session_factory, tenant_id, None))
     assert seen == [None]
 
 
-async def test_an_openai_channel_copies_through_the_operator_host(
-    seen: list[object], db_session_factory: async_sessionmaker[AsyncSession]
+async def test_an_authorized_openai_channel_copies_through_the_operator_host(
+    seen: list[object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _isolatable(db_session_factory)
-    await _configure(db_session_factory, tenant_id, OPENAI)
+    revision = await _configure(db_session_factory, tenant_id, OPENAI)
+    account = uuid.uuid4()
+    _manifest(
+        tmp_path,
+        monkeypatch,
+        tenant_id=tenant_id,
+        account_id=account,
+        platform="discord",
+        channel_id=CHANNEL,
+        digest=revision.digest,
+    )
     host = object()
     factory = _Factory(host)
-    rt = _with(
-        build_cli_runtime(
-            db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_settings()
-        ),
-        factory,
-    )
     with pytest.raises(_Stop):
-        await _copy(rt)
+        await _copy(_channel_rt(db_session_factory, tenant_id, factory))
     assert seen == [host]
     (call,) = factory.calls
-    assert call["tenant_id"] == tenant_id
-    assert call["account_id"] == derive_guild_account_uuid(tenant_id)
+    assert (call["tenant_id"], call["account_id"]) == (tenant_id, account)
     assert call["principal_id"].startswith("cli:")
     assert call["operation_key"].startswith("cli-channel-copy:")
+
+
+@pytest.mark.parametrize("manifest", ["absent", "stale_revision", "other_channel"])
+async def test_an_openai_channel_without_an_authorized_deployment_keeps_its_path(
+    manifest: str,
+    seen: list[object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _isolatable(db_session_factory)
+    first = await _configure(db_session_factory, tenant_id, OPENAI)
+    if manifest == "stale_revision":
+        # The manifest authorizes an earlier revision; the channel has moved on.
+        await _configure(
+            db_session_factory,
+            tenant_id,
+            BackendConfig(
+                backend="openai",
+                profile="openai.persistent_workspace",
+                model="gpt-6-luna",
+                thread_mode="shared",
+            ),
+        )
+    if manifest != "absent":
+        _manifest(
+            tmp_path,
+            monkeypatch,
+            tenant_id=tenant_id,
+            account_id=uuid.uuid4(),
+            platform="discord",
+            channel_id=CHANNEL if manifest == "stale_revision" else "900000000000000009",
+            digest=first.digest,
+        )
+    factory = _Factory(object())
+    with pytest.raises(_Stop):
+        await _copy(_channel_rt(db_session_factory, tenant_id, factory))
+    assert seen == [None]
+    assert factory.calls == []
 
 
 @pytest.mark.parametrize("config", [ANTHROPIC, None])
@@ -201,14 +313,8 @@ async def test_an_anthropic_or_unconfigured_channel_keeps_its_path_and_asks_for_
     if config is not None:
         await _configure(db_session_factory, tenant_id, config)
     factory = _Factory(object())
-    rt = _with(
-        build_cli_runtime(
-            db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_settings()
-        ),
-        factory,
-    )
     with pytest.raises(_Stop):
-        await _copy(rt)
+        await _copy(_channel_rt(db_session_factory, tenant_id, factory))
     assert seen == [None]
     assert factory.calls == []
 
@@ -221,16 +327,10 @@ async def test_a_gemini_channel_copy_is_refused_and_nothing_changes(
     async with db_session_factory() as session:
         before = await load_access_policy(session, tenant_id=tenant_id)
     factory = _Factory(object())
-    rt = _with(
-        build_cli_runtime(
-            db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_settings()
-        ),
-        factory,
-    )
     console = _console()
     with pytest.raises(typer.Exit):
         await channels_rule_set(
-            rt=rt,
+            rt=_channel_rt(db_session_factory, tenant_id, factory),
             console=console,
             platform="discord",
             workspace_id=GUILD,
@@ -245,33 +345,58 @@ async def test_a_gemini_channel_copy_is_refused_and_nothing_changes(
         assert await load_access_policy(session, tenant_id=tenant_id) == before
 
 
-# agents get
+# agents get, over the real neutral catalog
 
 
-def _revision(tenant_id: uuid.UUID, name: str) -> AgentRevision:
-    spec = AgentSpec(
-        name=name,
-        description="qa-original",
-        model=ModelRef(provider="openai", id="gpt-6-luna"),
-        skills=(SkillRef(id="skill_own", version="3"),),
-    )
-    agent = Agent(
+def _cli_tenant() -> uuid.UUID:
+    """The cli:local tenant the conftest seeds; the command adds its principal itself."""
+    return derive_tenant_uuid(platform="cli", workspace_id="local")
+
+
+async def _deployment_account(sessions: async_sessionmaker[AsyncSession]) -> uuid.UUID:
+    async with sessions.begin() as session:
+        tenant = await get_tenant(session, _cli_tenant())
+        assert tenant is not None
+        return (await make_account(session, tenant=tenant)).id
+
+
+def _agent(account_id: uuid.UUID, name: str) -> Agent:
+    return Agent(
         ref=ResourceRef(
             id="agent_native",
             kind="agent",
             provider="openai",
-            account_scope_id="project",
-            tenant_id=str(tenant_id),
-            account_id=str(derive_guild_account_uuid(tenant_id)),
+            account_scope_id=PROJECT,
+            tenant_id=str(_cli_tenant()),
+            account_id=str(account_id),
         ),
         revision=Revision(local=0),
         created_at=datetime(2026, 10, 10, tzinfo=UTC),
-        spec=spec,
+        spec=AgentSpec(
+            name=name,
+            description="qa-original",
+            model=ModelRef(provider="openai", id="gpt-6-luna"),
+            skills=(SkillRef(id="skill_own", version="3"),),
+        ),
     )
-    return AgentRevision(catalog_id=name, local_revision=1, agent=agent, principal_id="cli")
+
+
+async def _seed(
+    sessions: async_sessionmaker[AsyncSession], account_id: uuid.UUID, name: str
+) -> AgentRevision:
+    scope = Scope(
+        tenant_id=str(_cli_tenant()),
+        account_id=str(account_id),
+        principal_id="cli:testuser",
+        authorization_id="cli-deployment-operator",
+    )
+    catalog = PostgresNeutralCatalog(sessions, provider="openai", account_scope_id=PROJECT)
+    return await catalog.put_agent(scope, name, _agent(account_id, name), expected_revision=0)
 
 
 class _Host:
+    """The host's native readback, recorded; the catalog itself is real."""
+
     def __init__(self, row: AgentRevision) -> None:
         self.row = row
         self.read_ids: list[str] = []
@@ -286,48 +411,49 @@ class _Host:
         return self.row
 
 
-class _GetSettings:
-    cli = FakeCliSettings.cli
-    mcp = SimpleNamespace(public_url=None)
-
-
-def _cli_tenant() -> uuid.UUID:
-    """The cli:local tenant the conftest seeds; the command adds its principal itself."""
-    return derive_tenant_uuid(platform="cli", workspace_id="local")
-
-
-def _catalog(monkeypatch: pytest.MonkeyPatch, rows: tuple[AgentRevision, ...]) -> list[str]:
-    """The neutral catalog as read by routing: records the workspace it was opened on."""
+def _opened(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every catalog the command opens, still the real store underneath."""
     opened: list[str] = []
+    real = PostgresNeutralCatalog
 
-    class _Catalog:
-        def __init__(self, _sessions: object, *, provider: str, account_scope_id: str) -> None:
-            assert provider == "openai"
-            opened.append(account_scope_id)
+    def counting(*args: Any, **kwargs: Any) -> PostgresNeutralCatalog:
+        opened.append(kwargs["account_scope_id"])
+        return real(*args, **kwargs)
 
-        async def list_agents(self, _scope: object) -> tuple[AgentRevision, ...]:
-            return rows
-
-    monkeypatch.setattr(neutral_catalog, "PostgresNeutralCatalog", _Catalog)
+    monkeypatch.setattr(neutral_catalog, "PostgresNeutralCatalog", counting)
     return opened
 
 
-def _anthropic_router(tenant_id: uuid.UUID, name: str) -> MARouter:
-    agent = ma_agent(id="agent_anthropic", name=name, tenant_id=tenant_id)
+def _anthropic(name: str) -> AsyncAnthropic:
+    agent = ma_agent(id="agent_anthropic", name=name, tenant_id=_cli_tenant())
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda req, m: list_response([agent.model_dump(mode="json")]))
-    return router
+    return _isolated(router.dispatch)
 
 
-async def test_without_the_capability_get_reads_no_catalog(
-    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+def _get_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, account: uuid.UUID) -> None:
+    _manifest(
+        tmp_path,
+        monkeypatch,
+        tenant_id=_cli_tenant(),
+        account_id=account,
+        platform="cli",
+        channel_id="local",
+        digest="sha256:deployed",
+    )
+
+
+async def test_without_the_capability_get_opens_no_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id = _cli_tenant()
-    opened = _catalog(monkeypatch, (_revision(tenant_id, "qa-agent"),))
+    account = await _deployment_account(db_session_factory)
+    await _seed(db_session_factory, account, "qa-agent")
+    _get_manifest(tmp_path, monkeypatch, account)
+    opened = _opened(monkeypatch)
     rt = build_cli_runtime(
-        db_session_factory,
-        router=_anthropic_router(tenant_id, "qa-agent"),
-        settings=_GetSettings(),
+        db_session_factory, anthropic=_anthropic("qa-agent"), settings=_GetSettings()
     )
     console = _console()
     await agents_get(rt=rt, console=console, name="qa-agent", as_json=False)
@@ -335,41 +461,94 @@ async def test_without_the_capability_get_reads_no_catalog(
     assert "agent_anthropic" in _out(console)
 
 
-async def test_get_reads_an_openai_agent_back_through_the_host(
+async def test_an_unconfigured_tenant_falls_back_without_opening_the_catalog(
     monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    tenant_id = _cli_tenant()
-    row = _revision(tenant_id, "qa-agent")
-    opened = _catalog(monkeypatch, (row,))
-    host = _Host(row)
-    factory = _Factory(host)
-    rt = _with(build_cli_runtime(db_session_factory, settings=_GetSettings()), factory)
-    console = _console()
-    await agents_get(rt=rt, console=console, name="qa-agent", as_json=True)
-    assert opened == ["project"]
-    assert host.read_ids == ["qa-agent"], "the provider's agent is read back, not the row alone"
-    out = _out(console)
-    assert "agent_native" in out and "qa-original" in out
-    assert "gpt-6-luna" in out and "skill_own" in out
-    (call,) = factory.calls
-    assert call["operation_key"].startswith("cli-agent-get:")
-
-
-async def test_get_with_no_catalog_row_asks_for_no_host_and_falls_back(
-    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    tenant_id = _cli_tenant()
-    opened = _catalog(monkeypatch, ())
+    """The capability is installed, but nothing authorizes this tenant natively."""
+    opened = _opened(monkeypatch)
     factory = _Factory(object())
     rt = _with(
         build_cli_runtime(
-            db_session_factory,
-            router=_anthropic_router(tenant_id, "qa-agent"),
-            settings=_GetSettings(),
+            db_session_factory, anthropic=_anthropic("qa-agent"), settings=_GetSettings()
         ),
         factory,
     )
     console = _console()
     await agents_get(rt=rt, console=console, name="qa-agent", as_json=False)
-    assert opened == ["project"] and factory.calls == []
+    assert opened == [] and factory.calls == []
     assert "agent_anthropic" in _out(console)
+
+
+async def test_get_reads_an_authorized_openai_agent_back_through_the_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    account = await _deployment_account(db_session_factory)
+    row = await _seed(db_session_factory, account, "qa-agent")
+    _get_manifest(tmp_path, monkeypatch, account)
+    opened = _opened(monkeypatch)
+    host = _Host(row)
+    factory = _Factory(host)
+
+    def no_anthropic(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"an OpenAI agent was looked up on Anthropic: {request.url}")
+
+    rt = _with(
+        build_cli_runtime(
+            db_session_factory, anthropic=_isolated(no_anthropic), settings=_GetSettings()
+        ),
+        factory,
+    )
+    console = _console()
+    await agents_get(rt=rt, console=console, name="qa-agent", as_json=True)
+    assert opened == [PROJECT]
+    assert host.read_ids == ["qa-agent"], "the provider's agent is read back, not the row alone"
+    out = _out(console)
+    assert "agent_native" in out and "qa-original" in out
+    assert "gpt-6-luna" in out and "skill_own" in out
+    (call,) = factory.calls
+    assert call["account_id"] == account
+    assert call["operation_key"].startswith("cli-agent-get:")
+
+
+async def test_an_authorized_tenant_without_that_agent_asks_for_no_host_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    account = await _deployment_account(db_session_factory)
+    _get_manifest(tmp_path, monkeypatch, account)
+    opened = _opened(monkeypatch)
+    factory = _Factory(object())
+    rt = _with(
+        build_cli_runtime(
+            db_session_factory, anthropic=_anthropic("qa-agent"), settings=_GetSettings()
+        ),
+        factory,
+    )
+    console = _console()
+    await agents_get(rt=rt, console=console, name="qa-agent", as_json=False)
+    assert opened == [PROJECT] and factory.calls == []
+    assert "agent_anthropic" in _out(console)
+
+
+# The test clients themselves: ambient SDK settings refused by name.
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_WEBHOOK_SIGNING_KEY", "ANTHROPIC_BASE_URL"],
+)
+@pytest.mark.parametrize("value", ["", "ambient"])
+def test_the_test_clients_refuse_ambient_settings_by_name(
+    name: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_egress(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"egress attempted: {request.url}")
+
+    monkeypatch.setenv(name, value)
+    with pytest.raises(AmbientSDKConfigurationError, match=name):
+        _isolated(no_egress)
+    with pytest.raises(AmbientSDKConfigurationError, match=name):
+        _ma(uuid.uuid4(), "shared")

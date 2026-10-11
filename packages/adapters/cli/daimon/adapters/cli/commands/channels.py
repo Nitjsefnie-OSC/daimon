@@ -16,7 +16,13 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
-from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime, build_runtime, cli_principal_id
+from daimon.adapters.cli.runtime import (
+    FACE_WAIT_S,
+    CliRuntime,
+    authorized_openai_deployments,
+    build_runtime,
+    cli_principal_id,
+)
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
@@ -41,7 +47,6 @@ from daimon.core.channel_rules import (
 from daimon.core.channel_skills import REFUSALS as CHANNEL_SKILL_REFUSALS
 from daimon.core.channel_skills import add_skill_to_channel
 from daimon.core.config import load_settings
-from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -484,10 +489,14 @@ async def _copy_resource_host(
     """The OpenAI host a channel's own copy is made through, or None for the existing path.
 
     Only with the operator capability (`rt.resource_hosts`). The channel's
-    backend is read fresh, here, and a host is requested only for the OpenAI
-    profile. A channel on any other non-Anthropic backend cannot be copied yet.
+    backend is read fresh, here. A host is requested only for an OpenAI channel
+    the operator's deployment manifest authorizes for exactly this revision, in
+    the factory's workspace, under that deployment's account. Any other OpenAI
+    channel keeps the existing path; a channel on another non-Anthropic backend
+    cannot be copied yet.
     """
-    if rt.resource_hosts is None:
+    factory = rt.resource_hosts
+    if factory is None:
         return None
     async with rt.sessionmaker() as session:
         revision = await current_backend(session, channel_ref(tenant_id, platform, channel))
@@ -497,9 +506,19 @@ async def _copy_resource_host(
         raise ChannelRuleRefused(
             "invalid", message="This channel's backend can't make its own copy of an agent yet."
         )
-    return rt.resource_hosts(
+    authorized = [
+        deployment
+        for deployment in authorized_openai_deployments(tenant_id)
+        if deployment.platform == platform
+        and deployment.channel_id == channel
+        and deployment.config_digest == revision.digest
+        and deployment.project == factory.account_scope_id
+    ]
+    if len(authorized) != 1:
+        return None
+    return factory(
         tenant_id=tenant_id,
-        account_id=derive_guild_account_uuid(tenant_id),
+        account_id=uuid.UUID(authorized[0].account_id),
         principal_id=cli_principal_id(rt),
         operation_key=f"cli-channel-copy:{uuid.uuid4()}",
     )

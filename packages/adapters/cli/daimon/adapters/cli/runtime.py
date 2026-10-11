@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
@@ -22,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 if TYPE_CHECKING:
     # Typing only: the default CLI path never imports the neutral resource host.
     from daimon.core.neutral_resources import NeutralResourceHost
+    from daimon.core.turn.openai_deployment import OpenAIDeployment
 
 # A command that creates an agent waits this long for its face: a background
 # render dies with the process. The render takes about a second.
@@ -101,3 +104,37 @@ async def build_runtime(settings: Settings) -> AsyncIterator[CliRuntime]:
         finally:
             await drain_outcomes()
             await engine.dispose()
+
+
+_DEPLOYMENT_FILE = "DAIMON_TURN__PROVIDER_RUNTIME_FILE"
+_MAX_DEPLOYMENT_BYTES = 1_048_576
+
+
+def authorized_openai_deployments(tenant_id: uuid.UUID) -> tuple[OpenAIDeployment, ...]:
+    """The operator's explicit OpenAI deployments for one tenant, or none.
+
+    The same manifest the turn path admits OpenAI channels from (see
+    `daimon.core.turn.openai_deployment`). A tenant with no row, or no manifest,
+    or one that cannot be read or validated, has no authorized native
+    deployment, and every command keeps its existing path for it.
+    """
+    from daimon.core.turn.openai_deployment import OpenAIDeployment
+    from pydantic import JsonValue, TypeAdapter, ValidationError
+
+    path = os.environ.get(_DEPLOYMENT_FILE)
+    if not path:
+        return ()
+    try:
+        with Path(path).open("rb") as manifest:
+            raw = manifest.read(_MAX_DEPLOYMENT_BYTES + 1)
+        if len(raw) > _MAX_DEPLOYMENT_BYTES:
+            return ()
+        rows = TypeAdapter(list[dict[str, JsonValue]]).validate_json(raw)
+        return tuple(
+            OpenAIDeployment.model_validate(row)
+            for row in rows
+            if row.get("profile") == "openai.persistent_workspace"
+            and row.get("tenant_id") == str(tenant_id)
+        )
+    except (OSError, ValidationError):
+        return ()
