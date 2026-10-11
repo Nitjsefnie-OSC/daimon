@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A reply to an earlier Discord message is now answered about that message. The agent is told which message you replied to, including one from before its last turn, or part of a long answer, instead of treating your reply as being about the latest message.
+- Discord turns no longer show the agent their own status card as an empty message from itself right before your request, so it stops saying the message you replied to "has no text".
 - The **New agent** button in `/agent-setup` opens its form again. Discord had been rejecting the form, so clicking the button showed "This interaction failed" and no agent could be created from the panel.
 - Deploys no longer leave Discord buttons and slash commands unanswered for about 14 seconds: the new Discord container starts beside the old one and takes over the gateway through a database lease as soon as the old one has drained and closed.
 - The report viewer loads its stylesheet and script on installs that resolve FastAPI before 0.137, instead of staying on "Loading…".

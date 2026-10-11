@@ -6,17 +6,21 @@ prepending to a user's message when responding in an existing thread.
 
 from __future__ import annotations
 
+import asyncio
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
+import structlog
 from daimon.adapters.discord.vision import is_oversized_image, is_vision_image_attachment
 from daimon.core.media.vision import MAX_VISION_IMAGE_DIMENSION
 from daimon.core.turn_keys import render_keys_element
 from daimon.core.untrusted import untrusted_block
 
 import discord
+
+log = structlog.get_logger()
 
 # Number of parent-channel messages fetched when a channel mention creates a new thread.
 # Bot replies are included so the agent sees the full conversational context.
@@ -31,6 +35,17 @@ CHANNEL_FILE_LIMIT = 10
 # person asking, so they ride in the shared untrusted envelope. Only the
 # `<user_query>` after it is the request.
 _HISTORY_SOURCE = {"source": "discord"}
+
+# A replied-to message that is not part of the replayed conversation rides in its
+# own `<reply_targets>` block. Its text is bounded so one huge post cannot swamp
+# the turn; the cut is marked, not silent.
+REPLY_TARGET_MAX_CHARS = 2000
+# In a composite queued query the agent matches each target to the replying
+# message by a short excerpt of what the replier said.
+REPLY_EXCERPT_MAX_CHARS = 200
+# Fetching an uncached target is best effort and must never hold up a turn.
+REPLY_FETCH_TIMEOUT_S = 5.0
+_TRUNCATION_MARK = "… [truncated]"
 
 
 def _strip_bot_mention(
@@ -90,7 +105,9 @@ _DELIVERY_HINT = (
     "so you cannot see what was said or answered in other threads. If asked about an earlier "
     "message you have no record of, explain that it may be in another thread or was not "
     "addressed to you, and that other threads are separate conversations; never say it did "
-    "not reach you or that you did not receive it"
+    "not reach you or that you did not receive it. When the user_query has a reply_to id, "
+    "the person is replying to that message: find it by that id in the history or in the "
+    "reply_targets block, and answer about that message, not the latest one"
 )
 
 
@@ -99,14 +116,150 @@ def _render_delivery() -> str:
     return f"<delivery hint={quoteattr(_DELIVERY_HINT)}/>"
 
 
+def _reply_target_id(msg: discord.Message) -> int | None:
+    """The id of the message ``msg`` replies to, or None when it is not a reply.
+
+    Forwards and other references are not replies, and a reference without a
+    message id points at nothing the agent could look up.
+    """
+    reference = msg.reference
+    if (
+        not isinstance(reference, discord.MessageReference)
+        or reference.type is not discord.MessageReferenceType.reply
+    ):
+        return None
+    return reference.message_id if isinstance(reference.message_id, int) else None
+
+
+def _embed_text(msg: discord.Message) -> str:
+    """Title and description text of ``msg``'s embeds.
+
+    A bot answer or status card is an embed with no message text; without this a
+    reply to it would show the agent an empty message.
+    """
+    parts: list[str] = []
+    for embed in msg.embeds:
+        for piece in (embed.title, embed.description):
+            if isinstance(piece, str) and piece.strip():
+                parts.append(piece.strip())
+    return "\n".join(parts)
+
+
+async def _resolve_reply_target(
+    home: discord.abc.Messageable, msg: discord.Message
+) -> discord.Message | discord.DeletedReferencedMessage | None:
+    """Find the message ``msg`` replies to: Discord's own copy, else one fetch.
+
+    ``None`` means it could not be found (not cached and the fetch failed); the
+    agent then keeps only the ``reply_to`` id.
+    """
+    reference = msg.reference
+    if not isinstance(reference, discord.MessageReference):
+        return None
+    resolved = reference.resolved
+    if isinstance(resolved, discord.Message | discord.DeletedReferencedMessage):
+        return resolved
+    target_id = reference.message_id
+    if target_id is None:
+        return None
+    try:
+        channel: object | None = home
+        home_id = getattr(home, "id", None)
+        if reference.channel_id != home_id:
+            guild = getattr(home, "guild", None)
+            channel = None if guild is None else guild.get_channel_or_thread(reference.channel_id)
+        fetch = getattr(channel, "fetch_message", None)
+        if fetch is None:
+            return None
+        async with asyncio.timeout(REPLY_FETCH_TIMEOUT_S):
+            fetched = await fetch(target_id)
+        return fetched if isinstance(fetched, discord.Message) else None
+    except (discord.HTTPException, TimeoutError):
+        return None
+
+
+async def _reply_target_lines(
+    home: discord.abc.Messageable,
+    query_messages: Sequence[discord.Message],
+    rendered_ids: Collection[int],
+    *,
+    bot_user_id: int | None,
+    bot_display_name: str,
+    omit_oversized_image_urls: bool,
+) -> list[str]:
+    """The ``<reply_targets>`` block for replies whose target the context does not show.
+
+    A target already rendered in the history, delta or channel context, or part of
+    the query itself, needs only the ``reply_to`` id and is skipped here, except in
+    a merged query, where an id-only entry (``shown`` or ``unavailable``) still
+    ties each reply to its target. Never
+    raises: a reply target is a convenience, not a reason to fail a turn.
+    """
+    query_ids = {m.id for m in query_messages}
+    composite = len(query_messages) > 1
+    body: list[str] = []
+    for replying in query_messages:
+        try:
+            target_id = _reply_target_id(replying)
+            if target_id is None:
+                continue
+            origin = f" reply_from={quoteattr(str(replying.id))}"
+            if composite:
+                excerpt = _strip_bot_mention(
+                    replying.content, bot_user_id, bot_display_name=bot_display_name
+                )[:REPLY_EXCERPT_MAX_CHARS]
+                origin += (
+                    f" reply_from_author={quoteattr(replying.author.display_name)}"
+                    f" reply_from_excerpt={quoteattr(excerpt)}"
+                )
+            # A merged query has no single `reply_to`, so every reply in it keeps
+            # an entry naming its target, even when the target is shown elsewhere.
+            if target_id in rendered_ids or target_id in query_ids:
+                if composite:
+                    body.append(f'<message id={quoteattr(str(target_id))} shown="true"{origin}/>')
+                continue
+            target = await _resolve_reply_target(home, replying)
+            if target is None:
+                if composite:
+                    body.append(
+                        f'<message id={quoteattr(str(target_id))} unavailable="true"{origin}/>'
+                    )
+                continue
+            if isinstance(target, discord.DeletedReferencedMessage):
+                body.append(f'<message id={quoteattr(str(target_id))} deleted="true"{origin}/>')
+                continue
+            body.extend(
+                _render_message(
+                    target,
+                    bot_user_id,
+                    bot_display_name=bot_display_name,
+                    omit_oversized_image_urls=omit_oversized_image_urls,
+                    max_content_chars=REPLY_TARGET_MAX_CHARS,
+                    extra_attrs=origin,
+                )
+            )
+        except Exception:
+            log.warning("reply_target.render_failed", message_id=str(replying.id), exc_info=True)
+    if not body:
+        return []
+    return untrusted_block("reply_targets", body, _HISTORY_SOURCE)
+
+
 def _render_message(
     msg: discord.Message,
     bot_user_id: int | None,
     *,
     bot_display_name: str = "daimon",
     omit_oversized_image_urls: bool = False,
+    max_content_chars: int | None = None,
+    extra_attrs: str = "",
 ) -> list[str]:
     """Render a single message as XML lines.
+
+    Every message carries its ``id``, and ``reply_to`` when it is a Discord reply,
+    so the agent can tell which message a reply points at.
+    ``max_content_chars`` bounds the text (a marked cut) and ``extra_attrs`` appends
+    ready-made attributes; both serve the ``<reply_targets>`` block.
 
     Image attachments over the API's pixel cap are marked ``oversized="true"``
     and carry a warning, because the agent otherwise sees a plain URL, curls it,
@@ -119,15 +272,23 @@ def _render_message(
     not good enough — withholding the URL is what actually breaks the
     recover-replay-die loop.
     """
+    reply_to = _reply_target_id(msg)
     attrs = (
+        f" id={quoteattr(str(msg.id))}"
         f" author_name={quoteattr(msg.author.display_name)}"
         f" user_id={quoteattr(str(msg.author.id))}"
         f" is_bot={quoteattr(str(msg.author.bot).lower())}"
         f" timestamp={quoteattr(msg.created_at.isoformat())}"
+        + (f" reply_to={quoteattr(str(reply_to))}" if reply_to is not None else "")
     )
-    content = escape(
-        _strip_bot_mention(msg.content, bot_user_id, bot_display_name=bot_display_name)
-    )
+    text = _strip_bot_mention(msg.content, bot_user_id, bot_display_name=bot_display_name)
+    if not text.strip():
+        text = _embed_text(msg)
+    if max_content_chars is not None and len(text) > max_content_chars:
+        text = text[:max_content_chars] + _TRUNCATION_MARK
+        attrs += ' truncated="true"'
+    attrs += extra_attrs
+    content = escape(text)
 
     if not msg.attachments:
         return [f"<message{attrs}>{content}</message>"]
@@ -171,19 +332,26 @@ def _render_user_query(
     is_admin: bool,
     unprompted: bool = False,
     query_text: str | None = None,
+    single_query: bool = True,
 ) -> str:
     """Render the ``<user_query>`` element for a turn's trigger message.
+
+    ``reply_to`` names the message the trigger replies to. A composite query of
+    several messages carries none (``single_query=False``): which of them
+    replied to what is told by the ``<reply_targets>`` block instead.
 
     All three builders use this renderer so initial, delta and reseeded
     context carry the same author, timestamp and permission attributes.
     ``is_admin`` uses the lowercase literal ``"true"``/``"false"`` so the
     model knows whether the caller can make an admin-gated change.
     """
+    reply_to = _reply_target_id(trigger) if single_query else None
     attrs = (
         f" author_name={quoteattr(trigger.author.display_name)}"
         f" user_id={quoteattr(str(trigger.author.id))}"
         f" timestamp={quoteattr(trigger.created_at.isoformat())}"
         f" is_admin={quoteattr('true' if is_admin else 'false')}"
+        + (f" reply_to={quoteattr(str(reply_to))}" if reply_to is not None else "")
         + (' unprompted="true"' if unprompted else "")
     )
     content = escape(
@@ -209,6 +377,8 @@ async def build_context_xml(
     key_names: Sequence[str] = (),
     query_text: str | None = None,
     query_message_ids: Sequence[int] = (),
+    query_messages: Sequence[discord.Message] = (),
+    excluded_message_ids: Sequence[str] = (),
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from thread history for the turn driver.
 
@@ -229,10 +399,19 @@ async def build_context_xml(
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
     ``query_text`` replaces only the active query text; ``trigger`` still
     supplies identity and remains excluded from history.
+
+    ``query_messages`` are the messages a composite query was composed from
+    (trigger included); their replies are reported like the trigger's.
+    ``excluded_message_ids`` lists messages to keep out of the history, such as
+    the turn's own status card.
     """
     messages = [m async for m in thread.history(limit=limit)]
     messages.sort(key=lambda m: m.created_at)
-    excluded_ids = {trigger.id, *query_message_ids}
+    excluded_ids = {
+        trigger.id,
+        *query_message_ids,
+        *(int(msg_id) for msg_id in excluded_message_ids),
+    }
     messages = [m for m in messages if m.id not in excluded_ids]
 
     # Prepend the thread-starter message once if it exists, is not the trigger,
@@ -277,6 +456,17 @@ async def build_context_xml(
         )
     ]
     lines.extend(untrusted_block("thread_history", body, _HISTORY_SOURCE))
+    queries = tuple(query_messages) or (trigger,)
+    lines.extend(
+        await _reply_target_lines(
+            thread,
+            queries,
+            {m.id for m in messages},
+            bot_user_id=bot_user_id,
+            bot_display_name=bot_display_name,
+            omit_oversized_image_urls=omit_oversized_image_urls,
+        )
+    )
     lines.append("</context>")
 
     # user_query sits outside <context>, separated by a blank line
@@ -289,6 +479,7 @@ async def build_context_xml(
             is_admin=is_admin,
             unprompted=unprompted,
             query_text=query_text,
+            single_query=len(queries) == 1,
         )
     )
 
@@ -309,6 +500,7 @@ async def build_delta_xml(
     excluded_message_ids: Sequence[str] = (),
     query_text: str | None = None,
     query_message_ids: Sequence[int] = (),
+    query_messages: Sequence[discord.Message] = (),
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -351,6 +543,8 @@ async def build_delta_xml(
             key_names=key_names,
             query_text=query_text,
             query_message_ids=query_message_ids,
+            query_messages=query_messages,
+            excluded_message_ids=excluded_message_ids,
         )
 
     after_obj = discord.Object(id=after_message_id)
@@ -390,6 +584,17 @@ async def build_delta_xml(
         )
     ]
     lines.extend(untrusted_block("thread_delta", body, _HISTORY_SOURCE))
+    queries = tuple(query_messages) or (trigger,)
+    lines.extend(
+        await _reply_target_lines(
+            thread,
+            queries,
+            {m.id for m in messages},
+            bot_user_id=bot_user_id,
+            bot_display_name=bot_display_name,
+            omit_oversized_image_urls=omit_oversized_image_urls,
+        )
+    )
     lines.append("</context>")
 
     lines.append("")
@@ -401,6 +606,7 @@ async def build_delta_xml(
             is_admin=is_admin,
             unprompted=unprompted,
             query_text=query_text,
+            single_query=len(queries) == 1,
         )
     )
 
@@ -508,6 +714,16 @@ async def build_channel_context_xml(
     ]
     lines.extend(
         untrusted_block("channel_context", body, {"count": str(len(messages)), **_HISTORY_SOURCE})
+    )
+    lines.extend(
+        await _reply_target_lines(
+            channel,
+            (trigger,),
+            {m.id for m in messages},
+            bot_user_id=bot_user_id,
+            bot_display_name=bot_display_name,
+            omit_oversized_image_urls=omit_oversized_image_urls,
+        )
     )
     if older_files:
         lines.extend(untrusted_block("recent_channel_files", older_files, _HISTORY_SOURCE))

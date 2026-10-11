@@ -2618,6 +2618,7 @@ class DaimonBot(commands.Bot):
                     content_override=_compose_queued_content(messages),
                     attachments_override=[a for m in messages for a in m.attachments],
                     admitted_message_ids=tuple(str(m.id) for m in messages),
+                    query_messages=tuple(messages),
                 )
             finally:
                 await self._clear_queued_reactions(messages)
@@ -2641,6 +2642,7 @@ class DaimonBot(commands.Bot):
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         admitted_message_ids: tuple[str, ...] = (),
+        query_messages: tuple[discord.Message, ...] = (),
         unprompted: bool = False,
     ) -> None:
         """Orchestrate thread creation/lookup, session lifecycle, and turn execution.
@@ -2683,6 +2685,7 @@ class DaimonBot(commands.Bot):
                 created_thread_ids=created_thread_ids,
                 attachments_override=attachments_override,
                 admitted_message_ids=admitted_message_ids,
+                query_messages=query_messages,
                 unprompted=unprompted,
                 failure_surface=surface,
             )
@@ -3425,6 +3428,7 @@ class DaimonBot(commands.Bot):
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         admitted_message_ids: tuple[str, ...] = (),
+        query_messages: tuple[discord.Message, ...] = (),
         unprompted: bool = False,
         failure_surface: _TurnFailureSurface | None = None,
     ) -> None:
@@ -3442,6 +3446,7 @@ class DaimonBot(commands.Bot):
                 created_thread_ids=created_thread_ids,
                 attachments_override=attachments_override,
                 admitted_message_ids=admitted_message_ids,
+                query_messages=query_messages,
                 unprompted=unprompted,
                 failure_surface=failure_surface,
             )
@@ -3456,6 +3461,7 @@ class DaimonBot(commands.Bot):
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         admitted_message_ids: tuple[str, ...] = (),
+        query_messages: tuple[discord.Message, ...] = (),
         unprompted: bool = False,
         failure_surface: _TurnFailureSurface | None = None,
     ) -> None:
@@ -4083,6 +4089,9 @@ class DaimonBot(commands.Bot):
         # already carry url= in their <attachment/> XML, so the agent can curl +
         # read them on demand instead. (build_context_xml still reports the
         # history image attachments; we just don't download them here.)
+        # The turn's own status card is already posted and would read as an empty
+        # message from the agent right before the query. Earlier turns' cards stay.
+        own_card_ids = tuple(i for i in (lifecycle.card_message_id,) if i is not None)
         if isinstance(message.channel, discord.Thread):
             if prepared.reused and prepared.watermark is not None:
                 user_message, _ = await build_delta_xml(
@@ -4095,13 +4104,17 @@ class DaimonBot(commands.Bot):
                     unprompted=unprompted,
                     key_names=key_names,
                     excluded_message_ids=(
-                        _live_row_for_keys.delivered_answer_chunk_ids or ()
-                        if _live_row_for_keys is not None
-                        and _live_row_for_keys.id == prepared.mapping_id
-                        else ()
+                        *(
+                            _live_row_for_keys.delivered_answer_chunk_ids or ()
+                            if _live_row_for_keys is not None
+                            and _live_row_for_keys.id == prepared.mapping_id
+                            else ()
+                        ),
+                        *own_card_ids,
                     ),
                     query_text=content_override,
                     query_message_ids=tuple(int(i) for i in admitted_message_ids),
+                    query_messages=query_messages,
                 )
             else:
                 user_message, _ = await build_context_xml(
@@ -4115,6 +4128,8 @@ class DaimonBot(commands.Bot):
                     key_names=key_names,
                     query_text=content_override,
                     query_message_ids=tuple(int(i) for i in admitted_message_ids),
+                    query_messages=query_messages,
+                    excluded_message_ids=own_card_ids,
                 )
         else:
             if content_override is not None:
@@ -4193,6 +4208,12 @@ class DaimonBot(commands.Bot):
                 unprompted=unprompted,
                 key_names=key_names,
                 query_text=content_override,
+                query_message_ids=tuple(int(i) for i in admitted_message_ids),
+                query_messages=query_messages,
+                excluded_message_ids=(
+                    *own_card_ids,
+                    *(i for i in (lifecycle_holder[0].card_message_id,) if i is not None),
+                ),
             )
             if synthetic_prefix:
                 full_message = synthetic_prefix + "\n" + full_message
