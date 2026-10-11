@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
 - Use the shared schema-aware database preflight for offline Discord ingress and Forbidden conformance fixtures, retaining connection-trap controls and contributor skips.
 - Revalidate NEW15 outcome coverage, observation windows and independently joined attempt identity when decoding captured receipts.
+- Add explicit scoped Gemini operator CLI copy/readback bindings with offline native SDK evidence; retain honest failed table checks and unsupported fixture/cleanup gaps.
 
 - Keep shared database preflight admission separate for each resolved schema fixture when running multiple test packages together; document owned local databases and skipped shared fixtures on plain local `daimon_test`.
 - Compose the signed resource admin operations on shared database preflight, preserving native service behavior and contributor isolation.

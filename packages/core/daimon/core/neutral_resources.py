@@ -158,7 +158,11 @@ class NeutralResourceHost:
         self.operation_key = operation_key
         self.resolve_pin = resolve_pin
         self._gemini_catalog: NativeCatalogReadback | None = None
-        if backend.capabilities().provider == "gemini":
+        if backend.capabilities().provider == "gemini" and (
+            resource_catalog_enabled is not False
+            or catalog_adapter is not None
+            or getattr(backend, "catalog_adapter", None) is not None
+        ):
             if (
                 resource_catalog_enabled is not True
                 or catalog_adapter is None
@@ -190,8 +194,7 @@ class NeutralResourceHost:
             raise UnsupportedCapability(
                 ("neutral_resource_host_profile",), backend.capabilities().profile_id
             )
-        # Build the store from the same explicit routing tuple. An empty
-        # caller-supplied catalog cannot certify its private provider/workspace.
+        # Preserve the already signed inline host; it is not native A1 evidence.
         self.catalog = PostgresNeutralCatalog(
             sessions, provider=provider, account_scope_id=account_scope_id
         )

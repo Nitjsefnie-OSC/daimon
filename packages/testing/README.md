@@ -629,3 +629,16 @@ decision identity joined to the first Discord thread and persisted usage caller.
 Stored pending gaps cannot certify an incomplete or altered capture. Late answers
 are still checked across the full observation window. Contradictory identities or
 out-of-window effects refuse; missing coverage/duration remains typed pending.
+
+Gemini's C6 operator profile is explicit: `opt_in_gemini_operator_profile` installs
+`GeminiCliResourceEdge` over an enabled native A1 catalog adapter and the same
+owned `AdminBindings` sessionmaker. Its immutable CLI grants bind tenant,
+account, channel, current config digest and provider workspace; native copy/get
+validate the returned host before catalog/provider access. Missing opt-in keeps
+the default paths unchanged. The edge runs the literal channel-copy and agent-get
+CLI functions and returns their actual table output. Independent native catalog
+readback cannot replace the frozen CLI assertion: D14 currently fails its two
+skill/model checks because the table omits those fields, despite retained copied
+skill bytes/model. Native archive and D5's authored Claude YAML conversion remain
+explicitly pending; no member edit or native turn is manufactured. All proofs
+are offline actual SDK HTTP requests with owned Postgres readback.
