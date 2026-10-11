@@ -135,7 +135,7 @@ is main, all on is the design, and each ablation turns one knob back.
 | `ErrCard`, `ErrSend` | `_render_turn_error`: `surface.end_card`, then `safe_thread_send` (`bot.py:2745-2761`, `thread_send.py:13-34`, which re-raises anything but 50083) |
 | `TurnEnd` | `_handle_mention` finally: `_finish_admitted_messages` (`bot.py:2714-2719`); a drained turn's `run` finally clears reactions (`bot.py:2623-2626`) |
 | `Drain`, `DrainEmpty` | `ThreadQueue.drain` (`thread_queue.py:49-53`) via `_drain_pending_mentions` (`bot.py:2590-2633`), one turn per author |
-| `StopDrain`, `StopFinish` | design only (step 4 of the #809 design): stop before starting a turn, finish the unrun rows, clear reactions |
+| `StopDrain`, `StopFinish` | design only (step 4 of the #809 design): stop before starting a turn, finish the unrun rows, no reaction calls in the lost thread |
 | `Unwind` | an escaping exception: the drain `finally` (`bot.py:2630-2633`) |
 | `Exit` | channel-branch `finally`: `_release_thread`, `_pending.pop`, reaction clear (`bot.py:2471-2478`) |
 | `Prologue` | `on_message` except clauses: `_handle_prologue_failure` posts into `message.channel`, the parent channel (`bot.py:2490-2493`, `2559-2584`) |
@@ -232,8 +232,8 @@ that fails, so `GoneDesign` cannot be clean by being blind to the bug.
 
 | Item | Source and status |
 | --- | --- |
-| Design behaviour | the #809 design (stop writes on the signal, never post elsewhere, stop the drain mid-group, finish queued admission rows); the model checks the design, not an implementation |
-| Discord answers 10003 to every later write (post, edit, reaction) once the thread is deleted | unsupported; from the #809 log (edits and a send both failed) and to be confirmed on staging with a real delete |
+| Design behaviour | the #809 design (stop writes on the signal, never post elsewhere, stop the drain mid-group, finish queued admission rows); see the knob-to-code table below for the implementation |
+| Discord answers 10003 to every later write (post, edit, reaction) once the thread is deleted | supported for edits and sends: staging, 2026-10-11 11:41-11:42Z, a REST delete mid-turn was followed by 43 progress edits (400, 10003) and one send (404, 10003); reactions not exercised |
 | The final terminal write raises into `_orchestrate` on a gone thread | supported by the #809 log (`turn.completed`, then `turn.failed 400 Unknown Channel`), not traced to a single line; `lifecycle.py` terminal path swallows some edit errors (`turn.card_write_dropped`) |
 | Progress edit failures are swallowed | `driver.py:812-823` |
 | Every thread write that can happen is a card post, progress edit, terminal write, error card edit, error send or reaction removal | read from `bot.py` and `lifecycle.py`; webhook-transport fallback sends and `confirm_write` prompts are not modelled |
@@ -252,6 +252,36 @@ own turn; its row is finished by that turn), orphan recovery, and
 cross-process behaviour. `GoneDesign` assumes `GoneIsNotFailure` covers every
 caller of a thread write, not only `_render_turn_error`.
 
-Replay status: provisional. No counterexample has been replayed against the
-real adapter yet, no staging contract test of the 10003 assumption has been
-run, and no production trace has been checked against the model.
+### Knobs in the implementation
+
+| Knob | Code (`fix/discord-deleted-thread`) |
+| --- | --- |
+| `GuardWrites` | `ThreadStops` / `TurnThreadWatch` (`thread_gone.py`); `DiscordPostTransport._refuse_if_stopped` (`post_transport.py`); `thread_stopped` checks in `lifecycle.py` (progress, terminal, 10008 replacement, deletes); `_thread_lost` for reactions (`bot.py`) |
+| `GoneIsNotFailure` | `_render_turn_error` never raises and signals a 10003 it meets; the channel branch swallows a drain failure once the thread is stopped (`bot.py`) |
+| `DrainStop = group` | `_drain_pending_mentions.run` checks the stop before every group (`bot.py`) |
+| `FinishUnrun`, `FinishAtRelease` | `_drop_queued` and `_release_and_clear` (`bot.py`) |
+| `ClearReactionsOnGone = FALSE` | `_thread_lost` guards `_remove_mention_reaction` and `_queue_behind_inflight_turn` (`bot.py`) |
+| `GatewayDelete` signals the turn | `on_raw_thread_delete` (`bot.py`) |
+
+Replay status:
+
+- Counterexamples: `packages/adapters/discord/tests/test_thread_gone.py`
+  replays each story against the real `on_message` path with only Discord
+  faked. Every test fails on `8d93a0b96` and passes on the fix:
+  `GoneMain`/`GoneMainIncident` by
+  `test_thread_deleted_mid_turn_interrupts_and_posts_nothing_in_the_channel`;
+  `GoneMainStart` by `test_a_queued_follow_up_behind_a_gone_turn_never_starts`;
+  `GoneMainWrite` by
+  `test_thread_delete_event_during_a_turn_interrupts_it_and_retires_sessions`;
+  `GoneMainRows` and `GoneDesignNoFinish` by the queued follow-up test;
+  `GoneDesignBatchStop` by
+  `test_a_message_queued_after_the_stop_is_dropped_before_its_group_runs`;
+  `GoneDesignNoReleaseFinish` and `GoneDesignReactions` by
+  `test_a_message_queued_after_the_stop_gets_no_reaction_and_is_finished`;
+  `GoneDesignNoSwallow` by
+  `test_a_failed_error_send_marks_the_thread_gone_and_never_raises`.
+- Traces: the production #809 log (2026-10-11 09:59-10:01Z) and the staging
+  repro on `8d93a0b96` (11:40-11:42Z) both follow `GoneMainIncident`:
+  card up, delete, failing progress edits, terminal write raises, error card
+  fails, error send raises, prologue posts in the parent channel. 2 of 2
+  accepted. The fixed build's staging trace is still to be checked.
