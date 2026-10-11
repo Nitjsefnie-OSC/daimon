@@ -149,11 +149,10 @@ async def test_connected_repo_is_granted_immediately_in_chat(
         repo_name="owner/missing",
     )
     assert missing.status == "sent"
-    assert "Nothing is connected yet" in missing.message
-    assert (
-        "I can't see owner/missing yet. Tap Connect GitHub, then click Add repos, tick owner/missing, click Add repos again and Save changes."
-        in missing.message
-    )
+    assert "nothing is connected yet" in missing.message
+    assert "at most this line" in missing.message
+    assert "I can't see owner/missing yet." in missing.message
+    assert "Add repos" not in missing.message
     delivery.assert_awaited_once()
     other_agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ma_other")
     async with committing_sessionmaker.begin() as session:
@@ -467,7 +466,7 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
         repo_name="owner/repo",
     )
     assert allowed.status == "sent"
-    assert "Nothing is connected yet" in allowed.message
+    assert "nothing is connected yet" in allowed.message
     async with committing_sessionmaker.begin() as session:
         await set_access_policy(
             session,
