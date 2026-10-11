@@ -17,7 +17,6 @@ from daimon.adapters.cli.runtime import (
     CLI_AUTHORIZATION_ID,
     FACE_WAIT_S,
     CliRuntime,
-    authorized_openai_deployments,
     build_runtime,
     cli_principal_id,
     request_resource_host,
@@ -216,10 +215,12 @@ async def _hosted_agent(
     factory = rt.resource_hosts
     if factory is None:
         return None
+    from daimon.core.turn.openai_deployment import authorized_deployments
+
     accounts = sorted(
         {
             deployment.account_id
-            for deployment in authorized_openai_deployments(tenant_id)
+            for deployment in authorized_deployments(str(tenant_id))
             if deployment.project == factory.account_scope_id
         }
     )
