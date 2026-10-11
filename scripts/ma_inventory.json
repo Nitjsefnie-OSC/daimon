@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2253,
+  "files_scanned": 2255,
   "parse_errors": [],
   "calls": [
     {
@@ -18230,6 +18230,15 @@
         "Agent"
       ],
       "category": "test"
+    },
+    {
+      "file": "packages/testing/daimon/testing/admin_bindings.py",
+      "line": 19,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test-support"
     },
     {
       "file": "packages/testing/daimon/testing/factories.py",
