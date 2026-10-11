@@ -167,7 +167,7 @@ async def turn_origin(
     is_setup: bool = False,
     is_external: bool = False,
     message_text: str | None = None,
-    message_created_at: datetime | None = None,
+    queued_message: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -176,8 +176,8 @@ async def turn_origin(
     `message_text` is the person's own message that started this turn, as the
     adapter received it; it settles their open skill-add previews in this
     thread (`resolve_pending_skill_adds`). None for a turn no message started.
-    `message_created_at` is the platform message time, so queued confirmations
-    cannot approve previews made after the person sent them.
+    `queued_message` means the message arrived during another turn in this
+    thread. It runs as a turn, but cannot settle a skill-add preview.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -199,13 +199,13 @@ async def turn_origin(
             is_external=is_external,
         )
         if message_text is not None:
-            await resolve_pending_skill_adds(
-                session,
-                origin=origin,
-                message_text=message_text,
-                now=now,
-                message_created_at=message_created_at,
-            )
+            if not queued_message:
+                await resolve_pending_skill_adds(
+                    session,
+                    origin=origin,
+                    message_text=message_text,
+                    now=now,
+                )
             await resolve_github_grant_proposals(session, origin=origin, message_text=message_text)
     origin_context = current_origin_id.set(origin.id)
     try:

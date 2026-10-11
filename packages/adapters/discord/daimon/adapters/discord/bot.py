@@ -4295,7 +4295,7 @@ class DaimonBot(commands.Bot):
                 role=role,
                 is_setup=admission.config.thread_binding_kind == "setup",
                 message_text=message.content,
-                message_created_at=message.created_at,
+                queued_message=content_override is not None,
             ) as origin:
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,

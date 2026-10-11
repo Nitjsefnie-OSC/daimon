@@ -5,8 +5,10 @@ previewing turn (`TurnOriginRow`): its person, thread and target agent, and
 the previewed content's hash. When that person's next turn in the thread
 starts, the adapter's own copy of their message settles it
 (`resolve_pending_skill_adds`): an explicit yes approves it for that turn
-alone, anything else cancels it. `add_skill` then consumes it once, from that
-turn, before it expires. Nothing the model passes decides the confirmation.
+alone, anything else cancels it. Messages queued behind a running turn do not
+settle it; the preview stays open for a later direct reply. `add_skill` then
+consumes it once, from that turn, before it expires. Nothing the model passes
+decides the confirmation.
 """
 
 from __future__ import annotations
@@ -87,13 +89,11 @@ async def resolve_pending_skill_adds(
     origin: TurnOriginRow,
     message_text: str,
     now: datetime,
-    message_created_at: datetime | None = None,
 ) -> None:
     """Settle this person's one open preview in this thread with their new message.
 
     An explicit yes (`is_affirmative`) approves it for ``origin`` alone;
-    anything else cancels it. A preview created after this message arrived
-    cannot be settled by it, even when queueing delays the turn.
+    anything else cancels it. Queued messages never reach this function.
     """
     still_open = (
         PendingSkillAdd.tenant_id == origin.tenant_id,
@@ -104,8 +104,6 @@ async def resolve_pending_skill_adds(
         PendingSkillAdd.approved_origin_id.is_(None),
         PendingSkillAdd.expires_at > now,
     )
-    if message_created_at is not None:
-        still_open += (PendingSkillAdd.created_at <= message_created_at,)
     settled = (
         {"approved_origin_id": origin.id} if is_affirmative(message_text) else {"consumed_at": now}
     )

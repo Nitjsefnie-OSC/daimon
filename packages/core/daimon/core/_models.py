@@ -2305,8 +2305,9 @@ class PendingSkillAdd(Base):
 
     Written only where no approval card can show because the deployment turned
     them off. Bound to the previewing turn's caller, thread and target agent
-    and to the previewed content. Their next message approves it for that turn
-    (`approved_origin_id`) or cancels it (`consumed_at`); an upload consumes it.
+    and to the previewed content. Their next non-queued message approves it for
+    that turn (`approved_origin_id`) or cancels it (`consumed_at`); an upload
+    consumes it.
     """
 
     __tablename__ = "pending_skill_adds"

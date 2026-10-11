@@ -2,9 +2,10 @@
 
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
+from daimon.core._models import PendingSkillAdd
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.pending_skill_adds import (
@@ -22,19 +23,27 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-@pytest.mark.parametrize("first_text", ["add this skill", "yes"])
-async def test_queued_yes_cannot_approve_preview_created_after_it_arrived(
+@pytest.mark.parametrize(
+    ("first_text", "queued_text"),
+    [
+        ("add this skill", "yes"),
+        ("yes", "yes"),
+        ("add this skill", "do this\nyes"),
+    ],
+)
+async def test_queued_message_cannot_settle_preview_created_during_running_turn(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     first_text: str,
+    queued_text: str,
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    arrived = datetime.now(UTC) - timedelta(seconds=10)
     kwargs = dict(
         tenant_id=tenant.id,
         account_id=account.id,
@@ -50,7 +59,6 @@ async def test_queued_yes_cannot_approve_preview_created_after_it_arrived(
             db_session_factory,
             **kwargs,
             message_text=first_text,
-            message_created_at=arrived,
         ) as first,
         db_session_factory.begin() as session,
     ):
@@ -65,8 +73,8 @@ async def test_queued_yes_cannot_approve_preview_created_after_it_arrived(
         turn_origin(
             db_session_factory,
             **kwargs,
-            message_text="yes",
-            message_created_at=arrived + timedelta(seconds=1),
+            message_text=queued_text,
+            queued_message=True,
         ) as second,
         db_session_factory.begin() as session,
     ):
@@ -77,6 +85,24 @@ async def test_queued_yes_cannot_approve_preview_created_after_it_arrived(
             content_hash="preview",
             now=datetime.now(UTC),
         )
+        preview = await session.scalar(
+            select(PendingSkillAdd).where(PendingSkillAdd.preview_origin_id == first.id)
+        )
+        assert preview is not None
+        assert preview.approved_origin_id is None
+        assert preview.consumed_at is None, "a skipped queued turn must leave the preview pending"
+
+    async with (
+        turn_origin(db_session_factory, **kwargs, message_text="yes") as third,
+        db_session_factory.begin() as session,
+    ):
+        assert await consume_pending_skill_add(
+            session,
+            origin=third,
+            ma_agent_id="agent",
+            content_hash="preview",
+            now=datetime.now(UTC),
+        ), "a fresh yes after the preview turn may approve the pending preview"
 
 
 async def test_simultaneous_origins_keep_separate_snapshots_and_cleanup(
