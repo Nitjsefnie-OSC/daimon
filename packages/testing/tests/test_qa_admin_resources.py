@@ -36,7 +36,11 @@ from daimon.testing.admin_bindings import (
 )
 from daimon.testing.admin_resources import ResourceAdminBindings
 from daimon.testing.db import isolated_test_schema, require_owned_sessionmaker
-from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
+from daimon.testing.isolated_sdk import (
+    AmbientSDKConfigurationError,
+    build_async_openai,
+    build_gemini_client,
+)
 from daimon.testing.ma import FakeMAState, MARouter, list_response, make_fake_ma_handler
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from google.genai import Client
@@ -992,13 +996,9 @@ async def test_resource_sdk_constructors_do_not_read_tls_proxy_or_allocate_netwo
         isolated.setattr("httpx._client.HTTPTransport", forbid_network)
         isolated.setattr("httpx._client.AsyncHTTPTransport", forbid_network)
         trace = ScriptedTransport()
-        openai, google = build_resource_clients(trace)
-        try:
-            assert not ambient.reads and not trace.requests
-        finally:
-            await openai.close()
-            google.close()
-            await google.aio.aclose()
+        with pytest.raises(AmbientSDKConfigurationError, match=name):
+            build_resource_clients(trace)
+        assert not ambient.reads and not trace.requests
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])

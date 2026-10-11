@@ -385,6 +385,7 @@ async def test_actual_channel_rule_fork_retains_utf8_skills_and_repeat_reuses_th
             copy_from="source",
             channel_label="Team Alpha",
             resource_host=host,
+            actor_account_id=uuid.UUID(case.scope.account_id),
         )
         repeated = await set_channel_rule(
             legacy,
@@ -400,6 +401,7 @@ async def test_actual_channel_rule_fork_retains_utf8_skills_and_repeat_reuses_th
             copy_from="source",
             channel_label="Team Alpha",
             resource_host=host,
+            actor_account_id=uuid.UUID(case.scope.account_id),
         )
         assert changed.copied_from == "source" and changed.agent_name == "team-alpha"
         assert changed.dropped_skills == ("foreign",)
@@ -451,6 +453,7 @@ async def test_failed_channel_write_cleanup_keeps_gemini_catalog_and_native_iden
                 copy_from="source",
                 channel_label="Team Alpha",
                 resource_host=case.host(driver),
+                actor_account_id=uuid.UUID(case.scope.account_id),
             )
         current = await case.host(driver).read("team-alpha")
         assert current.local_revision == 1 and current.agent.lifecycle == "active"
