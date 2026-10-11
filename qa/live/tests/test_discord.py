@@ -743,3 +743,66 @@ def test_transport_denylist_precedes_even_matching_refusal_pattern(
     )
     with pytest.raises(RuntimeError, match="transport failure"):
         backend.admin(step, "parent")
+
+
+@pytest.mark.parametrize(
+    "chunk2_s, answer_edit_s, expected",
+    [(17.237, 17, "PASS"), (23, 17, "FAIL"), (17.237, None, "PENDING")],
+)
+def test_unedited_working_card_converted_into_chunk_one_is_timed_from_its_edit(
+    backend: DiscordBackend,
+    driver: FakeDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    chunk2_s: float,
+    answer_edit_s: float | None,
+    expected: str,
+) -> None:
+    """Collector-to-evaluator replay of the saved NEW10 shape (REVIEW-739-0f6d204)."""
+    from datetime import timedelta
+
+    from qa.live.evaluate import evaluate
+    from qa.live.schema import Assertion
+    from qa.live.tests.conftest import FakeJudge
+
+    backend.owned.add("parent")
+    started = utcnow()
+
+    def at(seconds: float) -> str:
+        return (started + timedelta(seconds=seconds)).isoformat()
+
+    # Both running snapshots have no edit timestamp, exactly like NEW10.
+    working: Message = {
+        "id": "card",
+        "channel_id": "parent",
+        "working": True,
+        "content": "Working",
+        "timestamp": at(1),
+        "edited_timestamp": None,
+    }
+    chunk1: Message = {**working, "working": False, "content": "chunk one"}
+    if answer_edit_s is not None:
+        chunk1["edited_timestamp"] = at(answer_edit_s)
+    chunk2: Message = {
+        "id": "chunk2",
+        "channel_id": "parent",
+        "content": "chunk two",
+        "timestamp": at(chunk2_s),
+    }
+    rows = iter([[working], [working], [chunk1, chunk2]])
+    monkeypatch.setattr(
+        driver, "turn_messages", lambda *args, **kwargs: next(rows, [chunk1, chunk2])
+    )
+    turn = Turn(1, "123", "parent", started)
+    backend.collect(turn, 1)
+    assert turn.settled
+    assert turn.card_history == [
+        {"message_id": "card", "edited_timestamp": None, "phase": "running"}
+    ]
+    gap = Assertion(kind="chunks_gap_max_s", turn=1, maximum=5)
+    result = evaluate(gap, [turn], backend, FakeJudge())
+    assert result.status == expected, result.reason
+    if expected == "PASS":
+        assert "0.237" in result.reason
+    # An unedited running card is a working observation, not an edit.
+    edits = Assertion(kind="card_edits_min", turn=1, minimum=1, during="running")
+    assert evaluate(edits, [turn], backend, FakeJudge()).status == "FAIL"
