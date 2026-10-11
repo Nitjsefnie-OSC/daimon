@@ -207,3 +207,28 @@ def test_staging_prebuilt_join_precedes_both_vm_refreshes() -> None:
     )
     assert "iap-ssh-key.sh run " in start["run"]
     assert "iap-ssh-key.sh wait " in join["run"]
+
+
+def test_serial_registration_step_works_without_checked_out_helper(tmp_path: Path) -> None:
+    workflow: dict[str, Any] = yaml.safe_load(_WORKFLOW.read_text())
+    steps = workflow["jobs"]["deploy"]["steps"]
+    serial = next(step for step in steps if step.get("name") == "Register the IAP SSH key")
+    run = serial["run"].replace("${{ vars.GCP_AR_REPO }}", "test-repo")
+    env = _fake_tools(tmp_path, mode="retry-worker")
+    env["ZONE"] = "test-zone"
+    assert not (tmp_path / "scripts/ci/iap-ssh-key.sh").exists()
+
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", run],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = Path(env["FAKE_GCLOUD_LOG"]).read_text().splitlines()
+    assert calls[0].startswith("compute ssh test-repo-notebook")
+    assert calls[1].startswith("compute instances describe test-repo-workers")
+    assert sum("compute ssh test-repo-workers" in call for call in calls) == 3

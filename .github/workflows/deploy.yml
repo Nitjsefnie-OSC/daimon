@@ -234,10 +234,30 @@ jobs:
 
       - name: Register the IAP SSH key
         if: inputs.environment != 'staging' || steps.images.outputs.prebuilt != 'true'
-        env:
-          REPO_NAME: ${{ vars.GCP_AR_REPO }}
         run: |
-          scripts/ci/iap-ssh-key.sh register "$REPO_NAME" "$ZONE"
+          # Keep this inline: rollback workflows check out the requested old
+          # SHA, which may not contain the helper script used by current main.
+          # The first SSH on a fresh runner generates a key and writes it to
+          # project metadata before either VM refresh below starts.
+          gcloud compute ssh ${{ vars.GCP_AR_REPO }}-notebook --zone "$ZONE" \
+            --tunnel-through-iap --command true
+          # gcloud waits for a new key to reach only the VM it connects to, so
+          # wait for the workers VM (when running) to accept it as well.
+          STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-workers \
+            --zone "$ZONE" --format='value(status)')
+          if [ "$STATUS" = "RUNNING" ]; then
+            for i in $(seq 1 6); do
+              if gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
+                --tunnel-through-iap --command true; then
+                break
+              fi
+              if [ "$i" = "6" ]; then
+                echo "workers VM did not accept the SSH key" >&2
+                exit 1
+              fi
+              sleep 10
+            done
+          fi
 
       - name: Start notebook-host VM refresh (in the background)
         id: notebook_refresh
