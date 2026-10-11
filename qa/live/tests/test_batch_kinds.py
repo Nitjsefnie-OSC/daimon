@@ -402,3 +402,73 @@ def test_duplicate_observations_and_unchanged_samples_are_not_edits() -> None:
 def test_proven_edits_pass_despite_capture_gaps() -> None:
     turn = sampled([0, 30, 31, 60], ["Working · 0s", "Working · 30s", "x", "Working · 60s"])
     assert evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge()).status == "PASS"
+
+
+def card_sample(turn: Turn, identity: str, seconds: float, footer: str) -> Message:
+    return {
+        "message_id": identity,
+        "phase": "running",
+        "observed_at": (turn.started_at + timedelta(seconds=seconds)).isoformat(),
+        "elapsed_s": seconds,
+        "poll_interval_s": 4,
+        "message": {
+            "id": identity,
+            "channel_id": "parent",
+            "edited_timestamp": None,
+            "embeds": [{"footer": {"text": footer}}],
+        },
+    }
+
+
+def card_unavailable(turn: Turn, identity: str, seconds: float) -> Message:
+    row = card_sample(turn, identity, seconds, "")
+    del row["message"]
+    row["unavailable"] = "running card readback unavailable: SystemExit"
+    return row
+
+
+def test_other_card_samples_cannot_fill_a_same_card_capture_gap() -> None:
+    # Reviewer reproduction (REVIEW-730-e7d753b): card B is read on every poll,
+    # but card A's own readbacks failed from +12 to +56.
+    turn = observed(1, "card-a")
+    turn.done_s = 65
+    turn.card_history = [
+        card_sample(turn, "card-a", t, "0s" if t < 60 else "60s") for t in (0, 4, 8, 60)
+    ]
+    turn.card_history.extend(card_unavailable(turn, "card-a", t) for t in range(12, 60, 4))
+    turn.card_history.extend(card_sample(turn, "card-b", t, "unchanged") for t in range(1, 65, 4))
+    check = evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge())
+    assert check.status == "PENDING" and "card-a capture gap 52.0s" in check.reason, check.reason
+
+
+def test_failed_early_readbacks_leave_a_leading_gap_that_stays_pending() -> None:
+    # Reviewer reproduction: the card is known running from +0, readbacks fail
+    # until +52, and dense late capture shows only one transition.
+    turn = observed(1, "card")
+    turn.done_s = 70
+    turn.card_history = [card_unavailable(turn, "card", t) for t in range(0, 54, 4)]
+    turn.card_history.extend(
+        card_sample(turn, "card", t, f"{t // 10 * 10}s") for t in (54, 58, 62, 66)
+    )
+    check = evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge())
+    assert check.status == "PENDING" and "card capture gap 54.0s" in check.reason, check.reason
+
+
+def test_card_never_read_back_stays_pending() -> None:
+    turn = observed(1, "card-a")
+    turn.done_s = 25
+    turn.card_history = [card_sample(turn, "card-a", t, "0s") for t in range(0, 24, 4)]
+    turn.card_history.append(card_unavailable(turn, "card-b", 8))
+    check = evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge())
+    assert check.status == "PENDING" and "card-b was never read back" in check.reason
+
+
+def test_each_card_covered_through_its_own_end_can_still_fail() -> None:
+    # Card A stops being listed as working after +20; the next poll (+24, card B)
+    # bounds its end, so its interval is covered without extending to terminal.
+    turn = observed(1, "card-b")
+    turn.done_s = 46
+    turn.card_history = [card_sample(turn, "card-a", t, "frozen A") for t in range(0, 24, 4)]
+    turn.card_history.extend(card_sample(turn, "card-b", t, "frozen B") for t in range(24, 46, 4))
+    check = evaluate(EDITS_MIN_3, [turn], FakeBackend(), FakeJudge())
+    assert check.status == "FAIL" and "observed 0 successive" in check.reason, check.reason

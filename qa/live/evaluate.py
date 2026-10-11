@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -75,31 +75,65 @@ def running_card_edits(turn: Turn) -> tuple[int, list[tuple[datetime, Message]]]
 def running_capture_covered(
     turn: Turn, samples: list[tuple[datetime, Message]], minimum: int
 ) -> None:
-    """Raise PENDING unless capture spans the running interval tightly enough to FAIL."""
+    """Raise PENDING unless every running card's capture is tight enough to FAIL.
+
+    Coverage is checked per card identity. Each card's running interval starts
+    at its first known running observation, including failed readbacks, and
+    ends at the next poll that no longer listed it as working (or at terminal
+    proof). Another card's snapshots never qualify this card's missed time.
+    """
     counts: dict[str, int] = {}
     for _, sample in samples:
         counts[str(sample["message_id"])] = counts.get(str(sample["message_id"]), 0) + 1
     if max(counts.values(), default=0) < max(2, minimum + 1):
         raise Pending("insufficient running card samples; edit minimum is unproven")
-    intervals = [sample.get("poll_interval_s") for _, sample in samples]
+    known: dict[str, list[datetime]] = {}
+    intervals: list[JsonValue] = []
+    for entry in turn.card_history:
+        if entry.get("phase") != "running" or not entry.get("message_id"):
+            continue
+        if not isinstance(entry.get("observed_at"), str):
+            raise Pending("running card observation time is missing; edit minimum is unproven")
+        try:
+            observed = datetime.fromisoformat(str(entry["observed_at"]))
+        except ValueError:
+            raise Pending("running card sample has an invalid observation time") from None
+        if observed.tzinfo is None:
+            raise Pending("running card sample observation time lacks a timezone")
+        known.setdefault(str(entry["message_id"]), []).append(observed)
+        intervals.append(entry.get("poll_interval_s"))
     if any(isinstance(i, bool) or not isinstance(i, (int, float)) or i <= 0 for i in intervals):
         raise Pending("running card capture cadence is unknown; edit minimum is unproven")
-    bound = CARD_GAP_POLLS * max(cast(float, i) for i in intervals)
-    times = [observed for observed, _ in samples]
-    gaps = [(b - a).total_seconds() for a, b in zip(times, times[1:], strict=False)]
     if turn.done_s is None:
         raise Pending("running card end is unobserved; edit minimum is unproven")
-    gaps.append(turn.done_s - (times[-1] - turn.started_at).total_seconds())
-    widest = max(gaps)
-    if widest > bound:
-        missing = sum(
-            1 for e in turn.card_history if e.get("phase") == "running" and e.get("unavailable")
-        )
-        raise Pending(
-            f"running card capture gap {widest:.1f}s exceeds {bound:.1f}s"
-            + (f" ({missing} card readbacks unavailable)" if missing else "")
-            + "; edit minimum is unproven"
-        )
+    bound = CARD_GAP_POLLS * max(cast(float, i) for i in intervals)
+    terminal = turn.started_at + timedelta(seconds=turn.done_s)
+    every = sorted(t for times in known.values() for t in times)
+    successful: dict[str, list[datetime]] = {}
+    for observed, sample in samples:
+        successful.setdefault(str(sample["message_id"]), []).append(observed)
+    for identity, times in known.items():
+        good = sorted(successful.get(identity, []))
+        if not good:
+            raise Pending(f"running card {identity} was never read back; edit minimum is unproven")
+        last_known = max(times)
+        # The next poll that saw other cards but not this one bounds its end.
+        end = min([t for t in every if t > last_known] + [terminal])
+        edges = [min(times), *good, max(end, good[-1])]
+        widest = max((b - a).total_seconds() for a, b in zip(edges, edges[1:], strict=False))
+        if widest > bound:
+            missing = sum(
+                1
+                for e in turn.card_history
+                if e.get("phase") == "running"
+                and str(e.get("message_id")) == identity
+                and e.get("unavailable")
+            )
+            raise Pending(
+                f"running card {identity} capture gap {widest:.1f}s exceeds {bound:.1f}s"
+                + (f" ({missing} card readbacks unavailable)" if missing else "")
+                + "; edit minimum is unproven"
+            )
 
 
 def component_labels(component: Message) -> list[str]:
