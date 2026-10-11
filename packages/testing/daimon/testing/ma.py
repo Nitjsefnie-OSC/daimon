@@ -252,9 +252,19 @@ def build_fake_anthropic(
     combine_handlers / make_fake_ma_handler) and pass it here. The real SDK
     code path runs in full (parameter validation, response parsing).
     """
-    transport = httpx.MockTransport(handler)
-    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    return AsyncAnthropic(api_key="test", http_client=http_client)
+    from anthropic import DEFAULT_TIMEOUT
+    from daimon.testing.isolated_sdk import build_async_anthropic
+
+    # Preserve this builder's SDK defaults while refusing ambient credentials,
+    # signing keys, headers and routes before constructing its HTTP client.
+    return build_async_anthropic(
+        transport=httpx.MockTransport(handler),
+        api_key="test",
+        base_url="https://api.anthropic.com",
+        headers={},
+        max_retries=2,
+        timeout=DEFAULT_TIMEOUT,
+    )
 
 
 def build_stub_anthropic(

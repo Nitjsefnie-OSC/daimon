@@ -78,3 +78,60 @@ before I/O. Ordinary fixtures retain their existing behavior.
 Guard adopters refuse plain local `daimon_test` by design. Their real-database
 policy tests skip that documented contributor setup outside GitHub Actions CI;
 use an owned lane database to exercise those tests locally.
+# Isolated provider SDK clients
+
+`daimon.testing.isolated_sdk` supplies `build_async_openai`,
+`build_async_anthropic` and `build_gemini_client` for tests. Each requires an
+explicit HTTPX transport and supplies a fake API key, a fixed provider base URL
+and empty custom headers by default. Override `api_key`, `base_url` and `headers`
+explicitly when a test needs a different wire shape. HTTP clients use
+`trust_env=False`; Gemini also receives explicit SSL contexts. Install the
+corresponding OpenAI or Google GenAI SDK alongside this package to use those
+factories; imports remain lazy.
+
+```python
+import httpx
+from daimon.testing.isolated_sdk import build_async_openai
+
+transport = httpx.MockTransport(
+    lambda request: httpx.Response(200, json={"data": [], "object": "list"})
+)
+async with build_async_openai(transport=transport) as client:
+    models = await client.models.list()
+```
+
+Construction raises `AmbientSDKConfigurationError` if any variable in
+`SDK_ENV_VARS` is present, even with an empty value and even for another provider.
+Every factory additionally refuses unknown `ANTHROPIC_`/`OPENAI_`/`GOOGLE_`/`GEMINI_`
+variable names (case insensitive), including empty or future settings; unknown
+names and all values are omitted from errors. The same check guards late OpenAI
+and Anthropic SDK copies. Checks iterate names before set membership,
+avoiding `os.environ` membership's implicit value lookup. Both `GOOGLE_API_KEY`
+and `GEMINI_API_KEY` are refused before Gemini construction, even with an explicit
+test key, because Google GenAI 2.7 reads them unconditionally. This includes
+provider keys, webhook/admin keys, org/project settings, custom headers, base
+URLs, Anthropic identity/configuration and Gemini credential,
+Vertex and replay settings. Errors name variables without exposing values. The
+factories never clear the process environment; explicit test keys prevent
+credential-chain fallback. Start tests in a clean environment or remove only
+the relevant variables with a scoped test fixture. Missing keys, routes or
+transports also fail before HTTP client construction. Generic proxy and certificate environment settings are
+ignored by the supplied clients.
+
+Close OpenAI and Anthropic clients with their normal async context manager.
+Gemini owns both clients: call `client.close()` and `await client.aio.aclose()`.
+`MockTransport` supplies both transport protocols; a different sync Gemini
+transport requires a separate `async_transport`. OpenAI and Anthropic use SDK subclasses
+whose constructor guard also applies to
+`copy()` and `with_options()`. Late ambient settings therefore refuse the copy
+before SDK initialization; existing clients and caller-owned environments remain
+unchanged. Clean copies retain the SDK's arguments, owned HTTP clients and wire
+shape. New factories default to one HTTP attempt, including Gemini models and
+interactions. Anthropic accepts an explicit `max_retries` and `timeout` for tests
+exercising retry behavior.
+
+The existing `build_fake_anthropic`, `build_stub_anthropic` and
+`ScriptedTransport.client` inherit the isolation guard. Their test key, provider
+URL, SDK timeout and retry behavior are preserved: fake/stub use two retries;
+scripted defaults to zero and honors its explicit retry budget. The existing
+`build_no_retry_anthropic` remains a separate builder outside this change.
