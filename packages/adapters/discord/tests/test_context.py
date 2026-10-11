@@ -99,6 +99,27 @@ def _make_thread(
     return thread
 
 
+@pytest.mark.parametrize("delta", [False, True])
+async def test_merged_query_messages_are_absent_from_history(delta: bool) -> None:
+    first = _make_message(msg_id=11, content="first queued instruction")
+    second = _make_message(msg_id=12, content="second queued instruction")
+    earlier = _make_message(msg_id=10, content="earlier context")
+    thread = _make_thread([earlier, first, second])
+    kwargs = dict(
+        query_text="first queued instruction\nsecond queued instruction", query_message_ids=(11, 12)
+    )
+    if delta:
+        result, _ = await build_delta_xml(thread, first, after_message_id=9, **kwargs)
+    else:
+        result, _ = await build_context_xml(thread, first, **kwargs)
+    history = result.split("</thread_history>" if not delta else "</thread_delta>")[0]
+    assert "earlier context" in history
+    assert "first queued instruction" not in history
+    assert "second queued instruction" not in history
+    assert "first queued instruction" in result.split("<user_query")[1]
+    assert "second queued instruction" in result.split("<user_query")[1]
+
+
 def _make_text_channel(messages: list[discord.Message]) -> discord.TextChannel:
     """Build a mock discord.TextChannel with a history async iterator."""
     channel = MagicMock(spec=discord.TextChannel)
@@ -144,6 +165,16 @@ async def test_channel_backfill_keeps_the_team_zip_after_busy_channel_chat() -> 
 
 class TestBuildContextXml:
     """Tests for build_context_xml()."""
+
+    @pytest.mark.asyncio
+    async def test_queued_query_replaces_only_trigger_text(self) -> None:
+        trigger = _make_message(msg_id=10, content="first", author_name="Bob", author_id=200)
+        thread = _make_thread([trigger])
+
+        result, _ = await build_context_xml(thread, trigger, query_text="first\n\nsecond <item>")
+
+        assert 'user_id="200"' in result
+        assert "first\n\nsecond &lt;item&gt;" in result
 
     @pytest.mark.asyncio
     async def test_build_context_xml_empty_thread_returns_user_query_only(self) -> None:
@@ -605,6 +636,18 @@ class TestBuildContextXml:
 
 class TestBuildDeltaXml:
     """Tests for build_delta_xml() — continuation turn delta builder."""
+
+    @pytest.mark.asyncio
+    async def test_queued_query_replaces_only_trigger_text(self) -> None:
+        trigger = _make_message(msg_id=10, content="first", author_name="Bob", author_id=200)
+        thread = _make_thread([])
+
+        result, _ = await build_delta_xml(
+            thread, trigger, after_message_id=5, query_text="first\n\nsecond <item>"
+        )
+
+        assert 'user_id="200"' in result
+        assert "first\n\nsecond &lt;item&gt;" in result
 
     @pytest.mark.asyncio
     async def test_delta_xml_is_admin_true_for_guild_admin(self) -> None:

@@ -2487,6 +2487,81 @@ class TestSessionReuse:
     @patch("daimon.adapters.discord.bot.build_delta_xml", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_queued_thread_mentions_include_every_merged_message_in_user_turn(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_build_delta: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """The drain's content override must reach a reused thread session."""
+        from daimon.core.stores.identity import get_or_create_platform_principal
+        from daimon.core.stores.thread_sessions import create_thread_session
+
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        principal = await get_or_create_platform_principal(
+            db_session, tenant_id=tenant.id, platform="discord", external_id="111"
+        )
+        await db_session.commit()
+        async with db_session_factory() as seed_session:
+            snapshot = _snapshot_of(ma_session(id="sesn_queued_existing"))
+            await create_thread_session(
+                seed_session,
+                ma_agent_id="ag_test",
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="5555",
+                account_id=principal.account_id,
+                ma_session_id="sesn_queued_existing",
+                budget_channel_id="789",
+                watermark_message_id="111222333",
+                effective_config=snapshot,
+                identity_fingerprint=fingerprint_identity(snapshot),
+                mutable_fingerprint=fingerprint_mutable(snapshot),
+            )
+            await seed_session.commit()
+
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+
+        async def delta_with_query(*_args: object, **kwargs: object) -> tuple[str, list[object]]:
+            query = kwargs.get("query_text") or "first queued question"
+            return (
+                f"<context><thread_delta></thread_delta></context>\n\n<user_query>{query}</user_query>",
+                [],
+            )
+
+        mock_build_delta.side_effect = delta_with_query
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(thread_id=5555)
+        message.channel.send.return_value.id = 888999000
+
+        await bot._handle_mention(
+            message,
+            "123456",
+            tenant.id,
+            content_override="first queued question\n\nsecond queued question",
+        )
+
+        mock_create_session.assert_not_called()
+        mock_run_turn.assert_called_once()
+        assert mock_build_delta.call_args.kwargs["query_text"] == (
+            "first queued question\n\nsecond queued question"
+        )
+        assert "second queued question" in mock_run_turn.call_args.kwargs["user_message"]
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.adapters.discord.bot.build_delta_xml", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_second_thread_mention_reuses_session_no_second_create(
         self,
         mock_resolve: AsyncMock,

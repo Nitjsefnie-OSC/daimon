@@ -1267,6 +1267,28 @@ async def test_queue_cleanup_failure_does_not_skip_other_messages(queued_bot):
     messages[1].remove_reaction.assert_awaited_once_with("⌛", queued_bot.user)
 
 
+@pytest.mark.parametrize("contents", [("yes", "also do this"), ("do this", "yes")])
+async def test_queued_yes_runs_alone_among_instructions(
+    queued_bot: DaimonBot, contents: tuple[str, str]
+) -> None:
+    """A yes must settle its preview from its own message, not a merged turn."""
+    messages = [
+        _make_thread_message(content=contents[0]),
+        _make_thread_message(content=contents[1]),
+    ]
+    messages[0].id = 101
+    messages[1].id = 102
+    queued_bot._pending[789] = messages
+    queued_bot._handle_mention = AsyncMock()  # type: ignore[method-assign]
+
+    await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+
+    calls = queued_bot._handle_mention.await_args_list
+    assert [call.args[0] for call in calls] == messages
+    assert [call.kwargs["content_override"] for call in calls] == list(contents)
+    assert [call.kwargs["admitted_message_ids"] for call in calls] == [("101",), ("102",)]
+
+
 async def test_early_eyes_precede_admission_and_clear_on_failure(queued_bot):
     message = _make_thread_message()
     admission_entered = asyncio.Event()
