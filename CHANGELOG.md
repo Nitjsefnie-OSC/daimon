@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route legacy session budget-stamp reads through the tenant-scoped native session port, preserving SDK requests, partial metadata and retry behavior.
 
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
+- Discord restart recovery reads its mapped session through tenant-scoped provider authorization, preserving native requests and completed-turn replay.
 
 - Keep guarded Anthropic live probes running on aggregate cache-write usage with unknown TTLs using a conservative monitor estimate; export closed request routes and separately audited resource IDs, and pin the signed A7 replacement envelope.
 - Isolate pooled Discord conformance test fixtures and control timeout expiry after real callback entry, avoiding shared-transaction setup hangs and deadline races.

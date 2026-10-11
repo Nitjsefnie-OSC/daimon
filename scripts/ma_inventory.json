@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2433,
+  "files_scanned": 2435,
   "parse_errors": [],
   "calls": [
     {
@@ -298,19 +298,6 @@
       "response_access": []
     },
     {
-      "file": "packages/adapters/discord/daimon/adapters/discord/startup_replay.py",
-      "line": 26,
-      "end": 26,
-      "scope": "completed_orphan_text",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "anthropic_client.beta.sessions.retrieve(row.ma_session_id)",
-      "request_keys": [],
-      "response_access": [
-        "session.status"
-      ]
-    },
-    {
       "file": "packages/adapters/discord/tests/contracts/test_panel_roundtrip.py",
       "line": 27,
       "end": 27,
@@ -372,6 +359,19 @@
       "call": "client.beta.agents.archive(a.id)",
       "request_keys": [],
       "response_access": []
+    },
+    {
+      "file": "packages/adapters/discord/tests/fixtures/startup_replay_main.py",
+      "line": 28,
+      "end": 28,
+      "scope": "completed_orphan_text",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "anthropic_client.beta.sessions.retrieve(row.ma_session_id)",
+      "request_keys": [],
+      "response_access": [
+        "session.status"
+      ]
     },
     {
       "file": "packages/adapters/discord/tests/test_memory_command.py",
@@ -10504,6 +10504,24 @@
       "category": "production"
     },
     {
+      "file": "packages/adapters/discord/daimon/adapters/discord/startup_replay.py",
+      "line": 9,
+      "module": "anthropic._models",
+      "names": [
+        "construct_type_unchecked"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/adapters/discord/daimon/adapters/discord/startup_replay.py",
+      "line": 10,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsSession"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/adapters/discord/daimon/adapters/discord/thread_naming.py",
       "line": 19,
       "module": "anthropic",
@@ -10588,6 +10606,15 @@
     {
       "file": "packages/adapters/discord/tests/contracts/test_panel_roundtrip.py",
       "line": 12,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/fixtures/startup_replay_main.py",
+      "line": 10,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -10846,6 +10873,15 @@
         "BetaManagedAgentsSessionStatusIdleEvent",
         "BetaManagedAgentsStreamSessionEvents",
         "BetaManagedAgentsTextBlock"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_startup_replay_mux_parity.py",
+      "line": 13,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "test"
     },
