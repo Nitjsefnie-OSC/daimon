@@ -306,3 +306,5 @@ discord_gateway_handover	GatewayHandover	GatewayWitnessWait	violates:NoWaiting	3
 discord_gateway_handover	GatewayHandover	GatewayBootstrap	clean	439	-	legacy (pre-lease) Old plus the bootstrap rule: New waits until no other owner is alive
 discord_gateway_handover	GatewayHandover	GatewayBootstrapProgress	clean	439	-	liveness with a legacy Old: New eventually connects
 discord_gateway_handover	GatewayHandover	GatewayBootstrapNoWait	violates:AtMostOneHandler	73	-	legacy Old, no bootstrap rule: an empty lease row lets New connect beside Old
+test_session_task_lifecycle	TestSessionTaskLifecycle	Unsafe	violates:NoCleanupDuringTask	6	-	fixture cleanup can race an unjoined Discord bot task
+test_session_task_lifecycle	TestSessionTaskLifecycle	Safe	clean	6	-	bot tasks finish before fixture cleanup

@@ -874,7 +874,7 @@ class TestOnReadySweepProvisioning:
         mock_reconcile: AsyncMock,
         mock_set_provision_status: AsyncMock,
         db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
+        db_engine: AsyncEngine,
     ) -> None:
         """on_ready sweep provision-new-guild branch must pass clear_archive=True to
         set_provision_status — defense-in-depth for guilds that rejoined while the bot
@@ -892,8 +892,30 @@ class TestOnReadySweepProvisioning:
 
         mock_reconcile.return_value = ApplyReport()
 
-        runtime = _make_runtime(db_session_factory)
+        import asyncio
+
+        seed_started = asyncio.Event()
+        release_seed = asyncio.Event()
+        seed_finished = asyncio.Event()
+
+        # `on_ready` owns background seed/replay tasks. They may use the DB
+        # while this test is finishing, so give them their own pooled sessions
+        # instead of sharing `db_session`'s single checked-out connection.
+        runtime = _make_runtime(async_sessionmaker(bind=db_engine, expire_on_commit=False))
         bot = make_bot(runtime)
+        original_seed = bot._seed_tenant_defaults  # pyright: ignore[reportPrivateUsage]
+
+        async def gated_seed(
+            *, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool
+        ) -> None:
+            seed_started.set()
+            await release_seed.wait()
+            try:
+                await original_seed(tenant_id=tenant_id, guild=guild, was_ready=was_ready)
+            finally:
+                seed_finished.set()
+
+        bot._seed_tenant_defaults = gated_seed  # type: ignore[method-assign]
 
         # Register one guild that is not in known_guild_ids.
         mock_guild = MagicMock(spec=discord.Guild)
@@ -916,23 +938,36 @@ class TestOnReadySweepProvisioning:
         bot.tree.clear_commands = MagicMock()  # type: ignore[method-assign]
         bot.tree.sync = AsyncMock()  # type: ignore[method-assign]
 
-        await bot.on_ready()
+        try:
+            await bot.on_ready()
+            # Keep one tracked task alive until cleanup starts. This makes the
+            # lifecycle assertion independent of scheduler timing.
+            await asyncio.wait_for(seed_started.wait(), timeout=5)
 
-        # Find the set_provision_status call for the sweep provision branch
-        # (status="pending" with clear_archive=True).
-        pending_calls = [
-            c
-            for c in mock_set_provision_status.await_args_list
-            if c.kwargs.get("status") == "pending"
-        ]
-        assert len(pending_calls) >= 1, (
-            "sweep provision branch must call set_provision_status with status='pending'"
-        )
-        for call in pending_calls:
-            assert call.kwargs.get("clear_archive") is True, (
-                "#132: sweep provision branch must pass clear_archive=True to "
-                "set_provision_status; got: " + repr(call.kwargs)
+            # Find the set_provision_status call for the sweep provision branch
+            # (status="pending" with clear_archive=True).
+            pending_calls = [
+                c
+                for c in mock_set_provision_status.await_args_list
+                if c.kwargs.get("status") == "pending"
+            ]
+            assert len(pending_calls) >= 1, (
+                "sweep provision branch must call set_provision_status with status='pending'"
             )
+            for call in pending_calls:
+                assert call.kwargs.get("clear_archive") is True, (
+                    "#132: sweep provision branch must pass clear_archive=True to "
+                    "set_provision_status; got: " + repr(call.kwargs)
+                )
+        finally:
+            # Fixture teardown rolls back its DB session. Join every bot task
+            # first so no on_ready work survives into that teardown or the next
+            # test's schema wipe.
+            release_seed.set()
+            while bot._bg_tasks:  # pyright: ignore[reportPrivateUsage]
+                await asyncio.gather(*list(bot._bg_tasks), return_exceptions=True)
+        assert not bot._bg_tasks  # pyright: ignore[reportPrivateUsage]
+        assert seed_finished.is_set()
 
     @patch("daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.provision_tenant", new_callable=AsyncMock)
