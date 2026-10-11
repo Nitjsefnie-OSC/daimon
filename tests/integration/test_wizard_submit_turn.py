@@ -47,6 +47,7 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.stores.wizard_session import get_wizard_session
+from daimon.core.turn import run as run_module
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
@@ -458,6 +459,119 @@ async def test_submitting_a_form_records_usage(
         "the shared billing chokepoint rather than a private turn path"
     )
     assert usage_rows[0].model == _MODEL_ID
+
+
+# --- shutdown drain ------------------------------------------------------------
+
+
+async def test_the_shutdown_drain_counts_and_waits_for_a_running_wizard_turn(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """#16: a wizard-started turn claims no `_processing` thread, so the drain
+    logged `inflight_threads=0` while it ran. `run_prepared_turn` now registers
+    it in `TurnDeps.running_turns`; the drain counts it and waits for it."""
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800003501")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+
+    channel = _make_channel(thread_id=5035, parent_id=4035)
+    sent_events: list[dict[str, Any]] = []
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
+    runtime = _make_runtime(db_session_factory, router)
+    bot = _make_bot(runtime)
+    bot.close = AsyncMock()  # type: ignore[method-assign]
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_impl = run_module.run_prepared_turn_impl
+
+    async def _held_impl(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await release.wait()
+        return await real_impl(*args, **kwargs)
+
+    with (
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+        patch.object(run_module, "run_prepared_turn_impl", _held_impl),
+        patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 10.0),
+    ):
+        mock_create_session.return_value = ma_session(
+            id="sess_fresh_drain", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
+        )
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.wait_for(entered.wait(), timeout=10.0)
+        turn_tasks = set(bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+        try:
+            assert not bot._processing, "a wizard turn claims no mention-path thread"  # pyright: ignore[reportPrivateUsage]
+            assert runtime.turn_deps.running_turns.count() == 1
+            assert bot._running_turn_tasks() & turn_tasks  # pyright: ignore[reportPrivateUsage]
+
+            drain = asyncio.create_task(bot._drain_and_close())  # pyright: ignore[reportPrivateUsage]
+            await asyncio.sleep(0.6)
+            assert not drain.done(), "the drain must wait for the running wizard turn"
+            bot.close.assert_not_called()  # pyright: ignore[reportAttributeAccessIssue]
+        finally:
+            release.set()
+        await asyncio.wait_for(drain, timeout=10.0)
+        await asyncio.wait_for(asyncio.gather(*turn_tasks), timeout=10.0)
+
+    assert stream_hits, "the wizard turn ran to its end rather than being cut"
+    assert runtime.turn_deps.running_turns.count() == 0
+    assert bot.turn_queue.in_flight() == 0
+    bot.close.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue]
+    assert await list_orphaned_turns(db_session, platform="discord") == []
+
+
+async def test_the_shutdown_drain_cancels_a_wizard_turn_still_running_after_the_grace(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800003502")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+
+    channel = _make_channel(thread_id=5036, parent_id=4036)
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=[])
+    runtime = _make_runtime(db_session_factory, router)
+    bot = _make_bot(runtime)
+    bot.close = AsyncMock()  # type: ignore[method-assign]
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    entered = asyncio.Event()
+
+    async def _stuck_impl(*_args: Any, **_kwargs: Any) -> Any:
+        entered.set()
+        await asyncio.Event().wait()
+
+    with (
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+        patch.object(run_module, "run_prepared_turn_impl", _stuck_impl),
+        patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.2),
+    ):
+        mock_create_session.return_value = ma_session(
+            id="sess_fresh_cut", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
+        )
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.wait_for(entered.wait(), timeout=10.0)
+        turn_tasks = set(bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+        await asyncio.wait_for(bot._drain_and_close(), timeout=15.0)  # pyright: ignore[reportPrivateUsage]
+        _, still_running = await asyncio.wait(turn_tasks, timeout=5.0)
+        for task in still_running:
+            task.cancel()
+
+    assert not still_running, "the drain cancels a wizard turn left after the grace"
+    assert any(task.cancelled() for task in turn_tasks)
+    assert runtime.turn_deps.running_turns.count() == 0
+    assert bot.turn_queue.in_flight() == 0, "its finally released the turn slot"
+    bot.close.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue]
 
 
 async def test_two_concurrent_submits_bill_exactly_one_turn(

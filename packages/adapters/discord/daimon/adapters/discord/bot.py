@@ -805,13 +805,32 @@ class DaimonBot(commands.Bot):
         self._output_sweeps[session_id] = task
         task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
 
+    def _running_turn_tasks(self) -> set[asyncio.Task[object]]:
+        """Every task running a turn: per-thread claims plus `run_prepared_turn`'s registry.
+
+        The registry covers entry points that never claim a thread here (a
+        wizard submit, a direct message); the claims cover turns still before
+        `run_prepared_turn` (queued, preparing). The calling task is excluded,
+        so the drain never counts or cancels itself.
+        """
+        tasks = set(self.runtime.turn_deps.running_turns.tasks())
+        tasks.update(
+            task
+            for thread_id in self._processing
+            if (task := self._processing_tasks.get(thread_id)) is not None and not task.done()
+        )
+        if (current := asyncio.current_task()) is not None:
+            tasks.discard(current)
+        return tasks
+
     async def _drain_and_close(self) -> None:
         """Graceful shutdown drain.
 
-        Flips draining=True so on_message rejects new mentions, then polls the
-        existing _processing set until it empties or the grace window elapses.
-        Cancels turns left after the grace period, waits for their cleanup and
-        retained card writes, then closes the client.
+        Flips draining=True so on_message rejects new mentions, then waits
+        until no turn is running -- no claimed thread, no held turn slot and no
+        turn inside `run_prepared_turn`, whichever entry point started it -- or
+        the grace window elapses. Cancels turns left after the grace period,
+        waits for their cleanup and retained card writes, then closes the client.
         """
         self.draining = True
         # Pending auto batches are unasked-for turns that have not started;
@@ -819,26 +838,29 @@ class DaimonBot(commands.Bot):
         # admit a new turn the drain is trying to stop.
         for thread_id in list(self._participation_pending):
             self._cancel_participation_batch(thread_id)
-        log.info("discord.draining", inflight_threads=len(self._processing))
+        log.info(
+            "discord.draining",
+            inflight_threads=len(self._processing),
+            running_turns=len(self._running_turn_tasks()),
+            turn_slots=self.turn_queue.in_flight(),
+        )
         deadline = asyncio.get_running_loop().time() + _DRAIN_GRACE_S
         while (
-            self._processing or self.turn_queue.in_flight()
+            self._processing or self.turn_queue.in_flight() or self._running_turn_tasks()
         ) and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.5)
-        log.info("discord.drain_complete", remaining=len(self._processing))
+        log.info(
+            "discord.drain_complete",
+            remaining=len(self._processing),
+            running_turns=len(self._running_turn_tasks()),
+            turn_slots=self.turn_queue.in_flight(),
+        )
         # Before close(): it closes the HTTP session a notice still DMs through.
         notices = asyncio.ensure_future(drain_budget_notices())
         _, late = await asyncio.wait({notices}, timeout=_DRAIN_NOTICES_S)
         if late:
             log.warning("discord.drain_notices_timed_out", budget_s=_DRAIN_NOTICES_S)
-        tasks = {
-            task
-            for thread_id in self._processing
-            if (task := self._processing_tasks.get(thread_id)) is not None and not task.done()
-        }
-        current = asyncio.current_task()
-        if current is not None:
-            tasks.discard(current)
+        tasks = self._running_turn_tasks()
         for task in tasks:
             task.cancel()
         if tasks:

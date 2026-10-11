@@ -28,6 +28,7 @@ from daimon.core.ma_resolver import ResolverCache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn.running import RunningTurns
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -65,6 +66,8 @@ class TurnDeps:
     # Re-checks a notice recipient's stored Slack group or Teams team; set with the notifier.
     group_members: GroupMembersFor | None = None
     budget_notices_off: frozenset[uuid.UUID] = frozenset()
+    # Every turn inside `run_prepared_turn`, whatever started it; read by shutdown drains.
+    running_turns: RunningTurns = field(default_factory=RunningTurns)
 
 
 def _reveal(secret: SecretStr | None) -> str | None:

@@ -570,7 +570,7 @@ async def run_prepared_turn(
     observation.session_id = prepared.ma_session_id
     observation.origin = origin
     try:
-        with observation.activate():
+        with observation.activate(), deps.running_turns.track():
             result = await run_prepared_turn_impl(
                 deps,
                 prepared,

@@ -49,9 +49,10 @@ turns feed and drain; half-registering a wizard turn into it would strand
 mentions that arrive while the wizard turn runs, with nothing left to drain
 them. The practical effect is that a wizard turn and a mention turn can run
 concurrently against the same thread's session -- an accepted trade-off, not
-a bug, for the first cut of this feature. It also means `_drain_and_close`
-(which polls `_processing`) does not wait for an already-running wizard turn;
-the drain gate above is what keeps new ones from starting. If the session
+a bug, for the first cut of this feature. The shutdown drain still counts,
+waits for and finally cancels a running wizard turn like any other:
+`run_prepared_turn` registers itself in `TurnDeps.running_turns`, which
+`_drain_and_close` reads alongside `_processing`. If the session
 dies under both turns at once, dead-session recovery (`core.turn.run`) runs
 under the per-thread preparation lock, so the second turn adopts the first
 one's replacement and the thread still has one live session.
