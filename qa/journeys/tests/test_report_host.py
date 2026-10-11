@@ -97,7 +97,9 @@ async def _run_page(
         await page.wait_for_function(f"({canvas_ink_script})() > 100", timeout=20_000)
         canvas_ink = await page.evaluate(canvas_ink_script)
         assert canvas_ink > 100, canvas_ink
-        await page.screenshot(path=str(report_page_screenshot), full_page=True)
+        await page.screenshot(
+            path=str(report_page_screenshot), full_page=True, animations="disabled"
+        )
         if viewport_name == "mobile":
             await page.get_by_role("button", name="Open chat").click()
             await expect(page.locator("body")).to_have_class("dock-open")
@@ -105,8 +107,8 @@ async def _run_page(
             await expect(page.locator(".dock")).to_be_visible()
         await expect(
             page.get_by_placeholder("Ask about any number or claim in this report")
-        ).to_be_visible()
-        await page.screenshot(path=str(screenshot), full_page=True)
+        ).to_be_in_viewport()
+        await page.screenshot(path=str(screenshot), full_page=True, animations="disabled")
         dom.write_text(
             json.dumps(
                 {
