@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2403,
+  "files_scanned": 2404,
   "parse_errors": [],
   "calls": [
     {
@@ -6931,8 +6931,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 414,
-      "end": 414,
+      "line": 415,
+      "end": 415,
       "scope": "walk",
       "category": "production",
       "resource": "sessions.list",
@@ -6942,8 +6942,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 365,
-      "end": 365,
+      "line": 366,
+      "end": 366,
       "scope": "read_native",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -6953,8 +6953,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 399,
-      "end": 399,
+      "line": 400,
+      "end": 400,
       "scope": "list",
       "category": "production",
       "resource": "sessions.list",
@@ -6964,8 +6964,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 351,
-      "end": 351,
+      "line": 352,
+      "end": 352,
       "scope": "send",
       "category": "production",
       "resource": "sessions.create",
@@ -6975,8 +6975,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 358,
-      "end": 358,
+      "line": 359,
+      "end": 359,
       "scope": "create",
       "category": "production",
       "resource": "sessions.create",
@@ -6986,8 +6986,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 377,
-      "end": 377,
+      "line": 378,
+      "end": 378,
       "scope": "retrieve",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -6997,8 +6997,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 508,
-      "end": 510,
+      "line": 509,
+      "end": 511,
       "scope": "apply_update",
       "category": "production",
       "resource": "sessions.update",
@@ -7420,8 +7420,8 @@
     },
     {
       "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
-      "line": 177,
-      "end": 177,
+      "line": 183,
+      "end": 183,
       "scope": "test_create_preserves_override_tool_key_order_in_request_bytes",
       "category": "test",
       "resource": "sessions.create",
@@ -18447,7 +18447,7 @@
     },
     {
       "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
-      "line": 175,
+      "line": 181,
       "module": "anthropic.types.beta.session_create_params",
       "names": [
         "Agent"
