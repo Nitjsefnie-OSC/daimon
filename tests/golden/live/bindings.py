@@ -109,7 +109,7 @@ class Manifest(Strict):
     provider: Literal["anthropic"]
     profile: Literal["anthropic.managed_agents"]
     turn_path: Literal["legacy"]
-    model: Literal["claude-haiku-4-5-20251001"]
+    model: Literal["claude-haiku-5-5"]
     run_admission: list[str] = Field(min_length=1)
     fixtures: dict[str, dict[str, str]]
     common_assertions: list[Assertion] = Field(min_length=1)

@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "preparation": "OFFLINE_RECIPES_ONLY",
-  "source_commit": "2d84f160d9fe36497c4da3d08ac2b12e49175ece",
+  "source_commit": "0bfa591a7ee680f4e5e97d9aad72f204c48edbde",
   "provider": "anthropic",
   "profile": "anthropic.managed_agents",
   "turn_path": "legacy",
-  "model": "claude-haiku-4-5-20251001",
+  "model": "claude-haiku-5-5",
   "run_admission": [
     "These are offline recipes, not callback implementations, a GO, provider receipts or LIVE PASS results. N9 owns callback registration and live admission. No key access or paid call by N3.",
     "Lead GO + disposable workspace/key required. N9 must verify exact Haiku snapshot eligibility; no Sonnet/golden model or model fallback. No production or staging IDs/endpoints.",
@@ -200,7 +200,7 @@
       "name": "plain_turn",
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver.py::test_run_turn_folds_full_stream_and_returns_terminal_state",
-      "golden_sha256": "92ec2189aca3deade73a9679a5dd6205fc30bcb45a95bdd4be1432419a8b743f",
+      "golden_sha256": "61125893d15aad5f1d5d4c248d9656fe572eb4624320d1991d5d9e9b0cbdd51a",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -211,7 +211,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -269,7 +269,7 @@
       "name": "tool_use",
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver_policy_approval.py::test_chat_read_runs_without_a_card",
-      "golden_sha256": "98cd50fbc5f35565e661b6b6fb26539fe3aedc6835b7ecbd964a5d6245ebab4a",
+      "golden_sha256": "931f0acfcff11dbda0ebb3ced60b501d4a585d4893f281c5e6fb42494bd4773c",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -280,7 +280,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -358,7 +358,7 @@
       "name": "approval_card",
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver_policy_approval.py::test_chat_write_shows_a_card_and_runs_only_after_confirm",
-      "golden_sha256": "58472354e2b7db3a75e1af756af92ebffdd0ed536fe3437f31d6a1cf1e3497a7",
+      "golden_sha256": "ecc4cdc42ae73630d40bae279e1eb2a41ffeed9196f0a3ed55de3e6f4aa77cc1",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -369,7 +369,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -565,7 +565,7 @@
       "name": "cancel_mid_stream",
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver.py::test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack",
-      "golden_sha256": "677639149ade66dd18632aa5058f3d4793df7ddc97ec4104c5c4565881034d9e",
+      "golden_sha256": "a9d108967f1120562faea0afbd457c235929cc29c8035cf5aa04fc5508613869",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -576,7 +576,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -652,7 +652,7 @@
       "name": "reconnect",
       "status": "BLOCKED",
       "source_node": "packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_reconnect_on_connection_drop",
-      "golden_sha256": "d0e5c12fb9b00aa9bf34afcbaa9f3476e694d3e7a2b68e1286b366a6dfb5da24",
+      "golden_sha256": "8116328b1e2abf04ff7b5d3490efd7689787ce7af495815526f7fe9a81d7759e",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -707,7 +707,7 @@
       "name": "rate_limit",
       "status": "BLOCKED",
       "source_node": "packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_rate_limited_with_until_before_sleep",
-      "golden_sha256": "8e95eea644f936baaea92c66f45aade329ad8422ed4e5833c86f1c236e888c60",
+      "golden_sha256": "4536db40786a434344d6da878db5d9ef3dd786daf2d4a1166b108c8a00a478af",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -762,7 +762,7 @@
       "name": "mcp_degraded",
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver.py::test_mcp_failure_then_reply_finalizes_as_success_carrying_the_failure",
-      "golden_sha256": "006a14efc004db2d09351d1454b93bee433fbda7129dd9185e0da3d52ad65f6b",
+      "golden_sha256": "4bfaabe9e37b66a733e8736c403866759b39becdbb9f8bea8501d8f5df851207",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -773,7 +773,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -841,7 +841,7 @@
       "name": "ceiling",
       "status": "BOUND",
       "source_node": "tests/golden/test_boundary_scenarios.py::test_ceiling_after_http_setup_closes_stream",
-      "golden_sha256": "53412659b490e7884f73fc1820a0503f312953f9bdc68662649287cb985c8532",
+      "golden_sha256": "5b9bc5f9c4f2572420cdcc709e6b5bf014ddf6a8d743f1584627b9a22192dfa5",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -852,7 +852,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -927,7 +927,7 @@
       "name": "billing_replay",
       "status": "BLOCKED",
       "source_node": "packages/core/tests/turn/test_driver_replay_billing.py::test_replayed_call_is_debited_with_the_turns_attribution",
-      "golden_sha256": "4d482a317aa41300133a0ca0b89570b9de21e9dc27bf367fbb87863b582c8d41",
+      "golden_sha256": "70fc572b846835f22cf04c2a89069a4fc28cf96de297655f5d9f9dae2e27d862",
       "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -983,7 +983,7 @@
       "name": "cold_discord",
       "status": "BOUND",
       "source_node": "tests/golden/test_boundary_scenarios.py::test_cold_thread_feedback_before_session_create[discord]",
-      "golden_sha256": "94aa4ad38d35725e385e68e55f2caf276dd714ed69bd6c0cb33d393e9b488382",
+      "golden_sha256": "fd0830bcaa03fef8c2ac5b52f5ba8174df66ee4d3459a347dd1e8422435d9518",
       "host_entry_point": "DaimonBot.on_message",
       "platform": "discord",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -994,7 +994,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1085,7 +1085,7 @@
       "name": "cold_slack",
       "status": "BOUND",
       "source_node": "tests/golden/test_boundary_scenarios.py::test_cold_thread_feedback_before_session_create[slack]",
-      "golden_sha256": "d174059b0e96335af00a9e2f4620de2f83db7fbf53bcda92fb322de78d8dbec9",
+      "golden_sha256": "46bdaa1bb241ada1ee66d98d581285ed9466e7d81eca0e271b241939ffe46911",
       "host_entry_point": "SlackApp._handle_app_mention",
       "platform": "slack",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -1096,7 +1096,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1187,7 +1187,7 @@
       "name": "dm_delivery",
       "status": "BOUND",
       "source_node": "tests/golden/test_boundary_scenarios.py::test_dm_reply_delivery_and_deduplication",
-      "golden_sha256": "00cbd207269d1b9eb57e568a4f74e056581b8de5d3f1f1624adb16420630ccc3",
+      "golden_sha256": "a882bc305f79385895a8f4ab7c750efa222c5fe4e5f3904b9c641bda3cdd82b8",
       "host_entry_point": "DirectMessageCog.on_message",
       "platform": "discord",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -1198,7 +1198,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1300,7 +1300,7 @@
       "name": "plain_discord",
       "status": "BOUND",
       "source_node": "tests/parity/test_turn_billed.py::test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit[discord]",
-      "golden_sha256": "75113adfee6873382cb43c0d359b92dea0cbe259b0fe22de7025b9fce3db15c7",
+      "golden_sha256": "8424faabb5526dbecf5b8e4ed6e907910b9405e990c62a9328c2b9e5c52c8995",
       "host_entry_point": "DaimonBot.on_message",
       "platform": "discord",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -1311,7 +1311,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1385,7 +1385,7 @@
       "name": "plain_slack",
       "status": "BOUND",
       "source_node": "tests/parity/test_turn_billed.py::test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit[slack]",
-      "golden_sha256": "8565d579ebcc74fc43a3e33427ccc00f5ce216dbd18d331ebd490488cf36b9b5",
+      "golden_sha256": "11f09efbf34ea91c31e3140d54ed34bc97ab99d10a3d4ddb9126c15bdfb50a01",
       "host_entry_point": "SlackApp._handle_app_mention",
       "platform": "slack",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -1396,7 +1396,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1470,7 +1470,7 @@
       "name": "blocked_balance",
       "status": "BLOCKED",
       "source_node": "tests/parity/test_turn_blocked_balance.py::test_turn_blocked_when_over_balance_writes_no_usage_and_no_ledger_row[discord]",
-      "golden_sha256": "dacb7889c1c36422c7bfa6ee275c05c38058f150301e4d5dbe3e7a86e2c260cd",
+      "golden_sha256": "19b6d57689aa1f434eb27c97f5661b0613e1846203c4449b098cdb15035cd4d3",
       "host_entry_point": "DaimonBot.on_message",
       "platform": "discord",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -1527,7 +1527,7 @@
       "name": "blocked_cap",
       "status": "BLOCKED",
       "source_node": "tests/parity/test_turn_blocked_cap.py::test_turn_blocked_when_over_cap_writes_no_new_usage_or_ledger_row[slack]",
-      "golden_sha256": "45726b5f8ec3dca7958ffc57d12b7d24aee8a3273cfc499b56cac27bf5cc989d",
+      "golden_sha256": "cf6bd131a5076cb31bdba995fb0387ac675b3603c8e2f12a46c90e416c7d6026",
       "host_entry_point": "SlackApp._handle_app_mention",
       "platform": "slack",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -1584,7 +1584,7 @@
       "name": "dead_session",
       "status": "BOUND",
       "source_node": "tests/parity/test_dead_session.py::test_dead_session_recreates_marks_old_row_dead_and_bills_new_session[discord]",
-      "golden_sha256": "2ad0cdf6557f5eb592c6834c12761c209b7017ccaa3d5181b94e58717dfdd57e",
+      "golden_sha256": "a8f1779f5ec30d7cbf7970457f024c3e1ec3cc8d12a6b979b4b958e4bf89e2ef",
       "host_entry_point": "DaimonBot.on_message",
       "platform": "discord",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -1595,7 +1595,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1702,7 +1702,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1818,7 +1818,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1909,7 +1909,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -1996,7 +1996,7 @@
       "name": "wake_continuation",
       "status": "BOUND",
       "source_node": "tests/parity/test_private_input_dispatch.py::test_private_input_continuation_dispatches_exactly_one_follow_up_turn[discord]",
-      "golden_sha256": "8af549f9c082b596eba9446d735b2e64fd24850a22166985fbc02ba697677dcf",
+      "golden_sha256": "6bbf1b954b76e9ede2a14fd966a9bd553a07d6da6aeb47499d00a071a0d2093c",
       "host_entry_point": "DaimonBot.on_message + production continuation dispatcher",
       "platform": "discord",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -2007,7 +2007,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -2107,7 +2107,7 @@
       "name": "handoff_continuation",
       "status": "BOUND",
       "source_node": "tests/parity/test_handoff_dispatch.py::test_handoff_continuation_dispatches_exactly_one_follow_up_turn[discord]",
-      "golden_sha256": "2c8053a6904d2d75197f171df14a89b24a019c88a7867817f01eb671d5ed791b",
+      "golden_sha256": "b5ea3ae7f419e62645a045cacb8fe24b7d286698df72b268e3dd9deed594bda7",
       "host_entry_point": "DaimonBot.on_message + production continuation dispatcher",
       "platform": "discord",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -2118,7 +2118,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -2218,7 +2218,7 @@
       "name": "dm_turn",
       "status": "BOUND",
       "source_node": "tests/integration/test_direct_messages.py::test_dm_scope_reuses_session_replays_history_bills_and_deduplicates[discord]",
-      "golden_sha256": "1e97594647139b2bd2c03a37b1931594d8a6cf815b3b18cf2711c98a2a54f260",
+      "golden_sha256": "50185f3d05d2fcce8ed6604974b5fb6b2d83250ada8840e62d10665eae25de47",
       "host_entry_point": "daimon.core.direct_messages.start_dm + reply_to_dm",
       "platform": "discord",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -2229,7 +2229,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -2331,7 +2331,7 @@
       "name": "sealed_channel",
       "status": "BOUND",
       "source_node": "packages/adapters/scheduler/tests/test_main.py::test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session",
-      "golden_sha256": "14412bd9155a37757320d143f4baacc4b2538d087c3e603956ee97267b2b33eb",
+      "golden_sha256": "8559a2929f944c9278988bd50eab6caf4db7ef731ec2f365d1977c567c440ea7",
       "host_entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless legacy run_turn)",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -2342,7 +2342,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
@@ -2422,7 +2422,7 @@
       "name": "scheduler_run",
       "status": "BOUND",
       "source_node": "packages/adapters/scheduler/tests/test_main.py::test_fire_runs_in_the_routine_channels_environment[channel]",
-      "golden_sha256": "9778b2fda071396bdd1733aa46917d5a8fbe7f968b9c956129fe3ffba524dcaa",
+      "golden_sha256": "208e797dbea9c76250e66dee72f1da816de39c0d51a66e01991588028171c740",
       "host_entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless legacy run_turn)",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
@@ -2433,7 +2433,7 @@
         },
         {
           "resource": "agent",
-          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-4-5-20251001, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
+          "instructions": "Create a probe-owned agent named qa-<run_id>-<scenario>-agent with metadata.qa_run=<run_id>, exact claude-haiku-5-5, concise task instructions, no production skills/vaults/repositories or memory. Register its actual handle under the local tenant."
         },
         {
           "resource": "environment",
