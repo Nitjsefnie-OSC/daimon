@@ -393,7 +393,7 @@ class DiscordTurnLifecycle:
         # The answer message that carries the summary, once there is one. The
         # vote emoji and the turn's files go on it too.
         self._summary_ref: discord.Message | None = None
-        self._last_answer_chunk_ref: discord.Message | None = None
+        self._delivered_answer_chunk_ids: list[str] = []
         # A snowflake just past the turn's end: posts before it belong to the turn.
         self._ended_before: int | None = None
         # The newest Discord-side moment this turn's own sends and edits carried.
@@ -1119,6 +1119,8 @@ class DiscordTurnLifecycle:
                     **({"files": files} if files else {}),
                     **({"embeds": [summary]} if summary and len(chunks) == 1 else {}),
                 )
+                if hasattr(self._message_ref, "id"):
+                    self._delivered_answer_chunk_ids.append(str(self._message_ref.id))
             else:
                 file_kwargs: dict[str, Any] = {"attachments": files} if files else {}
                 await self._edit_message(
@@ -1131,6 +1133,7 @@ class DiscordTurnLifecycle:
                     embeds=[summary] if summary and len(chunks) == 1 else [],
                 )
 
+        self._delivered_answer_chunk_ids.clear()
         try:
             await deliver_first(chunks[0], table_files)
         except discord.HTTPException as exc:
@@ -1145,7 +1148,6 @@ class DiscordTurnLifecycle:
             await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
         self._summary_ref = self._message_ref
-        self._last_answer_chunk_ref = self._message_ref
         # Overflow: subsequent chunks posted as new messages, the summary under the last.
         for i, chunk in enumerate(chunks[1:], start=2):
             last = summary is not None and i == len(chunks)
@@ -1154,7 +1156,10 @@ class DiscordTurnLifecycle:
                 allowed_mentions=discord.AllowedMentions.none(),
                 **({"embeds": [summary]} if last else {}),
             )
-            self._last_answer_chunk_ref = sent
+            # Discord sends return messages with IDs. Lightweight lifecycle
+            # recorders may return opaque refs when they do not test history.
+            if hasattr(sent, "id"):
+                self._delivered_answer_chunk_ids.append(str(sent.id))
             if last:
                 self._summary_ref = sent
         if notify:
@@ -1358,10 +1363,13 @@ class DiscordTurnLifecycle:
 
     @property
     def watermark_message_id(self) -> str | None:
-        """Last answer chunk, or the terminal card when no text answer was posted."""
-        if self._last_answer_chunk_ref is not None:
-            return str(self._last_answer_chunk_ref.id)
-        return self.final_message_id
+        """Consumed-input boundary: the terminal card, before any overflow sends."""
+        return self.card_message_id or self.final_message_id
+
+    @property
+    def delivered_answer_chunk_ids(self) -> tuple[str, ...]:
+        """Overflow messages delivered after the card, excluded from the next delta."""
+        return tuple(self._delivered_answer_chunk_ids)
 
     @property
     def ended(self) -> bool:

@@ -295,6 +295,7 @@ async def build_delta_xml(
     is_admin: bool = False,
     unprompted: bool = False,
     key_names: Sequence[str] = (),
+    excluded_message_ids: Sequence[str] = (),
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -304,7 +305,8 @@ async def build_delta_xml(
     element identical to the one ``build_context_xml`` emits, and
     ``image_attachments`` is the list of image-type attachments found in the
     delta (for the caller to pass as vision content blocks).  The trigger is
-    excluded from the delta; the bot's own messages are NOT excluded.
+    excluded from the delta. Bot replies remain visible unless their IDs are
+    explicitly listed as answer chunks already delivered to this session.
 
     Q1→(b) (SCOPING §3/§9): bot replies ARE included in the cross-speaker
     delta.  When a caller resumes after other participants spoke, their
@@ -341,7 +343,8 @@ async def build_delta_xml(
     # No backfill, no thread-starter prepend, no coalescing — the reused MA session
     # already holds prior context server-side; re-injecting it duplicates tokens and
     # re-triggers image replay from earlier turns.
-    messages = [m for m in messages if m.id != trigger.id]
+    excluded_ids = {trigger.id, *(int(msg_id) for msg_id in excluded_message_ids)}
+    messages = [m for m in messages if m.id not in excluded_ids]
     messages.sort(key=lambda m: m.created_at)
 
     image_atts: list[discord.Attachment] = [

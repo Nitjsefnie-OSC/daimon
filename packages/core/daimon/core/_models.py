@@ -484,6 +484,7 @@ class ThreadSession(Base):
     budget_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     seal_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     watermark_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivered_answer_chunk_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     # Untyped Text on purpose — no CHECK, so widening the vocabulary never needs
     # a lock on a hot table. Values:
     #   'live'       the caller's current session (the only status the

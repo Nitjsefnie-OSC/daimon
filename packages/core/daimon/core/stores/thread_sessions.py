@@ -347,12 +347,16 @@ async def update_watermark(
     *,
     id: _uuid.UUID,
     watermark_message_id: str,
+    delivered_answer_chunk_ids: tuple[str, ...] = (),
 ) -> None:
-    """Persist the bot's final reply message id as the watermark for this mapping."""
+    """Persist the consumed-input card and overflow IDs as one atomic update."""
     await session.execute(
         update(ThreadSession)
         .where(ThreadSession.id == id)
-        .values(watermark_message_id=watermark_message_id)
+        .values(
+            watermark_message_id=watermark_message_id,
+            delivered_answer_chunk_ids=list(delivered_answer_chunk_ids),
+        )
     )
     await session.flush()
 
