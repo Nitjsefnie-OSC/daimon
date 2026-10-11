@@ -97,6 +97,7 @@ class Turn:
     channel_history: list[Message] = field(default_factory=list[Message])
     parent_messages: list[Message] = field(default_factory=list[Message])
     verdicts: list[str] = field(default_factory=list[str])
+    attribution_pending: str | None = None
     usage: Usage = field(default_factory=Usage)
     settled: bool = False
 

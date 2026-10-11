@@ -168,6 +168,8 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
     try:
         if assertion.pending_extension:
             raise Pending(assertion.pending_extension)
+        if turn is not None and turn.attribution_pending:
+            raise Pending(turn.attribution_pending)
         if kind == "interrupt_within_s":
             raise Pending("headless interrupt hook is not implemented")
         if kind == "any_of":

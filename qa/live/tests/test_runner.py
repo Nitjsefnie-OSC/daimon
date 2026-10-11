@@ -243,3 +243,29 @@ def test_thread_followup_posts_while_first_turn_is_still_running(
     assert result.status == "PASS"
     assert len(result.turns) == 2 and all(t.settled for t in result.turns)
     assert backend.events[-1] == "delete"
+
+
+def test_queue_followup_after_predecessor_finished_is_pending_and_never_sent(
+    backend: FakeBackend,
+    judge: FakeJudge,
+    ledger: Ledger,
+    pricing: Pricing,
+    scenario: Scenario,
+) -> None:
+    changed = Scenario.model_validate(
+        scenario.model_dump(by_alias=True)
+        | {
+            "steps": [
+                {"do": "mention", "text": "FIRST"},
+                {"do": "wait", "s": 0.2},
+                {"do": "thread_reply", "mention": True, "text": "SECOND"},
+                {"do": "wait_done", "timeout_s": 5},
+            ],
+        }
+    )
+    # The fake first turn settles immediately: the follow-up would no longer
+    # be queued behind a busy turn, so it cannot claim queue coverage.
+    result = Executor(backend, judge, ledger, pricing, "staging").run(changed)
+    assert result.status == "PENDING"
+    assert any("finished before the queued follow-up" in c.reason for c in result.checks)
+    assert backend.sent == 1 and len(result.turns) == 1

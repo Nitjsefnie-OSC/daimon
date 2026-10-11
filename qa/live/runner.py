@@ -421,6 +421,7 @@ class Executor:
             if step.channel and step.channel not in self.channels:
                 raise Pending(f"unknown channel reference: {step.channel}")
             reply_id: str | None = None
+            queue_prior: Turn | None = None
             if step.reply_to:
                 reference = re.fullmatch(r"turn([1-9][0-9]*)\.chunk([1-9][0-9]*)", step.reply_to)
                 assert reference is not None
@@ -442,6 +443,7 @@ class Executor:
                     if not prior.thread_id:
                         raise Pending("active turn thread was not observed before follow-up")
                     destination = prior.thread_id
+                    queue_prior = prior
                 else:
                     destination = next(
                         (t.thread_id for t in reversed(result.turns) if t.thread_id), ""
@@ -453,6 +455,12 @@ class Executor:
                 result.seed_messages.append({"message_id": message, "channel_id": destination})
                 return
             self.backend.verify_model(destination)
+            if queue_prior is not None and (
+                queue_prior.settled or self.watchers[queue_prior.number].done()
+            ):
+                # The follow-up must be sent while its predecessor is busy;
+                # otherwise this is an ordinary follow-up, not queue coverage.
+                raise Pending("predecessor turn finished before the queued follow-up was sent")
             started_at = utcnow()
             self.trigger_attempted = True
             message = self.backend.send(

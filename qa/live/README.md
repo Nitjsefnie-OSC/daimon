@@ -422,6 +422,15 @@ Queue scenarios that send a thread follow-up before the first `wait_done` start
 watching mentions immediately. The follow-up uses the preceding turn's observed
 thread and never waits for its terminal answer or guesses a thread ID. Watchers
 finish before assertions, teardown, and accounting.
+The follow-up is sent only while its predecessor is still running; if the
+predecessor already finished, the scenario is PENDING and nothing is sent.
+Overlapping turns in one thread are attributed by the product's serial order:
+messages created before the follow-up trigger belong to the predecessor, and the
+follow-up owns messages from its first card observed working that was created
+after every predecessor card finalized. A predecessor's late chunks before that
+card stay with the predecessor. The follow-up cannot settle before its
+predecessor. If no follow-up card is observed working, evidence after its
+trigger is unattributed and both turns' checks are PENDING.
 
 `progress_text_seen {turn, pattern, within_s}` checks frozen non-terminal card
 text at the actual poll time. JSON retains `progress_text_history`, first-poll

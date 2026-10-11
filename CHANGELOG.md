@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - QA chunk delivery gaps use the answer edit time for cards observed running during the same turn; missing edit evidence remains pending.
 - QA reads nested Discord V2 card text for current-card assertions and records component-only card edits; unreadable card copy stays pending.
 
-- QA observes queue progress text during live turns and can post thread follow-ups before the first answer completes.
+- QA observes queue progress text during live turns and can post thread follow-ups before the first answer completes. Overlapping follow-up evidence is attributed per turn, and unattributable evidence stays PENDING.
 
 - QA running-card edit checks retain direct message snapshots on every poll and report missing or insufficient capture as PENDING.
 - QA running-card edit checks retain direct message snapshots on every poll, count successive changes, and report missing, sparse or gapped capture as PENDING. A failed card readback is recorded as unavailable instead of stopping the scenario.

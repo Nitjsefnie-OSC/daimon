@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.parse
 from datetime import UTC, datetime
@@ -162,6 +163,15 @@ class DiscordBackend:
         self.fallback_watch_s = config.fallback_watch_s
         self.bindings: dict[str, str] = {}
         self.billing_cache: dict[str, BillingEvidence] = {}
+        # Overlapping same-thread turns (a queued follow-up sent while its
+        # predecessor is still running) share one message stream; attribution
+        # between them is tracked here across concurrent watchers.
+        self.overlap_lock = threading.Lock()
+        self.collected: list[Turn] = []
+        self.predecessors: dict[str, list[Turn]] = {}
+        self.successors: dict[str, list[Turn]] = {}
+        self.ever_working: set[str] = set()
+        self.inflight: dict[str, list[Message]] = {}
 
     @property
     def driver(self) -> Driver:
@@ -369,10 +379,140 @@ class DiscordBackend:
             raise ValueError("driver did not return a Discord message id")
         self.baselines[message_id] = {fingerprint(m) for m in baseline}
         self.baseline_ids[message_id] = {str(m.get("id")) for m in baseline}
+        if step.do == "thread_reply":
+            # A Daimon card still working when the follow-up is posted proves
+            # an in-flight predecessor, even if no watcher is collecting it.
+            self.inflight[message_id] = [
+                m
+                for m in baseline
+                if str(obj(m.get("author")).get("id")) == self.target.daimon_id
+                and self.classify(m) == "working"
+            ]
         self.driver.set_role("user")
         return message_id
 
+    def _link_overlaps(self, turn: Turn) -> None:
+        """Link a thread follow-up to predecessors that were unfinished when it was sent."""
+        with self.overlap_lock:
+            for prior in self.collected:
+                if prior is turn or turn.channel_id == prior.channel_id:
+                    continue
+                if turn.channel_id not in {prior.thread_id, prior.trigger_id}:
+                    continue
+                if prior.ended_at is not None and prior.ended_at <= turn.started_at:
+                    continue
+                if prior not in self.predecessors.get(turn.trigger_id, []):
+                    self.predecessors.setdefault(turn.trigger_id, []).append(prior)
+                    self.successors.setdefault(prior.trigger_id, []).append(turn)
+            if turn not in self.collected:
+                self.collected.append(turn)
+
+    @staticmethod
+    def _trigger_time(turn: Turn) -> datetime:
+        return message_created_at({"id": turn.trigger_id}) or turn.started_at
+
+    def _boundary(self, successor: Turn, messages: list[Message]) -> datetime | None:
+        """Creation time of the follow-up's first card, if positively observed.
+
+        The product runs a thread's turns serially: a queued follow-up's card is
+        created only after its predecessor finishes. The boundary is the first
+        card created after the follow-up trigger that was observed working and
+        that postdates the finalization of every pre-trigger predecessor card.
+        A predecessor card still working means no follow-up card can exist yet.
+        """
+        start = self._trigger_time(successor)
+        finalized = start
+        for message in messages:
+            created = message_created_at(message)
+            if created is None or created >= start:
+                continue
+            if self.classify(message) == "working":
+                return None
+            edited = message.get("edited_timestamp")
+            if isinstance(edited, str):
+                stamp = datetime.fromisoformat(edited.replace("Z", "+00:00"))
+                finalized = max(finalized, stamp)
+        cards = [
+            created
+            for m in messages
+            if (created := message_created_at(m)) is not None
+            and created >= finalized
+            and str(m.get("id")) in self.ever_working
+        ]
+        return min(cards) if cards else None
+
+    def _attribute(self, turn: Turn, messages: list[Message]) -> list[Message]:
+        """Partition one overlapping thread stream between predecessor and follow-up."""
+        with self.overlap_lock:
+            self.ever_working.update(
+                str(m.get("id")) for m in messages if self.classify(m) == "working"
+            )
+            predecessors = list(self.predecessors.get(turn.trigger_id, []))
+            successors = list(self.successors.get(turn.trigger_id, []))
+            inflight = list(self.inflight.get(turn.trigger_id, []))
+        if predecessors or inflight:
+            start = self._trigger_time(turn)
+            # The predecessor's own latest view supplies its card even when the
+            # follow-up's time-window read no longer lists it.
+            pool = {str(m.get("id")): m for m in inflight}
+            pool.update({str(m.get("id")): m for p in predecessors for m in p.messages})
+            pool.update({str(m.get("id")): m for m in messages})
+            boundary = self._boundary(turn, list(pool.values()))
+            if boundary is None:
+                return []
+            messages = [
+                m
+                for m in messages
+                if (created := message_created_at(m)) is not None
+                and created >= start
+                and created >= boundary
+            ]
+        for successor in successors:
+            start = self._trigger_time(successor)
+            boundary = self._boundary(successor, messages)
+            messages = [
+                m
+                for m in messages
+                if (created := message_created_at(m)) is None
+                or created < start
+                or boundary is None
+                or created < boundary
+            ]
+        return messages
+
+    def _unsettled_predecessor(self, turn: Turn) -> bool:
+        with self.overlap_lock:
+            return any(not p.settled for p in self.predecessors.get(turn.trigger_id, []))
+
+    def _finish_overlap(self, turn: Turn) -> None:
+        with self.overlap_lock:
+            predecessors = self.predecessors.get(turn.trigger_id, [])
+            if predecessors and not turn.messages:
+                # No follow-up card was positively observed: messages after its
+                # trigger cannot be split between the two turns.
+                start = self._trigger_time(turn)
+                for prior in predecessors:
+                    late = [
+                        m
+                        for m in prior.messages
+                        if (created := message_created_at(m)) is not None and created >= start
+                    ]
+                    if late:
+                        reason = (
+                            "overlapping follow-up evidence unattributed: no follow-up card "
+                            "was observed after the predecessor finished"
+                        )
+                        prior.attribution_pending = reason
+                        turn.attribution_pending = reason
+
     def collect(self, turn: Turn, timeout: float) -> None:
+        self._link_overlaps(turn)
+        try:
+            self._collect(turn, timeout)
+        finally:
+            self._finish_overlap(turn)
+
+    def _collect(self, turn: Turn, timeout: float) -> None:
         # An end timestamp bounds evidence; only terminal stability proves it complete.
         turn.settled = False
         self._owned(turn.channel_id)
@@ -452,6 +592,7 @@ class DiscordBackend:
                 for m in candidates
                 if fingerprint(m) not in self.baselines.get(turn.trigger_id, set())
             ]
+            messages = self._attribute(turn, messages)
             elapsed = (utcnow() - turn.started_at).total_seconds()
             for message in messages:
                 event = message_visible_at(
@@ -539,6 +680,10 @@ class DiscordBackend:
                 turn.progress_seen_s = elapsed
             terminal = bool(messages) and all(v in self.driver.TERMINAL for v in turn.verdicts)
             current = json.dumps(messages, sort_keys=True)
+            if terminal and self._unsettled_predecessor(turn):
+                # A follow-up cannot prove terminal stability before its
+                # predecessor has claimed its own late messages.
+                terminal = False
             if terminal:
                 if turn.done_s is None:
                     turn.done_s = elapsed
