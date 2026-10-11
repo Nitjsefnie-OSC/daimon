@@ -17,6 +17,7 @@ from daimon.adapters.cli.runtime import (
     CLI_AUTHORIZATION_ID,
     FACE_WAIT_S,
     CliRuntime,
+    authorized_openai_deployments,
     build_runtime,
     cli_principal_id,
 )
@@ -203,54 +204,68 @@ async def _hosted_agent(
 ) -> _HostedAgentRow | None:
     """The named agent from the OpenAI catalog, read back from the provider, or None.
 
-    Only with the operator capability (`rt.resource_hosts`). The neutral
-    catalog is read fresh first; a host is requested only when it has an
-    active agent of that name. The readback retrieves the provider's agent and
-    refuses one that differs from the catalog row.
+    Only with the operator capability (`rt.resource_hosts`), and only for a
+    tenant the operator's deployment manifest authorizes in the factory's
+    workspace: any other tenant keeps the existing path without the catalog
+    being opened. Under each authorized account the neutral catalog is read
+    fresh, and a host is requested only when an active agent has that name.
+    The readback retrieves the provider's agent and refuses one that differs
+    from the catalog row.
     """
     factory = rt.resource_hosts
     if factory is None:
         return None
+    accounts = sorted(
+        {
+            deployment.account_id
+            for deployment in authorized_openai_deployments(tenant_id)
+            if deployment.project == factory.account_scope_id
+        }
+    )
+    if not accounts:
+        return None
     from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
     from mux.contracts.ids import Scope
 
-    account_id = derive_guild_account_uuid(tenant_id)
-    scope = Scope(
-        tenant_id=str(tenant_id),
-        account_id=str(account_id),
-        principal_id=cli_principal_id(rt),
-        authorization_id=CLI_AUTHORIZATION_ID,
-    )
     catalog = PostgresNeutralCatalog(
         rt.sessionmaker, provider="openai", account_scope_id=factory.account_scope_id
     )
-    rows = [
-        row
-        for row in await catalog.list_agents(scope)
-        if row.agent.lifecycle == "active"
-        and (row.agent.spec.metadata or {}).get(MA_METADATA_KEY_NAME, row.agent.spec.name) == name
-    ]
-    if not rows:
-        return None
-    host = factory(
-        tenant_id=tenant_id,
-        account_id=account_id,
-        principal_id=cli_principal_id(rt),
-        operation_key=f"cli-agent-get:{uuid.uuid4()}",
-    )
-    view = await host.find(name)
-    if view is None:
-        return None
-    fresh = await host.read(view.revision.catalog_id)
-    spec = fresh.agent.spec
-    return _HostedAgentRow(
-        name=name,
-        id=fresh.agent.ref.id,
-        description=spec.description,
-        created_at=fresh.agent.created_at,
-        model=spec.model.id,
-        skills=tuple(skill.id for skill in spec.skills or ()),
-    )
+    for account in accounts:
+        scope = Scope(
+            tenant_id=str(tenant_id),
+            account_id=account,
+            principal_id=cli_principal_id(rt),
+            authorization_id=CLI_AUTHORIZATION_ID,
+        )
+        named = [
+            row
+            for row in await catalog.list_agents(scope)
+            if row.agent.lifecycle == "active"
+            and (row.agent.spec.metadata or {}).get(MA_METADATA_KEY_NAME, row.agent.spec.name)
+            == name
+        ]
+        if not named:
+            continue
+        host = factory(
+            tenant_id=tenant_id,
+            account_id=uuid.UUID(account),
+            principal_id=cli_principal_id(rt),
+            operation_key=f"cli-agent-get:{uuid.uuid4()}",
+        )
+        view = await host.find(name)
+        if view is None:
+            return None
+        fresh = await host.read(view.revision.catalog_id)
+        spec = fresh.agent.spec
+        return _HostedAgentRow(
+            name=name,
+            id=fresh.agent.ref.id,
+            description=spec.description,
+            created_at=fresh.agent.created_at,
+            model=spec.model.id,
+            skills=tuple(skill.id for skill in spec.skills or ()),
+        )
+    return None
 
 
 class _GoogleBindingRow(BaseModel):
