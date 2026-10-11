@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Deleting or archiving a Discord thread while it is answering no longer leaves an error message in the channel. The turn stops, nothing more is written to the thread, and messages queued behind it are dropped instead of started. A deleted thread's chats are retired so a restart does not revive them.
 - A reply to an earlier Discord message is now answered about that message. The agent is told which message you replied to, including one from before its last turn, or part of a long answer, instead of treating your reply as being about the latest message.
 - Discord turns no longer show the agent their own status card as an empty message from itself right before your request, so it stops saying the message you replied to "has no text".
 - The **New agent** button in `/agent-setup` opens its form again. Discord had been rejecting the form, so clicking the button showed "This interaction failed" and no agent could be created from the panel.
