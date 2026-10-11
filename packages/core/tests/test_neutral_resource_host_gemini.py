@@ -328,7 +328,7 @@ async def test_binary_inline_add_refuses_before_catalog_or_native_agent_mutation
             await add_host_agent_skill(
                 case.host(driver), catalog_id="source", bundle=data, recheck=allow
             )
-        assert refused.value.missing == ("binary_inline_source",)
+        assert refused.value.missing == ("skill_bundle_gcs_deployment",)
         current = await case.catalog.get_agent(case.scope, "source")
         assert current is not None and current.local_revision == 1 and current.agent == before
         assert not await case.catalog.list_skills(case.scope)
