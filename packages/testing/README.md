@@ -372,9 +372,18 @@ and an explicitly bound provider-reachable MCP endpoint; loopback fixtures
 cannot supply live MCP evidence. Each session has one attempt, SDK retries zero,
 and an exclusive envelope marker prevents a second run at a different output.
 
-These are guard-only probes: the installed SDK has no native session budget
-field and none is sent. Token thresholds are observed facts, never provider
-caps. A7's total deadline is 300 seconds and streamed stop estimate $0.28; F2's
+The A7 entry remains guard-only. The F2 entry additionally requires the
+documented native session budget through SDK `extra_body`: `type=limit`,
+`max_list_cost.amount="25"` (25 US cents). Creation acknowledgement and an
+independent session readback must echo that exact budget before any user message.
+F2 requires a fresh financial authorization and trusted GO digest pinning the
+budget and native tool configuration; old guard-only F2 authorizations refuse.
+Its isolated SDK instance disables builtin and MCP toolsets by default, enables
+exactly bash/read/edit/grep/glob/write and describe_agent/list_my_sessions, and
+explicitly disables web search/fetch. Effective native readback is checked,
+including default policies and absent delegation. Product SDKs and schemas do
+not change. Token thresholds remain observed facts, never provider token caps.
+A7's total deadline is 300 seconds and streamed stop estimate $0.28; F2's
 are 600 seconds and $0.52. Fifteen seconds within that same deadline are
 reserved for interruption, archive and close. The stop uses the signed dated
 Haiku 5.5 price table, disjoint model spans and a separately labelled wall-time
@@ -436,3 +445,65 @@ The final receipt preserves these partial legs on failure. Successful claims
 include both accepted and processed; pending/uncertain/failed claims still refuse.
 This captures final text and outcome without certifying a failed run as PASS.
 R3 is a new signed attempt; prior markers, holds and receipts remain unchanged.
+
+Late usage is audited against every registered credential, including F2 MCP
+bearers. Proof enrichment also refuses unknown/string-bearing meter metadata;
+credential halves in separate frames cannot become durable provider notes. The
+initial admission latch survives audit refusal. Thread `/stream` endpoints and
+other identified SSE responses use the same monitored SDK decoder; undecodable
+streams refuse.
+
+`python -m daimon.testing.f2_budget_acceptance` is a separate signed-only,
+create-only acceptance probe. It needs `--authorization`, its independently
+trusted `--authorization-sha256`, `--go-receipt`/`--go-sha256`, `--live-binding`,
+`--budget-config`, `--spend-ledger` and fresh `--output`. Its separate
+$0.02/60-second envelope is pinned to the lead-signed acceptance digest below. The binding
+must name an existing explicitly authorized disposable Haiku5.5 F2 agent with the
+exact effective allowlist. It creates one budgeted session, verifies independent
+readback, archives, and sends no user message. Its transport refuses events and
+thread/model work. Acceptance is not an empirical enforcement test, and absent
+billed runtime remains unknown/held rather than an invented exact zero. This
+probe must never consume/reuse the F2 workload authorization or attempt marker.
+
+Worst-cost GO evidence uses official 1M input/128k output limits, the highest
+cache-write price and the routing basis. Without verified global routing, N8's
+conservative US-rate bounds are $2.92 A7 and $1.72 budgeted F2 including running
+time. F2 follows A7 reconciliation and needs at least $2.22 real cap room including
+a $0.50 margin, no admission latch and no unresolved late evidence. These bounds
+are conditional on the documented single-thread/request controls and billed
+runtime limits; local clocks do not prove successful provider termination.
+
+### Closed late usage identities
+
+The opt-in live runner closes provider identity and free-text fields structurally.
+Only native shapes `(sevt|sesn)_[A-Za-z0-9]{20,40}` are eligible for late numeric
+proof enrichment, and a repeated event identity closes further enrichment.
+Rejected IDs persist only SHA256 plus `shape_rejected` / `duplicate_rejected`
+metadata beside the trusted 0600 reconciliation latch. Even eligible unique IDs
+are hashed in `proof.id` and `proof.session.id`, preventing alphanumeric credential
+halves from masquerading as different shape-valid IDs. The original native IDs
+remain private in memory; N8 can match hashes against its authorized inventory.
+
+Final and orphan display receipts also hash native IDs and provider free text,
+including request/thread references, threshold IDs and result evidence. The host's
+status vocabulary and numeric evidence remain readable. These display projections
+do not alter canonical BudgetGuard settlement inputs or the original one settlement.
+Full Audit remains defense in depth: original late frames and result/meter values
+are checked, and every projected durable field remains in cumulative literal
+credential scanning. Only exact host-generated hashes and host-owned config/ledger
+pins bypass recursive encoded-text interpretation. A hit or a full 256-record /
+1 MiB scope closes enrichment; the unknown actual, retained hold and admission
+latch remain, including after cancellation. Interleaved, reversed and base64-split
+native-ID regressions exercise the real SDK decoder with a mock transport.
+No product or adapter defaults change, and no additional live run is authorized.
+
+
+F2-R2 financial admission is pinned to the lead-signed digest
+`6103a70419f4d1260c97eb0f3be60a3e238701cd9de7ae5ccd802f894b1b6a18`.
+The independent acceptance envelope is pinned to
+`8628b05e1b6d637b152c138a0977dc806e40833e9fc6e1d54794881a9ae063a3`.
+Both require the exact native budget and effective tool allowlist. The old
+`8eea963b` guard-only authorization and caller-rewritten replacements are refused.
+Each still needs its own separately signed source/binding GO and exclusive attempt
+marker. Financial signatures authorize neither execution nor a retry by themselves.
+No acceptance or workload is run by composing this entry.
