@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Accept processed A7 send claims and preserve audited per-leg final output through later proof failures.
 - Pin the partial OpenAI CERT-M2 tape/receipt hashes and historical SDK/API revision; disclose recovered HTTP 409 cleanup in each live PASS row.
+- Route legacy session budget-stamp reads through the tenant-scoped native session port, preserving SDK requests, partial metadata and retry behavior.
 
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
 

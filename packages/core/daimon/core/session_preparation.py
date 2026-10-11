@@ -41,11 +41,14 @@ from typing import Literal, Protocol
 
 import anthropic as anthropic_pkg
 import structlog
+from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import managed_agents, resource_ref
+from daimon.core.mux_compat import legacy_call
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -122,6 +125,7 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import ContinuityOutcome, FreshSession, PreparedTurn
 from daimon.core.turn.session_identity import check_session_agent
+from mux.drivers.anthropic.sessions_lifecycle import SessionReads
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -599,7 +603,23 @@ async def _resolve_legacy_budget_stamp(
     if row is None or row.budget_channel_id != "":
         return None
     try:
-        observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+        scope = session_scope(
+            tenant_id=tenant_id,
+            account_id=account_id,
+            call_site="session_preparation:_resolve_legacy_budget_stamp",
+        )
+        backend = managed_agents(
+            deps.anthropic,
+            scope=scope,
+            resources=frozenset({("session", row.ma_session_id)}),
+        )
+        reads = backend.extension(SessionReads, namespace="anthropic.session_reads", version=1)
+        native = await legacy_call(
+            reads.read_native(
+                scope, resource_ref(backend, "session", row.ma_session_id, scope=scope)
+            )
+        )
+        observed = construct_type_unchecked(value=native, type_=BetaManagedAgentsSession)
     except anthropic_pkg.APIError as error:
         # A transient read leaves the unknown marker for the next bind.
         log.warning(
