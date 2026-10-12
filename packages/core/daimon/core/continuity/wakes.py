@@ -37,12 +37,15 @@ from typing import Final, Literal
 
 import structlog
 from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.fleet import FleetConflict, run_settled
+from daimon.core.stores import fleet
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
     cancel_wake_row,
     claim_wake_row,
     defer_wake_rows,
+    get_continuation,
     list_dispatchable_continuations,
     list_due_wake_rows,
     record_continuation,
@@ -71,6 +74,7 @@ __all__ = [
     "cancel_wake",
     "claim_wake",
     "enqueue_wake",
+    "enqueue_worker_finished",
     "list_dispatchable_wakes",
     "list_due_wake_threads",
     "poll_wakes_once",
@@ -79,6 +83,7 @@ __all__ = [
     "settle_wake",
     "skip_thread_wakes",
     "start_wake",
+    "worker_finished_key",
 ]
 
 #: How long a claim may sit before its turn starts. Covers the decision reads
@@ -143,29 +148,107 @@ class WakeThread(BaseModel):
 WakeOpener = Callable[[WakeThread], Awaitable[bool]]
 
 
+async def _record_wake(
+    session: AsyncSession, request: ContinuationRequest, *, available_at: datetime
+) -> None:
+    await record_continuation(
+        session,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        parent_channel_id=request.parent_channel_id,
+        thread_id=request.thread_id,
+        requester_account_id=request.requester_account_id,
+        requester_external_user_id=request.requester_external_user_id,
+        target_ma_agent_id=request.target_ma_agent_id,
+        target_name=request.target_name,
+        reason=request.reason,
+        idempotency_key=request.idempotency_key,
+        requested_work=request.requested_work,
+        available_at=available_at,
+    )
+
+
 async def enqueue_wake(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: async_sessionmaker[AsyncSession] | AsyncSession,
     request: ContinuationRequest,
     *,
     available_at: datetime,
 ) -> None:
-    """Queue `request` to run in its thread no earlier than `available_at`."""
+    """Queue work, using an existing transaction when supplied.
+
+    A factory retains the existing independent commit. A session must already
+    hold a transaction: its owning state transition commits or rolls back both
+    that transition and the wake, with no commit inside this function.
+    """
+    if isinstance(sessionmaker, AsyncSession):
+        if not sessionmaker.in_transaction():
+            raise ValueError("Enqueuing with a session requires an active transaction")
+        await _record_wake(sessionmaker, request, available_at=available_at)
+        return
     async with sessionmaker.begin() as session:
-        await record_continuation(
-            session,
-            tenant_id=request.tenant_id,
-            platform=request.platform,
-            parent_channel_id=request.parent_channel_id,
-            thread_id=request.thread_id,
-            requester_account_id=request.requester_account_id,
-            requester_external_user_id=request.requester_external_user_id,
-            target_ma_agent_id=request.target_ma_agent_id,
-            target_name=request.target_name,
-            reason=request.reason,
-            idempotency_key=request.idempotency_key,
-            requested_work=request.requested_work,
-            available_at=available_at,
-        )
+        await _record_wake(session, request, available_at=available_at)
+
+
+def worker_finished_key(run_id: uuid.UUID) -> uuid.UUID:
+    """One durable completion wake for the run's initial worker batch."""
+    return uuid.uuid5(run_id, "worker_finished")
+
+
+async def enqueue_worker_finished(
+    session: AsyncSession,
+    request: ContinuationRequest,
+    *,
+    run_id: uuid.UUID,
+    now: datetime,
+) -> bool:
+    """Atomically move a ready run to collecting and enqueue its sole completion wake.
+
+    The caller owns the active transaction, including its worker transition.
+    Lock the run through the fleet store before transitioning that worker, so
+    all completion producers share the run-then-worker lock order. The run
+    lock freezes membership at the readiness check; collecting forbids later
+    additions. A quorum signals readiness to collect, never successful output.
+
+    The host supplies an authorized orchestrator request and reauthorizes its
+    concrete target/binding when dispatching. This function does not resolve a
+    provider target, rearm a batch, release a monetary hold or commit.
+    """
+    if not session.in_transaction():
+        raise ValueError("Worker completion requires an active transaction")
+    if request.reason != "worker_finished" or request.idempotency_key != worker_finished_key(
+        run_id
+    ):
+        raise ValueError("Worker completion requires the run's stable wake identity")
+    run, workers = await fleet.run_status(
+        session, tenant_id=request.tenant_id, run_id=run_id, for_update=True
+    )
+    if (
+        request.requester_account_id != run.orchestrator_account_id
+        or request.platform != run.platform
+        or request.parent_channel_id != run.channel_id
+        or request.thread_id != run.thread_id
+    ):
+        raise FleetConflict("The completion request does not address this run's orchestrator")
+    if run.status == "collecting":
+        row = await get_continuation(session, idempotency_key=request.idempotency_key)
+        if row is None or any(
+            getattr(row, field) != value for field, value in request.model_dump().items()
+        ):
+            raise FleetConflict("The collecting run does not have its expected completion wake")
+        return False
+    if run.status != "running" or not run_settled(run, workers):
+        return False
+    if now >= run.deadline_at:
+        raise FleetConflict("The fleet deadline does not admit a completion turn")
+    await fleet.set_run_status(
+        session,
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        expected_version=run.version,
+        status="collecting",
+    )
+    await enqueue_wake(session, request, available_at=now)
+    return True
 
 
 async def claim_wake(

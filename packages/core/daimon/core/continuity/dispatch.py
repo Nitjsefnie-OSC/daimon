@@ -57,6 +57,7 @@ __all__ = [
     "LatestMessageAt",
     "PostNotice",
     "RunFollowUp",
+    "WorkerFinishedDecision",
     "dispatch_pending_continuations",
 ]
 
@@ -69,6 +70,9 @@ PostNotice = Callable[[str], Awaitable[None]]
 DecisionContext = Callable[[TaskContinuationRow], Awaitable[tuple[datetime | None, bool]]]
 Notice = Callable[[TaskContinuationRow, str, str], Awaitable[None]]
 RunDecision = Callable[[TaskContinuationRow, ContinuationDecision], Awaitable[None]]
+WorkerFinishedDecision = Callable[
+    [TaskContinuationRow, datetime], Awaitable[ContinuationDecision | None]
+]
 
 
 async def _settle(
@@ -103,6 +107,7 @@ async def dispatch_pending_continuations(
     settle_before_notice: bool = True,
     run_decision: RunDecision | None = None,
     notify_missing_seed: bool = True,
+    worker_finished_decision: WorkerFinishedDecision | None = None,
 ) -> None:
     """Claim and settle every continuation or due wake this thread may run now, oldest first.
 
@@ -119,6 +124,9 @@ async def dispatch_pending_continuations(
     checks. Discord runs the full decision; Slack and Teams run its seed.
     Teams settles before notices; Discord and Slack settle after them.
     The clock is read afresh at each queue transition.
+    Worker completion uses the injected host decision, never the legacy agent
+    lookup or human-message supersession rule. An absent/unready decision defers
+    the existing row; it cannot authorize a turn by falling back to that lookup.
     """
 
     if run_follow_up is None and run_decision is None:
@@ -173,37 +181,50 @@ async def dispatch_pending_continuations(
             reason=row.reason,
             idempotency_key=row.idempotency_key,
         )
+        decision: ContinuationDecision | None = None
+        decision_now: datetime | None = None
+        latest: datetime | None = None
+        active_turn = False
         try:
-            if decision_context is None:
-                async with sessionmaker() as session:
-                    live = await get_live_thread_session(
-                        session,
-                        tenant_id=row.tenant_id,
-                        platform=platform,
-                        thread_id=row.thread_id,
-                        account_id=row.requester_account_id,
-                    )
-                # Preserve core's clock read before the history callback.
-                decision_now = now()
-                assert latest_user_message_at is not None
-                latest = await latest_user_message_at(row)
-                active_turn = live is not None and live.active_turn_message_id is not None
+            if row.reason == "worker_finished":
+                if worker_finished_decision is None:
+                    raise ContinuationContextUnavailable("worker_finished_unavailable")
+                decision = await worker_finished_decision(row, now())
+                if decision is None:
+                    raise ContinuationContextUnavailable("worker_finished_not_ready")
             else:
-                latest, active_turn = await decision_context(row)
-                decision_now = now()
+                if decision_context is None:
+                    async with sessionmaker() as session:
+                        live = await get_live_thread_session(
+                            session,
+                            tenant_id=row.tenant_id,
+                            platform=platform,
+                            thread_id=row.thread_id,
+                            account_id=row.requester_account_id,
+                        )
+                    # Preserve core's clock read before the history callback.
+                    decision_now = now()
+                    assert latest_user_message_at is not None
+                    latest = await latest_user_message_at(row)
+                    active_turn = live is not None and live.active_turn_message_id is not None
+                else:
+                    latest, active_turn = await decision_context(row)
+                    decision_now = now()
         except ContinuationContextUnavailable as exc:
             # An incomplete history must never authorize a stale handoff.
             log.warning("continuation.context_unavailable", row_id=str(row.id), reason=str(exc))
             await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
             continue
-        decision = await decide_continuation(
-            sessionmaker,
-            anthropic,
-            request=request,
-            now=decision_now,
-            latest_user_message_at=latest,
-            active_turn=active_turn,
-        )
+        if decision is None:
+            assert decision_now is not None
+            decision = await decide_continuation(
+                sessionmaker,
+                anthropic,
+                request=request,
+                now=decision_now,
+                latest_user_message_at=latest,
+                active_turn=active_turn,
+            )
         if decision.action == "skip_turn_running" and row.available_at is not None:
             # A wake has nobody waiting to be told; it runs after the turn in progress.
             await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)

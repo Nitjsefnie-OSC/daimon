@@ -36,7 +36,7 @@ PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "co
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
 ContinuationReason = Literal[
-    "task_handoff", "private_input_applied", "timer", "github_access_ready"
+    "task_handoff", "private_input_applied", "timer", "github_access_ready", "worker_finished"
 ]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]

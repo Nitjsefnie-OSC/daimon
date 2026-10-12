@@ -2332,3 +2332,26 @@ transition in one transaction. Audit uses the existing scoped append-only store
 and contains identities and typed outcomes rather than prompts or credentials.
 A missing or erased actor cannot authorize launch. Existing turn paths do not
 call the resolver and remain unchanged.
+### Worker completion wakes
+
+`enqueue_worker_finished` uses a caller-owned active transaction to read and
+lock a fleet run, test the store's all-worker or quorum readiness, move it to
+collecting and record one stable `worker_finished` wake. The completion writer
+locks the run before changing the worker, then calls the producer in that same
+transaction. A rollback removes both transitions and the wake. Collecting
+freezes the initial batch; rearming a later review batch is not supported by
+this interface. A quorum notification does not certify successful results or
+release any accounting hold.
+
+The host supplies the authorized orchestrator address and must revalidate its
+concrete target and binding at dispatch. The existing dispatcher accepts an
+optional `worker_finished_decision` host hook. Missing or unavailable decisions
+leave the row pending; worker completion never falls back to the legacy agent
+lookup or human-history supersession rule. The existing claim/start/settle
+ladder fences the turn before its first effect, so an expired started wake is
+interrupted rather than automatically replayed. Native execution and result
+collection still require their independently authorized host integrations.
+
+Migration `0094_worker_finished_wakes`, after `0093_fleet_runs`, widens only
+the existing reason check. Its downgrade removes worker-completion rows that
+older applications cannot interpret before restoring the previous reasons.

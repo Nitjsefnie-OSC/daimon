@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the durable fleet store behind orchestrated worker fleets (off by default, `DAIMON_FLEET__*`): run and worker rows, a per-tenant and per-process worker pool separate from chat turns, worker results kept in each worker's own journal, and migration `0093_fleet_runs`.
 
 - Add read-only attribution of distinct host-worker usage and conservative token floors, preserving original debit identities and explicit pending revisions.
+- Queue worker-completion wakes transactionally on the existing continuation ladder, using stored fleet all-worker or quorum readiness and the existing at-most-once lease fence. Missing host decisions defer without a provider fallback.
+
+- Add the durable fleet store behind orchestrated worker fleets (off by default, `DAIMON_FLEET__*`): run and worker rows, a per-tenant and per-process worker pool separate from chat turns, worker results kept in each worker's own journal, and migration `0093_fleet_runs`.
 - Preserve complete root place and category authority when deriving fleet workers, and refuse unknown hosted-network defaults without guessing provider permissions.
 - Share backend preview capability checks with worker derivation, preserve root stamps through metadata patches, and return typed refusals for invalid worker backend selections.
 

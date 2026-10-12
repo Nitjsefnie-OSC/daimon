@@ -427,3 +427,56 @@ async def test_a_wake_survives_a_restart_and_two_pollers_run_it_exactly_once() -
     finally:
         await engine_a.dispose()
         await engine_b.dispose()
+
+
+async def test_enqueued_wake_rolls_back_with_its_callers_transaction(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.tenants import get_tenant
+
+    tenant_id: uuid.UUID | None = None
+    request: ContinuationRequest | None = None
+    async with db_session_factory() as session:
+        with pytest.raises(RuntimeError, match="abort state transition"):
+            async with session.begin():
+                tenant = await make_tenant(session)
+                tenant_id = tenant.id
+                request = _request(tenant.id)
+                await enqueue_wake(session, request, available_at=_NOW)
+                assert await get_continuation(session, idempotency_key=request.idempotency_key)
+                raise RuntimeError("abort state transition")
+    assert tenant_id is not None and request is not None
+    async with db_session_factory() as session:
+        assert await get_tenant(session, tenant_id) is None
+        assert await get_continuation(session, idempotency_key=request.idempotency_key) is None
+
+
+async def test_enqueuing_with_a_session_requires_the_owners_active_transaction(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request = _request(await _tenant(db_session_factory))
+    async with db_session_factory() as session:
+        assert not session.in_transaction()
+        with pytest.raises(ValueError, match="requires an active transaction"):
+            await enqueue_wake(session, request, available_at=_NOW)
+        assert not session.in_transaction()
+        assert await get_continuation(session, idempotency_key=request.idempotency_key) is None
+
+
+async def test_enqueued_wake_commits_once_with_its_callers_transaction(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.tenants import get_tenant
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        request = _request(tenant.id)
+        await enqueue_wake(session, request, available_at=_NOW)
+        assert session.in_transaction(), "enqueue must not commit its owner's transaction"
+        queued = await get_continuation(session, idempotency_key=request.idempotency_key)
+        assert queued is not None
+        assert queued.status == "pending" and queued.attempts == 0
+    async with db_session_factory() as session:
+        assert await get_tenant(session, tenant.id) is not None
+        committed = await get_continuation(session, idempotency_key=request.idempotency_key)
+        assert committed == queued, "the committed wake retains its single durable identity"
