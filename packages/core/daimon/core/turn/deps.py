@@ -52,9 +52,9 @@ class TurnDeps:
     `fernet` is built ONCE here from `settings.crypto.keys` at adapter runtime
     construction -- this is the mechanism that makes a missing fernet on the
     Slack adapter impossible by construction (a caller can't forget to build
-    it per turn). `resolver_cache` is likewise a single shared instance per
-    adapter process: Slack stops constructing a fresh cache per turn
-    and adopts Discord's <=300s TTL staleness semantics.
+    it per turn). `resolver_cache` is likewise reused across turns for the
+    lifetime of the adapter process. Its ID mappings and full agent/environment
+    entries retain the shared resolver owner's separate expiration policies.
     """
 
     anthropic: AsyncAnthropic
