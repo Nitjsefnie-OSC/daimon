@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -24,10 +24,17 @@ from daimon.adapters.discord.billing_panel.state import BillingPanelState
 from daimon.adapters.discord.bot import _build_ready_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
+from daimon.core.promo_codes import (
+    build_promo_code_terms,
+    generate_promo_code,
+    hash_promo_code,
+    normalize_chosen_promo_code,
+    normalize_promo_code,
+)
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRedeemRefused
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -307,6 +314,112 @@ async def test_modal_submit_keeps_the_success_reply_when_the_rerender_fails(
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("10"), (
         "the credit should stay in the server ledger"
     )
+
+
+def _live_interaction() -> MagicMock:
+    """An admin interaction whose response flips to done once deferred, as Discord's does."""
+    interaction = _interaction(admin=True)
+    interaction.guild.get_member.return_value = None
+    interaction.channel = None
+    interaction.channel_id = 5
+    deferred = False
+
+    def is_done() -> bool:
+        return deferred
+
+    async def defer(*_args: object, **_kwargs: object) -> None:
+        nonlocal deferred
+        deferred = True
+
+    interaction.response.is_done.side_effect = is_done
+    interaction.response.defer = AsyncMock(side_effect=defer)
+    interaction.edit_original_response = AsyncMock()
+    return interaction
+
+
+def _submitted(modal: RedeemCodeModal, code: str) -> MagicMock:
+    """A modal submit carrying ``code`` in the field Discord was sent, read back by discord.py."""
+
+    def fill(components: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for c in components:
+            if c["type"] == 1:  # action row
+                out.append({"type": 1, "components": fill(c["components"])})
+            elif c["type"] == 18:  # label
+                out.append({"type": 18, "component": fill([c["component"]])[0]})
+            else:
+                out.append({"type": c["type"], "custom_id": c["custom_id"], "value": code})
+        return out
+
+    interaction = _live_interaction()
+    modal._refresh(interaction, cast(Any, fill(modal.to_dict()["components"])), {})
+    return interaction
+
+
+async def test_cli_issued_code_redeems_once_through_the_panel(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A code issued the way `daimon promo create` issues it redeems once from /billing (#791).
+
+    Drives the real panel: the button opens the modal, discord.py reads the
+    typed code back from the submit payload, the handler redeems and redraws
+    the panel. A second redemption and an unknown code are each refused in words.
+    """
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
+    await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
+    shown = generate_promo_code()  # what the CLI prints
+    terms = build_promo_code_terms(amount_usd=Decimal("25"), timed=False)
+    await promo_store.insert_promo_code(
+        db_session, code_hash=hash_promo_code(normalize_chosen_promo_code(shown)), terms=terms
+    )
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant_id, platform="discord", external_id="42"
+    )
+    await db_session.commit()
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.sessionmaker = db_session_factory
+    now = datetime.now(UTC)
+    view = BillingPanelView(
+        await _admin_snapshot(db_session, now=now),
+        runtime=runtime,
+        allowed_user_id=42,
+        is_admin=True,
+        account_id=principal.account_id,
+        now=now,
+        since=SINCE,
+    )
+    button = next(c for c in view.walk_children() if isinstance(c, _RedeemButton))
+
+    click = _live_interaction()
+    await button.callback(click)
+    modal = click.response.send_modal.call_args.args[0]
+    assert isinstance(modal, RedeemCodeModal), "the button should open the redeem modal"
+
+    first = _submitted(modal, f"  {shown.lower()} ")
+    await modal.on_submit(first)
+    assert first.followup.send.call_args.args[0] == (
+        "🎟️ Added **$25.00** of credit.\n\nBalance: **$25.00**"
+    ), "a fresh code, pasted loosely, should credit the server once"
+    first.edit_original_response.assert_awaited_once()
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("25"), (
+        "the credit should land in the server ledger"
+    )
+
+    again = _submitted(modal, shown)
+    await modal.on_submit(again)
+    assert again.followup.send.call_args.args[0] == "🎟️ That code was already redeemed here.", (
+        "a second redemption should be refused in words"
+    )
+    unknown = _submitted(modal, generate_promo_code())
+    await modal.on_submit(unknown)
+    assert unknown.followup.send.call_args.args[0] == (
+        "🎟️ That code is not valid. Check it and try again."
+    ), "an unknown code should be refused in words"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("25"), (
+        "refusals should not move the balance"
+    )
+    again.edit_original_response.assert_not_awaited()
+    unknown.edit_original_response.assert_not_awaited()
 
 
 async def _admin_snapshot(session: AsyncSession, *, now: datetime) -> BillingPanelState:
