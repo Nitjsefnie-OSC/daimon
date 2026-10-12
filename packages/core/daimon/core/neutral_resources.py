@@ -13,7 +13,7 @@ import json
 import uuid
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime
 from decimal import Decimal
@@ -28,7 +28,6 @@ from daimon.core.authz import (
     AgentRef,
     DenyReason,
     FleetFacts,
-    Place,
     Subject,
     Surface,
     authorize,
@@ -837,6 +836,8 @@ def _worker_environment(requested: EnvironmentSpec | None, granted: EnvironmentS
             if url.username or url.password or url.query or url.fragment:
                 raise WorkerSpecRefused("files", "unbound")
     network, ceiling = requested.network, granted.network
+    if requested.execution == "hosted" and (network is None or ceiling is None):
+        raise WorkerSpecRefused("sandbox", "unsupported")
     if network is None or ceiling is None:
         if network != ceiling:
             raise WorkerSpecRefused("sandbox", "unsupported")
@@ -877,7 +878,7 @@ def resolve_worker_spec(
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
     fleet = parent.fleet
-    place = Place(channel_id=fleet.root.thread_id, parent_channel_id=fleet.root.channel.channel_id)
+    place = fleet.place
     decision = authorize(
         policy,
         subject=parent.subject,
@@ -1045,6 +1046,7 @@ def resolve_worker_spec(
         "limits": cap.model_dump(mode="json"),
         "origin": str(fleet.origin_id),
         "run": str(fleet.run_id),
+        "place": asdict(fleet.place),
         "source": (
             [spec.ref.model_dump(mode="json"), spec.revision.model_dump(mode="json")]
             if isinstance(spec, Agent)

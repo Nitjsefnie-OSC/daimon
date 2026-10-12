@@ -2290,7 +2290,12 @@ journaled and a lease successor appending it again is a duplicate.
 
 The core resource owner exposes one worker spec resolver over existing
 `AgentSpec` and sparse `AgentPatch` shapes. Host-supplied current root facts bind
-the real tenant, account, channel, thread and origin. Spawning uses the existing
+the real tenant, account, channel, thread and origin, and retain the existing
+host-loaded `Place`, including category and unresolved-category facts; the same
+facts are retained in the derived grant and reused by every agent decision.
+The place must match the root thread and channel. Hosted network omission is
+an unknown provider default and refuses until the driver supplies a proved,
+normalized network ceiling. Spawning uses the existing
 writer, invoker and agent policy on the fleet surface, with no private-admin
 exemption. Worker depth is one; workers cannot spawn more workers.
 
@@ -2305,8 +2310,10 @@ server and the profile-declared finite tool policy keys; a native compiler that
 drops those keys cannot admit the connection. An implicit execution tool still counts toward
 authority when omitted from the requested tool list.
 
-This is an admission primitive, not a launch operation. The host must reload
-current authority at preparation and resume, retain the original ceiling, apply
+This is an admission primitive, not a launch operation. The host must
+preflight the resolved configuration through the existing native compiler
+before allocation; known generic controls can still be unsupported natively.
+It must reload current authority at preparation and resume, retain the original ceiling, apply
 the derived grants at every resource/tool edge, and reserve funds with the worker
 transition in one transaction. Audit uses the existing scoped append-only store
 and contains identities and typed outcomes rather than prompts or credentials.

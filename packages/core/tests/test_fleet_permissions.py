@@ -63,6 +63,7 @@ def parent(provider="anthropic"):
         origin_id=uuid4(),
         account_id=UUID(scope.account_id),
         run_id=uuid4(),
+        place=Place(channel_id=root.thread_id, parent_channel_id=root.channel.channel_id),
         enabled=True,
         active=True,
     )
@@ -378,6 +379,110 @@ def test_current_worker_rule_cannot_be_hidden_by_root_rule():
             root.spec.model_copy(update={"name": "blocked"}),
             policy=TenantAccessPolicy(agent_rules={"blocked": AgentRule(runs_in=())}),
         )
+
+
+@pytest.mark.parametrize("unknown", (False, True))
+def test_resolver_retains_real_root_category_authority(unknown):
+    root = parent()
+    policy = TenantAccessPolicy(category_rules={"protected": ChannelRule(writers="none")})
+    real_place = replace(
+        root.fleet.place, category_id=None if unknown else "protected", category_unresolved=unknown
+    )
+    root = replace(root, fleet=replace(root.fleet, place=real_place))
+    original = authorize(
+        policy,
+        subject=root.subject,
+        action=Action.START_TURN,
+        surface=Surface.CHANNEL,
+        agent=root.agent,
+        place=real_place,
+    )
+    assert not original and original.reason == "writers_none"
+    with pytest.raises(WorkerSpecRefused, match="origin: writers_none"):
+        resolve(root, policy=policy)
+
+
+@pytest.mark.parametrize("provider", ("anthropic", "openai", "gemini"))
+def test_unknown_network_default_is_not_an_effective_permission_ceiling(provider):
+    root = parent(provider)
+    root = replace(root, environment=root.environment.model_copy(update={"network": None}))
+    with pytest.raises(WorkerSpecRefused, match="sandbox: unsupported"):
+        resolve(root)
+
+
+@pytest.mark.parametrize("control", ("network", "packages"))
+def test_native_environment_incompatibility_still_requires_driver_preflight(control):
+    from mux.drivers.gemini.core import compile_environment
+    from mux.errors import UnsupportedCapability
+
+    root = parent("gemini")
+    env = EnvironmentSpec(
+        name="root-box",
+        **(
+            {"network": NetworkPolicy(mode="none")}
+            if control == "network"
+            else {"packages": {"python": ("private-package",)}}
+        ),
+    )
+    root = replace(root, environment=env)
+    with pytest.raises(UnsupportedCapability):
+        compile_environment(env)
+    if env.network is None:
+        with pytest.raises(WorkerSpecRefused, match="sandbox: unsupported"):
+            resolve(root)
+    else:
+        # Known authority can be derived; this is never native launch admission.
+        # The unchanged driver refuses this control before allocation or I/O.
+        result = resolve(root)
+        with pytest.raises(UnsupportedCapability):
+            compile_environment(result.environment)
+
+
+def test_derived_worker_retains_complete_root_place_and_refreshes_policy():
+    root = parent()
+    real_place = replace(
+        root.fleet.place, category_id="category", own_dm=True, parent_unresolved=True
+    )
+    root = replace(root, fleet=replace(root.fleet, place=real_place))
+    result = resolve(root)
+    assert result.permissions.fleet.place is real_place
+    assert (
+        result.digest
+        != resolve(
+            replace(
+                root, fleet=replace(root.fleet, place=replace(real_place, category_id="different"))
+            )
+        ).digest
+    )
+    with pytest.raises(WorkerSpecRefused, match="writers_none"):
+        resolve(
+            root,
+            policy=TenantAccessPolicy(category_rules={"category": ChannelRule(writers="none")}),
+        )
+
+
+@pytest.mark.parametrize("updates", ({"channel_id": "other"}, {"parent_channel_id": "other"}))
+def test_root_place_must_match_the_real_thread_and_channel(updates):
+    root = parent()
+    root = replace(root, fleet=replace(root.fleet, place=replace(root.fleet.place, **updates)))
+    with pytest.raises(WorkerSpecRefused, match="fleet_origin_required"):
+        resolve(root)
+
+
+def test_direct_spawn_cannot_replace_the_category_facts_with_a_narrow_place():
+    root = parent()
+    real_place = replace(root.fleet.place, category_id="protected")
+    root = replace(root, fleet=replace(root.fleet, place=real_place))
+    decision = authorize(
+        POLICY,
+        subject=root.subject,
+        action=Action.SPAWN_WORKER,
+        surface=Surface.FLEET,
+        agent=root.agent,
+        place=Place(channel_id="thread", parent_channel_id="channel"),
+        fleet=root.fleet,
+    )
+    assert not decision and decision.reason == "fleet_origin_required"
 
 
 def test_nested_schema_and_input_are_not_shared_with_result():

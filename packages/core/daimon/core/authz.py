@@ -275,6 +275,7 @@ class FleetFacts:
     origin_id: UUID
     account_id: UUID
     run_id: UUID
+    place: Place
     depth: int = 0
     enabled: bool = False
     active: bool = False
@@ -730,6 +731,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             or not isinstance(cast(object, fleet.run_id), UUID)
             or str(fleet.account_id) != fleet.scope.account_id
             or fleet.scope.tenant_id != fleet.root.channel.tenant_id
+            # authorize refreshes the policy-derived permissions. Every other
+            # admission fact must still be the authentic root's complete Place.
+            or replace(place, permissions=fleet.place.permissions) != fleet.place
             or place.channel_id != fleet.root.thread_id
             or place.parent_channel_id != fleet.root.channel.channel_id
             or not agent.present
