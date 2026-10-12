@@ -7,7 +7,6 @@ from anthropic import AsyncAnthropic
 from daimon.core.memory_view import (
     MemoryRequest,
     PersonalMemoryReply,
-    current_forget_code,
     is_strict_memory_args,
     parse_memory_args,
     personal_memory_reply,
@@ -59,6 +58,13 @@ async def _store(client: AsyncAnthropic, files: dict[str, str]) -> str:
     return store.id
 
 
+async def _code(client: AsyncAnthropic, store_id: str) -> str:
+    """The code the `forget-mine` preview offers for the store as it is now."""
+    asked = await _reply(client, store_id, MemoryRequest("forget_ask"))
+    assert asked.hint is not None
+    return asked.hint.split()[-1]
+
+
 async def _reply(
     client: AsyncAnthropic, store_id: str | None, request: MemoryRequest
 ) -> PersonalMemoryReply:
@@ -75,12 +81,10 @@ async def test_forget_needs_the_code_it_was_shown_and_touches_no_other_store() -
 
     asked = await _reply(client, mine, MemoryRequest("forget_ask"))
     assert len(state.memories[mine]) == 2, "asking deletes nothing"
-    code = await current_forget_code(client, mine)
+    code = await _code(client, mine)
     assert asked.hint is not None and code in asked.hint
 
-    wrong = await _reply(
-        client, mine, MemoryRequest("forget_confirm", await current_forget_code(client, theirs))
-    )
+    wrong = await _reply(client, mine, MemoryRequest("forget_confirm", await _code(client, theirs)))
     assert wrong.title.startswith("Nothing was deleted")
     assert len(state.memories[mine]) == 2
 
@@ -94,7 +98,7 @@ async def test_a_code_goes_stale_when_the_memory_changes() -> None:
     state = FakeMemoryStoreState()
     client = build_fake_anthropic(make_fake_memory_store_handler(state))
     mine = await _store(client, {"/style.md": "tabs"})
-    code = await current_forget_code(client, mine)
+    code = await _code(client, mine)
     await client.beta.memory_stores.memories.create(mine, path="/new.md", content="x")
 
     reply = await _reply(client, mine, MemoryRequest("forget_confirm", code))
@@ -144,7 +148,7 @@ async def test_forget_deletes_only_the_previewed_memories_and_keeps_new_ones() -
 
     client = build_fake_anthropic(concurrent_write)
     store_id = await _store(client, {"/old.md": "old preference"})
-    code = await current_forget_code(client, store_id)
+    code = await _code(client, store_id)
     armed = True
 
     reply = await _reply(client, store_id, MemoryRequest("forget_confirm", code))
@@ -173,7 +177,7 @@ async def test_forget_keeps_a_memory_whose_content_changed_after_the_preview() -
 
     client = build_fake_anthropic(rewrite_before_delete)
     store_id = await _store(client, {"/style.md": "tabs"})
-    code = await current_forget_code(client, store_id)
+    code = await _code(client, store_id)
 
     reply = await _reply(client, store_id, MemoryRequest("forget_confirm", code))
 

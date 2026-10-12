@@ -230,15 +230,16 @@ async def test_memory_mine_shows_only_the_invokers_own_personal_memory(
 async def test_forget_mine_needs_confirmation_and_never_clears_another_members(
     db_session, db_session_factory
 ) -> None:
-    from daimon.core.memory_view import current_forget_code
+    import re
 
     runtime = await _setup(db_session, db_session_factory, seed={"/notes/team.md": "fridays"})
     alice_store = await _seed_personal(db_session, runtime, user_id=777, files={"/style.md": "x"})
     bob_store = await _seed_personal(db_session, runtime, user_id=888, files={"/tone.md": "y"})
-    alice_code = await current_forget_code(runtime.anthropic, alice_store)
-
     asked = await _say(runtime, user_id=777, path="forget-mine")
-    assert alice_code in asked and await _paths(runtime, alice_store) == ["/style.md"], (
+    found = re.search(r"forget-mine ([0-9a-f]{6})", asked)
+    assert found is not None, "the preview offers the code"
+    alice_code = found.group(1)
+    assert await _paths(runtime, alice_store) == ["/style.md"], (
         "the first step only shows what would go, with its code"
     )
 

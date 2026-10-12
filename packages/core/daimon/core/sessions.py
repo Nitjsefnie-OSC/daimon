@@ -251,10 +251,13 @@ async def create_session(
     ``personal_memory`` also mounts the caller's own personal store for this
     agent (``ensure_personal_memory_store_and_mount``, keyed by ``account_id``),
     with the same access as the shared one and the same degrade-not-block
-    handling. Only a caller whose session belongs to one person passes it: an
-    interactive chat turn, whose session is already keyed on the caller's
-    account. Routines, MCP and CLI sessions leave it off and mount the shared
-    store alone, with instructions that forbid recording personal facts.
+    handling. Only a caller whose session belongs to one verified person
+    passes it: an interactive chat turn (keyed on the caller's account), a hub
+    `ask`/`start_turn` (platform sign-in, owner-only handles) and a routine
+    whose result reaches only its owner (`rule_views.routine_answers_only_owner`,
+    read-only). Every other caller (agent keys, operator and CLI tokens, routines
+    with a destination) leaves it off and mounts the shared store alone, with
+    instructions that forbid recording personal facts.
 
     When the agent has a repo binding, the clone credential is resolved via
     ``daimon.core.github_repo_auth.resolve_clone_token``:

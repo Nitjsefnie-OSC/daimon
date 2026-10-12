@@ -234,11 +234,6 @@ def forget_code(store_id: str, records: list[MemoryRecord]) -> str:
     return digest[:6]
 
 
-async def current_forget_code(anthropic: AsyncAnthropic, store_id: str) -> str:
-    """The code `forget-mine` would show for the store right now."""
-    return forget_code(store_id, await list_memory_records(anthropic, store_id))
-
-
 def _files(count: int) -> str:
     return f"{count} file" if count == 1 else f"{count} files"
 
@@ -269,6 +264,15 @@ async def personal_memory_reply(
     empty = PersonalMemoryReply(f"You have no personal memory with {agent_name}.")
     if store_id is None:
         return empty
+    if request.kind == "mine_show":
+        path = request.arg or ""
+        content = await get_memory_content(anthropic, store_id, path)
+        if content is None:
+            return PersonalMemoryReply(
+                f"No file called {path} in your personal memory.",
+                hint=f"{command} {MINE} lists them.",
+            )
+        return PersonalMemoryReply(path, content=content)
     # Listed once: a forget confirmation is checked against, and deletes only,
     # exactly this snapshot.
     records = await list_memory_records(anthropic, store_id)
@@ -281,15 +285,6 @@ async def personal_memory_reply(
             paths=tuple(paths),
             hint=f"{command} {MINE} <path> shows one. {command} {FORGET_MINE} clears it.",
         )
-    if request.kind == "mine_show":
-        path = request.arg or ""
-        content = await get_memory_content(anthropic, store_id, path)
-        if content is None:
-            return PersonalMemoryReply(
-                f"No file called {path} in your personal memory.",
-                hint=f"{command} {MINE} lists them.",
-            )
-        return PersonalMemoryReply(path, content=content)
     code = forget_code(store_id, records)
     if not paths:
         return empty
@@ -347,17 +342,15 @@ async def delete_memory_records(
 
 async def list_memory_paths(anthropic: AsyncAnthropic, store_id: str) -> list[str]:
     """Every memory path in the store, sorted."""
-    page = await anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
-    return sorted([item.path async for item in page if item.type == "memory"])
+    return [record.path for record in await list_memory_records(anthropic, store_id)]
 
 
 async def get_memory_content(anthropic: AsyncAnthropic, store_id: str, path: str) -> str | None:
     """The memory at exactly `path`, or None when there is none."""
-    page = await anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
-    async for item in page:
-        if item.type == "memory" and item.path == path:
+    for record in await list_memory_records(anthropic, store_id):
+        if record.path == path:
             memory = await anthropic.beta.memory_stores.memories.retrieve(
-                item.id, memory_store_id=store_id, view="full"
+                record.id, memory_store_id=store_id, view="full"
             )
             return memory.content or ""
     return None

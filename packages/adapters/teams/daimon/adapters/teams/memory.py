@@ -29,6 +29,7 @@ from daimon.core.memory_view import (
     personal_memory_reply,
     resolve_channel_agent,
 )
+from daimon.core.message_split import split_fenced
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import load_access_policy
 from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
@@ -67,7 +68,25 @@ async def _kept_inside(context: CommandContext, asked: TeamsInbound) -> bool:
     return readers_limited_at(policy, channel_id=asked.channel_id, thread_id=asked.thread_id)
 
 
-async def _personal_card(context: CommandContext, asked: TeamsInbound) -> AdaptiveCard:
+def _list_cards(title: str, paths: tuple[str, ...], hint: str | None) -> list[AdaptiveCard]:
+    """Every path, over as many cards as it takes, with the hint on the last.
+
+    A `forget-mine` preview's hint carries the code that deletes exactly the
+    listed files, so the list is never truncated: each card stays under the
+    limit instead.
+    """
+    chunks = split_fenced("\n".join(paths), TEAMS_LIMIT)
+    return [
+        _card(
+            title if n == 0 else f"{title} (continued)",
+            chunk,
+            hint if n == len(chunks) - 1 else None,
+        )
+        for n, chunk in enumerate(chunks)
+    ]
+
+
+async def _personal_cards(context: CommandContext, asked: TeamsInbound) -> list[AdaptiveCard]:
     """The sender's own personal memory: resolved from their account, never an argument."""
     agent = await resolve_channel_agent(
         context.runtime.sessionmaker,
@@ -80,7 +99,7 @@ async def _personal_card(context: CommandContext, asked: TeamsInbound) -> Adapti
         thread_id=asked.thread_id if asked.thread_id != asked.channel_id else None,
     )
     if agent is None:
-        return _card(EMPTY)
+        return [_card(EMPTY)]
     reply = await personal_memory_reply(
         context.runtime.anthropic,
         agent_name=agent.agent_name,
@@ -89,17 +108,19 @@ async def _personal_card(context: CommandContext, asked: TeamsInbound) -> Adapti
         command="memory",
     )
     if reply.content is not None:
-        return _card(reply.title, reply.content)
-    return _card(reply.title, "\n".join(reply.paths) if reply.paths else None, reply.hint)
+        return [_card(reply.title, reply.content)]
+    if not reply.paths:
+        return [_card(reply.title, None, reply.hint)]
+    return _list_cards(reply.title, reply.paths, reply.hint)
 
 
-async def _memory_card(context: CommandContext) -> AdaptiveCard:
+async def _memory_card(context: CommandContext) -> AdaptiveCard | list[AdaptiveCard]:
     runtime, path = context.runtime, context.args
     asked = context.asked_in or context.inbound
     if await _kept_inside(context, asked):
         return _card(KEPT_INSIDE)
     if parse_memory_args(path).kind not in ("shared_list", "shared_show"):
-        return await _personal_card(context, asked)
+        return await _personal_cards(context, asked)
     resolved = await get_channel_memory_store(
         runtime.sessionmaker,
         runtime.anthropic,
@@ -128,8 +149,9 @@ async def _memory_card(context: CommandContext) -> AdaptiveCard:
 
 async def show_memory(context: CommandContext) -> None:
     try:
-        card = await _memory_card(context)
+        cards = await _memory_card(context)
     except (DaimonError, anthropic.APIError) as exc:
         log.warning("teams.memory.failed", exc_info=exc)
-        card = _card(str(exc) if isinstance(exc, DaimonError) else _FAILED)
-    await context.send_card(card)
+        cards = _card(str(exc) if isinstance(exc, DaimonError) else _FAILED)
+    for card in cards if isinstance(cards, list) else [cards]:
+        await context.send_card(card)

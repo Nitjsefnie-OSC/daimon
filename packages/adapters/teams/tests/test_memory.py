@@ -190,7 +190,7 @@ async def _seed_personal(
 async def test_memory_mine_shows_and_clears_only_the_senders_own_after_confirming(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    from daimon.core.memory_view import current_forget_code
+    from daimon.core.memory_view import MemoryRequest, personal_memory_reply
 
     from .conftest import AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID
 
@@ -204,7 +204,16 @@ async def test_memory_mine_shows_and_clears_only_the_senders_own_after_confirmin
         aad_object_id=OTHER_AAD_OBJECT_ID,
         files={"/secret-pref.md": "someone else's"},
     )
-    code = await current_forget_code(anthropic, mine)
+    # The code the preview offers, from the same core reply the command renders.
+    preview = await personal_memory_reply(
+        anthropic,
+        agent_name="daimon",
+        store_id=mine,
+        request=MemoryRequest("forget_ask"),
+        command="memory",
+    )
+    assert preview.hint is not None
+    code = preview.hint.split()[-1]
     texts = ["memory mine", "memory forget-mine", f"memory forget-mine {code}", "memory"]
     listing, asked, done, shared = await _replies(
         db_session_factory, teams_api_fake, anthropic, texts
@@ -224,3 +233,44 @@ async def test_memory_mine_shows_and_clears_only_the_senders_own_after_confirmin
     ]
     assert kept == ["/secret-pref.md"], "another person's store is never touched"
     assert "/team.md" in shared, "the shared memory is untouched"
+
+
+async def test_a_long_forget_preview_shows_every_file_before_its_code(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """The code deletes exactly the listed files, so a preview longer than one
+    card goes over several: every path is delivered, the code only on the last."""
+    from daimon.core.memory_view import MemoryRequest, personal_memory_reply
+
+    from .conftest import AAD_OBJECT_ID
+
+    anthropic = await _anthropic(db_session_factory, {"/team.md": "fridays"})
+    files = {f"/notes/{n:02d}-{'x' * 90}.md": "pref" for n in range(50)}
+    mine = await _seed_personal(
+        db_session_factory, anthropic, aad_object_id=AAD_OBJECT_ID, files=files
+    )
+    preview = await personal_memory_reply(
+        anthropic,
+        agent_name="daimon",
+        store_id=mine,
+        request=MemoryRequest("forget_ask"),
+        command="memory",
+    )
+    assert preview.hint is not None
+    code = preview.hint.split()[-1]
+
+    async with running_service(
+        build_teams_runtime(db_session_factory, anthropic=anthropic), teams_api_fake
+    ) as service:
+        await post_activity(service, make_message_activity(text="memory forget-mine"))
+        async with asyncio.timeout(10):
+            while not any(code in json.dumps(r.body) for r in teams_api_fake.activity_requests):
+                await asyncio.sleep(0.01)
+    cards = [json.dumps(r.body, ensure_ascii=False) for r in teams_api_fake.activity_requests]
+
+    assert len(cards) > 1, "more than one card's worth of paths"
+    assert all(len(card) < 8000 for card in cards)
+    for path in files:
+        assert any(path in card for card in cards), f"{path} was not shown"
+    assert code in cards[-1] and not any(code in card for card in cards[:-1])
+    assert "truncated" not in "".join(cards)

@@ -179,7 +179,7 @@ async def _seed_personal(db_session, runtime, *, user_id: str, files: dict[str, 
 async def test_memory_mine_and_forget_act_only_on_the_invokers_own_store(
     db_session, db_session_factory
 ) -> None:
-    from daimon.core.memory_view import current_forget_code
+    import re
 
     runtime, web = await _setup(db_session, db_session_factory, seed={"/team.md": "fridays"})
     mine = await _seed_personal(db_session, runtime, user_id="U1", files={"/style.md": "tabs"})
@@ -201,8 +201,10 @@ async def test_memory_mine_and_forget_act_only_on_the_invokers_own_store(
     assert "/x.md" in listing and "/style.md" not in listing
 
     asked = await say("U1", "forget-mine")
-    code = await current_forget_code(runtime.anthropic, mine)
-    assert code in asked and await paths(mine) == ["/style.md"], "asking deletes nothing"
+    found = re.search(r"forget-mine ([0-9a-f]{6})", asked)
+    assert found is not None, "the preview offers the code"
+    code = found.group(1)
+    assert await paths(mine) == ["/style.md"], "asking deletes nothing"
 
     await say("U2", f"forget-mine {code}")
     assert await paths(mine) == ["/style.md"], "U1's code does nothing for U2"
