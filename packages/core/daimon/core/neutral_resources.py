@@ -700,10 +700,10 @@ class WorkerPermissions:
     spec: AgentSpec = dataclass_field(repr=False)
     base_system: str = dataclass_field(repr=False)
     backend_grants: tuple[ResolvedBackend, ...]
-    models: tuple[ModelRef, ...]
+    models: tuple[ModelRef, ...] = dataclass_field(repr=False)
     limits: WorkerLimits
-    resources: tuple[ResourceBinding, ...] = ()
-    environment: EnvironmentSpec | None = None
+    resources: tuple[ResourceBinding, ...] = dataclass_field(default=(), repr=False)
+    environment: EnvironmentSpec | None = dataclass_field(default=None, repr=False)
     source_agents: tuple[ResourceRef, ...] = ()
     source_revisions: tuple[tuple[ResourceRef, Revision], ...] = ()
     seal_ids: frozenset[str] = frozenset()
@@ -715,8 +715,8 @@ class WorkerPermissions:
 class ResolvedWorkerSpec:
     spec: AgentSpec = dataclass_field(repr=False)
     backend: ResolvedBackend
-    resources: tuple[ResourceBinding, ...]
-    environment: EnvironmentSpec | None
+    resources: tuple[ResourceBinding, ...] = dataclass_field(repr=False)
+    environment: EnvironmentSpec | None = dataclass_field(repr=False)
     limits: WorkerLimits
     permissions: WorkerPermissions = dataclass_field(repr=False)
     digest: str

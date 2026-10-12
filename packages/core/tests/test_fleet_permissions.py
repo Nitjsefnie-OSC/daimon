@@ -412,6 +412,24 @@ def test_old_profile_rows_default_to_no_implicit_execution_or_mcp_policy():
     assert restored.mcp_policy_keys == ()
 
 
+def test_unsupported_private_native_facts_never_appear_in_permission_repr():
+    root = parent()
+    secret = "private-native-environment-value"
+    root = replace(
+        root,
+        environment=EnvironmentSpec(
+            name="root-box",
+            native_config=ExtensionConfig(
+                namespace="anthropic.environment_config", version=1, value={"token": secret}
+            ),
+        ),
+    )
+    assert secret not in repr(root)
+    with pytest.raises(WorkerSpecRefused) as caught:
+        resolve(root)
+    assert secret not in repr(caught.value)
+
+
 def test_native_mcp_policy_that_is_dropped_by_compilation_refuses():
     root = parent()
     server = MCPConnection(
