@@ -9,7 +9,7 @@ from pydantic import JsonValue
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import DeletionReceipt
 from mux.drivers.anthropic.resources._authorization import authorize, check_ref
-from mux.drivers.anthropic.resources._errors import provider_call
+from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.resources.artifacts import AnthropicArtifacts
 
 _MA_BETA = "managed-agents-2026-04-01"
@@ -31,7 +31,9 @@ class Outputs(Protocol):
         self, scope: Scope, body: AsyncIterator[bytes], *, filename: str, media_type: str, key: str
     ) -> str: ...
 
-    async def list_outputs(self, scope: Scope, session: ResourceRef) -> tuple[OutputEntry, ...]: ...
+    async def list_outputs(
+        self, scope: Scope, session: ResourceRef, *, all_pages: bool = False
+    ) -> tuple[OutputEntry, ...]: ...
 
     async def read_output(self, scope: Scope, ref: ResourceRef) -> bytes: ...
 
@@ -41,7 +43,7 @@ class Outputs(Protocol):
 
 
 class AnthropicOutputs(AnthropicArtifacts):
-    """One listing page and buffered reads, matching the existing host sweeps.
+    """One listing page by default; delivery can request all SDK pages.
 
     Inherit N6's reference construction and shared upload request. Bundle
     rehosting consumes only its returned ID. The three session-output requests
@@ -55,15 +57,18 @@ class AnthropicOutputs(AnthropicArtifacts):
         item = await self._upload_file(scope, body, filename=filename, media_type=media_type)
         return item.id
 
-    async def list_outputs(self, scope: Scope, session: ResourceRef) -> tuple[OutputEntry, ...]:
+    async def list_outputs(
+        self, scope: Scope, session: ResourceRef, *, all_pages: bool = False
+    ) -> tuple[OutputEntry, ...]:
         authorize(self._authorization, scope, "session", session.id)
         check_ref(scope, session, self._account_scope_id, "session")
         page = await provider_call(
             self._client.beta.files.list(scope_id=session.id, betas=[_MA_BETA], limit=1000)
         )
+        items = [item async for item in provider_iter(page)] if all_pages else page.data
         return tuple(
             OutputEntry(native=cast(JsonValue, item.model_dump(mode="json", exclude_unset=True)))
-            for item in page.data
+            for item in items
         )
 
     async def read_output(self, scope: Scope, ref: ResourceRef) -> bytes:

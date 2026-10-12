@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Literal, Protocol
 
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
@@ -60,7 +61,11 @@ ExemptReason = Literal["cli-operator-run", "headless-unrecorded", "mcp-internal-
 
 
 class UsageRecorder(Protocol):
-    async def __call__(self, *, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None: ...
+    """Meters one model call. May return the USD it debited (None: nothing written)."""
+
+    async def __call__(
+        self, *, event: BetaManagedAgentsSpanModelRequestEndEvent
+    ) -> Decimal | None: ...
 
 
 @dataclass(frozen=True)

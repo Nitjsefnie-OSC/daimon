@@ -590,3 +590,21 @@ def test_the_wait_sample_is_bounded_without_a_heartbeat() -> None:
     window = queue.take_window()
     assert window["started"] == 5000, "the started count is exact; only the sample is capped"
     holder.release()
+
+
+def test_after_stop_dispatch_a_freed_slot_starts_no_waiting_turn() -> None:
+    """A shutdown drain cancels what is left; releasing one cancelled turn's
+    slot must not start a queued one the drain did not see (#16)."""
+    queue = make_queue(global_cap=1)
+    running = admit(queue, A)
+    waiting = admit(queue, B)
+    assert waiting.queued
+
+    queue.stop_dispatch()
+    running.release()
+
+    assert waiting.queued, "the waiting turn is not granted the freed slot"
+    assert queue.in_flight() == 0
+    assert queue.admit(C, cap=10) is None, "nothing new starts or queues either"
+    waiting.release()
+    assert queue.depth() == 0

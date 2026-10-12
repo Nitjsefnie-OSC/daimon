@@ -18,8 +18,16 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
-from daimon.core.defaults.ma_index import find_skill_by_display_title, list_skills_lenient
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsSkillParams,
+    SkillListResponse,
+)
+from daimon.core.defaults.ma_index import (
+    find_skill_by_display_title,
+    list_skills_lenient,
+    match_skills_by_display_title,
+)
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.errors import DefaultsError
 from daimon.core.specs import SkillRef
@@ -30,6 +38,7 @@ async def resolve_refs(
     *,
     refs: list[SkillRef],
     tenant_id: uuid.UUID,
+    skills_view: Sequence[SkillListResponse] | None = None,
 ) -> list[BetaManagedAgentsSkillParams]:
     """Resolve authoring-time SkillRef list to MA skill parameters.
 
@@ -47,7 +56,11 @@ async def resolve_refs(
             resolved.append({"type": "anthropic", "skill_id": ref.skill_id})
         else:
             canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=ref.skill_id)
-            sk = await find_skill_by_display_title(client, canonical, on_truncation="degrade")
+            if skills_view is None:
+                sk = await find_skill_by_display_title(client, canonical, on_truncation="degrade")
+            else:
+                matches = match_skills_by_display_title(list(skills_view), canonical)
+                sk = matches[0] if matches else None
             if sk is None:
                 raise DefaultsError(
                     f"custom skill {ref.skill_id!r} not found "

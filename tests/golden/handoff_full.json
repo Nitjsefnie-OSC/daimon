@@ -352,7 +352,8 @@
           ],
           "first_id": "<id:10>",
           "has_more": false,
-          "last_id": "<id:10>"
+          "last_id": "<id:10>",
+          "next_page": null
         },
         "status": 200
       }
@@ -408,7 +409,8 @@
           ],
           "first_id": "<id:10>",
           "has_more": false,
-          "last_id": "<id:10>"
+          "last_id": "<id:10>",
+          "next_page": null
         },
         "status": 200
       }
@@ -464,7 +466,8 @@
           ],
           "first_id": "<id:10>",
           "has_more": false,
-          "last_id": "<id:10>"
+          "last_id": "<id:10>",
+          "next_page": null
         },
         "status": 200
       }
@@ -623,7 +626,8 @@
           "data": [],
           "first_id": null,
           "has_more": false,
-          "last_id": null
+          "last_id": null,
+          "next_page": null
         },
         "status": 200
       }

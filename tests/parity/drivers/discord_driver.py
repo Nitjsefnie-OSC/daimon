@@ -85,7 +85,9 @@ from .cards import CapturedCard, read_discord_card, walk_components
 from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_discord_modal, read_discord_view
 
-_BALANCE_BLOCKED_TEXT = "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
+_BALANCE_BLOCKED_TEXT = (
+    "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
+)
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 
 #: The message id the faked REST POST hands back for a posted card. The row

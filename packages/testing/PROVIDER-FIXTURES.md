@@ -382,3 +382,18 @@ new scenario outcome credit; missing product hooks and artifacts remain PENDING.
 Anthropic regeneration verifies the checked-out codec against its reviewed SHA256.
 The recorded codec commit remains provenance; the generator requires no historical
 local Git object. Changed codec bytes refuse before any replay output is written.
+
+### Main #824 product-host catch-up
+
+For a fresh first product turn, `anthropic_turn_tape(...,
+post_turn_usage_catchup=True)` appends the exact post-turn history GET introduced
+by main #824 (`0733181847dc775bda444d51c2467016780b8d5d`). It waits on that
+turn's send and stream requests, matches the bound session, beta/protocol
+headers and `limit=100&order=asc&types[]=span.model_request_end`, and returns the
+original authored span objects in a native page with `next_page: null`. The
+session override remains explicit. The default is `False`, preserving existing
+direct-driver tapes. Turns other than the first refuse this first-pass option;
+reused sessions need separately authored cursor/repair queries. Wrong queries,
+foreign sessions, premature or repeated reads still record violations; the
+shared `WireReplay` matcher and consumption checks are unchanged. N9 opts in
+when publishing fresh preparation tapes and tests the real product consumer.

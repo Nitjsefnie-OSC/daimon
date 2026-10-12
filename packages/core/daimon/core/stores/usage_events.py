@@ -184,6 +184,21 @@ async def list_event_ids_for_session(
     return frozenset(result.scalars().all())
 
 
+async def recorded_among(
+    session: AsyncSession, *, managed_session_id: str, event_ids: Sequence[str]
+) -> frozenset[str]:
+    """Which of `event_ids` already have a usage row for the session."""
+    if not event_ids:
+        return frozenset()
+    result = await session.execute(
+        select(UsageEvent.event_id).where(
+            UsageEvent.managed_session_id == managed_session_id,
+            UsageEvent.event_id.in_(event_ids),
+        )
+    )
+    return frozenset(result.scalars().all())
+
+
 async def _select_rows(
     session: AsyncSession,
     *,

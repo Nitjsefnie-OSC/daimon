@@ -18,7 +18,7 @@ import httpx
 import pytest
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.slack.output_delivery import deliver_provider_output, deliver_session_outputs
-from daimon.core.output_delivery import MAX_BYTES_PER_FILE, DeliverableFile
+from daimon.core.output_delivery import MAX_BYTES_PER_FILE, DeliverableFile, NoticedFiles
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from yarl import URL
 
@@ -494,11 +494,12 @@ async def test_delivery_continues_after_non_scope_api_error_on_one_file(
     )
 
 
-async def test_delivery_posts_oversize_notice_and_deletes_entry_without_upload(
+async def test_delivery_posts_one_oversize_notice_and_keeps_entry_without_upload(
     fake_slack_web_client: Any,
 ) -> None:
     """An oversize file gets one in-thread notice naming the file and its size,
-    no upload requests at all, and its MA listing entry is deleted."""
+    no upload requests at all, and its MA listing entry is kept. A later sweep
+    that lists it again posts no second notice."""
     mock = fake_slack_web_client.mock
 
     deletes: list[str] = []
@@ -531,29 +532,33 @@ async def test_delivery_posts_oversize_notice_and_deletes_entry_without_upload(
     async def sleep(delay: float) -> None:
         pass
 
-    await deliver_session_outputs(
-        anthropic_client,
-        fake_slack_web_client.client,
-        session_id="sesn_1",
-        channel_id="C1",
-        thread_ts="1.2",
-        notice_keys=NoticeKeys(),
-        team_id="T1",
-        sleep=sleep,
-    )
+    noticed = NoticedFiles()
+    for _ in range(2):
+        await deliver_session_outputs(
+            anthropic_client,
+            fake_slack_web_client.client,
+            session_id="sesn_1",
+            channel_id="C1",
+            thread_ts="1.2",
+            notice_keys=NoticeKeys(),
+            team_id="T1",
+            noticed_files=noticed,
+            sleep=sleep,
+        )
 
     notices = _post_message_calls(mock)
-    assert len(notices) == 1, "exactly one oversize notice must be posted"
+    assert len(notices) == 1, "exactly one oversize notice across both sweeps"
     notice_text = str(notices[0].kwargs)
     assert "big_data.bin" in notice_text, "the notice must name the sanitized file"
-    assert "20 MiB" in notice_text, "the notice must quote the delivery limit"
+    assert "20 MB upload limit" in notice_text, "the notice must quote the delivery limit"
+    assert "still saved" in notice_text, "the notice must say the file was kept"
     upload_requests = [
         url
         for (_, url) in mock.requests
         if "getUploadURLExternal" in str(url) or "files.slack.com" in str(url)
     ]
     assert upload_requests == [], "an oversize file must produce no upload requests at all"
-    assert deletes == ["file_big"], "the oversize entry must be deleted after the notice"
+    assert deletes == [], "the oversize entry must be kept, not deleted"
 
 
 async def test_neutral_bytes_reach_actual_slack_sdk_upload_flow(fake_slack_web_client: Any) -> None:

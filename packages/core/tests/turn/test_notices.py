@@ -95,7 +95,7 @@ def _tool(name: str, status: str) -> ToolUseBlock:
         (
             TerminationReason.ADMISSION_BALANCE_DEPLETED,
             "Your team's Daimon credit has run out.",
-            "Ask an admin to top up.",
+            "An admin can top up with `/billing`.",
         ),
         (
             TerminationReason.ADMISSION_CAP_EXCEEDED,
@@ -244,6 +244,27 @@ def test_refusals_have_two_spaced_lines(reason: AdmissionDenialReason, in_dm: bo
     assert len(lines) == 2
     assert all(line.endswith(".") for line in lines)
     assert "{" not in rendered
+
+
+def test_depleted_refusal_names_the_billing_command() -> None:
+    teams = RefusalNouns(
+        scope="organisation",
+        admin="an admin",
+        billing="`billing` in a 1:1 chat with me",
+        setup="`setup`",
+    )
+    assert admission_refusal_text("balance_depleted", _NOUNS) == (
+        "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
+    )
+    assert admission_refusal_text("balance_depleted", teams).endswith(
+        "An admin can top up with `billing` in a 1:1 chat with me."
+    )
+    notice = render_termination_notice(
+        TerminationReason.ADMISSION_BALANCE_DEPLETED,
+        billing_command="`billing` in a 1:1 chat with me",
+    )
+    assert notice is not None
+    assert notice.next_step == "An admin can top up with `billing` in a 1:1 chat with me."
 
 
 def test_teams_setup_noun() -> None:

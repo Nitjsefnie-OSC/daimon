@@ -12,12 +12,14 @@ from mux.drivers.anthropic.outputs import Outputs
 
 
 async def list_output_records(
-    client: AsyncAnthropic, session_id: str, *, scope: Scope
+    client: AsyncAnthropic, session_id: str, *, scope: Scope, all_pages: bool = False
 ) -> tuple[FileMetadata, ...]:
     backend = managed_agents(client, scope=scope, resources=frozenset({("session", session_id)}))
     port = backend.extension(Outputs, namespace="anthropic.outputs", version=1)
     records = await legacy_call(
-        port.list_outputs(scope, resource_ref(backend, "session", session_id, scope=scope))
+        port.list_outputs(
+            scope, resource_ref(backend, "session", session_id, scope=scope), all_pages=all_pages
+        )
     )
     return tuple(
         construct_type_unchecked(value=record.native, type_=FileMetadata) for record in records

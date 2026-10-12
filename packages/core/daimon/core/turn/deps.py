@@ -30,6 +30,7 @@ from daimon.core.mux_backend import TurnRuntime
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
@@ -87,6 +88,8 @@ class TurnDeps:
     turn_runtime_factory: RuntimeFactory | None = None
     # Only prepared mux turns use this; default composition uses Postgres.
     state_store: StateStore | None = None
+    # Every turn inside `run_prepared_turn`, whatever started it; read by shutdown drains.
+    running_turns: RunningTurns = field(default_factory=RunningTurns)
 
 
 def _reveal(secret: SecretStr | None) -> str | None:

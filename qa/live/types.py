@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from qa.live.billing import BillingEvidence
 
 from pydantic import JsonValue
 
@@ -25,6 +28,17 @@ def objects(value: JsonValue) -> list[Message]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
+def component_text(message: Message) -> list[str]:
+    """Discord V2 text displays only; button labels are controls, not copy."""
+    parts: list[str] = []
+    for component in objects(message.get("components")):
+        content = component.get("content")
+        if component.get("type") == 10 and isinstance(content, str):
+            parts.append(content)
+        parts.extend(component_text(component))
+    return parts
+
+
 def text_components(message: Message, *, include_fields: bool = True) -> list[str]:
     parts = [str(message.get("content") or "")]
     for embed in objects(message.get("embeds")):
@@ -37,6 +51,11 @@ def text_components(message: Message, *, include_fields: bool = True) -> list[st
 
 def text_of(message: Message, *, include_fields: bool = True) -> str:
     return "\n".join(text_components(message, include_fields=include_fields))
+
+
+def card_text_of(message: Message) -> str:
+    """Readable card copy, including V2 displays, separate from answer matching."""
+    return "\n".join([*text_components(message), *component_text(message)])
 
 
 @dataclass
@@ -64,16 +83,21 @@ class Turn:
     done_s: float | None = None
     thread_id: str | None = None
     progress_seen_s: float | None = None
+    progress_text_history: list[Message] = field(default_factory=list[Message])
+    progress_first_poll_s: float | None = None
+    progress_observed_until_s: float | None = None
     guild_id: str = "1435062989119295640"
     trigger_reactions: list[Message] = field(default_factory=list[Message])
     trigger_reaction_history: list[Message] = field(default_factory=list[Message])
     messages: list[Message] = field(default_factory=list[Message])
     card_history: list[Message] = field(default_factory=list[Message])
     baseline_message_ids: list[str] = field(default_factory=list[str])
+    billing: Message = field(default_factory=dict[str, JsonValue])
     agent_subtext_headers: list[Message] = field(default_factory=list[Message])
     channel_history: list[Message] = field(default_factory=list[Message])
     parent_messages: list[Message] = field(default_factory=list[Message])
     verdicts: list[str] = field(default_factory=list[str])
+    attribution_pending: str | None = None
     usage: Usage = field(default_factory=Usage)
     settled: bool = False
 
@@ -103,6 +127,7 @@ class DeploymentEvidence:
     settled_image: str | None = None
     events_error: str | None = None
     error: str | None = None
+    quiet: Message = field(default_factory=dict[str, JsonValue])
 
 
 class Pending(RuntimeError):
@@ -111,6 +136,8 @@ class Pending(RuntimeError):
 
 class WatchTimeout(Pending):
     """Observation completed without terminal proof; evaluate the collected evidence."""
+
+    turn: int | None = None
 
 
 class Backend(Protocol):
@@ -135,6 +162,7 @@ class Backend(Protocol):
     def logs(self, assertion: Assertion, turn: Turn) -> list[Message]: ...
     def db_check(self, sql: str, turn: Turn | None = None) -> JsonValue: ...
     def usage(self, turn: Turn) -> Usage: ...
+    def billing_evidence(self, turn: Turn) -> BillingEvidence: ...
     def thread_name(self, turn: Turn) -> str: ...
     def channel_messages(self, turn: Turn) -> list[Message]: ...
     def current_messages(self, turn: Turn) -> list[Message]: ...
@@ -142,6 +170,7 @@ class Backend(Protocol):
     def cli_read(self, command: str) -> str: ...
     def classify(self, message: Message) -> str: ...
     def deployment_image(self) -> str: ...
+    def deployment_quiet(self) -> Message: ...
     def deployment_events(
         self, start: datetime, end: datetime, turns: list[Turn]
     ) -> list[Message]: ...

@@ -149,6 +149,24 @@ latency, thread location/reuse, observed progress, blank messages, parent-channe
 posts, silent drops, regex presence and
 absence over content and all embed text, settled cards, reactions, attachment
 counts/uniqueness, scoped logs, read-only SQL, and the fixed Haiku judge.
+Running cards are fetched directly on every poll. Result `card_history` retains
+each immutable message snapshot, including its footer/timer, edit timestamp,
+and observation time, even when the card never changes. A failed or mismatched
+per-card readback is kept as card-specific `unavailable` evidence; collection and
+the other assertions continue. `card_edits_min` counts successive state changes
+(A, B, A, B is three edits). Proven edits PASS regardless of gaps. A shortfall is
+FAIL only with at least `max(2, minimum + 1)` snapshots of one card and, for every
+running card separately, no capture gap wider than 2.5 poll intervals: from the
+card's first known running observation to its first snapshot, between its
+snapshots, and from its last snapshot to its end. Each sample records `listed_at`,
+the poll's listing time taken before the slow direct read, separately from the
+snapshot's `observed_at`; failed and slow readbacks therefore keep the known
+running start, and `listed_at` identifies poll membership. A card ends when its
+direct read raced to terminal (kept as an `ended` entry without a payload), else
+at the next poll that no longer lists it working, else at terminal. Another
+card's read in the same poll never ends it. A card never read back, or another
+card's snapshots, cannot qualify missed time. Otherwise it is PENDING.
+Terminal edits do not count.
 The approved filtered attachment counts (`name_pattern`) and timed reaction
 observations remain PENDING until the FULL stage implements their semantics.
 The approved global regex assertions are appended to every executed turn: no
@@ -334,6 +352,10 @@ The frozen Discord batch also supports whole-run `answers_total` and
 `threads_created` upper bounds, three-valued nested `any_of`, nested component
 labels, current card refreshes after a wait, distinct running card-edit timestamps,
 and answer chunk gaps from answer-bearing edits or message creation times.
+Cards observed running during the same turn (recorded on every working poll, even
+before their first edit) use their answer edit time for chunk
+delivery, as do cards reused from before the trigger. Missing edit evidence stays
+PENDING; later edits on ordinary answer messages do not change their delivery time.
 An incomplete observation cannot prove a count or gap upper bound. Expected CLI
 failures require matching declared refusal text and the hook's JSON `exit_code`;
 a transport failure remains a harness error. `new_channel.guild` must resolve to the configured approved QA
@@ -354,3 +376,84 @@ Transport/crash signatures (connection refusal/reset, timeouts, DNS, TLS/SSL, 5x
 tracebacks and unhandled exceptions) are rejected before the declared refusal regex.
 Expected patterns must not match empty output. CLI args must be command strings;
 tenant-credit tokens are refused even behind wrappers or global options.
+
+`footer_cost_matches_ledger {turn, tol_usd}` and `ledger_matches_usage {turn, tol_pct}`
+require complete, read-only staging billing evidence. The settled turn's exact
+`usage_refs` identify per-request usage rows and ledger debit idempotency keys;
+foreign, missing or duplicate rows remain PENDING. The footer check parses only
+embed footer `$X used`, separately from `$X left`, and applies the declared
+absolute tolerance. `<$0.001` is an interval, never a rounded scalar.
+
+`staging.billing_probe` is a read-only argv hook receiving `{env: staging,
+guild_id, read_only: true}` on stdin. It returns JSON `{guild_id, markup, source}`
+from the deployed billing configuration; missing provenance is PENDING. Expected
+ledger spend is independently calculated with Decimal from each request's token
+counts, the QA `billing_rates` map and that markup. The default Haiku 5.5 rates
+come from driver `hack/GO-pricing-check.md` (official pricing verified 2026-10-10):
+input/write/read/output per million are 0.10/0.125/0.01/0.50 up to 100,000 prompt
+tokens and 0.50/0.625/0.05/2.50 above that, selected per request. Unknown models or
+missing independent prices remain PENDING; Daimon's own cost/price table isn't
+used as the expected value. Raw request, debit, markup and rate evidence is saved
+under each turn's `billing`. No billing writes are performed.
+
+Before every staging observation, the runner reads main CI runs and their jobs
+through `gh`. It requires no active/queued `Deploy to GCP (staging)` job, including
+older active runs outside the recent run list, and at least three minutes since
+the most recent completed staging deploy job. It polls every 30 seconds for up to
+15 minutes; missing GitHub evidence never permits a trigger. This gate does not
+pin or deploy staging. A busy timeout is a silent PENDING without a paid retry or
+pending-streak increment. GitHub access failures remain harness PENDING. The
+existing deploy-interrupted retry policy still applies to turns already posted.
+The service timeout is one hour to cover quiet waits, observation, and one retry.
+
+The deploy gate matches bare caller and expanded reusable-workflow job names.
+Completed job metadata is cached across scenarios and retries in the process, keyed
+by run id and attempt, so a rerun is read afresh and its new deploy must settle;
+active, queued, waiting, requested, and pending runs are refreshed each time.
+Missing tools, authentication, or deployment history fail fast as harness PENDING.
+HTTP-only staging results retain the gate evidence under `deployment.quiet`.
+
+A known busy deploy that outlasts the quiet wait remains a silent not-quiet
+outcome. A snapshot begun near the wait deadline has a separate, bounded
+60-second query grace budget; the quiet wait remains 15 minutes and genuine
+GitHub transport or authentication failures remain alertable harness PENDING.
+
+Queue scenarios that send a thread follow-up before the first `wait_done` start
+watching mentions immediately. The follow-up uses the preceding turn's observed
+thread and never waits for its terminal answer or guesses a thread ID. Watchers
+finish before assertions, teardown, and accounting.
+The follow-up is sent only while its predecessor is positively running (a
+working card on its latest poll and no terminal observation); otherwise the
+scenario is PENDING and nothing is sent. A follow-up is linked to every turn
+still unfinished in that thread, including in-thread predecessors, before its
+POST is issued (bounded by the send time until the trigger id returns), so a
+delayed POST receipt can't let the predecessor settle on the follow-up's
+messages. A failed POST rolls the link back.
+Overlapping turns in one thread are attributed by the product's serial order:
+messages created before the follow-up trigger belong to the predecessor, and the
+follow-up owns messages from its first card observed working that was created
+after every predecessor card finalized. A predecessor's late chunks before that
+card stay with the predecessor. The follow-up cannot settle before its
+predecessor. If no follow-up card is observed working, evidence after its
+trigger is unattributed and both turns' checks are PENDING; a watch timeout on
+such a turn is PENDING too, while a silent or stuck bot still FAILs.
+
+`progress_text_seen {turn, pattern, within_s}` checks frozen non-terminal card
+text at the actual poll time. JSON retains `progress_text_history`, first-poll
+time, and observation coverage. Creation/edit timestamps do not backdate text
+seen on a late poll. Missing early coverage is PENDING; a completed observation
+without a matching early progress message FAILs. Tenant-cap mutation still needs
+an explicitly configured isolated QA operator hook.
+
+Progress text includes nested Discord V2 type-10 text displays. A component-only
+card whose running/terminal state the driver cannot identify is retained as
+`component_state_unknown`; it can only produce PENDING, never a false progress
+PASS or FAIL.
+
+`card_text_now` reads legacy message/embed copy and nested Discord V2 type-10
+text displays from refreshed messages. Unreadable current messages are PENDING
+for both presence and absence checks; button labels do not count as card copy.
+Observer fingerprints include components so component-only edits remain visible.
+This card-only extraction does not add component footer text to answer matching:
+anchored answers still match the whole content after removing only a recorded
+QA-agent subtext header.

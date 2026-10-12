@@ -46,6 +46,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
     mark_dead,
+    transfer_active_turn,
 )
 from daimon.core.tool_safety import trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
@@ -83,11 +84,13 @@ from daimon.core.turn.provider_actions import (
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
+from daimon.core.usage_reconcile import reconcile_unbilled
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
+from sqlalchemy.exc import SQLAlchemyError
 
 
 class _TurnPortKwargs(TypedDict, total=False):
@@ -194,6 +197,36 @@ def _turn_port_kwargs(
 
 
 log = structlog.get_logger(__name__)
+
+
+async def _reconcile_unbilled(
+    deps: TurnDeps, *, session_id: str, scope: Scope, record: UsageRecorder
+) -> None:
+    """Debit model calls on `session_id` that no live stream metered.
+
+    Runs once the turn is over -- after its answer or failure was rendered --
+    so it never delays the user's message or spends the turn's ceiling.
+    `reconcile_unbilled` bounds itself (pages and one wall-clock budget over
+    MA and database work); its durable cursor lets the next turn resume.
+
+    Named boundary: a failed backfill must not fail the user's turn.
+    Recording is idempotent, so the next pass on the session (or the
+    scheduler sweep) retries whatever this one could not write.
+    """
+    try:
+        await reconcile_unbilled(
+            anthropic=deps.anthropic,
+            sessionmaker=deps.sessionmaker,
+            managed_session_id=session_id,
+            scope=scope,
+            record=record,
+        )
+    except _anthropic.NotFoundError:
+        # A deleted session: its events can no longer be listed.
+        log.info("billing.reconcile_skipped", managed_session_id=session_id)
+    except (_anthropic.APIError, SQLAlchemyError):
+        log.exception("billing.reconcile_failed", managed_session_id=session_id)
+
 
 __all__ = ["RunOutcome", "run_prepared_turn"]
 
@@ -505,6 +538,7 @@ async def _replace_dead_session(
     thread_id: str,
     dead_session_id: str,
     dead_mapping_id: uuid.UUID,
+    active_turn_message_id: str | None = None,
 ) -> _Replacement:
     async def attempt():
         async with deps.preparation_gate.hold(), pool_headroom(deps.sessionmaker, preparation=True):
@@ -516,6 +550,7 @@ async def _replace_dead_session(
                 thread_id=thread_id,
                 dead_session_id=dead_session_id,
                 dead_mapping_id=dead_mapping_id,
+                active_turn_message_id=active_turn_message_id,
             )
 
     return await retry_fences(attempt)
@@ -530,8 +565,14 @@ async def _replace_dead_session_locked(
     thread_id: str,
     dead_session_id: str,
     dead_mapping_id: uuid.UUID,
+    active_turn_message_id: str | None = None,
 ) -> _Replacement:
     """Mark the dead mapping dead and move onto one live replacement.
+
+    `active_turn_message_id` is the turn's own in-flight marker, when its
+    adapter wrote one: it moves onto the replacement in the same locked
+    transaction (`transfer_active_turn`), before the replacement's turn is
+    sent, so restart recovery watches the session that is actually running.
 
     Runs under the same per-(tenant, platform, thread, account) advisory lock
     as `prepare_session_for_turn`. Two turns can be running on one mapping
@@ -604,6 +645,13 @@ async def _replace_dead_session_locked(
                     tenant_id=tenant_id,
                     now=lambda: datetime.now(UTC),
                 )
+                if active_turn_message_id is not None:
+                    await transfer_active_turn(
+                        db,
+                        from_id=dead_mapping_id,
+                        to_id=live.id,
+                        expected_message_id=active_turn_message_id,
+                    )
                 return _Replacement(
                     ma_session_id=live.ma_session_id,
                     mapping_id=live.id,
@@ -665,6 +713,13 @@ async def _replace_dead_session_locked(
             # would overwrite -- and gains only the pointer forward.
             await mark_dead(db, id=dead_mapping_id)
             await link_replacement(db, id=dead_mapping_id, replaced_by_id=fresh.mapping_id)
+            if active_turn_message_id is not None:
+                await transfer_active_turn(
+                    db,
+                    from_id=dead_mapping_id,
+                    to_id=fresh.mapping_id,
+                    expected_message_id=active_turn_message_id,
+                )
     except BaseException:
         # The locked transaction rolled back after the upstream session was
         # created (a ceiling, a cancel, a failed insert or commit). No row
@@ -725,6 +780,7 @@ async def run_prepared_turn(
     provider_action: ProviderActionHook | None = None,
     attended: bool | None = None,
     operation_key: str | None = None,
+    active_turn_message_id: str | None = None,
 ) -> RunOutcome:
     observation = (
         prepared.admission.observation
@@ -737,7 +793,7 @@ async def run_prepared_turn(
     observation.session_id = prepared.ma_session_id
     observation.origin = origin
     try:
-        with observation.activate():
+        with observation.activate(), deps.running_turns.track():
             result = await run_prepared_turn_impl(
                 deps,
                 prepared,
@@ -759,6 +815,7 @@ async def run_prepared_turn(
                 provider_action=provider_action,
                 attended=attended,
                 operation_key=operation_key,
+                active_turn_message_id=active_turn_message_id,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -790,6 +847,7 @@ async def run_prepared_turn_impl(
     provider_action: ProviderActionHook | None = None,
     attended: bool | None = None,
     operation_key: str | None = None,
+    active_turn_message_id: str | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -825,6 +883,11 @@ async def run_prepared_turn_impl(
     gets `no_confirmation_surface`, so its writes are refused, never run
     unseen. With the policy off the posture stays `RequireApproval`.
 
+    `active_turn_message_id` is the in-flight marker the adapter wrote on
+    `prepared.mapping_id` for this turn, if any. A recovery moves it onto the
+    replacement mapping before the re-run is sent, so a restart mid-recovery
+    leaves the marker on the session that is actually running.
+
     `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
     and the recovery re-run -- against the per-turn ceiling (D-08/D-09).
     `deadline=None` is fail-safe, not off: it computes
@@ -859,6 +922,12 @@ async def run_prepared_turn_impl(
     active_mapping_id_cell: list[uuid.UUID | None] = [prepared.mapping_id]
     recovered_cell: list[bool] = [False]
     continuity_cell: list[ContinuityOutcome] = [prepared.continuity]
+    # The recorder bound to the session in `active_session_id_cell`, for the
+    # turn-end reconcile: after recovery it is the replacement's, priced at
+    # the replacement's model.
+    active_record_cell: list[UsageRecorder | ObservationRecorder] = [prepared._record]  # pyright: ignore[reportPrivateUsage]
+
+    active_admission_cell: list[Admission] = [prepared.admission]
 
     # A replacement session's first user message opens with daimon's framing
     # for the work it inherited (`daimon.core.handoff_context`). Empty for
@@ -981,6 +1050,7 @@ async def run_prepared_turn_impl(
                 thread_id=thread_id,
                 dead_session_id=ma_session_id,
                 dead_mapping_id=mapping_id,
+                active_turn_message_id=active_turn_message_id,
             )
             new_session_id = recovery.ma_session_id
             new_mapping_id = recovery.mapping_id
@@ -1033,6 +1103,9 @@ async def run_prepared_turn_impl(
                 model_id=recovery.model_id,
                 channel_id=(recovery.admission or prepared.admission).budget_channel_id,
             )
+
+            active_record_cell[0] = new_record
+            active_admission_cell[0] = recovery.admission or prepared.admission
 
             log.info(
                 "turn.session_recovered",
@@ -1108,41 +1181,61 @@ async def run_prepared_turn_impl(
             continuity=continuity_cell[0],
         )
 
-    try:
-        return await asyncio.wait_for(_run(), timeout=remaining_s(effective_deadline, now=now()))
-    except TimeoutError:
-        active_session_id = active_session_id_cell[0]
-        active_mapping_id = active_mapping_id_cell[0]
-        recovered = recovered_cell[0]
-        err = ceiling_error()
-
-        log.error(
-            "turn.ceiling_exceeded",
-            phase="run_prepared_turn",
-            session_id=active_session_id,
-            mapping_id=str(active_mapping_id) if active_mapping_id is not None else None,
-            thread_id=thread_id,
-            platform=platform,
-            deadline=effective_deadline.isoformat(),
-        )
-
-        if active_mapping_id is not None:
-            async with deps.sessionmaker() as session:
-                await mark_dead(session, id=active_mapping_id)
-                await session.commit()
-
-        ceiling_state = TurnState(error=err, termination=TerminationReason.CEILING)
+    async def _run_within_ceiling() -> RunOutcome:
         try:
-            await lifecycle.on_terminal_failure(ceiling_state, err)
-        except Exception as render_err:
-            # Rendering is delivery, not correctness -- a broken adapter hook
-            # must not mask the ceiling error itself.
-            log.warning("turn.ceiling_render_failed", error=str(render_err))
+            return await asyncio.wait_for(
+                _run(), timeout=remaining_s(effective_deadline, now=now())
+            )
+        except TimeoutError:
+            active_session_id = active_session_id_cell[0]
+            active_mapping_id = active_mapping_id_cell[0]
+            recovered = recovered_cell[0]
+            err = ceiling_error()
 
-        return RunOutcome(
-            state=ceiling_state,
-            ma_session_id=active_session_id,
-            mapping_id=active_mapping_id,
-            recovered=recovered,
-            continuity=continuity_cell[0],
+            log.error(
+                "turn.ceiling_exceeded",
+                phase="run_prepared_turn",
+                session_id=active_session_id,
+                mapping_id=str(active_mapping_id) if active_mapping_id is not None else None,
+                thread_id=thread_id,
+                platform=platform,
+                deadline=effective_deadline.isoformat(),
+            )
+
+            if active_mapping_id is not None:
+                async with deps.sessionmaker() as session:
+                    await mark_dead(session, id=active_mapping_id)
+                    await session.commit()
+
+            ceiling_state = TurnState(error=err, termination=TerminationReason.CEILING)
+            try:
+                await lifecycle.on_terminal_failure(ceiling_state, err)
+            except Exception as render_err:
+                # Rendering is delivery, not correctness -- a broken adapter hook
+                # must not mask the ceiling error itself.
+                log.warning("turn.ceiling_render_failed", error=str(render_err))
+
+            return RunOutcome(
+                state=ceiling_state,
+                ma_session_id=active_session_id,
+                mapping_id=active_mapping_id,
+                recovered=recovered,
+                continuity=continuity_cell[0],
+            )
+
+    outcome = await _run_within_ceiling()
+    # Turn end: anything this session billed nowhere -- calls MA made while no
+    # worker was streaming it (an earlier turn whose worker died), while no
+    # stream generation was attached, or before a ceiling cut the turn off.
+    active_admission = active_admission_cell[0]
+    revision = active_admission.backend_revision
+    if revision is None or revision.profile == "anthropic.managed_agents":
+        await _reconcile_unbilled(
+            deps,
+            session_id=active_session_id_cell[0],
+            scope=admitted_session_scope(
+                active_admission, tenant_id=tenant_id, session_id=active_session_id_cell[0]
+            ),
+            record=cast(UsageRecorder, active_record_cell[0]),
         )
+    return outcome

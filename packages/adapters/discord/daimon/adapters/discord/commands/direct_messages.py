@@ -172,6 +172,13 @@ class DirectMessageCog(commands.Cog):
             or not isinstance(message.channel, discord.DMChannel)
         ):
             return
+        # The whole accepted DM -- slot wait, preparation, the turn and its
+        # reply -- is in progress for the shutdown drain, not only the turn.
+        with self.bot.runtime.turn_deps.running_turns.track():
+            await self._reply(message)
+
+    async def _reply(self, message: discord.Message) -> None:
+        assert isinstance(message.channel, discord.DMChannel)
         runtime = self.bot.runtime
         async with runtime.sessionmaker() as session:
             conversation = await get_conversation(

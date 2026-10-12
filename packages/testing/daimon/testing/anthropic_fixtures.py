@@ -314,11 +314,14 @@ def anthropic_turn_tape(
     *,
     codec: SourcePin,
     session_id: str | None = None,
+    post_turn_usage_catchup: bool = False,
 ) -> AnthropicTape:
     """Already admitted session only. Runner owns setup, side effects and verdicts.
 
     An explicit runner session override is allowed because native events carry
     no session ID. Input/root IDs and payloads remain immutable.
+    Fresh product-host tapes explicitly opt into the post-turn first
+    history page. Direct-driver tapes keep their existing requests unchanged.
     """
     if entry.scenario_id != scenario.scenario_id or turn not in scenario.turns:
         raise ValueError("foreign Anthropic scenario/turn")
@@ -343,7 +346,7 @@ def anthropic_turn_tape(
         if binding.completion_gate
         else len(turn.events)
     )
-    return AnthropicTape(
+    tape = AnthropicTape(
         source=entry.replay,
         codec=codec,
         replies=(
@@ -393,6 +396,25 @@ def anthropic_turn_tape(
             ),
         ),
     )
+    if not post_turn_usage_catchup:
+        return tape
+    if turn.turn != 1:
+        raise ValueError("first-pass usage catch-up requires a fresh first-turn tape")
+    # The fresh session's first ascending usage scan.
+    # Exact query, native spans and dependencies; no global replay allowance.
+    catchup = WireReply(
+        id="usage-catchup",
+        method="GET",
+        path=path + "/events",
+        query=(*QUERY, ("limit", "100"), ("order", "asc"), ("types[]", "span.model_request_end")),
+        headers=HEADERS,
+        response_json={
+            "data": [event for event in turn.events if event["type"] == "span.model_request_end"],
+            "next_page": None,
+        },
+        after=("send", "stream"),
+    )
+    return tape.model_copy(update={"replies": (*tape.replies, catchup)})
 
 
 @dataclass(frozen=True)

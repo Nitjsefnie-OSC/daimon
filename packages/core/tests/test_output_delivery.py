@@ -13,16 +13,26 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
 from daimon.core.output_delivery import (
     DeliverableFile,
+    NoticedFiles,
     OutputDeliveryDeferred,
     OutputPostingUnavailable,
     SkippedFile,
+    download_output_file,
     render_oversize_notice,
     sweep_session_outputs,
 )
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma import (
+    FakeMAState,
+    MARouter,
+    build_fake_anthropic,
+    combine_handlers,
+    list_response,
+)
+from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
 
@@ -361,9 +371,9 @@ async def test_sweep_counts_post_when_delete_fails_afterwards() -> None:
     assert posted == ["file_a", "file_b"], "the sweep must continue past the failed delete"
 
 
-async def test_sweep_skips_oversize_file_with_notice_then_deletes_entry() -> None:
+async def test_sweep_skips_oversize_file_with_notice_and_keeps_entry() -> None:
     """An oversize entry is never downloaded, produces one on_skip call, and its
-    listing entry is deleted so it never re-lists forever."""
+    listing entry is kept: deleting it would lose the person's file."""
 
     async def sleep(delay: float) -> None:
         pass
@@ -418,7 +428,245 @@ async def test_sweep_skips_oversize_file_with_notice_then_deletes_entry() -> Non
         "the SkippedFile must carry the oversize entry's id, filename and size"
     )
     assert downloads == [], "the oversize file's bytes must never be downloaded"
-    assert deletes == ["file_big"], "the oversize entry must be deleted after the notice"
+    assert deletes == [], "the oversize entry must be kept after the notice"
+
+
+def _oversize_then_normal_client(
+    deletes: list[str],
+) -> AsyncAnthropic:
+    def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        return list_response(
+            [
+                FileMetadata(
+                    id="file_big",
+                    created_at=NOW,
+                    filename="render.mp4",
+                    mime_type="video/mp4",
+                    size_bytes=11,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json"),
+                FileMetadata(
+                    id="file_ok",
+                    created_at=NOW,
+                    filename="ok.txt",
+                    mime_type="text/plain",
+                    size_bytes=2,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json"),
+            ]
+        )
+
+    def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        deletes.append(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "file_deleted"})
+
+    router = MARouter()
+    router.add("GET", r"/v1/files", on_list)
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"ok"),
+    )
+    router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
+    return build_fake_anthropic(router.dispatch)
+
+
+async def test_a_kept_oversize_file_is_announced_once_across_sweeps() -> None:
+    """The kept entry lists again on every later sweep; ``noticed`` stops a
+    repeat notice, while a normal file is still posted and deleted."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    deletes: list[str] = []
+    client = _oversize_then_normal_client(deletes)
+    skipped: list[str] = []
+    posted: list[str] = []
+
+    async def on_skip(file: SkippedFile) -> None:
+        skipped.append(file.file_id)
+
+    async def post(file: DeliverableFile) -> None:
+        posted.append(file.file_id)
+
+    noticed = NoticedFiles()
+    for _ in range(2):
+        await sweep_session_outputs(
+            client,
+            session_id="sesn_1",
+            post=post,
+            on_skip=on_skip,
+            sleep=sleep,
+            max_bytes=10,
+            noticed=noticed,
+        )
+
+    assert skipped == ["file_big"], "one notice for the kept file, not one per sweep"
+    assert "file_big" in noticed
+    assert posted == ["file_ok", "file_ok"], "the fake keeps listing it; each sweep posts it"
+    assert "file_big" not in deletes, "the oversize entry is never deleted"
+    assert deletes == ["file_ok", "file_ok"], "a delivered file is still cleaned up"
+
+
+async def test_without_a_ledger_every_sweep_repeats_the_notice() -> None:
+    async def sleep(delay: float) -> None:
+        pass
+
+    client = _oversize_then_normal_client([])
+    skipped: list[str] = []
+
+    async def on_skip(file: SkippedFile) -> None:
+        skipped.append(file.file_id)
+
+    async def post(file: DeliverableFile) -> None:
+        pass
+
+    for _ in range(2):
+        await sweep_session_outputs(
+            client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep, max_bytes=10
+        )
+
+    assert skipped == ["file_big", "file_big"]
+
+
+async def test_a_failed_notice_is_not_recorded_and_retries() -> None:
+    async def sleep(delay: float) -> None:
+        pass
+
+    client = _oversize_then_normal_client([])
+    calls = 0
+
+    async def on_skip(file: SkippedFile) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("chat is down")
+
+    async def post(file: DeliverableFile) -> None:
+        pass
+
+    noticed = NoticedFiles()
+    for _ in range(3):
+        await sweep_session_outputs(
+            client,
+            session_id="sesn_1",
+            post=post,
+            on_skip=on_skip,
+            sleep=sleep,
+            max_bytes=10,
+            noticed=noticed,
+        )
+
+    assert calls == 2, "the failed notice retries once, then is recorded"
+
+
+async def test_discard_skipped_up_to_deletes_only_files_that_fit() -> None:
+    """For a caller that can deliver nothing right now (``max_bytes=0``): a
+    file under the real cap is discarded as before, a larger one is kept."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    deletes: list[str] = []
+    client = _oversize_then_normal_client(deletes)  # file_big is 11 bytes, file_ok 2
+
+    async def post(file: DeliverableFile) -> None:
+        raise AssertionError("nothing is posted when max_bytes is 0")
+
+    await sweep_session_outputs(
+        client, session_id="sesn_1", post=post, sleep=sleep, max_bytes=0, discard_skipped_up_to=10
+    )
+
+    assert deletes == ["file_ok"], "only the file that fits the cap is discarded"
+
+
+async def test_a_kept_original_stays_downloadable_byte_for_byte() -> None:
+    """Against the stateful Files API fake: after a failed then retried notice,
+    the oversize original is still listed and downloads unchanged, while the
+    normal and empty files are cleaned up."""
+    state = FakeSessionsState(ma=FakeMAState())
+    client = build_fake_anthropic(combine_handlers(make_fake_sessions_handler(state)))
+    original = b"original-render-" * 100
+    big = state.write_output("sesn_k", "render.mp4", original)
+    normal = state.write_output("sesn_k", "poster.txt", b"ok")
+    empty = state.write_output("sesn_k", "empty.txt", b"")
+    notices: list[str] = []
+    posts: list[str] = []
+    noticed = NoticedFiles()
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    async def on_skip(file: SkippedFile) -> None:
+        notices.append(file.file_id)
+        if len(notices) == 1:
+            raise RuntimeError("notice transport failed")
+
+    async def post(file: DeliverableFile) -> None:
+        posts.append(file.file_id)
+
+    for _ in range(3):
+        await sweep_session_outputs(
+            client,
+            session_id="sesn_k",
+            post=post,
+            on_skip=on_skip,
+            noticed=noticed,
+            max_bytes=10,
+            sleep=sleep,
+        )
+
+    assert notices == [big.id, big.id], "the failed notice retries once, then stays quiet"
+    assert posts == [normal.id]
+    assert normal.id not in state.files and empty.id not in state.files
+    assert big.id in state.files
+    assert await download_output_file(client, big.id) == original
+
+
+async def test_kept_files_filling_the_first_page_do_not_hide_a_later_file() -> None:
+    """Kept entries never leave the listing; the sweep must follow the cursor."""
+    state = FakeSessionsState(ma=FakeMAState())
+    client = build_fake_anthropic(combine_handlers(make_fake_sessions_handler(state)))
+    for index in range(1000):
+        state.write_output("sesn_p", f"big-{index}", b"xx")
+    normal = state.write_output("sesn_p", "normal.txt", b"x")
+    posts: list[str] = []
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    async def on_skip(file: SkippedFile) -> None:
+        pass
+
+    async def post(file: DeliverableFile) -> None:
+        posts.append(file.file_id)
+
+    await sweep_session_outputs(
+        client,
+        session_id="sesn_p",
+        post=post,
+        on_skip=on_skip,
+        noticed=NoticedFiles(),
+        max_bytes=1,
+        sleep=sleep,
+    )
+
+    assert posts == [normal.id], "the file on the second page is delivered"
+    assert len(state.files) == 1000, "the kept files stay listed"
+
+
+def test_noticed_files_forgets_the_least_recently_seen_id_first() -> None:
+    noticed = NoticedFiles(max_ids=2)
+    noticed.add("a")
+    noticed.add("b")
+    assert "a" in noticed  # refreshes "a"
+    noticed.add("c")
+    assert "a" in noticed and "c" in noticed and "b" not in noticed
+    assert len(noticed) == 2
+    with pytest.raises(ValueError):
+        NoticedFiles(max_ids=0)
 
 
 async def test_sweep_keeps_oversize_entry_when_skip_notice_fails() -> None:
@@ -659,14 +907,26 @@ async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
     assert deletes == ["file_posted"], "the deferred file must stay listed"
 
 
-def test_oversize_notice_names_the_file_and_the_limit() -> None:
-    """The notice sanitizes the agent-supplied name and quotes both sizes."""
+def test_oversize_notice_names_the_file_the_limit_and_how_to_get_it() -> None:
+    """The notice sanitizes the agent-supplied name, quotes both sizes, says the
+    file was kept, and offers only what the agent can do."""
     notice = render_oversize_notice(
         SkippedFile(file_id="file_big", filename="big report.csv", size_bytes=25 * 1024 * 1024)
     )
     assert notice == (
-        "I couldn't attach `big_report.csv` — it is 25.0 MiB, over the 20 MiB delivery limit."
+        "`big_report.csv` is 25 MB, over the 20 MB upload limit here, so I couldn't attach "
+        "it. It's still saved in my workspace: ask me for a smaller version, or to split it "
+        "into parts under 20 MB, and I'll attach those."
     ), "notice text"
+
+
+def test_oversize_notice_quotes_the_callers_limit() -> None:
+    notice = render_oversize_notice(
+        SkippedFile(file_id="f", filename="render.mp4", size_bytes=int(182.34 * 1024 * 1024)),
+        max_bytes=10 * 1024 * 1024,
+    )
+    assert "`render.mp4` is 182.3 MB, over the 10 MB upload limit" in notice
+    assert "parts under 10 MB" in notice
 
 
 async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> None:

@@ -30,7 +30,7 @@ from daimon.testing.anthropic_fixtures import (
     load_anthropic_fixtures,
 )
 from daimon.testing.provider_fixtures import FixturePack, load_provider_fixtures
-from daimon.testing.provider_replay import Object, SourcePin, WireFrame
+from daimon.testing.provider_replay import Object, SourcePin, WireFrame, WireReplay
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.drivers.anthropic.transport import LegacyTurnTransport
 from pydantic import JsonValue, TypeAdapter, ValidationError
@@ -55,6 +55,78 @@ CASES = [
     for turn in scenario.turns
 ]
 _OBJECT = TypeAdapter[Object](Object)
+
+
+@pytest.mark.asyncio
+async def test_main_824_catchup_reads_recorded_usage_after_the_real_sdk_turn() -> None:
+    entry, row = PACK.select("QA-NEW9-NO-INTERNAL-PLUMBING")
+    turn = row.turns[0]
+    original = anthropic_turn_tape(entry, row, turn, codec=PACK.index.codec)
+    tape = anthropic_turn_tape(
+        entry, row, turn, codec=PACK.index.codec, post_turn_usage_catchup=True
+    )
+    assert tape.replies[:-1] == original.replies
+    async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
+        identity = entry.bindings[0].session_id
+        edge = LegacyTurnTransport(replay.client, identity)
+        assert await edge.status() == "idle"
+        lifecycle = RecordingLifecycle()
+        state = await run_turn(
+            anthropic=replay.client,
+            session_id=identity,
+            user_message=turn.request_text,
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            billing=BillingExempt(reason="headless-unrecorded"),
+            path="legacy",
+            render_interval_s=3600,
+        )
+        assert state.error is None and lifecycle.terminal_success
+        native_spans = [event for event in turn.events if event["type"] == "span.model_request_end"]
+        assert tape.replies[-1].response_json == {"data": native_spans, "next_page": None}
+        page = await replay.client.beta.sessions.events.list(
+            identity, limit=100, order="asc", types=["span.model_request_end"]
+        )
+        assert [event.model_dump(mode="json") for event in page.data] == [
+            BetaManagedAgentsSpanModelRequestEndEvent.model_validate(event).model_dump(mode="json")
+            for event in native_spans
+        ]
+        assert page.next_page is None
+        replay.wire.assert_consumed()
+        with pytest.raises(APIConnectionError):
+            await replay.client.beta.sessions.events.list(
+                identity, limit=100, order="asc", types=["span.model_request_end"]
+            )
+        assert len(replay.wire.violations) == 1
+
+
+@pytest.mark.parametrize("mutant", ("premature", "session", "limit", "type", "order"))
+def test_main_824_catchup_does_not_allow_foreign_or_mismatched_reads(mutant: str) -> None:
+    import httpx
+
+    entry, row = PACK.select("QA-NEW9-NO-INTERNAL-PLUMBING")
+    tape = anthropic_turn_tape(
+        entry, row, row.turns[0], codec=PACK.index.codec, post_turn_usage_catchup=True
+    )
+    reply = tape.replies[-1]
+    if mutant != "premature":
+        tape = tape.model_copy(update={"replies": (reply.model_copy(update={"after": ()}),)})
+    path = reply.path if mutant != "session" else "/v1/sessions/foreign/events"
+    query = dict(reply.query)
+    if mutant in {"limit", "type", "order"}:
+        query[{"limit": "limit", "type": "types[]", "order": "order"}[mutant]] = {
+            "limit": "1",
+            "type": "agent.message",
+            "order": "desc",
+        }[mutant]
+    wire = WireReplay(tape)
+    request = httpx.Request(
+        "GET", "https://offline.invalid" + path, params=query, headers=dict(reply.headers)
+    )
+    with pytest.raises(AssertionError, match="unscripted, mismatched or premature"):
+        wire.dispatch(request)
+    assert len(wire.violations) == 1
+
 
 _AMBIENT_SETTINGS = (
     "ANTHROPIC_API_KEY",

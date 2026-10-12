@@ -357,7 +357,7 @@ async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_
 
     from daimon.core.turn.prepare import PreparedTurn
     from daimon.core.turn.run import run_prepared_turn
-    from daimon.testing.ma import send_events_response
+    from daimon.testing.ma import list_response, send_events_response
     from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from daimon.testing.turn_fakes import RecordingLifecycle
 
@@ -384,6 +384,19 @@ async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_
     transport.queue(
         ScriptedReply.stream("/v1/sessions/session/events/stream", raw),
         ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+        # Main #824 (0733181847dc775bda444d51c2467016780b8d5d): the
+        # prepared turn performs one bounded post-turn usage catch-up.
+        ScriptedReply(
+            "GET",
+            "/v1/sessions/session/events",
+            list_response([]),
+            query=(
+                ("beta", "true"),
+                ("limit", "100"),
+                ("order", "asc"),
+                ("types[]", "span.model_request_end"),
+            ),
+        ),
     )
     async with transport.client() as client:
         dependencies = replace(
@@ -453,6 +466,11 @@ async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_
             )
             assert operation is not None and operation.operation.status == "accepted"
     transport.assert_consumed()
+    assert [(request.method, request.path) for request in transport.requests] == [
+        ("GET", "/v1/sessions/session/events/stream"),
+        ("POST", "/v1/sessions/session/events"),
+        ("GET", "/v1/sessions/session/events"),  # Main #824, exactly once.
+    ]
 
 
 async def test_unmapped_binding_never_consumes_a_host_identity_and_new_invocations_have_new_keys(

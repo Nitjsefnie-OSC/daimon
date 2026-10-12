@@ -222,6 +222,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.output_delivery import NoticedFiles
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
@@ -428,6 +429,8 @@ class SlackApp:
         self._provider_actions = SlackProviderActions()
         # Output-delivery notice dedup per thread and warning log dedup per workspace.
         self._delivery_notice_keys = NoticeKeys()
+        # Oversize outputs stay listed; each is announced once, not every sweep.
+        self._noticed_output_files = NoticedFiles()
         # Chains output sweeps per MA session so two never overlap.
         self._output_sweeps: dict[str, asyncio.Task[None]] = {}
         # Drain flag — set on SIGTERM; blocks new mention handling.
@@ -661,6 +664,7 @@ class SlackApp:
                 thread_ts=thread_ts,
                 notice_keys=self._delivery_notice_keys,
                 team_id=team_id,
+                noticed_files=self._noticed_output_files,
             )
         except Exception as exc:  # named boundary: a sweep failure must never escape
             log.warning(

@@ -2139,3 +2139,13 @@ an enabled backend; explicit `null` clears the preference. An optional
 and chat-agent callers cannot use the direct write: chat changes go through
 the separate admin-confirmation flow. Disabled settings leave the default tool
 registry and setup controls unchanged.
+
+### Output delivery pagination
+
+Delivery follows every Files API page through the authorized output port, so
+retained oversized entries cannot hide a newer deliverable file. Oversized
+outputs remain listed; successful notices enter the bounded notice cache, and
+the caller's explicit discard threshold applies only to smaller skipped files.
+The port's `all_pages` option defaults to false for workspace-transfer and other
+existing consumers. Delivery opts in; SDK cursors, MA headers and errors are
+preserved across later pages, with authorization checked before the first call.

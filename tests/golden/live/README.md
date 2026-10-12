@@ -164,3 +164,17 @@ Unsupported capabilities are typed runtime BLOCKED. A supported operation that
 violates its observed outcome assertion is FAIL. Additional live card, timer,
 MCP-adapter or CLI probes can be useful separately named coverage; they cannot
 replace these blocked source rows without an approved scope change.
+
+## SYNC-5 canonical hash refresh
+
+Only the `golden_sha256` fields for eleven scenarios are refreshed against the
+main-attributed recordings in [RERECORD-SYNC5.md](../RERECORD-SYNC5.md), on the
+reviewed assembly `b701375e27ab5c56bef64c9dc2871ee0af203253`. Cold Discord and
+its eight other completed-host counterparts gain main #824's captured usage
+catch-up reads (`0733181847dc775bda444d51c2467016780b8d5d`). The same manifest
+refresh includes main #831's blocked-balance copy, #813's two continuation
+prompt hints, and #833's handoff Files page cursor field, with exact SHAs and
+whole-record provenance in that document. The 33 recipe bodies, source nodes,
+setup, assertions, judge prompts, statuses, admission and budget bounds remain
+unchanged. This metadata refresh runs no live scenario and changes no canonical
+golden bytes.

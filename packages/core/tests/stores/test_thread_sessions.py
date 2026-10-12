@@ -36,6 +36,7 @@ from daimon.core.stores.thread_sessions import (
     record_app_token_refresh,
     record_snapshot,
     set_pending_unsaved_work,
+    transfer_active_turn,
     update_mutable_fingerprint,
     update_watermark,
 )
@@ -1198,3 +1199,71 @@ async def test_retiring_a_row_clears_the_answer_it_was_given_for(
     assert retired is not None and retired.pending_unsaved_work is None, (
         "a retired row is not live, so it holds no standing answer"
     )
+
+
+async def _two_mappings(
+    db_session: AsyncSession, tenant_id: uuid.UUID, thread_id: str
+) -> tuple[ThreadSessionRow, ThreadSessionRow]:
+    account_id = uuid.uuid4()
+    rows = [
+        await create_thread_session(
+            db_session,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=thread_id,
+            account_id=account_id,
+            ma_session_id=f"sess_{thread_id}_{suffix}",
+        )
+        for suffix in ("dead", "replacement")
+    ]
+    return rows[0], rows[1]
+
+
+async def test_transfer_active_turn_moves_the_callers_marker_with_its_owner(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    dead, replacement = await _two_mappings(db_session, tenant_id, "transfer-1")
+    started = datetime.now(UTC)
+    await mark_turn_active(
+        db_session, id=dead.id, active_turn_message_id="42", now=started, owner_key=7
+    )
+
+    moved = await transfer_active_turn(
+        db_session, from_id=dead.id, to_id=replacement.id, expected_message_id="42"
+    )
+
+    assert moved is True
+    (marker,) = await list_orphaned_turns(db_session, platform="discord")
+    assert (marker.id, marker.active_turn_message_id, marker.active_turn_owner_key) == (
+        replacement.id,
+        "42",
+        7,
+    ), "the replacement carries the same card and owner"
+    assert marker.active_turn_started_at == started
+
+
+async def test_transfer_active_turn_never_takes_another_turns_marker(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    """A stale task cannot move a marker it does not own, and an adopted
+    replacement already watched by another turn keeps that turn's marker."""
+    dead, replacement = await _two_mappings(db_session, tenant_id, "transfer-2")
+    now = datetime.now(UTC)
+    await mark_turn_active(db_session, id=dead.id, active_turn_message_id="43", now=now)
+
+    assert not await transfer_active_turn(
+        db_session, from_id=dead.id, to_id=replacement.id, expected_message_id="42"
+    ), "a marker naming another card stays where it is"
+
+    await mark_turn_active(db_session, id=replacement.id, active_turn_message_id="44", now=now)
+    assert not await transfer_active_turn(
+        db_session, from_id=dead.id, to_id=replacement.id, expected_message_id="43"
+    ), "the target's own marker is never overwritten"
+
+    markers = {
+        m.id: m.active_turn_message_id
+        for m in await list_orphaned_turns(db_session, platform="discord")
+    }
+    assert markers == {dead.id: "43", replacement.id: "44"}

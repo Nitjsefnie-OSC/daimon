@@ -168,7 +168,7 @@ async def run_smoke_check(
     )
     on_stage(f"resolved agent_id={resolved_agent_id} environment_id={resolved_environment_id}")
 
-    def usage_record_factory(session_id: str, model_id: str) -> Callable[..., Awaitable[None]]:
+    def usage_record_factory(session_id: str, model_id: str) -> Callable[..., Awaitable[object]]:
         return partial(
             record_turn_usage,
             sessionmaker=session_factory,

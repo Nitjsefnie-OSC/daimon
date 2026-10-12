@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
+from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.core.config import McpSettings
@@ -24,6 +25,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import ToolCall
+from daimon.core.turn.running import RunningTurns
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .harness import make_bot
@@ -222,3 +224,101 @@ async def test_drain_retires_live_confirmation_before_client_close() -> None:
     with contextlib.suppress(asyncio.CancelledError):
         await turn_task
     assert closed
+
+
+def _bot_with_running_turns() -> tuple[DaimonBot, RunningTurns, AsyncMock]:
+    runtime = _make_runtime()
+    running = RunningTurns()
+    runtime.turn_deps.running_turns = running  # pyright: ignore[reportAttributeAccessIssue]  # MagicMock deps
+    bot = make_bot(runtime)
+    close = AsyncMock()
+    bot.close = close  # type: ignore[method-assign]
+    return bot, running, close
+
+
+async def test_drain_waits_for_a_turn_that_claims_no_thread() -> None:
+    """A turn started outside the mention path (a wizard submit, a DM) holds no
+    `_processing` claim; the drain must still count it and wait for it (#16)."""
+    bot, running, close = _bot_with_running_turns()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def turn() -> None:
+        with running.track():
+            entered.set()
+            await release.wait()
+
+    turn_task = asyncio.create_task(turn())
+    await entered.wait()
+    assert not bot._processing  # pyright: ignore[reportPrivateUsage]
+    assert bot.turn_queue.in_flight() == 0
+
+    with (
+        patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 5.0),
+        patch("daimon.adapters.discord.bot.log") as log,
+    ):
+        drain = asyncio.create_task(bot._drain_and_close())  # pyright: ignore[reportPrivateUsage]
+        await asyncio.sleep(0.6)
+        assert not drain.done(), "the drain must wait for the running turn"
+        close.assert_not_called()
+        release.set()
+        await asyncio.wait_for(drain, timeout=3.0)
+
+    draining = next(c for c in log.info.call_args_list if c.args == ("discord.draining",))
+    assert draining.kwargs["running_turns"] == 1
+    assert draining.kwargs["inflight_threads"] == 0
+    assert turn_task.done() and not turn_task.cancelled(), "the turn finished on its own"
+    close.assert_called_once()
+
+
+async def test_drain_cancels_a_registered_turn_left_after_the_grace_window() -> None:
+    bot, running, close = _bot_with_running_turns()
+    entered = asyncio.Event()
+    cleaned_up = asyncio.Event()
+
+    async def turn() -> None:
+        with running.track():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned_up.set()
+
+    turn_task = asyncio.create_task(turn())
+    await entered.wait()
+    with patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.1):
+        await asyncio.wait_for(bot._drain_and_close(), timeout=5.0)  # pyright: ignore[reportPrivateUsage]
+
+    assert turn_task.cancelled(), "a turn still running after the grace is cancelled"
+    assert cleaned_up.is_set(), "its cleanup ran before the client closed"
+    assert running.count() == 0
+    close.assert_called_once()
+
+
+@pytest.mark.parametrize("by_drain", [True, False], ids=["drain", "other-cancel"])
+async def test_only_the_drains_cancel_keeps_a_turns_marker_for_recovery(by_drain: bool) -> None:
+    """A turn's cleanup keeps its thread marker only while unwinding from the
+    drain's cancel; any other end of a turn clears it as before."""
+    bot, running, _close = _bot_with_running_turns()
+    entered = asyncio.Event()
+    seen: list[bool] = []
+
+    async def turn() -> None:
+        with running.track():
+            try:
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                seen.append(bot._keeps_turn_for_recovery())  # pyright: ignore[reportPrivateUsage]
+
+    task = asyncio.create_task(turn())
+    await entered.wait()
+    assert not bot._keeps_turn_for_recovery()  # pyright: ignore[reportPrivateUsage]
+    if by_drain:
+        with patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.05):
+            await asyncio.wait_for(bot._drain_and_close(), timeout=5.0)  # pyright: ignore[reportPrivateUsage]
+    else:
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert seen == [by_drain]

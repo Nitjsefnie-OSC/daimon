@@ -282,6 +282,28 @@ stale edit is logged and ignored. Stop still interrupts the turn when its
 card has been deleted; restart recovery treats a card deleted between its
 lookup and edit as already resolved. Other edit failures still propagate.
 
+A turn stops when its own thread is lost. Discord answering a write to the
+thread with Unknown Channel (10003), or a thread-delete event for a thread with
+a running turn, marks the thread gone. A send still refused as archived (50083)
+after the transport's unarchive-and-retry marks it closed; an edit or delete
+refused as archived does not, because a thread can auto-archive during a slow
+turn and the final send unarchives it. Either stop sets the turn's Stop event,
+so the driver takes its normal interrupt path and bills what was already
+consumed; the bot then sends the turn's session one best-effort interrupt in
+case the stop landed before any event was read. From then on the turn writes
+nothing: no progress edit, terminal card, replacement card or error, and
+nothing in the parent channel. The transport rechecks the stop before each
+Discord call, after any webhook lookup. Messages queued behind it are not
+started, their admission rows are finished so startup replay skips them, and
+no reaction is added or removed in the lost thread. One `turn.thread_gone` log
+records the first signal (reason `gone` or `closed`). The stop record outlives
+the turn's release, so a reaction call still in flight sees it; the next turn
+to claim the thread clears a `closed` record, and a late error from an earlier
+turn cannot close the new turn. A gone thread's live sessions are marked dead
+and its in-flight marker cleared, including when a delete event arrives with no
+turn running; a closed thread keeps its sessions. Unknown Webhook (10015) is
+not a lost thread. The turn's stored outcome is the ordinary interrupted one.
+
 On gateway readiness, Discord scans recently active channels and threads for
 missed addressed messages. The window and per-guild/channel limits are
 configurable (`discord.startup_replay_*`). Replay defaults to off
@@ -349,6 +371,33 @@ checks. Missing cards and permanent permission/identity failures clear the
 marker without posting a replacement. Recovery never sends
 a new model request. Generated-file recovery and resuming a still-running
 provider session are not part of this text-recovery path.
+
+Deploy drain. On shutdown the Discord adapter refuses new mentions, wizard
+submits and DMs, then waits up to 60 seconds for every turn in progress. That
+covers mention-path threads it has claimed, held turn slots, and
+`TurnDeps.running_turns`. `run_prepared_turn` registers every turn there,
+whichever entry point started it. Wizard submits and DMs register the whole
+operation, from the slot wait through cleanup. The drain logs
+`running_turns` and `turn_slots` beside `inflight_threads`. When the grace runs
+out it stops granting turn slots, so cancelling one turn cannot start a queued
+one, then cancels everything still in progress and allows five seconds for
+cleanup. Cancelling the task ends this process's delivery, not the provider
+turn. A thread turn keeps its marker, still owned by this process. If a
+dead-session recovery moved the turn onto a replacement session, the marker
+moved with it, before the replacement's turn was sent. The move happens only
+while the marker still names this turn's card, and never over another turn's
+marker. Mention, continuation and wizard cards and markers carry the same
+owner key. While that owner's advisory lock or heartbeat grace protects the
+marker, boot card recovery leaves the card alone too. Once both have expired,
+the next process's orphan sweep delivers the answer if the session has
+finished, or edits the card to the restart notice and interrupts the session
+(above). Until then the session keeps running. A queued turn's card intent stays unresolved, so boot
+recovery shows the restart notice on it. A DM has no card or marker: its
+cleanup sends the session one interrupt, bounded to three seconds, while its
+delivery still holds the conversation's claim. If that interrupt is not
+confirmed, it marks the mapping dead so the next DM starts a fresh session.
+The drain does not keep a long turn alive across a deploy, and does not
+re-attach a new process to a running session's stream.
 
 Restart recovery keeps a card intent active when a pending card cannot be
 edited. It does not post a replacement status card, because the original
@@ -1028,8 +1077,17 @@ only if a new attachment holds its exact bytes, and the next edit starts from
 what is there. A file the answer cannot take (Discord's
 10-attachment limit, or a failed edit) is posted on its own below it, and a
 turn that ended without an answer (stopped or failed) gets its files as
-separate posts. Discord uses the guild's upload limit, skips oversize files
-with an in-thread notice, and checks the channel's writers before posting. A
+separate posts. Discord uses the guild's upload limit and checks the
+channel's writers before posting. A file over the limit (the guild's on
+Discord, 20 MB on Slack) is never deleted: it stays listed and in the
+agent's workspace, and the thread gets one notice naming the file, its size
+and the limit, and offering a smaller version or parts under the limit.
+Each adapter remembers which kept files it has announced (bounded, per
+process), so later sweeps that list the file again stay quiet; a restart can
+announce a kept file once more. Teams only logs an oversize file and keeps
+it too, including in a channel without file access, where files under the
+limit are still logged and removed. The sweep reads every page of the
+listing, so kept files never hide a newer one. A
 file Daimon already attached in the thread after the turn's card (the agent
 sent it itself), with the same name and bytes, is cleared from the listing
 without a second copy. The session listing is shared by every turn and the
@@ -1061,7 +1119,16 @@ model in `packages/core/daimon/core/tool_safety.py`. With
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
-the requester to press Approve on a confirmation card. The card is a platform
+the requester to press Approve on a confirmation card. Read or write comes
+from an operator `DAIMON_TOOL_SAFETY__EFFECTS` pin, then the tool's MCP
+annotations, then its name: a plainly-read leading verb (`get_`, `search_`,
+`list_` and the like, or the report noun `briefing`) with no write or chaining
+word anywhere is a read, and everything else is a write. `ask` and `verify`
+read only in a question-and-answer shape (`ask_wiki_question`,
+`eap_verify_answer`); a bare `ask`, such as another Daimon's agent_chat `ask`,
+which starts a turn in that agent, stays a write. Managed Agents does not
+forward third-party annotations, so for attached servers the name and the
+operator pins are what decide; a misnamed write needs a pin. The card is a platform
 hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 (`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
@@ -1141,6 +1208,18 @@ search tools return JSON rows, so their results carry the same marker as
 `trust` and `trust_note` fields instead. The paragraph in the agent guidance
 block (`packages/core/daimon/core/agent_guidance.py`) tells every agent what
 the marker means. Only the `<user_query>` is the request.
+
+Discord turns say which message a reply points at. Each replayed message carries
+its `id`, plus `reply_to` when it is a reply, and the `<user_query>` carries
+`reply_to` when its single trigger is one. When the target is not among the
+replayed messages (before the delta's watermark, a delivered answer chunk the
+delta leaves out, or an older channel post), an untrusted `reply_targets` block
+holds it, cut at 2,000 characters. A merged queued query lists one entry per reply, each
+with the replying message's id, author and a short excerpt; a target shown
+elsewhere or unavailable gets an id-only entry (`shown` or `unavailable`).
+A message with no text shows its embed's title and description. A deleted target is
+marked `deleted="true"`, and an unavailable one leaves only the id. The turn's
+own status card, posted before the context is built, is kept out of the history.
 
 For a new Discord thread started by a channel mention, the channel backfill
 keeps 25 messages. A separate untrusted `recent_channel_files` block lists up
@@ -1595,11 +1674,12 @@ host admits uploads only from the tenants the operator lists in
 `DAIMON_NOTEBOOK__TENANTS`, matched against the tenant named in the bot's
 signed upload token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
-Each host can opt into a static HTML page for unavailable document links:
-`DAIMON_NOTEBOOK__HTML_LINK_ERRORS=true` applies only to unresolved
-`GET /n/{slug}/` requests (404), and `DAIMON_REPORT__HTML_LINK_ERRORS=true`
-applies only to refused `GET /r/{slug}` requests (403). Both default to
-`false`. Token and expiry checks, successful pages, and API/file/admin
+A browser (`Accept: text/html`) opening an unavailable document link gets a
+static “Link unavailable” HTML page instead of a JSON error: unresolved
+`GET /n/{slug}/` requests (404) and refused `GET /r/{slug}` requests (403).
+Other clients keep the JSON error unless `DAIMON_NOTEBOOK__HTML_LINK_ERRORS`
+or `DAIMON_REPORT__HTML_LINK_ERRORS` is `true`, which gives every client the
+page. Token and expiry checks, successful pages, and API/file/admin
 responses retain their existing behavior.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach Daimon over HTTP with capability tokens, and the

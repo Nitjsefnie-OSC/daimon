@@ -54,7 +54,7 @@ from daimon.testing.ma_models import SessionStatus as SessionStatus
 
 class NotHandled(Exception):
     """Raise from a handler passed to combine_handlers to indicate this handler
-    does not match the request. combine_handlers will try the next handler."""
+    does not match the request. Routers/combine_handlers try the next handler."""
 
 
 # The shared `EMPTY_*` constants and `SessionStatus` live in
@@ -126,7 +126,12 @@ class MARouter:
             match = pattern.fullmatch(request.url.path)
             if match is None:
                 continue
-            return handler(request, match)
+            try:
+                return handler(request, match)
+            except NotHandled:
+                # A path match can still decline a query it does not script.
+                # Keep looking; exhausted routes still fail closed below.
+                continue
         raise AssertionError(
             f"MARouter: no route for {request.method} {request.url.path} "
             f"(registered: {[(m, p.pattern) for m, p, _ in self.routes]})"

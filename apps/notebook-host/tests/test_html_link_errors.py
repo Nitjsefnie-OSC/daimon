@@ -1,4 +1,5 @@
-"""Real expired notebook links change presentation only under explicit opt-in."""
+"""Real expired notebook links show browsers an HTML page; other clients keep JSON
+unless the operator gives every client the page."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -11,10 +12,17 @@ from notebook_host.config import Settings, load_settings
 from notebook_host.jail import get_slug_paths
 from notebook_host.main import create_app
 
+BROWSER_ACCEPT = (
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+)
+HTML_ACCEPTS = {"text/html", BROWSER_ACCEPT}
+
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("kind", ["missing", "expired", "wrong-token"])
-@pytest.mark.parametrize("accept", ["*/*", "text/html", "application/json"])
+@pytest.mark.parametrize(
+    "accept", ["*/*", "text/html", "application/json", BROWSER_ACCEPT, "text/html;q=0, */*"]
+)
 async def test_document_refusal_retains_expiry_and_authentication(
     tmp_path: Path, enabled: bool, kind: str, accept: str
 ) -> None:
@@ -54,7 +62,7 @@ async def test_document_refusal_retains_expiry_and_authentication(
     assert response.status_code == 404
     assert "set-cookie" not in response.headers
     assert app.state.admin_state.processes == {}
-    if enabled:
+    if enabled or accept in HTML_ACCEPTS:
         assert response.headers["content-type"] == "text/html; charset=utf-8"
         assert "Ask the sender to share a new link." in response.text
         assert all(value not in response.text for value in (slug, token, supplied, "detail"))
@@ -77,8 +85,9 @@ async def test_document_refusal_retains_expiry_and_authentication(
         ("GET", "/unknown"),
     ],
 )
+@pytest.mark.parametrize("accept", ["*/*", BROWSER_ACCEPT])
 async def test_opt_in_changes_no_other_route_or_method(
-    tmp_path: Path, method: str, path: str
+    tmp_path: Path, method: str, path: str, accept: str
 ) -> None:
     responses = []
     for enabled in (False, True):
@@ -86,7 +95,9 @@ async def test_opt_in_changes_no_other_route_or_method(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), trust_env=False
         ) as client:
-            response = await client.request(method, "https://notebooks.invalid" + path)
+            response = await client.request(
+                method, "https://notebooks.invalid" + path, headers={"Accept": accept}
+            )
         responses.append((response.status_code, response.content, dict(response.headers)))
     assert responses[0] == responses[1]
     assert responses[1][2]["content-type"] == "application/json"
@@ -107,7 +118,10 @@ async def test_opt_in_does_not_render_a_start_failure(
 
     monkeypatch.setattr("notebook_host.proxy.ensure_running", refused_start)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), trust_env=False) as client:
-        response = await client.get("https://notebooks.invalid/n/stopped/?access_token=saved-token")
+        response = await client.get(
+            "https://notebooks.invalid/n/stopped/?access_token=saved-token",
+            headers={"Accept": BROWSER_ACCEPT},
+        )
     assert response.status_code == 503
     assert response.headers["content-type"] == "application/json"
     assert response.content == b'{"detail":"notebook is starting"}'
@@ -150,7 +164,7 @@ async def test_running_notebook_keeps_the_same_upstream_response(
 
 
 @pytest.mark.parametrize("raw", [None, "false", "true"])
-def test_html_errors_require_explicit_environment_opt_in(
+def test_html_errors_for_every_client_require_explicit_environment_opt_in(
     monkeypatch: pytest.MonkeyPatch, raw: str | None
 ) -> None:
     if raw is not None:

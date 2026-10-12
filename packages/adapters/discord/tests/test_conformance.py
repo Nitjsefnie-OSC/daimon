@@ -169,6 +169,7 @@ def _assert_platform_oracle(evidence: Mapping[str, object]) -> None:
 async def test_actual_drain_preserves_per_caller_order_bytes_attachments_and_thread_ownership(
     bot: DaimonBot,
 ) -> None:
+    """Main #813 f84699cf6 drain keyword compatibility; original oracle unchanged."""
     envelope = _envelope(bot)
     original = envelope.bot._handle_mention  # pyright: ignore[reportPrivateUsage]
     seen: list[MentionTurn] = []
@@ -268,6 +269,7 @@ async def test_early_completed_callback_is_rejected_and_existing_instance_handle
 
 
 async def test_reaction_failure_retains_actual_queued_message(bot: DaimonBot) -> None:
+    """Main #813 f84699cf6 drain keyword compatibility; queued bytes unchanged."""
     envelope = _envelope(bot)
     envelope.threads[0].queued[0].add_reaction = AsyncMock(
         side_effect=RuntimeError("offline reaction")
@@ -406,6 +408,7 @@ def _sdk_message(
 async def test_real_discord_sdk_messages_threads_users_attachments_and_reaction_path(
     bot: DaimonBot,
 ) -> None:
+    """Main #813 f84699cf6 drain keyword compatibility; SDK identities unchanged."""
     inputs = tuple(
         ThreadInputs(
             _sdk_message(bot, first, thread_id=thread, human_id=10),
@@ -494,6 +497,7 @@ async def test_production_release_resumes_continuation_deferred_during_callback(
     bot: DaimonBot,
     exit_mode: str,
 ) -> None:
+    """Main #813 f84699cf6 drain keyword compatibility; release assertions unchanged."""
     envelope = _envelope(bot)
     resume = AsyncMock()
     entered = asyncio.Event()

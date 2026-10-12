@@ -526,8 +526,39 @@ async def test_pinned_product_turn_executes_real_admission_preparation_and_postg
         await ctx.prepare(actual_deps, invocation, revision, 30)
         replies.clear()
         await ctx.prepare(deps(binding, client), invocation, revision, 30)
+    # Main #824 (0733181847dc775bda444d51c2467016780b8d5d): exactly one
+    # session-scoped model-usage GET is part of the real product turn.
     turn_tape = anthropic_turn_tape(
-        native_recipe.entry, native_recipe.scenario, native.turn, codec=native_recipe.codec
+        native_recipe.entry,
+        native_recipe.scenario,
+        native.turn,
+        codec=native_recipe.codec,
+        post_turn_usage_catchup=True,
+    )
+    catchups = [
+        r
+        for r in turn_tape.replies
+        if r.method == "GET" and r.path == f"/v1/sessions/{pinned_session}/events"
+    ]
+    require(len(catchups) == 1, "usage catch-up missing or broadened")
+    require(
+        catchups[0].query
+        == (
+            ("beta", "true"),
+            ("limit", "100"),
+            ("order", "asc"),
+            ("types[]", "span.model_request_end"),
+        )
+        and catchups[0].request_json is None,
+        "usage catch-up request changed",
+    )
+    require(
+        catchups[0].response_json
+        == {
+            "data": [e for e in native.turn.events if e["type"] == "span.model_request_end"],
+            "next_page": None,
+        },
+        "usage catch-up lost recorded model-request spans",
     )
     whole_tape = AnthropicTape(
         source=turn_tape.source, codec=turn_tape.codec, replies=(*replies, *turn_tape.replies[1:])
