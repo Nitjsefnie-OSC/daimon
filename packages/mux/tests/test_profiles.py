@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import inspect
+import pickle
 
 import pytest
+from mux import profiles
 from mux.contracts import ports
 from mux.contracts.extensions import ExtensionConfig, ExtensionRef
 from mux.contracts.profile import CORE_CAPABILITIES, Profile
 from mux.errors import ExtensionVersionError, InvalidConfig, UnsupportedCapability
-from mux.profiles import MANAGED_AGENTS, PERSISTENT_WORKSPACE, PROFILES, get_profile
+from mux.profiles import (
+    MANAGED_AGENTS,
+    PERSISTENT_WORKSPACE,
+    PROFILES,
+    emits_legacy_events_for,
+    get_profile,
+)
 from pydantic import ValidationError
 
 
@@ -20,6 +28,36 @@ def test_declared_profiles_and_their_core_status() -> None:
         "openai.conversation_only": False,
         "gemini.inline_reuse": False,
     }
+
+
+@pytest.mark.parametrize("profile", tuple(PROFILES.values()), ids=lambda p: p.profile_id)
+def test_legacy_rendering_declarations_round_trip(profile: Profile) -> None:
+    assert profile.emits_legacy_events == (profile.provider == "anthropic")
+    assert emits_legacy_events_for(profile.provider) is profile.emits_legacy_events
+    assert Profile.model_validate_json(profile.model_dump_json()) == profile
+    assert pickle.loads(pickle.dumps(profile)) == profile
+
+
+def test_missing_rendering_declaration_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(profiles, "PROFILES", {})
+    with pytest.raises(InvalidConfig, match="unambiguous"):
+        emits_legacy_events_for("anthropic")
+
+
+def test_conflicting_rendering_declarations_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conflicting = PERSISTENT_WORKSPACE.model_copy(update={"emits_legacy_events": True})
+    monkeypatch.setattr(
+        profiles, "PROFILES", {"existing": PERSISTENT_WORKSPACE, "conflicting": conflicting}
+    )
+    with pytest.raises(InvalidConfig, match="unambiguous"):
+        emits_legacy_events_for("openai")
+
+
+def test_old_profile_defaults_to_normalized_rendering() -> None:
+    old = PERSISTENT_WORKSPACE.model_dump(exclude={"emits_legacy_events"})
+    assert Profile.model_validate(old).emits_legacy_events is False
 
 
 def test_core_flag_is_checked_against_support() -> None:

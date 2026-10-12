@@ -79,6 +79,8 @@ class Profile(Contract):
     core: bool
     support: FrozenMap[Capability, Support]
     extensions: tuple[ExtensionRef, ...] = ()
+    emits_legacy_events: bool = False
+    """The host receives SDK events alongside normalized events for rendering."""
 
     @model_validator(mode="after")
     def _check(self) -> Profile:
