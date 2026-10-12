@@ -463,3 +463,11 @@ credential callbacks before the second execution. The CLI uses it for fresh
 disposable HTTP apps per profile. Default factories use `profile=None`; opt-in
 factories apply the seven-switch public declaration. Both frozen matrices retain
 source hashes and assertions; unavailable surfaces remain typed PENDING.
+
+## Agent backend staging QA preparation
+
+[The H6 packet](SECTION-H-STAGING-QA.md) defines the per-backend
+switch/turn/revert scoring, retained-thread controls, receipt chain and separate
+staging GO. Its [offline plan](fixtures/section_h/staging-plan.json) starts with
+all owner/financial execution bindings unbound and zero earned points. It is
+preparation only and provides no live/staging entry point.
