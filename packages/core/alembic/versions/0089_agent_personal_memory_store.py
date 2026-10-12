@@ -20,8 +20,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision: str = "0088_agent_personal_memory_store"
-down_revision: str | None = "0087_usage_reconcile_progress"
+revision: str = "0089_agent_personal_memory_store"
+down_revision: str | None = "0088_channel_promo_codes"
 branch_labels: str | None = None
 depends_on: str | None = None
 
