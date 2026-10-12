@@ -34,6 +34,11 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import scoped_config_write, tenant_ledger
+from daimon.core.stores.access_policy import (
+    load_access_policy,
+    policy_write_transaction,
+    set_access_policy,
+)
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import build_turn_deps
@@ -230,7 +235,18 @@ async def start(
         "gemini": "gemini.inline_reuse",
     }
     models = {"anthropic": None, "openai": "gpt-6-luna", "gemini": "gemini-3.8-flash"}
-    async with owned.runtime.sessionmaker() as session, session.begin():
+    async with policy_write_transaction(
+        owned.runtime.sessionmaker, tenant_id=owned.tenant_id
+    ) as session:
+        policy = await load_access_policy(session, tenant_id=owned.tenant_id)
+        if backend not in policy.enabled_backends:
+            await set_access_policy(
+                session,
+                tenant_id=owned.tenant_id,
+                policy=type(policy).model_validate(
+                    {**policy.model_dump(), "enabled_backends": (*policy.enabled_backends, backend)}
+                ),
+            )
         await set_channel_backend(
             session,
             channel_ref(owned.tenant_id, "discord", "101"),
