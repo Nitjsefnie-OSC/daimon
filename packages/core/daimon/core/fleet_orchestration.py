@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.security_audit import record_authz_denial
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import AgentMessagePayload, Event, TextPart
 from mux.contracts.ids import ResourceRef, Revision, Scope
@@ -213,6 +214,7 @@ class FleetOrchestrator:
         if parent.subject.platform_user_id != parent.fleet.scope.principal_id and (
             not parent.subject.is_admin or parent.subject.via_agent_key
         ):
+            record_authz_denial("fleet_control", "controller_required")
             raise FleetRefused("controller_required")
 
     async def read_snapshot(

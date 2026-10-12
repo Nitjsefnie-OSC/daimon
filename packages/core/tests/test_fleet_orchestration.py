@@ -18,6 +18,7 @@ from daimon.core.neutral_resources import (
     WorkerPermissions,
     WorkerSpecRefused,
 )
+from daimon.core.security_audit import capture_decision
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Revision, Scope, ThreadRef
@@ -546,7 +547,9 @@ async def test_shared_fleet_control_requires_the_original_principal_or_tenant_ad
         )
 
     if allowed:
-        result = await act()
+        with capture_decision() as decision:
+            result = await act()
+        assert not decision.denied
         if operation == "collect":
             assert result["status"] == "ready"
             owner.validate_contract.assert_called_once()
@@ -554,8 +557,16 @@ async def test_shared_fleet_control_requires_the_original_principal_or_tenant_ad
             assert result["accepted"] is True
             owner.control.assert_awaited_once()
     else:
-        with pytest.raises(FleetRefused, match="controller_required"):
+        with (
+            capture_decision() as decision,
+            pytest.raises(FleetRefused, match="controller_required"),
+        ):
             await act()
+        assert (decision.operation, decision.denied, decision.reason) == (
+            "fleet_control",
+            True,
+            "authz:controller_required",
+        )
         owner.retained_control.assert_not_awaited()
         owner.control.assert_not_awaited()
         owner.wait.assert_not_awaited()

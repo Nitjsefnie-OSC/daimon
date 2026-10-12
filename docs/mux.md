@@ -2385,6 +2385,8 @@ or a trusted tenant admin; an agent key cannot supply the admin exemption. The
 loader retains the run's original scope principal independently of the current
 interaction's subject. The shared service owns this check for every adapter;
 open channel policy alone does not grant control of another person's run.
+Role refusals use the existing request audit as `authz:controller_required`
+denials, rather than tool errors; outside an audit capture the recorder is a no-op.
 
 Workers reuse `AgentSpec`, `BackendConfig` and a pinned `Agent` revision with
 sparse `AgentPatch` overrides. The single worker resolver derives their tools,

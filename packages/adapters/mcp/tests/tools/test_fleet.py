@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, create_autospec
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.adapters.mcp.tools.agent_chat import require_outside_chat_turn
@@ -34,6 +35,8 @@ from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
+from daimon.core.stores.security_audit import list_events
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_stub_anthropic
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -481,6 +484,76 @@ async def test_mcp_current_caller_cannot_control_another_principals_fleet(tool: 
     owner.wait.assert_not_awaited()
     owner.read_result.assert_not_awaited()
     owner.validate_contract.assert_not_called()
+
+
+@pytest.mark.parametrize("tool", ("fleet_kill", "fleet_resume", "fleet_collect"))
+async def test_controller_refusal_persists_as_an_authz_denial(
+    tool: str, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, id=AUTH.tenant_id)
+        await make_account(session, id=AUTH.account_id, tenant=tenant)
+    root = host_parent()
+    root = replace(
+        root,
+        fleet=replace(
+            root.fleet,
+            scope=root.fleet.scope.model_copy(update={"principal_id": "original-orchestrator"}),
+        ),
+    )
+
+    async def load(caller: AuthIdentity) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+        assert caller is AUTH
+        return root, TenantAccessPolicy(enabled_backends=("anthropic",))
+
+    async def subject(_ctx):
+        return str(AUTH.account_id)
+
+    async def tenant_claim(_ctx):
+        return str(AUTH.tenant_id)
+
+    async def absent(_ctx):
+        return None
+
+    async def role(_ctx):
+        return "user"
+
+    audit = IdentityMiddleware(
+        subject_resolver=subject,
+        tenant_resolver=tenant_claim,
+        role_resolver=role,
+        agent_id_resolver=absent,
+        is_admin_resolver=absent,
+        internal_resolver=absent,
+        sessionmaker=committing_sessionmaker,
+    )
+    owner = host_owner()
+    server = FastMCP("fleet-denial-audit")
+    server.add_middleware(audit)
+    server.add_middleware(SeedAuth())
+    register_fleet_tools(
+        server,
+        runtime(),
+        enabled=True,
+        service=HostFleetToolService(FleetOrchestrator(owner), load),
+    )
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="controller_required"):
+            await client.call_tool(tool, arguments(tool))
+    await audit.drain_audit()
+    async with committing_sessionmaker() as session:
+        rows = await list_events(session, tenant_id=AUTH.tenant_id)
+    rows = [row for row in rows if row.tool_name == tool]
+    assert len(rows) == 1
+    assert (rows[0].operation, rows[0].outcome, rows[0].reason) == (
+        "fleet_control",
+        "denied",
+        "authz:controller_required",
+    )
+    assert rows[0].account_id == AUTH.account_id
+    owner.control.assert_not_awaited()
+    owner.wait.assert_not_awaited()
+    owner.read_result.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
