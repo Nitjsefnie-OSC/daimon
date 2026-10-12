@@ -56,6 +56,7 @@ from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.gemini.transport import Object
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.state.store import binding_slot
 from pydantic import TypeAdapter
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -484,11 +485,22 @@ async def test_foreign_or_stale_target_refuses_before_native_io(case: Case, bad:
     elif bad == "catalog":
         origin = replace(origin, catalog_revision=2)
     elif bad in ("shared_binding", "foreign_binding_account"):
+        session = origin.session.model_copy(update={"id": str(uuid.uuid4())})
+        binding = await case.adapter.store.put_binding(
+            origin.binding.model_copy(
+                update={
+                    "id": str(uuid.uuid4()),
+                    "legacy_account_id": None if bad == "shared_binding" else str(uuid.uuid4()),
+                    "native_refs": dict(origin.binding.native_refs) | {"session": session.id},
+                }
+            ),
+            expected_generation=0,
+        )
+        assert await case.adapter.store.get_binding(binding_slot(binding)) == binding
         origin = replace(
             origin,
-            binding=origin.binding.model_copy(
-                update={"legacy_account_id": None if bad == "shared_binding" else str(uuid.uuid4())}
-            ),
+            binding=binding,
+            session=session,
         )
     else:
         origin = replace(
@@ -500,7 +512,10 @@ async def test_foreign_or_stale_target_refuses_before_native_io(case: Case, bad:
             ),
         )
     before = len(case.wire.requests)
-    with pytest.raises((ScopeViolation, CatalogConflict)):
+    with pytest.raises(
+        (ScopeViolation, CatalogConflict),
+        match="outside its grant" if bad in ("shared_binding", "foreign_binding_account") else None,
+    ):
         await case.adapter.offer(origin, kind="github")
     assert len(case.wire.requests) == before and case.delivery.registered == []
 
