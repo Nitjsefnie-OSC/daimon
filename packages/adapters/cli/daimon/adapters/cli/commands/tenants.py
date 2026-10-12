@@ -22,6 +22,7 @@ from daimon.core.permissions import (
     ChannelRule,
     ChannelWriters,
     agent_permissions,
+    describe_home,
 )
 from daimon.core.stores import tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
@@ -437,6 +438,10 @@ class PermissionRuleRow(BaseModel):
     """For an agent: the channel kept to its own agents it is one of."""
 
 
+def _home(policy: TenantAccessPolicy, home: str | None) -> str | None:
+    return describe_home(policy, home) if home is not None else None
+
+
 def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
     """The policy's rules, channels first (`daimon.core.permissions`)."""
     places: list[tuple[Literal["channel", "category"], dict[str, ChannelRule]]] = [
@@ -462,7 +467,7 @@ def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
             readers=None,
             writers=None,
             runs_in=None if rule.runs_in is None else list(rule.runs_in),
-            home=agent_permissions(policy, (name,)).home,
+            home=_home(policy, agent_permissions(policy, (name,)).home),
         )
         for name, rule in sorted(policy.agent_rules.items())
     ]
