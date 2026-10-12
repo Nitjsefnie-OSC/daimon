@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from mux.conformance.runner import (
     ConformanceFailure,
     Result,
     ScriptedTransport,
-    StateStore,
     require,
 )
 from mux.conformance.state_fixtures import c03, c04, c07, c13
@@ -36,6 +36,8 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import PageRequest
 from mux.contracts.ports import ManagedAgents, Steering
 from mux.contracts.resources import Artifact, SkillUpload, SkillUploadFile
+from mux.profiles import PROFILES
+from mux.state.store import StateStore
 
 Probe = Callable[[ManagedAgents, StateStore | None, ScriptedTransport], Awaitable[Result]]
 
@@ -574,8 +576,91 @@ async def c12(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
     )
 
 
+async def _host_evidence(fid: str, t: ScriptedTransport, name: str) -> Mapping[str, object] | None:
+    hook = getattr(t, name, None)
+    if hook is None:
+        return None
+    require(callable(hook), f"{fid}: host evidence hook must be callable")
+    facts = await cast(Callable[[], Awaitable[object]], hook)()
+    if facts is None:
+        return None
+    require(isinstance(facts, Mapping), f"{fid}: host evidence must contain observed facts")
+    return cast(Mapping[str, object], facts)
+
+
+def _host_tuple(facts: Mapping[str, object], key: str, fid: str) -> tuple[object, ...]:
+    value = facts.get(key)
+    if not isinstance(value, tuple):
+        raise ConformanceFailure(f"{fid}: {key} facts are absent or malformed")
+    return cast(tuple[object, ...], value)
+
+
+def _host_identity(facts: Mapping[str, object], key: str) -> tuple[object, ...]:
+    identity = _host_tuple(facts, key, "C14")
+    require(
+        len(identity) == 4
+        and type(identity[1]) is int
+        and identity[1] > 0
+        and all(isinstance(identity[i], str) and identity[i] for i in (0, 2, 3)),
+        "C14: prepared and persisted native identities must be present and well typed",
+    )
+    return identity
+
+
 async def c14(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending("C14", "N4/N10 existing/new-thread backend selection and registry seam pending")
+    facts = await _host_evidence("C14", t, "host_backend_selection_evidence")
+    if facts is None:
+        return pending(
+            "C14", "N4/N10 existing/new-thread backend selection and registry seam pending"
+        )
+    original = _host_tuple(facts, "original_config", "C14")
+    changed = _host_tuple(facts, "changed_config", "C14")
+    require(len(original) == 2, "C14: original config is absent")
+    require(len(changed) == 2, "C14: changed config is absent")
+    require(
+        original[0] != changed[0]
+        and type(original[1]) is int
+        and type(changed[1]) is int
+        and 0 < original[1] < changed[1],
+        "C14: channel must actually change profile/revision",
+    )
+    first = _host_identity(facts, "first")
+    existing = _host_identity(facts, "existing")
+    new = _host_identity(facts, "new_thread")
+    first_binding = _host_identity(facts, "first_binding")
+    existing_binding = _host_identity(facts, "existing_binding")
+    new_binding = _host_identity(facts, "new_binding")
+    require(
+        first == existing == first_binding == existing_binding,
+        "C14: existing thread must retain original native binding and revision",
+    )
+    require(
+        first[:2] == original and new[:2] == changed and new == new_binding,
+        "C14: new thread must bind the changed profile and revision",
+    )
+    for config, identities in (
+        (original, (first, existing, first_binding, existing_binding)),
+        (changed, (new, new_binding)),
+    ):
+        profile = PROFILES.get(cast(str, config[0]))
+        require(
+            profile is not None
+            and all(
+                identity[0] == profile.profile_id and identity[3] == profile.provider
+                for identity in identities
+            ),
+            "C14: selected profile provider must agree with prepared and persisted identities",
+        )
+    require(
+        facts.get("missing_original_refusal") == "backend_unsupported"
+        and type(facts.get("missing_original_mutations")) is int
+        and facts.get("missing_original_mutations") == 0,
+        "C14: absent original driver must refuse visibly before provider mutation",
+    )
+    return passed(
+        "C14",
+        "host backend selection retains persisted bindings and refuses a missing original driver",
+    )
 
 
 async def c15(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
@@ -650,15 +735,173 @@ async def c16(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
 
 
 async def c17(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending(
-        "C17",
-        "N5 host wake generation adapter pending; StateStore fencing alone is not a wake probe",
+    facts = await _host_evidence("C17", t, "host_wake_evidence")
+    if facts is None:
+        return pending(
+            "C17",
+            "N5 host wake generation adapter pending; StateStore fencing alone is not a wake probe",
+        )
+    before, current = facts.get("before_generation"), facts.get("current_generation")
+    require(
+        type(before) is int
+        and type(current) is int
+        and 0 < before < current
+        and type(facts.get("replacement_generation")) is int
+        and current == before + 1 == facts.get("replacement_generation"),
+        "C17: wake must run on the next persisted binding generation",
+    )
+    require(
+        facts.get("stale_binding_refused") is True
+        and type(facts.get("stale_pump_calls")) is int
+        and facts.get("stale_pump_calls") == 0
+        and facts.get("stale_wake_started") is False
+        and facts.get("stale_wake_settled") is False,
+        "C17: both superseded wake owner and stale binding must be fenced before effects",
+    )
+    require(
+        facts.get("wake_started") is True
+        and facts.get("wake_settled") is True
+        and facts.get("wake_status") == "delivered"
+        and type(facts.get("pump_calls")) is int
+        and facts.get("pump_calls") == 1
+        and facts.get("lease_released") is True
+        and facts.get("journal_event_present") is True
+        and isinstance(facts.get("current_session"), str)
+        and bool(facts.get("current_session")),
+        "C17: exactly one actual host wake must journal under its lease and release/settle",
+    )
+    return passed(
+        "C17", "durable wake takeover, binding generation, host journal and lease release verified"
     )
 
 
 async def c18(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending(
-        "C18", "N4/N8 host TerminationReason/outcome-row adapter pending; mux cannot import daimon"
+    facts = await _host_evidence("C18", t, "host_termination_evidence")
+    if facts is None:
+        return pending(
+            "C18",
+            "N4/N8 host TerminationReason/outcome-row adapter pending; mux cannot import daimon",
+        )
+    required = _host_tuple(facts, "required_reasons", "C18")
+    raw_rows = _host_tuple(facts, "terminations", "C18")
+    require(
+        bool(required)
+        and all(isinstance(x, str) and x for x in required)
+        and len(set(required)) == len(required),
+        "C18: independently declared reachable reasons are required",
+    )
+    require(
+        {"completed", "interrupted", "upstream", "session_terminated"} <= set(required),
+        "C18: reachable declaration must include all four normalized root outcomes",
+    )
+    require(
+        bool(raw_rows) and all(isinstance(row, Mapping) for row in raw_rows),
+        "C18: observed host outcomes are absent",
+    )
+    rows = cast(tuple[Mapping[str, object], ...], raw_rows)
+    require(
+        set(required) <= {row.get("expected_reason") for row in rows},
+        "C18: every declared reachable termination reason needs an executed host case",
+    )
+    require(
+        len({row.get("case") for row in rows}) == len(rows)
+        and all(isinstance(row.get("case"), str) and bool(row.get("case")) for row in rows),
+        "C18: termination cases must be uniquely named",
+    )
+    require(
+        all(isinstance(row.get("outcome_id"), str) and row["outcome_id"] for row in rows)
+        and len({row.get("outcome_id") for row in rows}) == len(rows),
+        "C18: each case needs its own observed outcome identity",
+    )
+    required_fields = (
+        "case",
+        "outcome_id",
+        "persisted_rows",
+        "expected_reason",
+        "actual_reason",
+        "persisted_reason",
+        "expected_error_class",
+        "actual_error_class",
+        "persisted_error_class",
+        "expected_session",
+        "actual_session",
+        "persisted_session",
+        "expected_account",
+        "persisted_account",
+        "expected_tenant",
+        "persisted_tenant",
+        "expected_platform",
+        "persisted_platform",
+        "expected_recovered",
+        "actual_recovered",
+        "persisted_recovered",
+    )
+    for row in rows:
+        require(
+            all(key in row for key in required_fields),
+            "C18: observed termination snapshot is incomplete",
+        )
+        require(
+            type(row["persisted_rows"]) is int and row["persisted_rows"] == 1,
+            "C18: each fresh observation must have exactly one committed outcome row",
+        )
+        require(
+            row["expected_reason"] in required,
+            "C18: each executed case must use an independently declared reachable reason",
+        )
+        require(
+            row["expected_reason"] == row["actual_reason"] == row["persisted_reason"],
+            "C18: normalized scenario, actual host reason and committed outcome must agree",
+        )
+        error_class = row["expected_error_class"]
+        require(
+            (error_class is None or isinstance(error_class, str) and bool(error_class))
+            and error_class == row["actual_error_class"] == row["persisted_error_class"],
+            "C18: actual and committed error classes must match the independent case",
+        )
+        session = row["expected_session"]
+        require(
+            row["expected_reason"] != "completed" or isinstance(session, str) and bool(session),
+            "C18: a completed turn ran on a native session and must retain it",
+        )
+        require(
+            row["expected_reason"] != "session_terminated"
+            or isinstance(session, str)
+            and bool(session),
+            "C18: a terminated session must retain native session identity",
+        )
+        require(
+            (session is None or isinstance(session, str) and bool(session))
+            and session == row["actual_session"] == row["persisted_session"],
+            "C18: actual and committed outcomes must retain the authorized native session",
+        )
+        require(
+            all(
+                isinstance(row[expected], str)
+                and bool(row[expected])
+                and row[expected] == row[persisted]
+                for expected, persisted in (
+                    ("expected_account", "persisted_account"),
+                    ("expected_tenant", "persisted_tenant"),
+                    ("expected_platform", "persisted_platform"),
+                )
+            ),
+            "C18: committed outcomes must retain the authorized account, tenant and platform",
+        )
+        require(
+            all(
+                type(row[key]) is bool
+                for key in ("expected_recovered", "actual_recovered", "persisted_recovered")
+            )
+            and row["expected_recovered"] == row["actual_recovered"] == row["persisted_recovered"],
+            "C18: actual and committed recovery flags must match the independent case",
+        )
+    require(
+        any(isinstance(row["expected_session"], str) and row["expected_session"] for row in rows),
+        "C18: at least one case must prove native session retention",
+    )
+    return passed(
+        "C18", "actual host terminal reasons match committed rows for declared reachable coverage"
     )
 
 

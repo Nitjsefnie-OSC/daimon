@@ -1497,6 +1497,89 @@ or change application startup. Use dedicated idle applications and scripted
 transports. Each adapter's `BACKEND-CONFORMANCE.md` describes its input boundary
 and the independent database and SDK mutation controls.
 
+Offline catalog sentinel clients and native OpenAI/Gemini replay clients use the
+shared `daimon.testing.isolated_sdk` factories. Ambient provider options,
+including empty settings and options added before SDK copies, refuse before
+HTTP client allocation without fetching their values. Auth, headers, routes,
+TLS and retry budgets stay explicit; both Gemini HTTP clients close with their
+replay. Recipes and native request/result matching are unchanged.
+
+Offline platform-surface host tests construct their Anthropic SDK client through
+`daimon.testing.isolated_sdk.build_async_anthropic`, with explicit routing,
+headers and retry settings. Ambient provider configuration is refused before
+HTTP allocation, including empty environment values.
+
+The offline catalog executor accepts `--anthropic-fixtures` to select the pinned
+TARGET-53 Anthropic manifest. It uses the real mux turn and owned journal, checks
+native session/model selection and usage folding, and captures text through the
+selected platform adapter. The manifest covers all 53 targets, including explicit
+unsupported recipes; it does not fall back to older authored replies. Missing
+concurrency, remote-effect, asset, routing and administrative hooks remain
+PENDING. Without this option the existing replay selection is unchanged.
+
+Offline ordered catalog steps can consume an explicitly injected
+`daimon.testing.admin_bindings.AdminBindings`. The runner preserves each original
+operation and its product readback receipt. Unsupported admin operations remain
+PENDING. A mutation does not bind a later synthetic host turn to the provisioned
+tenant's configuration and policy; that missing context remains an explicit
+barrier. Administrative receipts alone provide no scenario PASS credit.
+### Alternate resource catalog
+
+The host's `PostgresNeutralCatalog` retains OpenAI/Gemini agent revisions and checked skill bundles within an authorized tenant, account and provider workspace. Agent edits publish a new immutable native agent with a compare-and-swap host revision; historical revisions retain their native references and skill pins. The host revision does not change a provider's native revision. Exact-version bundles preserve their bytes, title and owning agent. Upload ownership is retained with each immutable version; callers commit a checked bundle before attachment.
+
+This store requires additive migration `0079_neutral_catalog`. It supplies storage for explicitly selected alternate resource helpers; callers still perform policy rechecks, native creation and attachment. The default Anthropic resource path uses its existing storage and requests. Downgrading drops only the alternate catalog tables and their retained content. Retained versions store bounded skill archives in Postgres; storage grows with published versions. Account deletion cascades to both catalog tables.
+
+### Scoped host resource helpers
+
+For an explicitly provisioned OpenAI or Gemini catalog, `NeutralResourceHost` constructs
+the store from the authorized tenant/account/project routing tuple and calls
+only the injected resource ports. `add_host_agent_skill` requires the caller's
+fresh policy gate. It retains each native uploaded version and checked bundle
+before replacing the catalog agent under local CAS. A known failed attachment
+can reuse that retained upload after restart. An unknown native upload remains
+the caller's claimed-operation reconciliation responsibility.
+
+Catalog publication failures retain and log the native identity, including a
+cancelled or ambiguous commit. A lost CAS does not prove an idempotently created
+agent unpublished: a current or historical catalog revision can name that same
+identity. Automatic CAS cleanup requires a fenced identity/history proof and is
+not attempted by this edge. Readback compares the fields after OpenAI's optional
+tool normalization while preserving the authored description and schema.
+
+`fork_host_agent` applies the existing FORK authorization, copies source-owned
+bundle bytes under new native skill ids, keeps shared library pins and omits
+foreign-agent skills. Passing this host to `set_channel_rule` exercises the same
+locked channel write and repeat-request behavior. Missing catalog ownership or
+bytes refuses before mutation. An owned unversioned pin requires an injected
+scoped native-default resolver; no latest-version or lexical fallback is used.
+Gemini inline resource edits retain concrete UTF-8 versions and their digests.
+Forks clone owned skill ids and add `code_execution`; SDK interactions mount the
+retained files while existing sessions preserve their old definition and pins.
+Binary inline sources and native agent deletion remain typed unsupported, and
+failed cleanup keeps the catalog identity rather than publishing a false tombstone.
+Runtime provisioning, remote MCP
+authentication and live turns are separate gates. Unconfigured Anthropic paths
+retain their existing requests, storage and policy.
+
+
+The offline catalog executor accepts an explicit per-cell `ProductContext`
+alongside its matching `AdminBindings`. It maps catalog destinations to owned
+channels and threads, uses `configure_channel` and the actual database revision,
+then calls real admission, `prepare_session_for_turn` with the product session
+operations, and `run_prepared_turn`. Its journal and input acknowledgement come
+from Postgres, with no memory-store substitution or manually adopted session.
+N6's public resource edge supplies D1/D7 skill attachment/removal and readback.
+
+Each Anthropic turn needs a separately source-pinned `ProductTurnRecipe` covering
+admission, preparation and the native turn requests. The original native source,
+codec, root, session, text, normalized events and usage remain pinned. A missing,
+busy, deferred or refused preparation preserves `ADMIN_HOST_CONTEXT_UNBOUND`;
+changing an admin policy alone provides no full-cell execution credit. The
+current public preparation function does not dispatch provider-native sessions,
+so OpenAI/Gemini opt-ins retain that gap before SDK or memory-store allocation.
+Without the opt-in, existing catalog replay behavior is unchanged. These are
+offline input/host proofs, with no live provider or model-behavior certification.
+
 ### Offline host turn conformance evidence
 
 `daimon.testing.turn_conformance` exposes optional evidence collectors for backend selection (C14) and durable wake
@@ -1651,6 +1734,71 @@ dependencies must be the actual captured client and owned factories, including
 nested admission dependencies. Native alternate-provider completion requires a
 separate explicit offline binding; initial-card pauses do not authorize it.
 
+
+### Host conformance facts
+
+Offline C14/C17/C18 probes can consume optional host fact hooks for backend
+selection, wake ownership and committed outcomes. Missing hooks or `None` facts
+remain PENDING. Installed facts must preserve existing-thread bindings, fence
+stale wake owners and retain the authorized native session/account in outcome
+rows; a callback verdict cannot substitute for these observations. C14 also
+requires each prepared and persisted provider to agree with the declared provider
+of its selected config profile, including after a revision change.
+
+
+The shared C18 oracle consumes N4's `TerminationSnapshot` fields. Each case must
+have a distinct observed outcome ID and exactly one committed row; every field
+must be explicitly present. Actual and persisted reason, error class, native
+session and recovery flags must match the independent case, and the committed
+account, tenant and platform must retain the authorized scope. A pre-native
+case may explicitly declare a null session; missing fields never count as null
+observations. Missing hooks remain PENDING. Provider owners must declare and
+audit complete reachable-reason coverage before clearing their adapter's typed
+PENDING; shared oracle controls do not certify native or live execution.
+
+C18 completed and session-terminated cases require a non-empty native
+session retained in both execution and the committed outcome. At least one case
+must prove native session retention; an all-null collection cannot certify C18.
+A queued first-turn Stop may retain null for interrupted outcomes because slot
+cancellation precedes native preparation. Explicit pre-native refusals such as
+missing configuration may also retain null.
+
+
+### C03 completion before a second new turn
+
+The durable-send conformance probe keeps its same-key receipt and uncertain-send
+checks, then waits for the first accepted root's authoritative saved terminal
+and fresh idle session occupancy before submitting its second distinct input.
+The barrier has a 60-second deadline, follows saved-history pagination, and
+refuses before the second mutation when completion cannot be proved. Acceptance,
+EOF, preview/child records and an idle-only snapshot do not release occupancy;
+provider input-mode guards are unchanged.
+
+Every completion poll revalidates the accepted input's root across all saved
+history pages. Conflicting roots or reassignment from an acknowledged or
+previously resolved root refuse before the acknowledgement-loss fault or second
+send, even when the original root has a terminal and the session is idle.
+
+
+Offline catalog MCP prerequisites retain their original `mcp`/`deepwiki`
+gap locations in evidence. The dispatcher accepts these scopes only with a
+selected native recipe, explicit connection intent and source-matched MCP calls.
+Authentication and server-count gaps block every host dispatch; unsupported
+effects and external discovery block the affected turns. Authored tool packets
+provide no remote-effect or full-scenario PASS credit. Unknown scopes refuse.
+
+
+
+### Offline rejected-token credential observation
+
+Discord's explicit offline `daimon.testing.discord_credential_conformance.rejected_token_submit` hook
+executes the existing native credential modal against an owned loopback MCP
+initialize rejection and reads the genuine form's scoped `used_at` predicate.
+It records the actual before/probe-entry/after database values without changing
+the product path or the frozen QA oracle. See the adapter's
+`packages/adapters/discord/CREDENTIAL-CONFORMANCE.md`
+for the accepted request-token binding and the shared database isolation guard.
+
 ### Offline Discord thread-permission observation
 
 Discord's explicitly imported test support can bind an owned parent channel to
@@ -1658,6 +1806,9 @@ an offline `discord.Forbidden` thread-creation edge, invoke normal ingress and
 capture the actual serialized parent notice plus native HTTP trace. Default
 host naming stays enabled and its exact Messages request remains visible;
 only that named host request is excluded from provider-turn writes. It checks
+
+
+capture the actual serialized parent notice plus native HTTP trace. It checks
 real tenant/account rows and configured backend selection before invocation.
 The source text/deadline predicates remain independent of the receipt; an offline
 result does not certify live Discord permission settings. Product error copy and
@@ -1718,3 +1869,27 @@ Unknown coverage or cost retains its typed accounting reason. Controlled rates
 prove offline host arithmetic only. The consumer must retain all independent
 source, ingress and capability gaps; this hook cannot certify those gaps or live
 spend. C12 aggregate coverage remains deferred.
+
+
+
+The offline catalog executor can explicitly inject a `RejectedTokenBinding` for
+the Anthropic NEW27 cell through `rejected_token_runs`. It uses that hook's actual
+owned form and loopback response, evaluates the original unused-row predicate,
+and retains an administrative envelope without provider `TurnEvidence` or SDK
+request credit. The default remains unbound. OpenAI and Gemini remain PENDING
+under A3. The source mapping pin in `tests/judge/REJECTED-TOKEN-BINDING.md`
+documents the exact signed hook, original source and approved token projection.
+
+The offline QA catalog runner can construct fresh product surfaces per explicit
+product profile in one job. Its default and opt-in boards keep independent
+evidence and counts; missing owner surfaces remain pending. Product settings
+receipts alone never prove native execution, delivery or spend.
+
+The offline catalog CLI with `--http-apps` executes default and opt-in product
+profiles in one job using fresh app settings, stores and observers. The public
+`offline_http_apps(..., profile=None)` retains its original default settings;
+an explicit profile applies the seven declared settings before the actual app
+factories. Applied settings are configuration receipts, not source outcome
+proof. Missing administration, reaction, scheduler or measured footer bindings
+stay PENDING. Opt-in successes are reported as `PASS under opt-in profile` and
+never increase default-profile PASS counts.

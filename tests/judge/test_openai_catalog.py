@@ -176,7 +176,7 @@ async def test_fenced_followup_reuses_the_session_and_excludes_old_output(tmp_pa
         if f.get("type") == "agent.session.turn.item.done"
     ]
     answer = next(item for item in answers if item.get("role") == "assistant")
-    assert result.rendered_text[1] == answer["content"][0]["text"][:1000]
+    assert result.rendered_text[1] == answer["content"][0]["text"]
 
 
 @pytest.mark.parametrize("change", ["source", "model", "provider", "turn", "text", "codec"])

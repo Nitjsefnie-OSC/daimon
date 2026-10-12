@@ -590,6 +590,10 @@ scripted, and MCP backing data is synthetic: this is offline composition
 evidence, not live F2 certification. It opens no tunnel and reads no provider
 key. Live Anthropic F2 still needs a disposable key and separate lead GO.
 
+The optional TARGET-53 Anthropic catalog replay consumer exercises the existing
+mux turn, persistence and native usage fold through pinned SDK MockTransport
+inputs. It preserves unsupported-effect and host-hook gaps and uses actual
+adapter text captures; it changes no product turn or channel default.
 The host may use `daimon.core.stores.neutral_catalog.PostgresNeutralCatalog` for durable alternate-backend agent revisions and retained skill bundles with upload ownership. Its local revision is separate from native revisions: drivers continue to refuse unsupported native mutation. Tenant/account/provider-workspace boundaries and immutable exact-version bundles are enforced in the store; host policy and native calls remain with the resource edge. No mux dependency on this host store is introduced.
 
 Host skill authoring decisions live in `daimon.core.skills.ownership` and
@@ -602,6 +606,7 @@ owned-bundle download or storage itself; the explicit host composition below
 supplies retained bundles and immutable native replacement for OpenAI.
 
 Explicit OpenAI host resource operations now use
+Explicit OpenAI and Gemini host resource operations now use
 `daimon.core.neutral_resources.NeutralResourceHost` over the retained catalog.
 The caller injects an authorized driver, tenant/account Scope, project, database
 sessions and claimed operation key. `add_host_agent_skill` requires the caller's
@@ -621,6 +626,17 @@ Add-skill operation locates owned retained versions and reads the actual native
 latest version; it never guesses from version ordering or creates another upload
 after a known attachment failure. The caller owns operation claiming and unknown
 native-upload reconciliation; this helper adds no retry loop or operation journal.
+
+The `gemini.inline_reuse` edge retains UTF-8 skill files as exact concrete inline
+versions and creates a new host agent definition for each catalog edit. Existing
+sessions keep their earlier definition and pinned bytes. Updating an existing
+inline pin also updates its version digest; forks clone owned bundles under new
+skill ids and add `code_execution`. The real SDK receives retained files as
+interaction environment sources. Binary inline sources return
+`binary_inline_source`; native agent deletion returns `agent_delete` before a
+catalog tombstone. Failed channel-write cleanup keeps that identity and preserves
+the original write error. The host injects transactional Gemini Storage/StateStore;
+offline in-memory fixtures do not certify production process-restart durability.
 
 Forks preserve shared library pins, upload source-owned bundles under distinct
 ids for the copy, omit foreign-agent skills and report failed copies. Owned
@@ -707,6 +723,42 @@ Slack attaches the scoped provider-action callback only for prepared alternate-p
 
 Teams attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
 
+
+Offline C14/C17/C18 conformance accepts optional async host fact hooks for backend
+selection, durable wake fencing and persisted termination outcomes. Missing or
+`None` facts remain PENDING; installed facts must satisfy the shared retention
+checks. The reference provides no host certification.
+
+C18's optional host evidence uses the public committed termination snapshot
+contract, including fresh row identity/count, authorized tenant/account/platform,
+error class and recovery. Null pre-native sessions are explicit facts, never
+missing-field defaults. Incomplete provider envelopes remain typed PENDING.
+
+C18 host conformance refuses missing native session identities for completed and
+session-terminated outcomes; pre-native refusal evidence remains
+explicitly nullable without replacing native session retention coverage. A queued
+first-turn Stop is a legitimate interrupted outcome before native preparation.
+
+### Tool-only post history checks
+
+The offline outcome oracle's `no_blank_message` predicate checks complete
+accepted Discord send/edit/delete history against an independently retained
+send receipt and authoritative host root. A finalized card is a message body
+even when the provider emits no answer text. A blank draft remains a failure
+after an edit or deletion. Missing capture or acknowledgement remains PENDING.
+`TurnEvidence.post_history` is optional and omitted from serialization when
+absent, preserving existing consumer bytes. Authored native replay proves
+host behavior only; it does not certify model behavior or remote execution.
+
+I3 native bindings are exercised by
+`packages/mux/tests/drivers/gemini/test_i3_native_replay.py`. Anthropic and
+OpenAI consume unchanged recorded fixture bytes; Gemini consumes an owned
+explicit `code_execution` tape. All three run the real host turn and Discord
+serializer. OpenAI's empty HTTP 202 receipt is retained unchanged and joined
+to the unique fresh authoritative native user item that echoes the accepted
+input. That item has a separate acknowledgement field; no native receipt ID
+is invented. The binder verifies the original scoped operation, immutable
+request digest, journal ownership and completed root before attaching posts.
 The manual conformance budget guard supports one lead-signed hold for a backend
 column of up to 53 fully executable cells. Recorded counters size a conservative
 token/runtime bound; disjoint complete native evidence settles each claimed

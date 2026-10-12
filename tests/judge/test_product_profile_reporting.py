@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -12,9 +13,11 @@ from pydantic import BaseModel
 
 from .catalog_runner import FROZEN_TARGET_SHA256, PROVIDERS
 from .headless_executor import (
+    CatalogProductBindings,
     CellResult,
     ExecutionReport,
     ProductProfileReport,
+    execute_catalog_profiles,
     run_product_profiles,
 )
 
@@ -247,6 +250,118 @@ async def test_partial_execution_failure_propagates_instead_of_inventing_a_zero_
             AsyncMock(return_value=board()), execute_opt_in=AsyncMock(side_effect=error)
         )
     assert profiles.current_product_profile() == profiles.DEFAULT_PRODUCT_PROFILE
+
+
+async def test_catalog_job_builds_and_closes_fresh_surfaces_inside_each_profile(monkeypatch):
+    from . import headless_executor as executor
+
+    monkeypatch.setattr(profiles.QAProductProfile, "require_available", lambda _self: None)
+    order = []
+    actual = []
+
+    @asynccontextmanager
+    async def factories(profile):
+        if profiles.current_product_profile() != profile:
+            raise RuntimeError("factory did not receive its active profile")
+        order.append(("open", profile.name))
+        if profile.name == "opt-in-product":
+            apply_flags(profile)
+        instance = CatalogProductBindings(profile=profile)
+        actual.append(instance)
+        try:
+            yield instance
+        finally:
+            order.append(("close", profile.name))
+
+    async def execute(_root, **kwargs):
+        profile = profiles.current_product_profile()
+        order.append(("execute", profile.name))
+        if kwargs["run_id"] != "same-job" or kwargs["admin_runs"]:
+            raise RuntimeError("catalog inputs changed between profiles")
+        return board(first="FAIL" if profile.name == "default" else "PASS")
+
+    monkeypatch.setattr(executor, "execute_catalog", execute)
+    result = await execute_catalog_profiles(
+        Path("unused"), integration_sha=HEAD, run_id="same-job", replays=(), bindings=factories
+    )
+    if (
+        order
+        != [
+            ("open", "default"),
+            ("execute", "default"),
+            ("close", "default"),
+            ("open", "opt-in-product"),
+            ("execute", "opt-in-product"),
+            ("close", "opt-in-product"),
+        ]
+        or actual[0] is actual[1]
+    ):
+        raise RuntimeError("profile surfaces were not fresh independent executions")
+    if result.scored_counts["PASS"] or result.opt_in_scored_counts[profiles.OPT_IN_PASS] != 1:
+        raise RuntimeError("opt-in outcome contaminated the default tally")
+    if profiles.current_product_profile() != profiles.DEFAULT_PRODUCT_PROFILE:
+        raise RuntimeError("profile context leaked outside the job")
+
+
+@pytest.mark.parametrize("corruption", ["foreign_profile", "shared_observer", "factory_failure"])
+async def test_catalog_factory_refuses_cross_profile_surfaces_and_preserves_cleanup(
+    monkeypatch, corruption
+):
+    from daimon.testing.http_observation import HTTPObserver
+
+    from . import headless_executor as executor
+
+    monkeypatch.setattr(profiles.QAProductProfile, "require_available", lambda _self: None)
+    observer = HTTPObserver({}, nonce="unbound")
+    closed = []
+    dispatched = []
+
+    @asynccontextmanager
+    async def factories(profile):
+        try:
+            if profile.name == "opt-in-product" and corruption == "factory_failure":
+                raise RuntimeError("partial factory refusal")
+            yield CatalogProductBindings(
+                profile=profiles.DEFAULT_PRODUCT_PROFILE
+                if corruption == "foreign_profile"
+                else profile,
+                http_observer=observer if corruption == "shared_observer" else None,
+            )
+        finally:
+            closed.append(profile.name)
+
+    async def execute(_root, **_kwargs):
+        dispatched.append(profiles.current_product_profile().name)
+        return board()
+
+    monkeypatch.setattr(executor, "execute_catalog", execute)
+    with pytest.raises(
+        RuntimeError if corruption == "factory_failure" else ValueError,
+        match="factory refusal|different product profile|reused a mutable product surface",
+    ):
+        await execute_catalog_profiles(
+            Path("unused"), integration_sha=HEAD, run_id="job", replays=(), bindings=factories
+        )
+    if dispatched != ["default"] or closed != ["default", "opt-in-product"]:
+        raise RuntimeError("refused profile dispatched or failed to close its surfaces")
+    if profiles.current_product_profile() != profiles.DEFAULT_PRODUCT_PROFILE:
+        raise RuntimeError("refused factory leaked its profile context")
+
+
+@pytest.mark.parametrize("corruption", ["target", "missing", "profile", "flags"])
+def test_copied_execution_boards_still_validate_the_frozen_matrix(corruption):
+    default = board()
+    opted = board(profile="opt-in-product")
+    if corruption == "target":
+        default = default.model_copy(update={"target_sha256": "0" * 64})
+    elif corruption == "missing":
+        default = default.model_copy(update={"cells": default.cells[:-1]})
+    elif corruption == "profile":
+        default = default.model_copy(update={"product_profile": "opt-in-product"})
+    else:
+        opted = opted.model_copy(update={"applied_flags": ()})
+    with pytest.raises(ValueError):
+        ProductProfileReport(default_board=default, opt_in_board=opted)
 
 
 def test_six_flag_receipt_cannot_certify_the_seven_switch_profile():

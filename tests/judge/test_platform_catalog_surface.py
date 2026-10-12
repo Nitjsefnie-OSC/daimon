@@ -94,7 +94,7 @@ async def test_actual_surviving_text_and_retired_draft_have_separate_domains(pla
 
 
 @pytest.mark.parametrize("platform", ["slack", "teams"])
-async def test_long_actual_answer_is_not_the_capped_headless_return(
+async def test_long_actual_answer_preserves_full_return_and_actual_platform_capture(
     tmp_path: Path,
     platform: str,
 ) -> None:
@@ -106,7 +106,7 @@ async def test_long_actual_answer_is_not_the_capped_headless_return(
     tape["turns"][0]["events"][2]["content"][0]["text"] = "x" * 4500 + "ACTUAL_TAIL"
     result = await execute_cell(plan, scripted(plan).model_validate(tape))
     turn, capture = result.evidence.turns[0], result.platform_surfaces[0]
-    assert "ACTUAL_TAIL" not in result.headless_outputs[0].text
+    assert result.headless_outputs[0].text == "x" * 4500 + "ACTUAL_TAIL"
     assert "ACTUAL_TAIL" in "\n".join(t.text for t in turn.texts)
     assert result.catalog_outcome.checks[0].status == "PASS"
     assert len(result.catalog_outcome.checks) == len(plan.assertions) + len(plan.global_assertions)

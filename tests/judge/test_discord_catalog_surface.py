@@ -60,8 +60,8 @@ async def test_long_answer_binds_all_actual_chunks_and_excludes_retired_draft(
     result = await execute_cell(plan, scripted(plan).model_validate(tape))
     turn = result.evidence.turns[0]
     capture = result.discord_surfaces[0]
-    assert result.headless_outputs[0].text == answer[:1000]
-    assert "DISCORD_TAIL" not in result.rendered_text[0]
+    assert result.headless_outputs[0].text == answer
+    assert result.rendered_text[0] == answer
     assert "DISCORD_TAIL" in "\n".join(t.text for t in turn.texts)
     assert len(capture.messages) >= 3
     assert all(len(m.content) <= 2000 for m in capture.messages)

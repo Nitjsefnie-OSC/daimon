@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2541,
+  "files_scanned": 2546,
   "parse_errors": [],
   "calls": [
     {
@@ -18704,7 +18704,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/admin_bindings.py",
-      "line": 19,
+      "line": 20,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -19803,7 +19803,7 @@
     },
     {
       "file": "tests/judge/headless_executor.py",
-      "line": 70,
+      "line": 81,
       "module": "anthropic_catalog_replay",
       "names": [
         "AnthropicRecipe",
@@ -19813,7 +19813,7 @@
     },
     {
       "file": "tests/judge/headless_executor.py",
-      "line": 103,
+      "line": 121,
       "module": "anthropic_catalog_replay",
       "names": [
         "AnthropicRecipe",

@@ -481,6 +481,46 @@ recovery neither claims actual nor deletes history. Pre-upgrade rows and signed
 reconciliation digests remain readable unchanged. Canonical config/ledger
 changes are operator actions after the exact digest is signed.
 
+
+### Optional host fact hooks
+
+C14, C17 and C18 call optional zero-argument async transport hooks named
+`host_backend_selection_evidence`, `host_wake_evidence` and
+`host_termination_evidence`. An absent hook, a `None` attribute or a `None`
+result retains the existing PENDING reason. Present malformed facts fail.
+Adapters clear their typed PENDING declaration only when complete host evidence
+is installed; declarations still prevent dispatch.
+
+Hooks return mappings of independently queried facts, never verdicts. C14
+compares original/changed config `(profile, revision)` and prepared/persisted
+`(profile, revision, native_session, provider)` identities, retaining the original
+binding for an existing thread and checking zero-mutation missing-driver refusal.
+Both config profiles must be declared in the mux profile registry, and every
+prepared/persisted identity must agree with its selected profile provider.
+C17 checks durable takeover, replacement generation, stale-owner fencing,
+exactly one host pump, journal evidence, settlement and lease release. C18
+requires an independently declared reachable-reason inventory, including all four
+normalized root outcomes, and executed cases whose actual reasons and committed
+rows retain the expected native session and account. Providers own declaration
+completeness and native execution; oracle controls alone certify no backend.
+
+
+C18 snapshots follow N4's public `TerminationSnapshot` contract: distinct observed
+outcome identity, exactly one committed row, explicit expected/actual/persisted
+reason, error class, session and recovery fields, and authorized account, tenant
+and platform attribution. Every field is required, including nullable fields.
+An explicit null session is legal for a genuinely pre-native case and must stay
+null in both actual execution and its committed row. Missing observations,
+legacy minimal rows, reused outcome IDs or wrong scope fail. Provider owners
+retain responsibility for independently complete reachable-reason coverage;
+partial collectors and oracle test controls never certify a provider.
+
+C18 completed and session-terminated cases require a non-empty native
+session retained in both execution and the committed outcome. At least one case
+must prove native session retention; an all-null collection cannot certify C18.
+A queued first-turn Stop may retain null for interrupted outcomes because slot
+cancellation precedes native preparation. Explicit pre-native refusals such as
+missing configuration may also retain null.
 ### Whole-column admission
 
 `ColumnPlan` describes 1–53 full-cell-executable receipts for one allowlisted

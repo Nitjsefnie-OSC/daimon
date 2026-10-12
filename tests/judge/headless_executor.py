@@ -10,8 +10,9 @@ import argparse
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -27,10 +28,19 @@ from daimon.testing.admin_bindings import AdminBindings
 from daimon.testing.anthropic_fixtures import load_anthropic_fixtures
 from daimon.testing.discord_surface import DiscordSurfaceCapture
 from daimon.testing.host_clock import current_host_clock
+from daimon.testing.http_observation import (
+    HTTP_SOURCE_ASSERTIONS,
+    AdminHTTPRun,
+    HTTPObservation,
+    HTTPObserver,
+    http_outcome,
+    offline_http_apps,
+)
 from daimon.testing.ma import send_events_response
 from daimon.testing.ma_models import ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.outcome_oracle import (
+    CheckResult,
     OutcomeReport,
     RunEvidence,
     SessionUse,
@@ -49,6 +59,7 @@ from daimon.testing.product_profiles import (
     ProductProfileUnavailable,
     QAProductProfile,
     applied_product_flags,
+    current_product_profile,
     use_product_profile,
 )
 from daimon.testing.provider_fixtures import (
@@ -80,7 +91,14 @@ if __package__:
         expand_text,
         sha,
     )
-    from .catalog_steps import AdminStepBinding, ExecutionGap, StepReceipt, run_steps, step_gaps
+    from .catalog_steps import (
+        AdminStepBinding,
+        ExecutionGap,
+        StepReceipt,
+        http_only_source,
+        run_steps,
+        step_gaps,
+    )
     from .discord_catalog_surface import bind_discord_text
     from .gemini_catalog_replay import execute_gemini_turns
     from .headless_output import HeadlessOutput, capture_headless_return
@@ -113,7 +131,14 @@ else:
         expand_text,
         sha,
     )
-    from catalog_steps import AdminStepBinding, ExecutionGap, StepReceipt, run_steps, step_gaps
+    from catalog_steps import (
+        AdminStepBinding,
+        ExecutionGap,
+        StepReceipt,
+        http_only_source,
+        run_steps,
+        step_gaps,
+    )
     from discord_catalog_surface import bind_discord_text
     from gemini_catalog_replay import execute_gemini_turns
     from headless_output import HeadlessOutput, capture_headless_return
@@ -251,7 +276,10 @@ class CellResult(Record):
     source_sha256: str
     product_profile: ProductProfileName = "default"
     profile_state: Literal["executed", "unavailable", "unbound"] = "executed"
-    mode: Literal["offline_scripted", "offline_admin_credential"] = "offline_scripted"
+    mode: Literal["offline_scripted", "offline_admin_http", "offline_admin_credential"] = (
+        "offline_scripted"
+    )
+    admin_http: AdminHTTPRun | None = None
     admin_credential: RejectedTokenRun | None = Field(default=None, exclude_if=lambda v: v is None)
     gaps: tuple[ExecutionGap, ...]
     evidence: RunEvidence
@@ -285,6 +313,33 @@ class CellResult(Record):
             or self.source_sha256 != self.expected_failure.source_sha256
         ):
             raise ValueError("expected failure differs from reviewed catalog source")
+        return self
+
+    @model_validator(mode="after")
+    def administration_is_not_a_turn(self) -> CellResult:
+        admin = self.admin_http
+        if admin is None:
+            if self.mode == "offline_admin_http":
+                raise ValueError("HTTP administration needs its actual observation envelope")
+            return self
+        if (
+            self.mode != "offline_admin_http"
+            or (admin.scenario_id, admin.backend, admin.source_sha256)
+            != (self.scenario_id, self.backend, self.source_sha256)
+            or (self.evidence.scenario_id, self.evidence.backend)
+            != (self.scenario_id, self.backend)
+            or self.evidence.turns
+            or self.step_receipts
+            or self.headless_outputs
+            or self.discord_surfaces
+            or self.platform_surfaces
+            or self.rendered_text
+            or self.expected_failure is not None
+            or self.request_count != len(admin.observations)
+            or self.catalog_outcome != http_outcome(admin)
+            or self.host_outcome != admin_source_outcome(admin)
+        ):
+            raise ValueError("HTTP administration cannot claim or replace turn evidence")
         return self
 
     @model_validator(mode="after")
@@ -360,6 +415,11 @@ class ExecutionReport(Record):
 
     @model_validator(mode="after")
     def frozen_cells(self) -> ExecutionReport:
+        self.require_frozen_cells()
+        return self
+
+    def require_frozen_cells(self) -> None:
+        """Validate copied boards too, without invoking a decorated validator."""
         canonical = sha(("\n".join(self.target_ids) + "\n").encode())
         if self.target_sha256 != FROZEN_TARGET_SHA256 or canonical != self.target_sha256:
             raise ValueError("execution report differs from frozen TARGET-53")
@@ -390,7 +450,6 @@ class ExecutionReport(Record):
             for c in self.cells
         ):
             raise ValueError("unavailable profile cannot claim executed evidence or a verdict")
-        return self
 
     @computed_field
     @property
@@ -416,8 +475,8 @@ class ProductProfileReport(Record):
     @model_validator(mode="after")
     def same_frozen_matrix(self) -> ProductProfileReport:
         a, b = self.default_board, self.opt_in_board
-        a.frozen_cells()
-        b.frozen_cells()
+        a.require_frozen_cells()
+        b.require_frozen_cells()
         if (
             a.product_profile != "default"
             or b.product_profile != "opt-in-product"
@@ -664,7 +723,7 @@ async def _run_turn(
             async def invoke() -> str:
                 # This executor is the selected headless host. Like the real
                 # headless runner, its caller receives only the final response
-                # after the last tool, truncated by the host's published limit.
+                # after the last tool, matching the complete production return.
                 state = await await_root_completion(
                     run_turn(
                         anthropic=client,
@@ -1224,6 +1283,61 @@ async def execute_gemini_cell(
     )
 
 
+def admin_source_outcome(admin: AdminHTTPRun) -> OutcomeReport:
+    return OutcomeReport(
+        scenario_id=admin.scenario_id,
+        backend=admin.backend,
+        checks=(
+            CheckResult(
+                kind="admin_only_source", turn=None, status="PASS", code="SOURCE_REQUIRES_NO_TURN"
+            ),
+        ),
+    )
+
+
+async def execute_http_cell(plan: ScenarioPlan, observer: HTTPObserver) -> CellResult:
+    if not http_only_source(plan):
+        raise ValueError("HTTP hook requires the complete pinned administrative source")
+    expectations = HTTP_SOURCE_ASSERTIONS[plan.scenario.id]
+    observations: list[HTTPObservation] = []
+    urls: list[str | None] = []
+    gaps: list[ExecutionGap] = []
+    for n, expectation in enumerate(expectations):
+        try:
+            _, _, url = observer.resolve(expectation.url)
+        except ValueError:
+            urls.append(None)
+            gaps.append(ExecutionGap(code="HTTP_ORIGIN_UNBOUND", location=f"assert[{n}]"))
+            continue
+        urls.append(url)
+        try:
+            observations.append(await observer.observe(n, expectation))
+        except (ValueError, httpx.HTTPError, TimeoutError):
+            gaps.append(ExecutionGap(code="HTTP_RESPONSE_UNAVAILABLE", location=f"assert[{n}]"))
+    admin = AdminHTTPRun(
+        scenario_id=plan.scenario.id,
+        source_sha256=plan.scenario.sha256,
+        backend=plan.backend,
+        assertions=expectations,
+        urls=tuple(urls),
+        observations=tuple(observations),
+    )
+    return CellResult(
+        scenario_id=plan.scenario.id,
+        backend=plan.backend,
+        scored=plan.scored,
+        source_sha256=plan.scenario.sha256,
+        mode="offline_admin_http",
+        admin_http=admin,
+        gaps=tuple(gaps),
+        evidence=RunEvidence(scenario_id=plan.scenario.id, backend=plan.backend, turns=()),
+        catalog_outcome=http_outcome(admin),
+        host_outcome=admin_source_outcome(admin),
+        request_count=len(observations),
+        input_provenance="actual-in-process-asgi",
+    )
+
+
 async def run_product_profiles(
     execute_default: Callable[[], Awaitable[ExecutionReport]],
     *,
@@ -1317,6 +1431,80 @@ async def run_product_profiles(
     return ProductProfileReport(default_board=default, opt_in_board=opt_in)
 
 
+@dataclass(frozen=True)
+class CatalogProductBindings:
+    """Actual disposable owner surfaces for one explicitly selected execution.
+
+    Factories apply the profile to the settings they pass to product code. An
+    absent surface retains the executor's existing gaps; settings alone supply
+    no native, delivery, accounting or source-outcome evidence.
+    """
+
+    profile: QAProductProfile
+    http_observer: HTTPObserver | None = None
+    admin_runs: Mapping[tuple[str, Provider], AdminStepBinding] = field(
+        default_factory=dict[tuple[str, Provider], AdminStepBinding]
+    )
+    product_contexts: Mapping[tuple[str, Provider], ProductContext] = field(
+        default_factory=dict[tuple[str, Provider], ProductContext]
+    )
+    rejected_token_runs: Mapping[tuple[str, Provider], RejectedTokenBinding] = field(
+        default_factory=dict[tuple[str, Provider], RejectedTokenBinding]
+    )
+
+
+async def execute_catalog_profiles(
+    root: Path,
+    *,
+    integration_sha: str,
+    run_id: str,
+    replays: tuple[ScenarioReplay, ...],
+    bindings: Callable[[QAProductProfile], AbstractAsyncContextManager[CatalogProductBindings]],
+    provider_fixtures: Path | None = None,
+    anthropic_fixtures: Path | None = None,
+) -> ProductProfileReport:
+    """Build fresh product surfaces inside each profile, then execute both boards.
+
+    Mutable DB bindings, transport observers and credential callbacks cannot be
+    reused from default execution: that would attribute spent resources and
+    settings to another profile. Source-pinned native fixture inputs are shared
+    unchanged. Failures after dispatch propagate, including factory cleanup.
+    """
+    prior: list[object] = []
+
+    async def execute(profile: QAProductProfile) -> ExecutionReport:
+        if profile != current_product_profile():
+            raise ValueError("catalog factory differs from active product profile")
+        async with bindings(profile) as actual:
+            if actual.profile != profile:
+                raise ValueError("catalog factory returned a different product profile")
+            surfaces: list[object] = [actual]
+            if actual.http_observer is not None:
+                surfaces.append(actual.http_observer)
+            surfaces.extend(run.binding for run in actual.admin_runs.values())
+            surfaces.extend(actual.product_contexts.values())
+            surfaces.extend(actual.rejected_token_runs.values())
+            if any(surface is old for surface in surfaces for old in prior):
+                raise ValueError("catalog profiles reused a mutable product surface")
+            prior.extend(surfaces)
+            return await execute_catalog(
+                root,
+                integration_sha=integration_sha,
+                run_id=run_id,
+                replays=replays,
+                provider_fixtures=provider_fixtures,
+                anthropic_fixtures=anthropic_fixtures,
+                admin_runs=actual.admin_runs,
+                product_contexts=actual.product_contexts,
+                http_observer=actual.http_observer,
+                rejected_token_runs=actual.rejected_token_runs,
+            )
+
+    return await run_product_profiles(
+        lambda: execute(DEFAULT_PRODUCT_PROFILE), execute_opt_in=execute
+    )
+
+
 async def execute_catalog(
     root: Path,
     *,
@@ -1327,6 +1515,7 @@ async def execute_catalog(
     anthropic_fixtures: Path | None = None,
     admin_runs: Mapping[tuple[str, Provider], AdminStepBinding] | None = None,
     product_contexts: Mapping[tuple[str, Provider], ProductContext] | None = None,
+    http_observer: HTTPObserver | None = None,
     rejected_token_runs: Mapping[tuple[str, Provider], RejectedTokenBinding] | None = None,
 ) -> ExecutionReport:
     # Always regenerate from pinned source files, never execute an unvalidated saved plan.
@@ -1361,6 +1550,9 @@ async def execute_catalog(
     cells: list[CellResult] = []
     for plan in matrix.plans:
         if plan.scored:
+            if http_observer is not None and http_only_source(plan):
+                cells.append(await execute_http_cell(plan, http_observer))
+                continue
             rejected_token = credential_runs.get((plan.scenario.id, plan.backend))
             if rejected_token is not None:
                 cells.append(await execute_cell(plan, None, rejected_token=rejected_token))
@@ -1435,6 +1627,11 @@ def main() -> None:
     parser.add_argument("--replays", type=Path, required=True)
     parser.add_argument("--provider-fixtures", type=Path)
     parser.add_argument("--anthropic-fixtures", type=Path)
+    parser.add_argument(
+        "--http-apps",
+        action="store_true",
+        help="bind the two admin-only HTTP scenarios to real disposable in-process apps",
+    )
     parser.add_argument("--integration-sha", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -1442,8 +1639,24 @@ def main() -> None:
     raw: list[object] = json.loads(args.replays.read_text())
     replays = tuple(ScenarioReplay.model_validate(item) for item in raw)
 
-    async def default_execution() -> ExecutionReport:
-        return await execute_catalog(
+    @asynccontextmanager
+    async def bindings(profile: QAProductProfile) -> AsyncIterator[CatalogProductBindings]:
+        if not args.http_apps:
+            yield CatalogProductBindings(profile=profile)
+            return
+        from tempfile import TemporaryDirectory
+
+        # Fresh settings, link stores and ASGI observers for each profile.
+        with TemporaryDirectory(prefix="daimon-qa-http-") as folder:
+            async with offline_http_apps(
+                Path(folder),
+                nonce="qa-http",
+                profile=profile if profile != DEFAULT_PRODUCT_PROFILE else None,
+            ) as observer:
+                yield CatalogProductBindings(profile=profile, http_observer=observer)
+
+    result = asyncio.run(
+        execute_catalog_profiles(
             args.catalog.resolve(),
             integration_sha=args.integration_sha,
             run_id=args.run_id,
@@ -1452,10 +1665,8 @@ def main() -> None:
             anthropic_fixtures=args.anthropic_fixtures.resolve()
             if args.anthropic_fixtures
             else None,
+            bindings=bindings,
         )
-
-    result = asyncio.run(
-        run_product_profiles(default_execution, execute_opt_in=lambda _profile: default_execution())
     )
     args.output.write_text(result.model_dump_json(indent=2) + "\n")
     print(f"Default-profile scored cells: {result.scored_counts}; no live calls.")

@@ -283,9 +283,14 @@ async def test_missing_resource_edge_is_typed_pending_without_io(
 
 
 async def test_frozen_credit_draining_does_not_forge_a_ledger_write(binding: AdminBindings) -> None:
-    receipt = await invoke(
-        binding,
-        "daimon tenants credit discord {guild_id} -<balance> --note qa-deplete --id qa-deplete-fixture",
+    row = next(
+        row
+        for row in json.loads(FIXTURE.read_text())["scenarios"]
+        if row["scenario_id"] == "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY"
+    )
+    receipt = await binding.execute(
+        row["operations"][0]["source"],
+        {"env.qa_drain_guild_id": binding.workspace_id, "nonce": "fixture"},
     )
     assert receipt.status == "pending" and receipt.code == "ADMIN_CREDIT_SOURCE_NOT_EXECUTABLE"
     async with binding.sessions() as session:
@@ -953,3 +958,155 @@ async def test_actual_binding_fixture_does_not_skip_foreign_per_model_bind(
         await generator.aclose()
         await foreign.dispose()
         await shared.dispose()
+
+
+@pytest.mark.parametrize(
+    ("amount", "normalized"), [("2.50", "2.50"), ("0.01", "0.01"), ("1e1", "10.00")]
+)
+async def test_literal_positive_credit_uses_cli_identity_and_real_ledger_readback(
+    binding: AdminBindings, amount: str, normalized: str
+) -> None:
+    tenant_id = uuid.UUID(binding.scope.tenant_id)
+    foreign = await provision_tenant(
+        binding.sessions, platform="discord", workspace_id="823456789012345678"
+    )
+    command = (
+        f"daimon tenants credit discord {{guild_id}} {amount}"
+        ' --note " QA_Trial / Grant! " --id qa-credit-fixture'
+    )
+    receipt = await invoke(binding, command)
+    again = await invoke(binding, command)
+    assert receipt.status == again.status == "executed"
+    assert receipt.observations["inserted"] is True
+    assert again.observations["inserted"] is False
+    key = f"manual:credit:{tenant_id}:qa-trial-grant:usd{normalized}:qa-credit-fixture"
+    async with binding.sessions() as session:
+        rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant_id)
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
+        foreign_rows = await tenant_ledger.list_for_tenant(session, tenant_id=foreign.tenant_id)
+    assert len(rows) == 1 and rows[0].idempotency_key == key
+    assert rows[0].delta_usd == balance == Decimal(normalized)
+    assert rows[0].reason == "manual_credit" and rows[0].channel_id is None
+    assert receipt.observations["ledger_entry"] == rows[0].model_dump(mode="json")
+    assert again.observations["ledger_entry"] == receipt.observations["ledger_entry"]
+    assert receipt.observations["balance_usd"] == str(balance)
+    assert not foreign_rows and not binding.trace.requests
+
+
+async def test_credit_without_id_returns_the_actual_cli_uuid_for_replay(
+    binding: AdminBindings,
+) -> None:
+    command = "daimon tenants credit discord {guild_id} 1 --note qa-default-id"
+    receipt = await invoke(binding, command)
+    request_id = receipt.observations["credit_id"]
+    assert isinstance(request_id, str) and str(uuid.UUID(request_id)) == request_id
+    again = await invoke(binding, f"{command} --id {request_id}")
+    assert again.status == "executed" and again.observations["inserted"] is False
+    assert again.observations["ledger_entry"] == receipt.observations["ledger_entry"]
+    assert not binding.trace.requests
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "0 --note qa",
+        "-1 --note qa",
+        "NaN --note qa",
+        "sNaN --note qa",
+        "Infinity --note qa",
+        "-Infinity --note qa",
+        "1.001 --note qa",
+        "-<balance> --note qa",
+        "wat --note qa",
+        "1",
+        '1 --note ""',
+        '1 --note "   "',
+        "1 --note ---",
+        "1 --note ___",
+        "1 --note qa --id first --id second",
+        "1 --note qa --debit true",
+    ],
+)
+async def test_non_cli_credit_shapes_remain_pending_without_ledger_writes(
+    binding: AdminBindings, arguments: str
+) -> None:
+    receipt = await invoke(binding, f"daimon tenants credit discord {{guild_id}} {arguments}")
+    assert receipt.status == "pending"
+    async with binding.sessions() as session:
+        rows = await tenant_ledger.list_for_tenant(
+            session, tenant_id=uuid.UUID(binding.scope.tenant_id)
+        )
+    assert not rows and not binding.trace.requests
+
+
+async def test_foreign_credit_destination_refuses_without_funding_either_tenant(
+    binding: AdminBindings,
+) -> None:
+    foreign = await provision_tenant(
+        binding.sessions, platform="discord", workspace_id="823456789012345678"
+    )
+    with pytest.raises(ScopeViolation):
+        await invoke(binding, "daimon tenants credit discord 823456789012345678 1 --note qa")
+    async with binding.sessions() as session:
+        for tenant_id in (uuid.UUID(binding.scope.tenant_id), foreign.tenant_id):
+            assert not await tenant_ledger.list_for_tenant(session, tenant_id=tenant_id)
+    assert not binding.trace.requests
+
+
+async def test_credit_missing_readback_cannot_issue_executed_receipt(
+    binding: AdminBindings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock
+
+    real_read = tenant_ledger.list_for_tenant
+    monkeypatch.setattr(tenant_ledger, "list_for_tenant", AsyncMock(return_value=[]))
+    with pytest.raises(RuntimeError, match="credit readback differs"):
+        await invoke(binding, "daimon tenants credit discord {guild_id} 1 --note qa --id readback")
+    async with binding.sessions() as session:
+        rows = await real_read(session, tenant_id=uuid.UUID(binding.scope.tenant_id))
+    assert len(rows) == 1 and rows[0].reason == "manual_credit"
+    assert not binding.trace.requests
+
+
+@pytest.mark.parametrize("fault", ["missing_set", "wrong_limit", "stale_clear"])
+async def test_budget_readback_failure_cannot_issue_executed_receipt(
+    binding: AdminBindings, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    from unittest.mock import AsyncMock
+
+    await invoke(
+        binding, "daimon channels budget set discord {guild_id} {channel_id} 0.01 --window total"
+    )
+    real_read = channel_budgets.get_channel_budget
+    async with binding.sessions() as session:
+        persisted = await real_read(
+            session,
+            tenant_id=uuid.UUID(binding.scope.tenant_id),
+            platform="discord",
+            channel_id=min(binding.channels),
+        )
+    assert persisted is not None
+    corrupted = (
+        None
+        if fault == "missing_set"
+        else persisted.model_copy(update={"limit_usd": Decimal("999")})
+        if fault == "wrong_limit"
+        else persisted
+    )
+    monkeypatch.setattr(channel_budgets, "get_channel_budget", AsyncMock(return_value=corrupted))
+    command = (
+        "daimon channels budget clear discord {guild_id} {channel_id}"
+        if fault == "stale_clear"
+        else "daimon channels budget set discord {guild_id} {channel_id} 0.01 --window total"
+    )
+    with pytest.raises(RuntimeError, match="budget readback differs"):
+        await invoke(binding, command)
+    async with binding.sessions() as session:
+        actual = await real_read(
+            session,
+            tenant_id=uuid.UUID(binding.scope.tenant_id),
+            platform="discord",
+            channel_id=min(binding.channels),
+        )
+    assert (actual is None) == (fault == "stale_clear")
+    assert not binding.trace.requests

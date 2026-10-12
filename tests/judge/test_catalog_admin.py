@@ -43,7 +43,9 @@ def require(condition: bool, message: str) -> None:
 
 @pytest.fixture(params=["anthropic", "openai", "gemini"])
 async def binding(
-    request: pytest.FixtureRequest, db_session_factory: async_sessionmaker[AsyncSession]
+    db_preflight: object,
+    request: pytest.FixtureRequest,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[AdminBindings]:
     try:
         require_owned_sessionmaker(db_session_factory)

@@ -16,6 +16,7 @@ from typing import Literal, cast
 
 from daimon.testing.admin_bindings import AdminBindings, AdminReceipt, parse_admin
 from daimon.testing.host_clock import ClockSample, HostClock, current_host_clock
+from daimon.testing.http_observation import HTTP_SOURCE_ASSERTIONS, HTTP_SOURCE_PINS
 from daimon.testing.outcome_oracle import TurnEvidence
 from daimon.testing.provider_fixtures import BackendFixture, FixtureGap
 from daimon.testing.turn_clock import await_clocked_step
@@ -54,6 +55,7 @@ class StepReceipt(Record):
     started_clock: ClockSample | None = None
     finished_clock: ClockSample | None = None
     completion_clock: ClockSample | None = None
+    admin: AdminReceipt | None = None
 
     @model_validator(mode="after")
     def bound_measurement(self) -> StepReceipt:
@@ -129,6 +131,33 @@ def number(value: object, *, positive: bool = False) -> float | None:
         return None
     n = float(value)
     return n if math.isfinite(n) and (n > 0 if positive else n >= 0) else None
+
+
+def http_only_source(plan: ScenarioPlan) -> bool:
+    """Narrow owner-bound, administrative source: never invent a host turn."""
+    raw = plan.scenario.scenario
+    expected = HTTP_SOURCE_ASSERTIONS.get(plan.scenario.id)
+    return (
+        expected is not None
+        and HTTP_SOURCE_PINS.get(plan.scenario.id) == plan.scenario.sha256
+        and raw.get("id") == plan.scenario.id
+        and raw.get("set") == "A"
+        and raw.get("surface") == "headless"
+        and type(raw.get("est_turns")) is int
+        and raw["est_turns"] == 0
+        and not raw.get("human")
+        and all(raw.get(section) == [] for section in ("setup", "steps", "teardown"))
+        and not plan.invocations
+        and not plan.bindings
+        and not plan.global_assertions
+        and list(plan.assertions) == raw.get("assert")
+        and list(plan.assertions) == [e.model_dump(exclude_none=True) for e in expected]
+        and all(
+            g.reason == "http_check: no headless binding implemented"
+            and g.location in {f"assert[{n}]" for n in range(len(expected))}
+            for g in plan.gaps
+        )
+    )
 
 
 def step_gaps(

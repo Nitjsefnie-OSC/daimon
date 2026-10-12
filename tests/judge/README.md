@@ -436,3 +436,30 @@ current public preparation function does not dispatch provider-native sessions,
 so OpenAI/Gemini opt-ins retain that gap before SDK or memory-store allocation.
 Without the opt-in, existing catalog replay behavior is unchanged. These are
 offline input/host proofs, with no live provider or model-behavior certification.
+
+Optimized catalog refusal checks allow 180 seconds for their child interpreter
+to import the SDKs and execute under shared host load. The source turn deadlines
+and refusal mutations inside those checks remain independently enforced.
+
+### Product-profile execution factories
+
+`execute_catalog_profiles` accepts an explicit async context-manager factory
+`bindings(profile)` yielding `CatalogProductBindings`. It constructs and closes
+independent product surfaces inside each selected profile, then executes the same
+frozen matrix and unchanged native inputs. Factories apply the supplied profile
+to the actual settings passed to product app, ingress, preparation, scheduler and
+accounting code. Mutable HTTP observers, admin bindings, product contexts and
+credential callbacks cannot be reused across the two runs.
+
+Missing surfaces retain the original typed execution gaps. An applied settings
+receipt supplies no native root, delivery, billing or catalog-outcome evidence.
+The default tally and `PASS under opt-in profile` tally remain separate. Factory
+failures propagate after closing their resources and restoring the profile; they
+do not become invented empty successful executions.
+
+`execute_catalog_profiles` constructs each profile's actual bindings inside its
+profile context and refuses shared mutable observers, admin bindings or
+credential callbacks before the second execution. The CLI uses it for fresh
+disposable HTTP apps per profile. Default factories use `profile=None`; opt-in
+factories apply the seven-switch public declaration. Both frozen matrices retain
+source hashes and assertions; unavailable surfaces remain typed PENDING.

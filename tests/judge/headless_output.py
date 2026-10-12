@@ -44,7 +44,7 @@ async def capture_headless_return(
 ) -> HeadlessOutput:
     """Await the actual host return; propagate failure/cancellation without a receipt.
 
-    Capture the string exactly as returned, including the host's truncation.
+    Capture the string exactly as returned, without applying a persistence-preview limit.
     Do not accept an on_state/render callback as the invocation, extract text
     from native events, or use this receipt for platform delivery/card coverage.
     A closed receipt covers this single return boundary only. The supplied clock
