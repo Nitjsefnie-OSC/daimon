@@ -10,6 +10,7 @@ catch-up, and writes the outcome with the real reason and usage.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import time
 import uuid
@@ -129,9 +130,34 @@ async def _fresh_process_state() -> AsyncIterator[None]:
     await headless_turn_billing.shutdown()
     headless_turn_billing._last_catch_up.clear()  # pyright: ignore[reportPrivateUsage]
     headless_turn_billing._unsettled.clear()  # pyright: ignore[reportPrivateUsage]
+    headless_turn_billing._limits.pop(asyncio.get_running_loop(), None)  # pyright: ignore[reportPrivateUsage]
     yield
     await headless_turn_billing.shutdown()
     await drain_outcomes()
+    headless_turn_billing._last_catch_up.clear()  # pyright: ignore[reportPrivateUsage]
+    headless_turn_billing._unsettled.clear()  # pyright: ignore[reportPrivateUsage]
+    headless_turn_billing._limits.pop(asyncio.get_running_loop(), None)  # pyright: ignore[reportPrivateUsage]
+
+
+class _CooldownClock:
+    """The cooldown's clock, advanced by the test's sleeps instead of waited on."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def now(self) -> float:
+        return time.monotonic() + self.offset
+
+    async def sleep(self, seconds: float) -> None:
+        self.offset += seconds
+
+
+@pytest.fixture
+def cooldown_clock(monkeypatch: pytest.MonkeyPatch) -> _CooldownClock:
+    clock = _CooldownClock()
+    monkeypatch.setattr(headless_turn_billing, "_now", clock.now)
+    monkeypatch.setattr(headless_turn_billing, "_cooldown_sleep", clock.sleep)
+    return clock
 
 
 async def _no_sleep(_s: float) -> None:
@@ -724,6 +750,7 @@ async def test_background_reads_use_their_own_timeout_and_retry_budget() -> None
 async def test_a_rate_limited_status_read_backs_off_to_retry_after(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    cooldown_clock: _CooldownClock,
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()
@@ -748,6 +775,7 @@ async def test_a_rate_limited_status_read_backs_off_to_retry_after(
 
     async def record_sleep(s: float) -> None:
         sleeps.append(s)
+        await cooldown_clock.sleep(s)
         limited[0] = False
 
     await settle_turn(
@@ -898,6 +926,7 @@ def _limited() -> httpx.Response:
 async def test_a_rate_limited_terminal_pass_waits_out_retry_after(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    cooldown_clock: _CooldownClock,
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()
@@ -919,6 +948,7 @@ async def test_a_rate_limited_terminal_pass_waits_out_retry_after(
 
     async def pause(seconds: float) -> None:
         pauses.append(seconds)
+        await cooldown_clock.sleep(seconds)
         limited[0] = False
 
     await settle_turn(
@@ -1105,3 +1135,338 @@ async def test_each_turn_expires_at_its_own_deadline(
     watch.finalize()
     await drain_outcomes()
     del client
+
+
+# ---------------------------------------------------------------------------
+# Third review (#865): the cooldown is enforced at each request's admission
+# (queued reads and passes, follow-up reads, every page), is re-read after
+# every sleep, and turns expire on time whatever the watcher is waiting on.
+# ---------------------------------------------------------------------------
+
+
+def _dispatch(
+    client: Any,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+    tenant_id: uuid.UUID,
+    boundary: str = "evt_turn",
+    observation: TurnObservation | None = None,
+) -> None:
+    headless_turn_billing.watch_turn(
+        anthropic=client,
+        sessionmaker=sessionmaker,
+        turn=DispatchedTurn(
+            session=session,
+            tenant_id=tenant_id,
+            platform_user_id="user-1",
+            turn_event_id=boundary,
+        ),
+        markup=MARKUP,
+        observation=observation,
+    )
+
+
+def _catch_up(
+    client: Any,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+    tenant_id: uuid.UUID,
+) -> bool:
+    return headless_turn_billing.catch_up_session(
+        anthropic=client,
+        sessionmaker=sessionmaker,
+        session=session,
+        tenant_id=tenant_id,
+        platform_user_id="user-1",
+        markup=MARKUP,
+    )
+
+
+def _left() -> float:
+    return headless_turn_billing._cooldown_left()  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_queued_status_read_waits_out_another_sessions_429(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    a = _session(tenant.id, status="running")
+    b = a.model_copy(update={"id": "sesn_queued_reader"})
+    state, _ = _fake(a)
+    state.sessions[b.id] = b
+    inner = make_fake_sessions_handler(state)
+    a_sent, release, b_sent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    cooldown_when_b_sent: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/v1/sessions/{a.id}":
+            a_sent.set()
+            await release.wait()
+            return _limited()
+        cooldown_when_b_sent.append(_left())
+        b_sent.set()
+        return inner(request)
+
+    monkeypatch.setattr(headless_turn_billing, "MAX_CONCURRENT_READS", 1)
+    client = build_fake_anthropic(handler)  # type: ignore[arg-type]
+    _dispatch(client, db_session_factory, a, tenant.id)
+    await asyncio.wait_for(a_sent.wait(), 1)
+    _dispatch(client, db_session_factory, b, tenant.id)
+    await asyncio.sleep(0.02)  # B is waiting for the only read slot
+    release.set()
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(b_sent.wait(), 0.15)
+
+    assert cooldown_when_b_sent == [], "B's read was admitted during A's cooldown"
+
+
+async def test_a_queued_fallback_pass_waits_out_another_sessions_429(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    a = _session(tenant.id)
+    b = a.model_copy(update={"id": "sesn_queued_fallback"})
+    state, _ = _fake(a)
+    state.sessions[b.id] = b
+    inner = make_fake_sessions_handler(state)
+    a_sent, release = asyncio.Event(), asyncio.Event()
+    cooldown_when_b_sent: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith(f"/v1/sessions/{a.id}/"):
+            a_sent.set()
+            await release.wait()
+            return _limited()
+        cooldown_when_b_sent.append(_left())
+        return inner(request)
+
+    monkeypatch.setattr(headless_turn_billing, "MAX_CONCURRENT_PASSES", 1)
+    client = build_fake_anthropic(handler)  # type: ignore[arg-type]
+    assert _catch_up(client, db_session_factory, a, tenant.id)
+    await asyncio.wait_for(a_sent.wait(), 1)
+    assert _catch_up(client, db_session_factory, b, tenant.id)
+    await asyncio.sleep(0.02)
+    release.set()
+    await asyncio.sleep(0.15)
+
+    assert cooldown_when_b_sent == [], "B's pass was admitted during A's cooldown"
+
+
+async def test_an_in_flight_status_reply_starts_nothing_during_a_cooldown(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    idle = _session(tenant.id)
+    throttled = idle.model_copy(update={"id": "sesn_limited", "status": "running"})
+    state, _ = _fake(idle)
+    state.sessions[throttled.id] = throttled
+    _finished_turn(state, "evt_a")
+    inner = make_fake_sessions_handler(state)
+    idle_sent, release, limited_sent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    later: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/v1/sessions/{idle.id}":
+            idle_sent.set()
+            await release.wait()
+        elif request.url.path == f"/v1/sessions/{throttled.id}":
+            limited_sent.set()
+            return _limited()
+        else:
+            later.append(_left())
+        return inner(request)
+
+    client = build_fake_anthropic(handler)  # type: ignore[arg-type]
+    _dispatch(client, db_session_factory, idle, tenant.id, BOUNDARY)
+    await asyncio.wait_for(idle_sent.wait(), 1)
+    _dispatch(client, db_session_factory, throttled, tenant.id)
+    await asyncio.wait_for(limited_sent.wait(), 1)
+    await asyncio.sleep(0.02)
+    assert _left() > 0
+    release.set()
+    await asyncio.sleep(0.08)
+
+    assert later == [], "the idle reply's transcript walk and pass waited"
+
+
+async def test_a_running_pass_requests_no_further_page_during_a_cooldown(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    idle = _session(tenant.id)
+    throttled = idle.model_copy(update={"id": "sesn_limited", "status": "running"})
+    state, _ = _fake(idle)
+    state.sessions[throttled.id] = throttled
+    _finished_turn(state, "evt_a", "evt_b")
+    inner = make_fake_sessions_handler(state)
+    first_page, release, limited_sent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    later_pages: list[float] = []
+    sent = [0]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/v1/sessions/{throttled.id}":
+            limited_sent.set()
+            return _limited()
+        sent[0] += 1
+        if sent[0] == 1:
+            first_page.set()
+            await release.wait()
+        else:
+            later_pages.append(_left())
+        return inner(request)
+
+    actual = headless_turn_billing.reconcile_unbilled
+
+    async def one_call_pages(**kwargs: Any) -> Any:
+        return await actual(**kwargs, page_size=1)
+
+    monkeypatch.setattr(headless_turn_billing, "reconcile_unbilled", one_call_pages)
+    client = build_fake_anthropic(handler)  # type: ignore[arg-type]
+    assert _catch_up(client, db_session_factory, idle, tenant.id)
+    await asyncio.wait_for(first_page.wait(), 1)
+    _dispatch(client, db_session_factory, throttled, tenant.id)
+    await asyncio.wait_for(limited_sent.wait(), 1)
+    await asyncio.sleep(0.02)
+    assert _left() > 0
+    release.set()
+    await asyncio.sleep(0.15)
+
+    assert later_pages == [], "the pass's next page waited for the cooldown"
+
+
+async def test_a_cooldown_extended_during_a_sleep_is_honoured(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    a = _session(tenant.id, status="running")
+    b = a.model_copy(update={"id": "sesn_extender"})
+    state, _ = _fake(a)
+    state.sessions[b.id] = b
+    inner = make_fake_sessions_handler(state)
+    a_sent, release_a, a_again = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    a_reads = [0]
+    left_at_next_a_read: list[float] = []
+
+    def one_second() -> httpx.Response:
+        response = _limited()
+        response.headers["retry-after"] = "1"
+        return response
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/v1/sessions/{a.id}":
+            a_reads[0] += 1
+            if a_reads[0] == 1:
+                a_sent.set()
+                await release_a.wait()
+                return one_second()
+            left_at_next_a_read.append(
+                headless_turn_billing._cooldown_until - time.monotonic()  # pyright: ignore[reportPrivateUsage]
+            )
+            a_again.set()
+            return inner(request)
+        await asyncio.sleep(0.45)  # in flight when A's 429 lands, then extends it
+        return one_second()
+
+    client = build_fake_anthropic(handler)  # type: ignore[arg-type]
+    _dispatch(client, db_session_factory, a, tenant.id)
+    await asyncio.wait_for(a_sent.wait(), 1)
+    _dispatch(client, db_session_factory, b, tenant.id)
+    await asyncio.sleep(0.02)
+    release_a.set()
+    await asyncio.wait_for(a_again.wait(), 3)
+
+    assert left_at_next_a_read and all(left <= 0 for left in left_at_next_a_read)
+
+
+async def test_an_older_turn_expires_during_a_newer_turns_read(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id, status="running")
+    state, _ = _fake(session)
+    inner = make_fake_sessions_handler(state)
+    sent = asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        sent.set()
+        await asyncio.sleep(0.3)
+        return inner(request)
+
+    client = build_fake_anthropic(slow)  # type: ignore[arg-type]
+    old = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    new = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    monkeypatch.setattr(headless_turn_billing, "TURN_CEILING_S", 0.04)
+    _dispatch(client, db_session_factory, session, tenant.id, "evt_old", old)
+    monkeypatch.setattr(headless_turn_billing, "TURN_CEILING_S", 1.0)
+    _dispatch(client, db_session_factory, session, tenant.id, "evt_new", new)
+    await asyncio.wait_for(sent.wait(), 1)
+    await asyncio.sleep(0.09)
+
+    assert old._finished and not new._finished  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_turn_expires_on_time_during_a_cooldown(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id, status="running")
+    sent = asyncio.Event()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        sent.set()
+        return _limited()
+
+    monkeypatch.setattr(headless_turn_billing, "TURN_CEILING_S", 0.04)
+    monkeypatch.setattr(headless_turn_billing, "RATE_LIMIT_MAX_PAUSE_S", 0.3)
+    observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    _dispatch(
+        build_fake_anthropic(handler),
+        db_session_factory,
+        session,
+        tenant.id,
+        "evt_old",
+        observation,
+    )
+    await asyncio.wait_for(sent.wait(), 1)
+    await asyncio.sleep(0.09)
+
+    assert observation._finished  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_gate_holds_every_background_request_until_the_cooldown_ends(
+    cooldown_clock: _CooldownClock,
+) -> None:
+    """Unit check of the admission gate itself: it re-reads the deadline after each
+    sleep, so an extension made while it slept is honoured too."""
+    sleeps: list[float] = []
+
+    async def extend_once(seconds: float) -> None:
+        sleeps.append(seconds)
+        await cooldown_clock.sleep(seconds)
+        if len(sleeps) == 1:
+            headless_turn_billing._start_cooldown(5.0, session_id=None)  # pyright: ignore[reportPrivateUsage]
+
+    headless_turn_billing._start_cooldown(10.0, session_id=None)  # pyright: ignore[reportPrivateUsage]
+    with patch.object(headless_turn_billing, "_cooldown_sleep", extend_once):
+        await headless_turn_billing._wait_out_cooldown()  # pyright: ignore[reportPrivateUsage]
+
+    assert len(sleeps) == 2 and sleeps[1] == pytest.approx(5.0, abs=0.1)

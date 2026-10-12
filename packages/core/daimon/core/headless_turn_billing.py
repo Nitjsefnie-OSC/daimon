@@ -35,9 +35,12 @@ share it), which never blocks the caller:
 
 **Rate limits.** Any 429 from a background read or pass starts one cooldown
 shared by the whole process (one Managed Agents workspace), from its
-`retry-after` (30 s without one, at most 5 min). No watcher reads, settlement
-pass or fallback pass starts before it ends; a newly dispatched turn does not
-cut it short, and a status poll during it queues nothing.
+`retry-after` (30 s without one, at most 5 min). It is enforced at admission:
+middleware on the background client (`_CooldownGate`) holds every HTTP
+request, every page included, until the cooldown ends, re-reading it after
+each sleep. A newly dispatched turn does not cut it short, and a status poll
+during it queues nothing. A timer expires each turn at its own deadline
+whatever the watcher is waiting on.
 
 `catch_up_session` is the poll-side fallback: a status read that sees the
 session idle or terminated runs up to three catch-up passes in the
@@ -66,11 +69,18 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 import anthropic as _anthropic
 import structlog
-from anthropic import AsyncAnthropic, omit
+from anthropic import (
+    APIRequest,
+    AsyncAnthropic,
+    AsyncAPIResponse,
+    AsyncCallNext,
+    Middleware,
+    omit,
+)
 from anthropic.pagination import AsyncPageCursor
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import (
@@ -174,6 +184,10 @@ class _Watch:
     deadline: float
     pending: dict[str, _PendingTurn] = field(default_factory=dict[str, _PendingTurn])
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # With `timed`, a loop timer expires each turn at its own deadline (on
+    # `time.monotonic()`), whatever read, pause or cooldown the watcher is in.
+    timed: bool = False
+    timer: asyncio.TimerHandle | None = None
 
     def finalize(self, reason: TerminationReason = TerminationReason.UNKNOWN) -> None:
         """Finish every pending outcome (`finish` is a no-op on one already written)."""
@@ -181,6 +195,24 @@ class _Watch:
             if turn.observation is not None:
                 turn.observation.finish(reason=reason)
         self.pending.clear()
+        self.arm()
+
+    def arm(self) -> None:
+        """(Re)schedule the expiry timer for the earliest pending deadline."""
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
+        if not self.timed or not self.pending:
+            return
+        earliest = min(t.deadline for t in self.pending.values())
+        self.timer = asyncio.get_running_loop().call_later(
+            max(0.0, earliest - time.monotonic()), self._on_timer
+        )
+
+    def _on_timer(self) -> None:
+        self.timer = None
+        self.expire(time.monotonic())
+        self.arm()
 
     def add(self, turn: _PendingTurn) -> None:
         """Hold one more turn, writing the oldest as `unknown` past the per-session cap."""
@@ -195,6 +227,7 @@ class _Watch:
             if oldest.observation is not None:
                 oldest.observation.finish(reason=TerminationReason.UNKNOWN)
         self.deadline = max(t.deadline for t in self.pending.values())
+        self.arm()
 
     def expire(self, now: float) -> None:
         """Write every turn past its own deadline as `unknown`."""
@@ -211,8 +244,60 @@ class _Watch:
 
 _watches: dict[str, _Watch] = {}
 # Shared by every background read and pass in this process (one MA workspace):
-# no background request is sent before this `time.monotonic()` reading.
+# no background request is sent before this `_now()` reading.
 _cooldown_until = 0.0
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+async def _cooldown_sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+async def _wait_out_cooldown() -> None:
+    """Return once no background cooldown is running, re-reading it after every sleep
+    (a sibling's 429 may extend it meanwhile)."""
+    while (left := _cooldown_until - _now()) > 0:
+        await _cooldown_sleep(left)
+
+
+def _start_cooldown(retry_after: float | None, *, session_id: str | None) -> None:
+    """Start (or extend) the shared background cooldown from a 429's `retry-after`."""
+    global _cooldown_until
+    wait = min(retry_after or POLL_MAX_S, RATE_LIMIT_MAX_PAUSE_S)
+    until = _now() + wait
+    if until > _cooldown_until:
+        _cooldown_until = until
+        log.warning(
+            "billing.headless_rate_limited", managed_session_id=session_id, retry_after_s=wait
+        )
+
+
+def _header_seconds(raw: str | None) -> float | None:
+    try:
+        return float(raw) if raw is not None else None
+    except ValueError:
+        return None
+
+
+class _CooldownGate(Middleware):
+    """Admission for every background HTTP attempt: waits out the shared cooldown
+    right before the request goes out (after any slot or lock wait, on every
+    page and cursor reset), and starts it from any 429 that comes back."""
+
+    async def handle_async(
+        self, request: APIRequest, call_next: AsyncCallNext
+    ) -> AsyncAPIResponse[Any]:
+        await _wait_out_cooldown()
+        response = await call_next(request)
+        if response.status_code == 429:
+            _start_cooldown(_header_seconds(response.headers.get("retry-after")), session_id=None)
+        return response
+
+
+_COOLDOWN_GATE = _CooldownGate()
 _watch_tasks: dict[str, asyncio.Task[None]] = {}
 _catch_ups: dict[str, asyncio.Task[None]] = {}
 _last_catch_up: OrderedDict[str, float] = OrderedDict()
@@ -247,8 +332,13 @@ def _mark_unsettled(session_id: str) -> None:
 
 
 def _background(anthropic: AsyncAnthropic) -> AsyncAnthropic:
-    """The client for background reads: a per-request timeout and no SDK retries."""
-    return anthropic.with_options(max_retries=BACKGROUND_MAX_RETRIES, timeout=REQUEST_TIMEOUT_S)
+    """The client for background reads: a per-request timeout, no SDK retries, and
+    the cooldown gate on every request. Interactive callers never go through it."""
+    return anthropic.with_options(
+        max_retries=BACKGROUND_MAX_RETRIES,
+        timeout=REQUEST_TIMEOUT_S,
+        middleware=[*anthropic.middleware, _COOLDOWN_GATE],
+    )
 
 
 def headless_recorder(
@@ -312,6 +402,9 @@ async def _reconcile(
         lock = _locks[session_id] = asyncio.Lock()
     try:
         async with _limit("pass"), lock:
+            # Not inside the pass's own budget: a pass blocked by a cooldown waits
+            # here, then gets its whole budget.
+            await _wait_out_cooldown()
             return await reconcile_unbilled(
                 anthropic=_background(anthropic),
                 sessionmaker=sessionmaker,
@@ -338,26 +431,16 @@ async def _reconcile(
     return None
 
 
-def _retry_after(err: _anthropic.APIStatusError) -> float | None:
-    raw = err.response.headers.get("retry-after")
-    try:
-        return float(raw) if raw is not None else None
-    except ValueError:
-        return None
-
-
 def _note_rate_limit(err: _anthropic.RateLimitError, *, session_id: str) -> None:
-    """Start (or extend) the shared background cooldown from a 429's `retry-after`."""
-    global _cooldown_until
-    wait = min(_retry_after(err) or POLL_MAX_S, RATE_LIMIT_MAX_PAUSE_S)
-    _cooldown_until = max(_cooldown_until, time.monotonic() + wait)
-    log.warning("billing.headless_rate_limited", managed_session_id=session_id, retry_after_s=wait)
+    """The cooldown from a rate-limit error (the gate has usually started it already)."""
+    _start_cooldown(_header_seconds(err.response.headers.get("retry-after")), session_id=session_id)
 
 
 def _cooldown_left() -> float:
-    """Whole seconds until background requests may resume (0 when they may now)."""
-    left = _cooldown_until - time.monotonic()
-    return float(math.ceil(left)) if left > 0 else 0.0
+    """Seconds until background requests may resume, rounded up to 10 ms (0 when
+    they may now), so a pause never ends just short of the cooldown."""
+    left = _cooldown_until - _now()
+    return math.ceil(left * 100) / 100 if left > 0 else 0.0
 
 
 def _settled(result: ReconcileResult | None) -> bool:
@@ -393,14 +476,20 @@ class _Deadline(Exception):
 async def _read[T](
     call: Callable[[], Awaitable[T]], *, deadline: float, clock: Callable[[], float]
 ) -> T:
-    """One upstream read under the read limit, never past `deadline`."""
+    """One upstream read under the read limit, never past `deadline`.
+
+    The slot wait and any cooldown count against the deadline; the request
+    itself gets `REQUEST_TIMEOUT_S` once admitted.
+    """
     remaining = deadline - clock()
     if remaining <= 0:
         raise _Deadline
     try:
-        async with asyncio.timeout(min(REQUEST_TIMEOUT_S, remaining)):
+        async with asyncio.timeout(remaining):
             async with _limit("read"):
-                return await call()
+                await _wait_out_cooldown()
+                async with asyncio.timeout(REQUEST_TIMEOUT_S):
+                    return await call()
     except TimeoutError:
         if deadline - clock() <= 0:
             raise _Deadline from None
@@ -549,9 +638,13 @@ async def _run(
     honored = 0.0
 
     async def cool_down() -> None:
-        """Sit out a background 429 cooldown; a new turn does not cut it short."""
+        """Sit out a background 429 cooldown; a new turn does not cut it short.
+
+        Re-read after every pause: a sibling's 429 may have extended it. (The
+        cooldown gate enforces it again on the request itself.)
+        """
         nonlocal honored
-        if _cooldown_until > honored:
+        while _cooldown_until > honored:
             left = _cooldown_left()
             honored = _cooldown_until
             if left > 0:
@@ -563,12 +656,14 @@ async def _run(
     passes = 0
     retry_delay = SETTLE_RETRY_INITIAL_S
     while True:
+        if watch.pending:
+            unbilled = True  # even a turn that expires meanwhile has calls to bill
         await cool_down()
         if watch.wake.is_set():
             watch.wake.clear()
             poll_delay = POLL_INITIAL_S
         if watch.pending:
-            unbilled = True  # even a turn that expires below has calls to bill
+            unbilled = True
         watch.expire(clock())
         if watch.pending:
             delay = poll_delay
@@ -699,7 +794,7 @@ def watch_turn(
             observation.finish(reason=TerminationReason.UNKNOWN)
         _mark_unsettled(session_id)
         return
-    watch = _Watch(session=turn.session, record=record, deadline=pending.deadline)
+    watch = _Watch(session=turn.session, record=record, deadline=pending.deadline, timed=True)
     watch.add(pending)
     _watches[session_id] = watch
 

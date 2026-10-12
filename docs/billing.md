@@ -155,9 +155,17 @@ turn-end catch-up instead.
 - **Rate limits.** Any 429 from a background status read, transcript read or
   catch-up pass starts one cooldown shared by the whole MCP process (all its
   sessions use one Managed Agents workspace), lasting the response's
-  `retry-after` (30 seconds without one, at most 5 minutes). Until it ends no
-  watcher reads, no settlement pass is retried and no poll fallback is
-  queued; a newly dispatched turn does not cut it short.
+  `retry-after` (30 seconds without one, at most 5 minutes). It is enforced
+  at admission: the background client's middleware holds every HTTP request
+  (status reads, every transcript and catch-up page, cursor resets) until it
+  ends, after any wait for a read or pass slot, and re-reads it after every
+  sleep, so an extension made meanwhile by another session's 429 is honoured.
+  No poll fallback is queued while it runs, a pass blocked by it starts its
+  5-second budget only once admitted, and a newly dispatched turn does not
+  cut it short. Interactive requests do not go through this gate.
+- **Turn deadlines.** A timer expires each turn at its own deadline, even
+  while the watcher is waiting on a read, a pause or a cooldown for other
+  turns.
 - **Settling.** Once its turns have ended the watcher runs catch-up passes
   until one finishes the listing: a pass that runs out of budget mid-listing
   is continued after 1 second, a failed pass is retried after 5 seconds,
