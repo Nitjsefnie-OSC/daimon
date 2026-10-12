@@ -389,7 +389,7 @@ async def _produce_fleet_budget(
 ) -> FleetBudgetUsage:
     """The sole product producer of held exposure and admission decisions.
 
-    Use the store's tenant/ledger/run/worker lock order. Read originals, derive
+    Use the store's tenant/actor/run/worker lock order. Read originals, derive
     conservative money once, and persist before returning an admission refusal.
     Terminal/crashed rows participate; changing status cannot free a bound.
     Caller owns commit, including refusals that retain new overrun evidence.
@@ -433,7 +433,22 @@ async def _produce_fleet_budget(
     if run.total_budget_usd > parent.limits.budget_usd:
         raise FleetConflict("fleet cap exceeds the authenticated parent budget")
 
-    pricing_unavailable = False
+    # The same resolved tariff gate applies before reservation, dispatch and
+    # every refresh, including workers with no native usage binding yet.
+    price = prices.get((worker.backend, worker.model))
+    pricing_unavailable = price is None or (
+        isinstance(price, ProviderPrice)
+        and (
+            not price.verified
+            or (price.provider, price.model) != (worker.backend, worker.model)
+            or price.checked_on > datetime.now(UTC).date()
+        )
+    )
+    if isinstance(price, ModelRates):
+        for variant in (price, *((price.long_context,) if price.long_context else ())):
+            for value in (variant.input, variant.output, variant.cache_read, variant.cache_write):
+                rate = Decimal(str(value))
+                pricing_unavailable = pricing_unavailable or not rate.is_finite() or rate < 0
     floors: dict[uuid.UUID, Decimal] = {}
     exposures: dict[uuid.UUID, Decimal] = {}
     debits: dict[uuid.UUID, Decimal] = {}
@@ -593,22 +608,6 @@ async def reserve_fleet_worker(
     # admission repeats the shared root authorization, not its spec compiler.
     if worker.budget_usd > parent.limits.budget_usd:
         raise FleetConflict("worker reservation exceeds parent authority")
-    price = prices.get((worker.backend, worker.model))
-    if price is None or (
-        isinstance(price, ProviderPrice)
-        and (
-            not price.verified
-            or (price.provider, price.model) != (worker.backend, worker.model)
-            or price.checked_on > datetime.now(UTC).date()
-        )
-    ):
-        raise FleetConflict("admission requires verified resolved model prices")
-    if isinstance(price, ModelRates):
-        for variant in (price, *((price.long_context,) if price.long_context else ())):
-            for value in (variant.input, variant.output, variant.cache_read, variant.cache_write):
-                rate = Decimal(str(value))
-                if not rate.is_finite() or rate < 0:
-                    raise FleetConflict("admission requires finite nonnegative model rates")
     snapshot = await _produce_fleet_budget(
         session, parent=parent, worker_id=worker_id, prices=prices, markup=markup, reserve=True
     )

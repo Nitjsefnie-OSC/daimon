@@ -38,6 +38,7 @@ from mux.contracts.resources import (
 )
 from mux.contracts.usage import UsageObservation
 from mux.profiles import backend_selection, get_profile
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 POLICY = TenantAccessPolicy(enabled_backends=("anthropic", "openai", "gemini"))
@@ -439,16 +440,16 @@ async def test_unknown_pricing_and_erased_actor_cannot_authorize_dispatch(sm):
     parent, run = await setup(sm)
     worker = await add(sm, parent)
     async with sm() as db, db.begin():
-        with pytest.raises(FleetConflict, match="prices"):
-            await reserve_fleet_worker(
-                db,
-                parent=parent,
-                policy=POLICY,
-                worker_id=worker.id,
-                expected_version=worker.version,
-                prices={},
-                markup=Decimal(1),
-            )
+        refused = await reserve_fleet_worker(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            expected_version=worker.version,
+            prices={},
+            markup=Decimal(1),
+        )
+    assert not refused.admitted and refused.reason == "pricing_unavailable"
     assert (await read(sm, parent, worker)).worker_exposure_usd == 0
     assert (await reserve(sm, parent, worker)).admitted
     from daimon.core.stores import accounts
@@ -559,6 +560,120 @@ async def test_preallocation_gate_refuses_unfunded_claim_then_accepts_real_reser
             markup=Decimal(1),
         )
     assert accepted.admitted and accepted.worker_exposure_usd == 1
+
+
+@pytest.mark.parametrize("price_state", ["missing", "unverified", "future", "valid"])
+async def test_funded_unbound_preallocation_revalidates_tariff_and_keeps_hold(sm, price_state):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    assert (await reserve(sm, parent, worker)).admitted
+    async with sm() as db, db.begin():
+        claimed = await fleet.claim_worker(db, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+    assert claimed is not None and claimed.binding_id is None
+    key = (worker.backend, worker.model)
+    prices = tariffs(parent)
+    if price_state == "missing":
+        prices = {}
+    elif price_state == "unverified":
+        prices[key] = replace(prices[key], verified=False)
+    elif price_state == "future":
+        prices[key] = replace(prices[key], checked_on=datetime.now(UTC).date() + timedelta(days=1))
+    async with sm() as db, db.begin():
+        snapshot = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=prices,
+            markup=Decimal(1),
+        )
+    assert snapshot.admitted is (price_state == "valid")
+    assert snapshot.reason == (None if price_state == "valid" else "pricing_unavailable")
+    assert snapshot.worker_exposure_usd == snapshot.run_exposure_usd == 1
+    assert (await read(sm, parent, worker)).worker_exposure_usd == 1
+
+
+async def test_open_fleet_transaction_does_not_block_another_tenants_ordinary_ledger(sm):
+    parent, _ = await setup(sm)
+    worker = await add(sm, parent)
+    async with sm() as db, db.begin():
+        other = await make_tenant(db)
+    async with sm() as admission, admission.begin():
+        snapshot = await reserve_fleet_worker(
+            admission,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            expected_version=worker.version,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+        )
+        assert snapshot.admitted
+        # The original append-only writer must commit while admission stays open.
+        async with sm() as ordinary, ordinary.begin():
+            await ordinary.execute(text("SET LOCAL lock_timeout = '3s'"))
+            for amount, reason in ((Decimal("-.25"), "turn_debit"), (Decimal(".5"), "topup")):
+                assert await tenant_ledger.insert_entry(
+                    ordinary,
+                    tenant_id=other.id,
+                    delta_usd=amount,
+                    reason=reason,
+                    idempotency_key=f"ordinary:{reason}:{other.id}",
+                )
+        async with sm() as observer:
+            assert await tenant_ledger.get_balance(observer, tenant_id=other.id) == Decimal(".25")
+
+
+async def test_same_tenant_ordinary_debit_serializes_before_fleet_funds_check(sm):
+    parent, run = await setup(sm, funds="1", cap="1")
+    worker = await add(sm, parent)
+    started = asyncio.Event()
+    admission_pid = None
+
+    async def compete():
+        nonlocal admission_pid
+        async with sm() as db, db.begin():
+            admission_pid = await db.scalar(text("SELECT pg_backend_pid()"))
+            started.set()
+            return await reserve_fleet_worker(
+                db,
+                parent=parent,
+                policy=POLICY,
+                worker_id=worker.id,
+                expected_version=worker.version,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+            )
+
+    async with sm() as ordinary:
+        await ordinary.begin()
+        ordinary_pid = await ordinary.scalar(text("SELECT pg_backend_pid()"))
+        await tenant_ledger.insert_entry(
+            ordinary,
+            tenant_id=run.tenant_id,
+            delta_usd=Decimal("-.75"),
+            reason="turn_debit",
+            idempotency_key=f"ordinary:{run.tenant_id}",
+        )
+        task = asyncio.create_task(compete())
+        try:
+            await asyncio.wait_for(started.wait(), 3)
+            async with asyncio.timeout(3):
+                while ordinary_pid not in await ordinary.scalar(
+                    text("SELECT pg_blocking_pids(:pid)"), {"pid": admission_pid}
+                ):
+                    assert not task.done()
+                    await asyncio.sleep(0.01)
+            await ordinary.commit()
+            snapshot = await asyncio.wait_for(task, 3)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert not snapshot.admitted and snapshot.reason == "tenant_budget_exceeded"
+    assert snapshot.worker_exposure_usd == 0
+    assert snapshot.prepaid_available_usd == Decimal(".25")
 
 
 async def test_flag_off_financial_admission_does_not_touch_database():

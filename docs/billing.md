@@ -1068,8 +1068,16 @@ usage and debits, then retains the greater of that reservation, a verified
 marked-up token floor, existing debit, and previous held exposure. Unknown or
 terminal usage never refunds a reservation. Run exposure sums the worker
 exposures; remaining prepaid funds subtract only holds not already debited.
+Refresh prices token floors for the authorized current run; other tenant runs
+contribute their retained reservations and original ledger debits. An undebited
+floor in another run is discovered by that run's refresh. These financial
+interfaces therefore do not certify a hard prepaid or provider spend ceiling.
 New spawns refuse after an overrun, when their run exceeds authenticated parent
 authority or available prepaid/channel funds, or when pricing is unavailable.
+Reservation, preallocation and refresh share one resolved tariff gate, including
+funded workers without native usage. Financial transactions fence only their
+tenant's funds through the existing ledger foreign key, then actor and fleet
+rows; unrelated ordinary ledger inserts continue without a new writer query.
 Operator-funded admission and replacement attempts remain unavailable without
 their authoritative funding and accepted-attempt inventory proofs.
 

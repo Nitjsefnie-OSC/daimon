@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
-from daimon.core._models import Account, Tenant
+from daimon.core._models import Account
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
 from daimon.core.fleet import (
@@ -40,7 +40,7 @@ from daimon.core.fleet import (
     check_result,
     worker_slot,
 )
-from daimon.core.stores import mux_state
+from daimon.core.stores import mux_state, tenant_ledger
 from pydantic import JsonValue
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -657,9 +657,9 @@ async def lock_budget(
 ) -> tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...]:
     """Join the caller's financial transaction before any fleet row transition.
 
-    Same tenant lock as pool claims, then ledger writers, runs, workers. Ledger
-    SHARE prevents concurrent credits/debits changing sampled available funds;
-    existing ledger writers need no new read or lock on the ordinary path.
+    Same tenant lock as pool claims, then the financial owner's tenant row,
+    actor, runs and workers. Ordinary ledger inserts use their existing foreign
+    key lock; no global table lock or additional writer query is required.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
@@ -667,10 +667,8 @@ async def lock_budget(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"fleet:{tenant_id}"},
     )
-    # Same tenant/account order as audit and erasure, before ledger writers.
-    tenant = await session.scalar(
-        select(Tenant.id).where(Tenant.id == tenant_id).with_for_update(read=True, key_share=True)
-    )
+    # Same tenant/account order as audit and erasure.
+    tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id)
     actor = await session.scalar(
         select(Account.id)
         .where(Account.id == actor_id, Account.tenant_id == tenant_id)
@@ -678,7 +676,6 @@ async def lock_budget(
     )
     if tenant is None or actor is None:
         raise FleetConflict("financial admission requires a live tenant actor")
-    await session.execute(text("LOCK TABLE tenant_ledger IN SHARE MODE"))
     runs = tuple(
         await session.scalars(
             select(FleetRunRow)
@@ -762,7 +759,7 @@ async def save_budget(
         )
         if changed is None:
             raise FleetConflict("run changed during monetary update")
-    # Already-held locks are retained; do not acquire the ledger lock twice.
+    # Already-held locks are retained; do not acquire the funds lock twice.
     result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
     for run, _ in graph:
         result.append(await run_status(session, tenant_id=tenant_id, run_id=run.id))
