@@ -1,7 +1,8 @@
 """The merge revision joins main's usage reconcile branch with the neutral-core branch.
 
 Main's 0087_usage_reconcile_progress keeps its id and parent (it may already be
-applied), so the graph has one head only through 0090. Each branch still
+applied), so 0090 joins it with the neutral-core chain, and 0092 joins that
+with 0091_agent_backend_settings into the single head. Each branch still
 reverses and re-applies on its own under the merge.
 """
 
@@ -20,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _VERSIONS = _REPO_ROOT / "packages" / "core" / "alembic" / "versions"
 MERGE = "0090_merge_main_usage_reconcile"
+HEAD = "0092_merge_agent_backend"
+AGENT_BACKEND = "0091_agent_backend_settings"
 MAIN = "0087_usage_reconcile_progress"
 NEUTRAL = ("0087_neutral_state", "0088_usage_observation_revision", "0089_neutral_catalog")
 FORK = "0086_discord_gateway_lease"
@@ -37,9 +40,12 @@ def _module(name: str) -> ModuleType:
     return module
 
 
-def test_the_merge_is_the_single_head_over_both_branches() -> None:
+def test_the_merge_sits_under_the_single_head_over_both_branches() -> None:
     script = _script()
-    assert script.get_heads() == [MERGE]
+    assert script.get_heads() == [HEAD]
+    head = script.get_revision(HEAD)
+    assert head is not None
+    assert set(head.down_revision or ()) == {MERGE, AGENT_BACKEND}
     merge = script.get_revision(MERGE)
     assert merge is not None
     assert set(merge.down_revision or ()) == {NEUTRAL[-1], MAIN}
