@@ -10952,7 +10952,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_gateway_ingress.py",
-      "line": 869,
+      "line": 885,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsAgentMessageEvent",
