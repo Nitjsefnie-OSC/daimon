@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2604,
+  "files_scanned": 2606,
   "parse_errors": [],
   "calls": [
     {
@@ -3825,8 +3825,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 711,
-      "end": 711,
+      "line": 718,
+      "end": 718,
       "scope": "test_scoped_source_reuse_projects_actual_sdk_retrieve_without_extra_request",
       "category": "test",
       "resource": "agents.retrieve",
@@ -3838,8 +3838,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 745,
-      "end": 745,
+      "line": 752,
+      "end": 752,
       "scope": "test_scoped_source_reuse_refuses_unbound_or_inactive_source_without_extra_request",
       "category": "test",
       "resource": "agents.retrieve",

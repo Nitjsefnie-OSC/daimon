@@ -61,8 +61,8 @@ from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision
 from mux.contracts.events import Event, NativeProvenance
-from mux.contracts.ids import ResourceRef
-from mux.contracts.resources import SessionSpec
+from mux.contracts.ids import ResourceRef, ThreadRef
+from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport
 from mux.errors import ScopeViolation
@@ -111,6 +111,26 @@ class _Provider:
             tenant_id=request.scope.tenant_id,
             account_id=request.scope.account_id,
         )
+
+        if request.admission.shared_owner is None and not reused:
+            revision = request.admission.backend_revision
+            assert revision is not None
+            async with request.deps.sessionmaker() as session:
+                await mux_state.put_binding(
+                    session,
+                    ProviderBinding(
+                        id=str(uuid.uuid4()),
+                        thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
+                        provider=revision.backend,
+                        profile=revision.profile,
+                        native_refs={"session": native},
+                        generation=1,
+                        config_revision=revision.local,
+                        legacy_account_id=request.scope.account_id,
+                    ),
+                    expected_generation=0,
+                )
+                await session.commit()
 
         async def record(event: object) -> None:
             raise AssertionError("preparation never bills")
