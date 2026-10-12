@@ -244,8 +244,9 @@ async def append_result(
 ) -> ResultPointer:
     """Append the worker's result to its own journal, once, under its own lease.
 
-    The lease must be the worker's slot's and the session the one its binding
-    names; anything else is refused before the journal is touched. The result
+    The lease must be the worker's slot's, the session the one its binding names,
+    and the event one of that session's; anything else is refused before the
+    journal is touched. The result
     entry is the worker's, not the caller's event: it is stored under an id and
     source key derived from the worker, so it never repeats an event the turn
     already journaled, and a retry or a lease successor (whatever event object it
@@ -260,10 +261,20 @@ async def append_result(
     if lease.slot != slot:
         raise FleetConflict(f"the lease is not worker {worker.id}'s slot")
     binding = await store.get_binding(slot)
-    if binding is None or binding.native_refs.get("session") != session.id:
+    if (
+        binding is None
+        or binding.native_refs.get("session") != session.id
+        or (worker.binding_id is not None and binding.id != worker.binding_id)
+    ):
         raise FleetConflict(f"session {session.id} is not worker {worker.id}'s")
+    if event.session_id != session.id:
+        # The result must come from this worker's own session: never relabel
+        # another session's event (another worker's answer) as this one's.
+        raise FleetConflict(
+            f"event {event.id} is from session {event.session_id}, not {session.id}"
+        )
     result_id = result_source_key(worker.id)
-    entry = event.model_copy(update={"id": result_id, "session_id": session.id})
+    entry = event.model_copy(update={"id": result_id})
     appended = await store.append_events(
         session,
         [JournalEntry(source_key=result_id, event=entry)],

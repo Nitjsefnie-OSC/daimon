@@ -1038,3 +1038,93 @@ async def test_reviewer_publication_requires_a_real_worker_journal_pointer(
                 excerpt="foreign output",
             ),
         )
+
+
+async def _journaled(store: Any, session: ResourceRef, lease: Any, text_: str, key: str) -> Event:
+    """A real recorded event, as the worker's turn journals it, read back from the journal."""
+    event = _final_message(session.id, text_).model_copy(update={"id": f"ev_{key}"})
+    await store.append_events(
+        session, [JournalEntry(source_key=key, event=event)], fence=lease, cursor=key, now=NOW
+    )
+    (stored,) = [e for e in await store.read_events(session.id) if e.id == f"ev_{key}"]
+    return stored
+
+
+async def test_reviewer_another_workers_recorded_event_is_never_relabelled_as_this_ones(
+    bound: tuple[Any, ...],
+) -> None:
+    store, run, worker_a, _, session_a, lease_a = bound
+    worker_b = _status_worker("running", run_id=run.id, tenant_id=run.tenant_id, ordinal=1)
+    _, session_b, lease_b, _ = await _bind(store, run, worker_b, session_id="sess_w1")
+    b_answer = await _journaled(store, session_b, lease_b, "B's answer", "native:b1")
+
+    with pytest.raises(FleetConflict, match="from session sess_w1"):
+        await append_result(
+            store, run, worker_a, session_a, b_answer, lease=lease_a, cursor="c", now=NOW
+        )
+    assert await store.read_events(session_a.id) == []  # nothing written for A
+
+    # Control: A's own journaled answer is A's result.
+    a_answer = await _journaled(store, session_a, lease_a, "A's answer", "native:a1")
+    own = await append_result(
+        store, run, worker_a, session_a, a_answer, lease=lease_a, cursor="c", now=NOW
+    )
+    assert own.excerpt == "A's answer" and own.session_id == session_a.id
+
+
+async def test_reviewer_another_workers_event_never_publishes_this_worker(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    started: list[tuple[FleetWorker, ResourceRef, Any]] = []
+    for ordinal in range(2):
+        await _worker(sm, run, ordinal)
+        claimed = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+        assert claimed is not None
+        _, session, lease, binding_id = await _bind(
+            store, run, claimed, session_id=f"sess_w{ordinal}"
+        )
+        running = await fleet.mark_running(
+            sm,
+            tenant_id=run.tenant_id,
+            worker_id=claimed.id,
+            expected_version=claimed.version,
+            binding_id=binding_id,
+        )
+        started.append((running, session, lease))
+    (a, session_a, lease_a), (_, session_b, lease_b) = started
+    b_answer = await _journaled(store, session_b, lease_b, "B's answer", "native:b1")
+    with pytest.raises(FleetConflict):
+        await append_result(store, run, a, session_a, b_answer, lease=lease_a, cursor="c", now=NOW)
+    _, (still_a, _) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert still_a.status == "running" and still_a.result is None
+
+
+async def test_an_underflowing_amount_is_refused_before_the_database(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(FleetConflict, match="not a storable"):
+        await _run(db_session_factory, budget="1E-1000040")
+    run = await _run(db_session_factory, budget="2.4500000", key="op-trailing")
+    assert run.total_budget_usd == Decimal("2.45")
+
+
+async def test_a_worker_bound_to_another_binding_is_refused_before_the_write(
+    bound: tuple[Any, ...],
+) -> None:
+    store, run, worker, _, session, lease = bound
+    rebound = replace(worker, binding_id="bind_of_another_generation")
+    with pytest.raises(FleetConflict, match="is not worker"):
+        await append_result(
+            store,
+            run,
+            rebound,
+            session,
+            _final_message(session.id, "answer"),
+            lease=lease,
+            cursor="c",
+            now=NOW,
+        )
+    assert await store.read_events(session.id) == []

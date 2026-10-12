@@ -21,7 +21,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from decimal import Context, Decimal, InvalidOperation, localcontext
+from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import FleetRun as FleetRunRow
@@ -46,9 +46,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _ACTIVE: tuple[WorkerStatus, ...] = ("starting", "running")
-_MICRO = Decimal("0.000001")
+_MICRO_EXPONENT = -6  # whole micro-dollars: Numeric(12, 6)
 _MAX_AMOUNT = Decimal("999999.999999")
-_AMOUNT_PRECISION = 40  # well past Numeric(12, 6) and any input it can hold
 
 type Source = async_sessionmaker[AsyncSession] | AsyncSession
 """A sessionmaker (the call commits on its own) or a caller's session inside its
@@ -70,12 +69,15 @@ async def _transaction(source: Source) -> AsyncIterator[AsyncSession]:
 def _amount(value: Decimal) -> Decimal:
     """An amount the columns store exactly: finite, at least 0, whole micro-dollars.
 
-    Checked in a local context wide enough for every storable amount, so the
-    answer never depends on the caller's ambient decimal precision.
+    Decided from the number's own digits, without arithmetic, so neither the
+    ambient decimal precision nor an underflow can change the answer.
     """
-    with localcontext(Context(prec=_AMOUNT_PRECISION, traps=[InvalidOperation])):
-        storable = value.is_finite() and 0 <= value <= _MAX_AMOUNT and value % _MICRO == 0
-    if not storable:
+    if not value.is_finite() or not 0 <= value <= _MAX_AMOUNT:
+        raise FleetConflict(f"{value} is not a storable fleet amount")
+    _, digits, exponent = value.as_tuple()
+    assert isinstance(exponent, int)  # finite
+    trailing_zeros = len(digits) - len("".join(map(str, digits)).rstrip("0"))
+    if any(digits) and exponent + trailing_zeros < _MICRO_EXPONENT:
         raise FleetConflict(f"{value} is not a storable fleet amount")
     return value
 
