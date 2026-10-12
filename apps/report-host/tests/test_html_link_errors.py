@@ -13,6 +13,11 @@ from report_host import reports_store
 from report_host.config import Settings, load_settings
 from report_host.main import create_app
 
+BROWSER_ACCEPT = (
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+)
+HTML_ACCEPTS = {"text/html", BROWSER_ACCEPT}
+
 
 @pytest.fixture
 async def host_pair(
@@ -91,7 +96,9 @@ async def request(
 
 
 @pytest.mark.parametrize("kind", ["missing", "absent-token", "unknown", "expired", "revoked"])
-@pytest.mark.parametrize("accept", ["*/*", "text/html", "application/json"])
+@pytest.mark.parametrize(
+    "accept", ["*/*", "text/html", "application/json", BROWSER_ACCEPT, "text/html;q=0, */*"]
+)
 async def test_document_refusal_is_indistinguishable_and_keeps_403(
     host_pair: tuple[FastAPI, FastAPI], kind: str, accept: str
 ) -> None:
@@ -105,8 +112,11 @@ async def test_document_refusal_is_indistinguishable_and_keeps_403(
     default = await request(host_pair[0], path, accept=accept)
     opted = await request(host_pair[1], path, accept=accept)
     assert default.status_code == opted.status_code == 403
-    assert default.headers["content-type"] == "application/json"
-    assert default.content == b'{"detail":"this link is not valid for this report"}'
+    if accept in HTML_ACCEPTS:
+        assert default.content == opted.content, "a browser gets the page without the opt-in"
+    else:
+        assert default.headers["content-type"] == "application/json"
+        assert default.content == b'{"detail":"this link is not valid for this report"}'
     assert opted.headers["content-type"] == "text/html; charset=utf-8"
     assert "Ask the sender to share a new link." in opted.text
     assert "set-cookie" not in opted.headers
@@ -117,7 +127,7 @@ async def test_document_refusal_is_indistinguishable_and_keeps_403(
     assert opted.content == other_refusal.content
 
 
-@pytest.mark.parametrize("accept", ["*/*", "text/html", "application/json"])
+@pytest.mark.parametrize("accept", ["*/*", "text/html", "application/json", BROWSER_ACCEPT])
 async def test_valid_viewer_bytes_and_cookie_are_unchanged(
     host_pair: tuple[FastAPI, FastAPI], accept: str
 ) -> None:
@@ -143,10 +153,11 @@ async def test_valid_viewer_bytes_and_cookie_are_unchanged(
         ("POST", "/r/private-report?k=private-expired"),
     ],
 )
+@pytest.mark.parametrize("accept", ["*/*", BROWSER_ACCEPT])
 async def test_opt_in_changes_no_api_file_admin_or_other_method(
-    host_pair: tuple[FastAPI, FastAPI], method: str, path: str
+    host_pair: tuple[FastAPI, FastAPI], method: str, path: str, accept: str
 ) -> None:
-    responses = [await request(app, path, method=method) for app in host_pair]
+    responses = [await request(app, path, method=method, accept=accept) for app in host_pair]
     assert responses[0].status_code == responses[1].status_code
     assert responses[0].content == responses[1].content
     assert dict(responses[0].headers) == dict(responses[1].headers)
@@ -154,7 +165,7 @@ async def test_opt_in_changes_no_api_file_admin_or_other_method(
 
 
 @pytest.mark.parametrize("raw", [None, "false", "true"])
-def test_html_errors_require_explicit_environment_opt_in(
+def test_html_errors_for_every_client_require_explicit_environment_opt_in(
     monkeypatch: pytest.MonkeyPatch, raw: str | None
 ) -> None:
     monkeypatch.delenv("DAIMON_REPORT__HTML_LINK_ERRORS", raising=False)

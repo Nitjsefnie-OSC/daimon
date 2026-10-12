@@ -104,9 +104,10 @@ class Settings(BaseSettings):
     html_link_errors: bool = Field(
         default=False,
         description=(
-            "Opt in to a static HTML page for refused report document links "
-            "(GET /r/{slug}, status 403). API, file and admin routes keep their "
-            "existing responses. Disabled by default."
+            "Show the static HTML page for refused report document links "
+            "(GET /r/{slug}, status 403) to every client. Browsers (Accept: text/html) "
+            "always get it; with this off, other clients keep the JSON error. API, file "
+            "and admin routes keep their existing responses."
         ),
     )
     thread_idle_archive_hours: int = Field(

@@ -1612,11 +1612,12 @@ host admits uploads only from the tenants the operator lists in
 `DAIMON_NOTEBOOK__TENANTS`, matched against the tenant named in the bot's
 signed upload token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
-Each host can opt into a static HTML page for unavailable document links:
-`DAIMON_NOTEBOOK__HTML_LINK_ERRORS=true` applies only to unresolved
-`GET /n/{slug}/` requests (404), and `DAIMON_REPORT__HTML_LINK_ERRORS=true`
-applies only to refused `GET /r/{slug}` requests (403). Both default to
-`false`. Token and expiry checks, successful pages, and API/file/admin
+A browser (`Accept: text/html`) opening an unavailable document link gets a
+static “Link unavailable” HTML page instead of a JSON error: unresolved
+`GET /n/{slug}/` requests (404) and refused `GET /r/{slug}` requests (403).
+Other clients keep the JSON error unless `DAIMON_NOTEBOOK__HTML_LINK_ERRORS`
+or `DAIMON_REPORT__HTML_LINK_ERRORS` is `true`, which gives every client the
+page. Token and expiry checks, successful pages, and API/file/admin
 responses retain their existing behavior.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach Daimon over HTTP with capability tokens, and the

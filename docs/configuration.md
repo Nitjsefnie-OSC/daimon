@@ -1441,9 +1441,10 @@ shared env file would set both.
 
 `bool` · optional · default `False`
 
-Opt in to a static HTML page for unavailable notebook document links (GET /n/{slug}/,
-status 404). Other routes and methods keep their existing responses. Disabled by
-default.
+Show the static HTML page for unavailable notebook document links (GET /n/{slug}/,
+status 404) to every client. Browsers (Accept: text/html) always get it; with this off,
+other clients keep the JSON error. Other routes and methods keep their existing
+responses.
 
 ### `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES`
 
@@ -1615,8 +1616,9 @@ How long a per-recipient link remains valid before expiring.
 
 `bool` · optional · default `False`
 
-Opt in to a static HTML page for refused report document links (GET /r/{slug}, status
-403). API, file and admin routes keep their existing responses. Disabled by default.
+Show the static HTML page for refused report document links (GET /r/{slug}, status 403)
+to every client. Browsers (Accept: text/html) always get it; with this off, other
+clients keep the JSON error. API, file and admin routes keep their existing responses.
 
 ### `DAIMON_REPORT__THREAD_IDLE_ARCHIVE_HOURS`
 

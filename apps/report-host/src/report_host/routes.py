@@ -12,6 +12,7 @@ Admin, upload-token-consuming and publish routes are NOT here — they land in
 later plans. This module owns only what a report's reader can reach.
 """
 
+import re
 import secrets
 import sqlite3
 from collections.abc import Awaitable, Callable
@@ -42,6 +43,7 @@ _LINK_UNAVAILABLE_HTML = (
     "<title>Link unavailable</title></head><body><h1>Link unavailable</h1>"
     "<p>This link is unavailable. Ask the sender to share a new link.</p></body></html>"
 )
+_ZERO_QUALITY = re.compile(r"(^|;)q=0(\.0*)?($|;)")
 _REPORT_UNAUTHORIZED_MESSAGE = (
     "this report's connection to daimon has expired; ask the publisher to re-publish it"
 )
@@ -119,6 +121,19 @@ def _validate_pdf_name(name: str) -> None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="invalid file name")
 
 
+def _browser_navigation(accept: str | None) -> bool:
+    """True when the `Accept` header lists `text/html` (a browser opening a link).
+
+    `*/*` alone (curl, httpx, `fetch`) is not a browser, so API clients keep JSON.
+    """
+    for item in (accept or "").split(","):
+        media, _, params = item.partition(";")
+        if media.strip().lower() != "text/html":
+            continue
+        return not _ZERO_QUALITY.search(params.replace(" ", "").lower())
+    return False
+
+
 def mount_viewer_assets(app: FastAPI) -> None:
     """Serve the viewer's CSS and JS at ``/viewer`` on the assembled app.
 
@@ -168,7 +183,7 @@ def build_reader_router(
             return await resolve_recipient(slug, request)
         except HTTPException as exc:
             if (
-                settings.html_link_errors
+                (settings.html_link_errors or _browser_navigation(request.headers.get("accept")))
                 and exc.status_code == status.HTTP_403_FORBIDDEN
                 and exc.detail == _RECIPIENT_INVALID_MESSAGE
             ):
