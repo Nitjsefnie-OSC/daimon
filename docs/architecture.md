@@ -1628,7 +1628,10 @@ admission before any of this runs.
   own agent, a hub run by an admin or that channel's admin included, is
   gated by and charged to that channel's budget. The billed media tool
   runs the same gates, then the budget of the channel named by the calling
-  turn's `origin_context_id`, and charges its spend to that channel.
+  turn's `origin_context_id`, and charges its spend to that channel. An
+  answered `ask` is queued for the tenant's mirrors
+  (`daimon.core.mirror_delivery`), which the Discord bot's mirror poller
+  posts. See [mirrors.md](mirrors.md).
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
