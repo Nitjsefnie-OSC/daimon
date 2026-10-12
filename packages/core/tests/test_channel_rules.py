@@ -109,6 +109,9 @@ def test_copy_name_slugs_the_channel_and_avoids_taken_names() -> None:
     assert copy_name(None, "19:a1b2c3d4e5f6@thread.tacv2", taken=()) == ("channel-d4e5f6"), (
         "a Teams id's tail comes from its id part, never its domain or the colon"
     )
+    assert copy_name("Team Alpha", "123", taken=(), ruled={"team-alpha"}) == "team-alpha-2", (
+        "a name with a rule is taken even when no live agent has it: the rule outlived its agent"
+    )
 
 
 def _client(tenant_id: uuid.UUID, *agents: tuple[str, bool]) -> tuple[AsyncAnthropic, FakeMAState]:
@@ -285,6 +288,34 @@ async def test_own_readers_with_a_copy_keeps_the_copy_there(
         await _set_rule(
             client, db_session_factory, tenant.id, "c3", copy=True, copy_from="team-alpha-2"
         )
+
+
+async def test_a_copy_never_takes_a_name_whose_rule_outlived_its_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A rule left by an archived copy must not refuse the next copy (#22).
+
+    Copy names come from the channel's name, cut to 40 characters, so a new
+    copy can land on an archived one's name; its stale rule names another
+    channel and would refuse the copy with `agent_runs_elsewhere`.
+    """
+    tenant = await make_tenant(db_session)
+    client, _ = _client(tenant.id, ("shared", False))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    stale = {"team-alpha": AgentRule(runs_in=("c9",))}
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(agent_rules=stale)
+    )
+    await db_session.commit()
+
+    change = await _set_rule(
+        client, db_session_factory, tenant.id, "c1", channel_label="Team Alpha", copy=True
+    )
+
+    assert change.agent_name == "team-alpha-2", "the ruled name is skipped"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.agent_rules == {**stale, "team-alpha-2": AgentRule(runs_in=("c1",))}
 
 
 @pytest.mark.parametrize("fork", [False, True], ids=["own-agent", "copy"])
@@ -923,6 +954,57 @@ async def test_set_agent_rule_limits_where_an_agent_runs(
     assert await _agent_rule(client, db_session_factory, tenant.id, "shared", None) is None
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.agent_rules == {}, "None clears the rule"
+
+
+async def test_anywhere_drops_the_rule_an_archived_agent_left_behind(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An operator can clear a stale rule by name; anything else still needs the agent."""
+    tenant = await make_tenant(db_session)
+    client, _ = _client(tenant.id, ("local", False))
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            agent_rules={"ghost": AgentRule(runs_in=("c9",)), "local": AgentRule(runs_in=("c1",))}
+        ),
+    )
+    await db_session.commit()
+
+    with pytest.raises(ChannelRuleRefused) as limiting:
+        await _agent_rule(client, db_session_factory, tenant.id, "ghost", ("c1",))
+    assert limiting.value.reason == "agent_not_found", "only dropping works without the agent"
+    with pytest.raises(ChannelRuleRefused) as stranger:
+        await set_agent_rule(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_name="ghost",
+            runs_in=None,
+            subject=Subject(is_admin=False),
+            default=DEFAULT,
+        )
+    assert stranger.value.reason == "admin_required"
+
+    change = await set_agent_rule(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        agent_name="ghost",
+        runs_in=None,
+        subject=ADMIN,
+        default=DEFAULT,
+    )
+
+    assert (change.changed, change.gone) == (True, True)
+    assert change.notes == ("There is no agent named ghost; its leftover rule was dropped.",)
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.agent_rules == {"local": AgentRule(runs_in=("c1",))}
+    with pytest.raises(ChannelRuleRefused) as typo:
+        await _agent_rule(client, db_session_factory, tenant.id, "ghost", None)
+    assert typo.value.reason == "agent_not_found", "a name with neither agent nor rule is unknown"
 
 
 async def test_an_agent_rule_naming_an_own_readers_channel_names_it_alone(

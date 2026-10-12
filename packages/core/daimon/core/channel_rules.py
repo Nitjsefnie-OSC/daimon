@@ -49,6 +49,7 @@ from daimon.core.permissions import (
     with_agent_rule,
     with_category_rule,
     with_channel_rule,
+    without_agent_rules,
 )
 from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
@@ -287,15 +288,26 @@ def resolve_rule(
         raise ChannelRuleRefused("own_on_both") from None
 
 
-def copy_name(channel_label: str | None, channel_id: str, *, taken: Collection[str]) -> str:
-    """A new agent name from the channel's name, unique among `taken`. Pure."""
+def copy_name(
+    channel_label: str | None,
+    channel_id: str,
+    *,
+    taken: Collection[str],
+    ruled: Collection[str] = (),
+) -> str:
+    """A new agent name from the channel's name, unique among `taken` and `ruled`. Pure.
+
+    `taken` are live agents' names; `ruled` are names with an agent rule, which
+    may outlive their agent (one archived before its rule was dropped with it)
+    and would otherwise be inherited by the copy.
+    """
     slug = re.sub(r"[^a-z0-9]+", "-", (channel_label or "").lower()).strip("-")[:40].strip("-")
     # A Teams id (`19:<id>@thread.tacv2`) ends in its domain and holds ":", so
     # the tail comes from its id part, letters and digits only.
     tail = re.sub(r"[^a-z0-9]", "", channel_id.partition("@")[0].lower())[-6:]
     base = slug or f"channel-{tail}"
     name, suffix = base, 2
-    while name in taken:
+    while name in taken or name in ruled:
         name, suffix = f"{base}-{suffix}", suffix + 1
     return name
 
@@ -606,11 +618,17 @@ async def set_channel_rule(
     source = copy_from or found.answering
     if not copy or source is None:
         raise ChannelRuleRefused(found.refusal, agent_name=found.name or source)
-    taken = {
-        agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
-        for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-    }
-    new_name = copy_name(channel_label, channel_id, taken=taken)
+    async with sessionmaker() as session:
+        ruled = (await load_access_policy(session, tenant_id=tenant_id)).agent_rules.keys()
+    new_name = copy_name(
+        channel_label,
+        channel_id,
+        taken={
+            agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
+            for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        },
+        ruled=ruled,
+    )
     made = await fork_agent(
         anthropic,
         sessionmaker,
@@ -697,9 +715,13 @@ class AgentRuleChange:
     changed: bool
     answers_outside: bool = False
     """It is still set to answer outside its new rule, where every turn is refused."""
+    gone: bool = False
+    """No agent has the name any more; only its leftover rule was dropped."""
 
     @property
     def notes(self) -> tuple[str, ...]:
+        if self.gone:
+            return (f"There is no agent named {self.agent_name}; its leftover rule was dropped.",)
         if self.runs_in is None:
             notes = [f"{self.agent_name} runs wherever it is set to answer."]
         elif not self.runs_in:
@@ -712,6 +734,32 @@ class AgentRuleChange:
                 "change those defaults too."
             )
         return tuple(notes)
+
+
+async def _drop_missing_agent_rule(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    subject: Subject,
+) -> AgentRuleChange:
+    """Drop the rule left by an agent that no longer exists, such as one archived out of band.
+
+    Refused as `agent_not_found` when the name has no rule either, so a typo
+    still says so.
+    """
+    async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
+        await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+        await lock_access_policy(session, tenant_id=tenant_id)
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        if not authorize(policy, subject=subject, action=Action.SET_AGENT_RULE):
+            raise ChannelRuleRefused("admin_required")
+        if agent_name not in policy.agent_rules:
+            raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
+        await set_access_policy(
+            session, tenant_id=tenant_id, policy=without_agent_rules(policy, (agent_name,))
+        )
+    return AgentRuleChange(agent_name, None, True, gone=True)
 
 
 async def set_agent_rule(
@@ -730,8 +778,9 @@ async def set_agent_rule(
     The rule replaces any on the agent's other names. A channel's own agent
     keeps its rule until that channel's readers change; a rule naming a
     channel only its own agents read names it alone, and makes the agent one
-    of its own only if it could be (`_own_agent_refusal`). Raise
-    `ChannelRuleRefused` if refused.
+    of its own only if it could be (`_own_agent_refusal`). With no agent of
+    that name, None drops a rule its name still has (`_drop_missing_agent_rule`).
+    Raise `ChannelRuleRefused` if refused.
     """
     # Checked first too, so whether an agent exists is no one else's to learn.
     async with sessionmaker() as session:
@@ -740,6 +789,10 @@ async def set_agent_rule(
         raise ChannelRuleRefused("admin_required")
     agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
     if agent is None:
+        if runs_in is None:
+            return await _drop_missing_agent_rule(
+                sessionmaker, tenant_id=tenant_id, agent_name=agent_name, subject=subject
+            )
         raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
     names = tuple(n for n in (agent_name, *agent_pin_names(agent.name, agent.metadata)) if n)
     target = tuple(dict.fromkeys(runs_in)) if runs_in is not None else None

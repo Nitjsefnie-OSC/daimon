@@ -35,7 +35,7 @@ from daimon.adapters.mcp.tools.agents import (
     register_agent_tools,
 )
 from daimon.core import agent_fork
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
 from daimon.core.agent_mcp_credentials import (
     resolve_agent_mcp_credentials,
@@ -51,7 +51,7 @@ from daimon.core.routing_facts import UNROUTED_LINE
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.specs import AgentSpec, SkillRef, SkillRepo
-from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.scoped_config_read import get_scope
@@ -1322,7 +1322,8 @@ async def test_fork_agent_impl_skips_guidance_for_isolated_source(
 async def test_archive_agent_impl_calls_ma_archive(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id = uuid.uuid4()
+    async with db_session_factory() as s, s.begin():
+        tenant_id = (await make_tenant(s)).id
     account_id = uuid.uuid4()
 
     archived: list[str] = []
@@ -1456,6 +1457,11 @@ async def test_archive_agent_clears_scope_rows_naming_the_agent(
     channel_scope = ChannelScopeRef(tenant_id=tenant.id, channel_id="C_ARCHIVED_DEFAULT")
     await set_fields(db_session, scope=tenant_scope, tenant_id=tenant.id, agent_name="doomed")
     await set_fields(db_session, scope=channel_scope, tenant_id=tenant.id, agent_name="doomed")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_rules={"doomed": AgentRule(runs_in=("C_OTHER",))}),
+    )
     await db_session.commit()
 
     client = build_fake_anthropic(_archive_router(tenant.id, account_id).dispatch)
@@ -1470,6 +1476,9 @@ async def test_archive_agent_clears_scope_rows_naming_the_agent(
         )
         assert await get_scope(s, scope=channel_scope) is None, (
             "the channel default naming the archived agent must be cleared too"
+        )
+        assert (await load_access_policy(s, tenant_id=tenant.id)).agent_rules == {}, (
+            "the archived agent's rule goes with it, or a later agent taking the name inherits it"
         )
 
 
@@ -3034,7 +3043,8 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Admin must be able to archive any stamped tenant agent regardless of which account owns it."""
-    tenant_id = uuid.uuid4()
+    async with db_session_factory() as s, s.begin():
+        tenant_id = (await make_tenant(s)).id
     caller_account_id = uuid.uuid4()
     other_account_id = uuid.uuid4()
     assert caller_account_id != other_account_id, (

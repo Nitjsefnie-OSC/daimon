@@ -27,7 +27,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY, MA_METAD
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_resource import archive_memory_store_for_agent
-from daimon.core.permissions import AgentRule, with_agent_rule
+from daimon.core.permissions import without_agent_rules
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -117,12 +117,6 @@ def archive_refusal(
     return None
 
 
-def _without_rules(policy: TenantAccessPolicy, names: set[str]) -> TenantAccessPolicy:
-    for name in names:
-        policy = with_agent_rule(policy, name, AgentRule())
-    return policy
-
-
 async def _find(
     client: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str, expected_ma_agent_id: str | None
 ) -> BetaManagedAgentsAgent:
@@ -173,7 +167,7 @@ async def archive_channel_copy(
         if refusal is not None:
             raise ChannelCopyArchiveRefused(refusal)
         await client.beta.agents.archive(agent.id)
-        updated = _without_rules(policy, names)
+        updated = without_agent_rules(policy, names)
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)
         for each in names:
