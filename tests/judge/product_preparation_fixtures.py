@@ -367,7 +367,15 @@ async def publish_preparation(
                 raise ProductContextPending("fresh preparation requires an empty owned thread")
         finally:
             await admin.close()
-    turn = anthropic_turn_tape(native.entry, native.scenario, source.turn, codec=native.codec)
+    # Main #824 (0733181847dc775bda444d51c2467016780b8d5d): the real turn
+    # performs one scoped post-turn usage catch-up; replay it explicitly.
+    turn = anthropic_turn_tape(
+        native.entry,
+        native.scenario,
+        source.turn,
+        codec=native.codec,
+        post_turn_usage_catchup=True,
+    )
     recipe = ProductTurnRecipe(
         scenario_id=plan.scenario.id,
         scenario_sha256=plan.scenario.sha256,

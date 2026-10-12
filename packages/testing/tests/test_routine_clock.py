@@ -289,7 +289,27 @@ async def test_failure_is_actual_scheduler_error_readback_not_success_delivery(
     assert (
         receipt.ticks[-1].readbacks[0].row.last_error == "RuntimeError: scheduled execution failed"
     )
-    assert not harness.gateway.events  # no error-copy post synthesized for NEW35
+    # Main #835 (8500fd7634b10dd5f454c934a3172918d8fb6375) posts the first
+    # consecutive failure once through the real adapter, without a result.
+    assert len(harness.gateway.events) == 1
+    event = harness.gateway.events[0]
+    assert event.operation == "send"
+    assert event.message.channel_id == "102"
+    assert event.message.observed_s == 60.0
+    assert event.message.content == (
+        "daimon's routine (* * * * *, UTC) failed, so there's no result this time.\n\n"
+        "Something went wrong while it was running.\n\n"
+        "It will try again at its next scheduled time."
+    )
+    posts = [post for tick in receipt.ticks for post in tick.posts]
+    assert posts == harness.gateway.events
+    after = receipt.ticks[-1].readbacks[0]
+    assert after.destination == "saved_destination"
+    assert after.row.last_result_tail is None
+    assert after.row.delivery_status == "delivered"
+    # Successful notice settlement clears the outbox note, not last_error.
+    assert after.row.delivery_note is None
+    assert after.row.delivered_at == _ANCHOR + timedelta(seconds=60)
 
 
 async def test_disabled_routine_never_fires(

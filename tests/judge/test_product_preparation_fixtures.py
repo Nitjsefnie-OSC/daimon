@@ -91,6 +91,35 @@ async def test_published_fresh_recipe_executes_actual_product_turn_without_prewa
     pin = await publish_preparation(context, plan, native, catalog_root=CATALOG)
     pin.verify(tmp_path)
     recipe = ProductTurnRecipe.model_validate_json((tmp_path / pin.path).read_bytes())
+    # Main #824 (0733181847dc775bda444d51c2467016780b8d5d): one exact
+    # post-turn GET; the global strict replay still rejects any extra call.
+    catchups = [
+        r
+        for r in recipe.tape.replies
+        if r.method == "GET" and r.path == f"/v1/sessions/{recipe.session_id}/events"
+    ]
+    require(len(catchups) == 1, "usage catch-up missing or broadened")
+    require(
+        catchups[0].query
+        == (
+            ("beta", "true"),
+            ("limit", "100"),
+            ("order", "asc"),
+            ("types[]", "span.model_request_end"),
+        )
+        and catchups[0].request_json is None,
+        "usage catch-up request changed",
+    )
+    require(
+        catchups[0].response_json
+        == {
+            "data": [
+                e for e in native.turn(1).turn.events if e["type"] == "span.model_request_end"
+            ],
+            "next_page": None,
+        },
+        "usage catch-up lost recorded model-request spans",
+    )
     # Authoring must not leave a prepared mapping hidden behind the replay.
     async with binding.sessions() as db:
         row = await get_live_thread_session(
