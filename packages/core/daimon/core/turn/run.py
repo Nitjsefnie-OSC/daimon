@@ -26,7 +26,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.config import load_turn_settings
-from daimon.core.confirmation import ConfirmationHook
+from daimon.core.confirmation import ConfirmationHook, backend_switch_tools_for_turn
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
@@ -917,6 +917,7 @@ async def run_prepared_turn_impl(
         attended=attended if attended is not None else origin != "routine",
         trusted_servers=trusted_servers_for(deps.public_url),
         asks_before_publishing=prepared.admission.asks_before_publishing,
+        confirmed_tools=backend_switch_tools_for_turn(deps),
     )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the

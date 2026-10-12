@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Add opt-in admin confirmation cards for chat-requested agent backend changes, with current compatibility and cost previews, permission rechecks and stale-preview refusal.
+
 
 - Keep Discord conformance tests on the adapter's shared database fixture lifetime so switching modules does not trigger premature schema teardown.
 - Build turn-test dependencies from the real TurnDeps bundle and validate replay behavior against recorded payloads instead of freezing implementation source bytes.

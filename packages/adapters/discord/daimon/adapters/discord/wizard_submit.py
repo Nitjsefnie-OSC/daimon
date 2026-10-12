@@ -769,7 +769,12 @@ async def run_wizard_submit_turn_observed(
                 recovery_lifecycle=_recovery_lifecycle,
                 render_interval_s=2.0,
                 deadline=turn_deadline_at,
-                confirm_write=discord_confirmation_hook(channel),
+                confirm_write=discord_confirmation_hook(
+                    channel,
+                    runtime=bot.runtime,
+                    tenant_id=row.tenant_id,
+                    account_id=admission.account_id,
+                ),
                 # A dead-session recovery moves this turn's marker to the replacement.
                 active_turn_message_id=marker_ids.get(prepared.mapping_id)
                 if prepared.mapping_id is not None
