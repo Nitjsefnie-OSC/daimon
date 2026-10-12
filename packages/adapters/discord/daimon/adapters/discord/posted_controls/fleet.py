@@ -7,11 +7,14 @@ authority, and an operation acknowledgement never certifies native completion.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from daimon.adapters.discord.posted_controls.view import build_card_view
+from daimon.adapters.discord.views import finish_control
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.fleet import TERMINAL, FleetRun, FleetWorker
 from daimon.core.fleet_orchestration import Control, FleetOrchestrator, FleetRefused
@@ -20,6 +23,9 @@ from daimon.core.neutral_resources import WorkerPermissions, WorkerSpecRefused
 from daimon.core.posted_controls import CardButton, CardState, PostedCard
 
 import discord
+
+if TYPE_CHECKING:
+    from daimon.adapters.discord.bot import DaimonBot
 
 type ParentLoader = Callable[
     [discord.Interaction | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy]]
@@ -40,8 +46,6 @@ def build_fleet_view(
     run: FleetRun,
     workers: Sequence[FleetWorker],
     *,
-    allowed_user_id: int,
-    control: Callable[[discord.Interaction, FleetWorker, Control], Awaitable[bool]],
     collected: bool = False,
 ) -> discord.ui.LayoutView:
     """Render only canonical scoped rows; no specs, excerpts or native handles."""
@@ -60,7 +64,6 @@ def build_fleet_view(
         else "received"
     )
     buttons: list[CardButton] = []
-    callbacks: dict[str, Callable[[discord.Interaction], Awaitable[bool]]] = {}
     facts: list[str] = []
     for worker in sorted(workers, key=lambda row: row.ordinal):
         facts.append(
@@ -72,21 +75,13 @@ def build_fleet_view(
             continue
         actions: tuple[tuple[Control, str], ...] = (("kill", "Stop"), ("resume", "Resume"))
         for action, label in actions:
-            custom_id = f"fleet:{worker.id}:{worker.version}:{action}"
+            custom_id = f"fleet:{run.id.hex}:{worker.id.hex}:{worker.version}:{action}"
             if len(custom_id) > 100:
                 raise FleetRefused("invalid_control")
-
-            async def callback(
-                interaction: discord.Interaction,
-                row: FleetWorker = worker,
-                choice: Control = action,
-            ) -> bool:
-                return await control(interaction, row, choice)
 
             buttons.append(
                 CardButton(label=f"{label} {worker.ordinal}", style="primary", custom_id=custom_id)
             )
-            callbacks[custom_id] = callback
     card = PostedCard(
         kind="fleet",
         state=state,
@@ -98,7 +93,84 @@ def build_fleet_view(
             f"Deadline <t:{int(run.deadline_at.timestamp())}:f>"
         ),
     )
-    return build_card_view(card, allowed_user_id=allowed_user_id, controls=callbacks)
+    return build_card_view(card, button_factory=FleetControl.from_button)
+
+
+class FleetControl(
+    discord.ui.DynamicItem[discord.ui.Button[discord.ui.LayoutView]],
+    template=r"fleet:(?P<run>[0-9a-f]{32}):(?P<worker>[0-9a-f]{32}):(?P<version>[0-9]+):(?P<action>kill|resume)",
+):
+    """The same durable, host-reconstructed control for live and restarted clients."""
+
+    def __init__(self, button: discord.ui.Button[discord.ui.LayoutView]) -> None:
+        super().__init__(button)
+        match = self.template.fullmatch(button.custom_id or "")
+        if match is None:
+            raise FleetRefused("invalid_control")
+        self.run_id = uuid.UUID(hex=match["run"])
+        self.worker_id = uuid.UUID(hex=match["worker"])
+        self.expected_version = int(match["version"])
+        self.action: Control = cast(Control, match["action"])
+
+    @classmethod
+    def from_button(cls, button: CardButton) -> Self:
+        return cls(
+            discord.ui.Button(
+                style=discord.ButtonStyle.primary, label=button.label, custom_id=button.custom_id
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+        /,
+    ) -> Self:
+        return cls(
+            discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label=getattr(item, "label", None),
+                custom_id=match[0],
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        bot = cast("DaimonBot", interaction.client)
+        channel = interaction.channel
+        if not isinstance(channel, discord.abc.Messageable) or interaction.message is None:
+            await interaction.response.send_message(
+                "This fleet control is unavailable.", ephemeral=True
+            )
+            return
+
+        async def edit(
+            message: discord.Message,
+            *,
+            view: discord.ui.LayoutView,
+            allowed_mentions: discord.AllowedMentions,
+        ) -> discord.Message:
+            return await message.edit(view=view, allowed_mentions=allowed_mentions)
+
+        card = bot.fleet_card_for(
+            thread=channel,
+            requester_id=interaction.user.id,
+            send=lambda: channel.send,
+            edit=edit,
+            run_id=self.run_id,
+        )
+        if card is None or card.run_id != self.run_id:
+            await interaction.response.send_message(
+                "This fleet control is unavailable.", ephemeral=True
+            )
+            return
+        await card.control(
+            interaction,
+            worker_id=self.worker_id,
+            action=self.action,
+            expected_version=self.expected_version,
+        )
 
 
 class DiscordFleetCard:
@@ -110,7 +182,6 @@ class DiscordFleetCard:
         run_id: uuid.UUID,
         service: FleetOrchestrator,
         load_parent: ParentLoader,
-        allowed_user_id: int,
         send: Send,
         edit: Edit,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -118,7 +189,6 @@ class DiscordFleetCard:
         self._run_id = run_id
         self._service = service
         self._load_parent = load_parent
-        self._allowed_user_id = allowed_user_id
         self._send = send
         self._edit = edit
         self._clock = clock
@@ -126,12 +196,18 @@ class DiscordFleetCard:
         self._view: discord.ui.LayoutView | None = None
         self._lock = asyncio.Lock()
 
+    @property
+    def run_id(self) -> uuid.UUID:
+        """A lookup identity; the shared owner still proves root/run authority."""
+        return self._run_id
+
     async def _snapshot(
         self, interaction: discord.Interaction | None
     ) -> tuple[WorkerPermissions, TenantAccessPolicy, FleetRun, tuple[FleetWorker, ...]]:
         parent, policy = await self._load_parent(interaction)
         if interaction is not None and (
-            interaction.guild_id is None
+            parent.subject.platform_user_id != str(interaction.user.id)
+            or interaction.guild_id is None
             or parent.fleet.scope.tenant_id
             != str(derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id)))
             or parent.fleet.root.channel.platform != "discord"
@@ -147,8 +223,6 @@ class DiscordFleetCard:
         return build_fleet_view(
             run,
             workers,
-            allowed_user_id=self._allowed_user_id,
-            control=self._control,
             collected=collected,
         )
 
@@ -169,8 +243,13 @@ class DiscordFleetCard:
                 self._view.stop()
             self._view = view
 
-    async def _control(
-        self, interaction: discord.Interaction, worker: FleetWorker, action: Control
+    async def control(
+        self,
+        interaction: discord.Interaction,
+        *,
+        worker_id: uuid.UUID,
+        action: Control,
+        expected_version: int,
     ) -> bool:
         async with self._lock:
             try:
@@ -179,10 +258,10 @@ class DiscordFleetCard:
                     parent,
                     policy,
                     run_id=self._run_id,
-                    worker_id=worker.id,
+                    worker_id=worker_id,
                     action=action,
-                    expected_version=worker.version,
-                    operation_key=f"discord:fleet:{self._run_id}:{worker.id}:{worker.version}:{action}",
+                    expected_version=expected_version,
+                    operation_key=f"discord:fleet:{self._run_id}:{worker_id}:{expected_version}:{action}",
                     now=self._clock(),
                 )
                 if reply.get("accepted") is not True:
@@ -192,8 +271,8 @@ class DiscordFleetCard:
                     return False
                 run, workers = await self._service.read_snapshot(parent, policy, self._run_id)
                 view = self._render(run, workers)
-                await interaction.response.edit_message(
-                    view=view, allowed_mentions=discord.AllowedMentions.none()
+                await finish_control(
+                    interaction, view=view, allowed_mentions=discord.AllowedMentions.none()
                 )
                 self._view = view
                 return True
@@ -222,10 +301,3 @@ class DiscordFleetCard:
                     self._view.stop()
                 self._view = view
             return ready
-
-
-def fleet_card(
-    *, enabled: bool = False, factory: Callable[[], DiscordFleetCard | None] | None = None
-) -> DiscordFleetCard | None:
-    """Default-off host injection; missing dependencies never create a card."""
-    return factory() if enabled is True and factory is not None else None

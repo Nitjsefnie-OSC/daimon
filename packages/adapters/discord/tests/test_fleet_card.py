@@ -1,5 +1,6 @@
 """Actual Discord controls over the shared resolver/operations and offline ports."""
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -12,11 +13,11 @@ import pytest
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.posted_controls.fleet import (
     DiscordFleetCard,
+    FleetControl,
     build_fleet_view,
-    fleet_card,
 )
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import AgentRef, FleetFacts, Subject
+from daimon.core.authz import AgentRef, FleetFacts, Place, Subject
 from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer, result_digest
 from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -24,7 +25,7 @@ from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, NetworkPolicy, ToolSpec
 from mux.profiles import backend_selection, get_profile
 
 NOW = datetime(2026, 10, 12, 19, tzinfo=UTC)
@@ -55,6 +56,7 @@ def parent(provider="anthropic"):
             account_id=ACCOUNT,
             origin_id=UUID(int=43),
             run_id=RUN,
+            place=Place(channel_id="70", parent_channel_id="50"),
             enabled=True,
             active=True,
         ),
@@ -67,7 +69,7 @@ def parent(provider="anthropic"):
         limits=WorkerLimits(
             budget_usd=Decimal("1"), deadline=NOW + timedelta(minutes=10), max_turns=4
         ),
-        environment=EnvironmentSpec(name="root"),
+        environment=EnvironmentSpec(name="root", network=NetworkPolicy(mode="none")),
         agent_id=UUID(int=44),
     )
 
@@ -123,10 +125,13 @@ def worker(provider="anthropic", ordinal=1, **updates):
     return replace(row, **updates)
 
 
-def interaction(user_id=123, guild=60, thread=70):
+def interaction(user_id=123, guild=60, thread=70, card=None):
     value = MagicMock(spec=discord.Interaction)
     value.user.id = user_id
     value.guild_id, value.channel_id = guild, thread
+    value.channel = MagicMock(spec=discord.Thread)
+    value.channel.send = AsyncMock()
+    value.client.fleet_card_for = MagicMock(return_value=card)
     value.response.send_message = AsyncMock()
     value.response.edit_message = AsyncMock()
     value.response.is_done.return_value = False
@@ -140,7 +145,7 @@ def interaction(user_id=123, guild=60, thread=70):
 
 
 def buttons(view):
-    return [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
+    return [item for item in view.walk_children() if isinstance(item, FleetControl)]
 
 
 def setup(provider="anthropic"):
@@ -166,7 +171,6 @@ def setup(provider="anthropic"):
         run_id=RUN,
         service=FleetOrchestrator(owner),
         load_parent=loader,
-        allowed_user_id=123,
         send=send,
         edit=edit,
         clock=lambda: NOW,
@@ -181,15 +185,15 @@ async def test_sdk_button_uses_real_shared_control_and_current_host_loader(provi
     await card.refresh()
     view = send.call_args.kwargs["view"]
     label = "Stop 1" if action == "kill" else "Resume 1"
-    click = interaction()
-    await next(item for item in buttons(view) if item.label == label).callback(click)
+    click = interaction(card=card)
+    await next(item for item in buttons(view) if item.item.label == label).callback(click)
     owner.control.assert_awaited_once()
     assert owner.control.call_args.kwargs["action"] == action
     assert owner.control.call_args.kwargs["expected_version"] == 3
     assert owner.control.call_args.args[0] is loader.return_value[0]
     assert loader.await_args_list[-1].args == (click,)
     click.response.edit_message.assert_awaited_once()
-    assert view.is_finished()
+    assert str(RUN.hex) in buttons(view)[0].item.custom_id
 
 
 @pytest.mark.parametrize(
@@ -203,6 +207,7 @@ async def test_real_core_refusal_before_any_control_write(mutation):
         456 if mutation == "wrong_user" else 123,
         guild=61 if mutation == "wrong_guild" else 60,
         thread=71 if mutation == "wrong_thread" else 70,
+        card=card,
     )
     if mutation in ("worker_origin", "inactive"):
         current, policy = loader.return_value
@@ -221,7 +226,6 @@ async def test_real_core_refusal_before_any_control_write(mutation):
     owner.control.assert_not_awaited()
     click.response.edit_message.assert_not_awaited()
     click.response.send_message.assert_awaited_once()
-    assert not view.is_finished()
 
 
 async def test_waiting_owner_ack_keeps_controls_active():
@@ -236,11 +240,122 @@ async def test_waiting_owner_ack_keeps_controls_active():
         return result
 
     owner.control.side_effect = waiting
-    click = interaction()
+    click = interaction(card=card)
     await buttons(view)[0].callback(click)
-    assert not view.is_finished()
-    assert not any(button.disabled for button in buttons(view))
+    assert not any(button.item.disabled for button in buttons(view))
     click.response.edit_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(admin):
+    card, owner, loader, send, _ = setup()
+    await card.refresh()
+    current, policy = loader.return_value
+    loader.return_value = (
+        replace(current, subject=Subject(platform_user_id="456", is_admin=admin)),
+        policy,
+    )
+    await buttons(send.call_args.kwargs["view"])[0].callback(interaction(456, card=card))
+    assert owner.control.await_count == (1 if admin else 0)
+
+
+async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_item(
+    db_session_factory, monkeypatch
+):
+    from .harness import make_bot
+    from .test_bot import _make_runtime
+
+    original, owner, loader, send, edit = setup()
+    await original.refresh()
+    view = send.call_args.kwargs["view"]
+    custom_id = buttons(view)[0].item.custom_id
+    components = view.to_components()
+    del original, view
+
+    def factory(thread, requester_id, _send, _edit, *, run_id=None):
+        assert run_id == RUN
+        return DiscordFleetCard(
+            run_id=run_id,
+            service=FleetOrchestrator(owner),
+            load_parent=loader,
+            send=send,
+            edit=edit,
+            clock=lambda: NOW,
+        )
+
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.fleet.enabled = True
+    bot = make_bot(replace(runtime, fleet_card_factory=factory))
+    bot.start_orphan_recovery = MagicMock()
+    await bot.setup_hook()
+    click = interaction()
+    click.client = bot
+    click.channel.id = 70
+    click.message = discord.Message(
+        state=bot._connection,
+        channel=click.channel,
+        data={
+            "id": "900",
+            "type": 0,
+            "content": "",
+            "author": {"id": "999", "username": "fixture", "discriminator": "0", "avatar": None},
+            "flags": 32768,
+            "timestamp": "2026-10-12T19:00:00+00:00",
+            "edited_timestamp": None,
+            "pinned": False,
+            "mention_everyone": False,
+            "tts": False,
+            "attachments": [],
+            "embeds": [],
+            "mentions": [],
+            "mention_roles": [],
+            "components": components,
+        },
+    )
+    click.data = {"custom_id": custom_id, "component_type": 2}
+    store = bot._connection._view_store
+    tasks = []
+    original_add = store.add_task
+
+    def retain(task):
+        tasks.append(task)
+        original_add(task)
+
+    monkeypatch.setattr(store, "add_task", retain)
+    store.dispatch_dynamic_items(2, custom_id, click)
+    assert len(tasks) == 1, "setup_hook must register the durable handler"
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=3)
+    owner.control.assert_awaited_once()
+    assert owner.control.call_args.args[1].id == RUN
+    assert owner.control.call_args.kwargs["expected_version"] == 3
+    assert (
+        owner.control.call_args.kwargs["operation_key"]
+        == f"discord:fleet:{RUN}:{worker().id}:3:kill"
+    )
+    click.response.edit_message.assert_awaited_once()
+    assert loader.await_args_list[-1].args == (click,)
+
+
+async def test_the_default_maximum_fleet_keeps_every_worker_and_control():
+    rows = tuple(worker(ordinal=index) for index in range(1, 9))
+    view = build_fleet_view(run(), rows)
+    assert len(buttons(view)) == 16
+    assert view.total_children_count <= 40
+    assert view.content_length() <= 4000
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_setup_registers_fleet_control_only_when_enabled(db_session_factory, enabled):
+    from .harness import make_bot
+    from .test_bot import _make_runtime
+
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.fleet.enabled = enabled
+    bot = make_bot(runtime)
+    bot.start_orphan_recovery = MagicMock()
+    await bot.setup_hook()
+    registry = bot._connection._view_store._dynamic_items
+    assert (registry.get(FleetControl.__discord_ui_compiled_template__) is FleetControl) is enabled
 
 
 async def test_all_three_backends_render_without_spec_or_result_material():
@@ -248,7 +363,7 @@ async def test_all_three_backends_render_without_spec_or_result_material():
         worker(provider, i + 1, spec={"credential": "DO_NOT_RENDER_SECRET"})
         for i, provider in enumerate(("anthropic", "openai", "gemini"))
     )
-    view = build_fleet_view(run(), rows, allowed_user_id=123, control=AsyncMock())
+    view = build_fleet_view(run(), rows)
     text = "\n".join(
         item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
     )
@@ -301,13 +416,6 @@ async def test_terminal_failure_sealed_answers_obey_fleet_disclosure_policy(work
     owner.read_result.assert_not_awaited()
     owner.wait.assert_not_awaited()
     assert not lifecycle.was_answered
-
-
-def test_flag_off_never_discovers_or_constructs_service():
-    factory = MagicMock(side_effect=AssertionError("must stay cold"))
-    assert fleet_card(factory=factory) is None
-    assert fleet_card(enabled=True) is None
-    factory.assert_not_called()
 
 
 @pytest.mark.parametrize("verdict", ["approved", "refused"])
@@ -379,7 +487,7 @@ def test_real_bot_flag_off_does_not_construct_a_sender_or_fleet_service():
     bot.runtime.settings.fleet.enabled = False
     sender = MagicMock(side_effect=AssertionError("must stay cold"))
     assert (
-        DaimonBot._fleet_card_for(
+        DaimonBot.fleet_card_for(
             bot, thread=MagicMock(), requester_id=123, send=sender, edit=AsyncMock()
         )
         is None

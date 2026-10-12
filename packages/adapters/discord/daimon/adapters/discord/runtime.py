@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from secrets import randbits
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
+from uuid import UUID
 
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
@@ -47,9 +48,18 @@ if TYPE_CHECKING:
 
     import discord
 
-type FleetCardFactory = Callable[
-    ["discord.abc.Messageable", int, "SendFn", "EditFn"], "DiscordFleetCard | None"
-]
+
+class FleetCardFactory(Protocol):
+    def __call__(
+        self,
+        thread: discord.abc.Messageable,
+        requester_id: int,
+        send: SendFn,
+        edit: EditFn,
+        *,
+        run_id: UUID | None = None,
+    ) -> DiscordFleetCard | None: ...
+
 
 log = structlog.get_logger()
 

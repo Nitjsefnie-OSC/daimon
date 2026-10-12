@@ -19,8 +19,8 @@ the one that dispatches their click (this bot) -- there is no live in-memory
 View instance to attach a non-persistent handler to. `FeedbackButton` is
 persistent for a related but distinct reason: it is delivered into a direct
 message and must still dispatch after this bot process restarts, so there is
-again no live View instance to rely on. Every other interactive component in
-this adapter stays non-persistent.
+again no live View instance to rely on. Opt-in fleet controls likewise use the
+registered `posted_controls.fleet.FleetControl` item to recover after restart.
 """
 
 from __future__ import annotations
@@ -36,27 +36,18 @@ import discord
 log = structlog.get_logger()
 
 
-async def check_control_invoker(
-    interaction: discord.Interaction, *, allowed_user_id: int, handled: bool
-) -> bool:
-    """Apply the same invoker and single-handler gate to classic and V2 cards."""
-    if interaction.user.id != allowed_user_id:
-        await interaction.response.send_message(
-            "Only the command invoker can use these buttons.", ephemeral=True
-        )
-        return False
-    if handled:
-        await interaction.response.send_message("Already handled.", ephemeral=True)
-        return False
-    return True
-
-
 async def finish_control(
-    interaction: discord.Interaction, *, view: discord.ui.View | discord.ui.LayoutView
+    interaction: discord.Interaction,
+    *,
+    view: discord.ui.View | discord.ui.LayoutView,
+    allowed_mentions: discord.AllowedMentions | None = None,
 ) -> None:
     """A completed Stop or Resume uses the existing missing-card boundary."""
     try:
-        await interaction.response.edit_message(view=view)
+        if allowed_mentions is None:
+            await interaction.response.edit_message(view=view)
+        else:
+            await interaction.response.edit_message(view=view, allowed_mentions=allowed_mentions)
     except discord.HTTPException as err:
         if err.code != 10008:
             raise
@@ -73,9 +64,19 @@ class GuardedView(discord.ui.View):
         self.message: discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # discord.py base uses broader type
-        return await check_control_invoker(
-            interaction, allowed_user_id=self.allowed_user_id, handled=self._handled
-        )
+        if interaction.user.id != self.allowed_user_id:
+            await interaction.response.send_message(
+                "Only the command invoker can use these buttons.",
+                ephemeral=True,
+            )
+            return False
+        if self._handled:
+            await interaction.response.send_message(
+                "Already handled.",
+                ephemeral=True,
+            )
+            return False
+        return True
 
     def _finalize(self) -> None:
         self._handled = True

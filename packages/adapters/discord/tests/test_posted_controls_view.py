@@ -9,10 +9,8 @@ in Discord's own spellings.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
@@ -72,127 +70,6 @@ def _action_rows(view: discord.ui.LayoutView) -> list[discord.ui.ActionRow[Any]]
 
 def _buttons(view: discord.ui.LayoutView) -> list[discord.ui.Button[Any]]:
     return [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
-
-
-def _interaction(user_id: int) -> MagicMock:
-    interaction = MagicMock(spec=discord.Interaction)
-    interaction.user.id = user_id
-    interaction.response.send_message = AsyncMock()
-    interaction.response.edit_message = AsyncMock()
-    interaction.response.is_done.return_value = False
-    return interaction
-
-
-async def test_bound_card_rejects_foreign_invoker_before_owner_write() -> None:
-    card = _requested_card()
-    write = AsyncMock(return_value=True)
-    view = build_card_view(card, allowed_user_id=123, controls={card.buttons[0].custom_id: write})
-    interaction = _interaction(456)
-    await _buttons(view)[0].callback(interaction)
-    write.assert_not_awaited()
-    interaction.response.send_message.assert_awaited_once_with(
-        "Only the command invoker can use these buttons.", ephemeral=True
-    )
-    assert not _buttons(view)[0].disabled
-
-
-async def test_bound_card_serializes_two_preaccepted_clicks() -> None:
-    card = _requested_card()
-    started, release = asyncio.Event(), asyncio.Event()
-    writes: list[int] = []
-
-    async def write(interaction: discord.Interaction) -> bool:
-        writes.append(interaction.user.id)
-        started.set()
-        await release.wait()
-        return True
-
-    view = build_card_view(card, allowed_user_id=123, controls={card.buttons[0].custom_id: write})
-    first, second = _interaction(123), _interaction(123)
-    assert await view.interaction_check(first)
-    assert await view.interaction_check(second)
-    task = asyncio.create_task(_buttons(view)[0].callback(first))
-    try:
-        async with asyncio.timeout(5):
-            await started.wait()
-            await _buttons(view)[0].callback(second)
-            second.response.send_message.assert_awaited_once_with(
-                "Already handled.", ephemeral=True
-            )
-            release.set()
-            await task
-    finally:
-        release.set()
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-    assert writes == [123]
-    first.response.edit_message.assert_awaited_once_with(view=view)
-    assert all(button.disabled for button in _buttons(view))
-    assert view.is_finished()
-
-
-@pytest.mark.parametrize("refusal", [False, None, {"status": "waiting"}, "approved", 1])
-async def test_owner_refusal_keeps_controls_available_for_fresh_authorization(
-    refusal: object,
-) -> None:
-    card = _requested_card()
-    write = AsyncMock(side_effect=[refusal, True])
-    view = build_card_view(card, allowed_user_id=123, controls={card.buttons[0].custom_id: write})
-    first, second = _interaction(123), _interaction(123)
-    await _buttons(view)[0].callback(first)
-    assert not view.is_finished()
-    assert not _buttons(view)[0].disabled
-    first.response.edit_message.assert_not_awaited()
-    await _buttons(view)[0].callback(second)
-    assert write.await_count == 2
-    assert view.is_finished()
-
-
-@pytest.mark.parametrize("error", [RuntimeError("write unavailable"), asyncio.CancelledError()])
-async def test_failed_owner_write_does_not_strand_the_control(error: BaseException) -> None:
-    card = _requested_card()
-    write = AsyncMock(side_effect=error)
-    view = build_card_view(card, allowed_user_id=123, controls={card.buttons[0].custom_id: write})
-    with pytest.raises(type(error)):
-        await _buttons(view)[0].callback(_interaction(123))
-    assert await view.interaction_check(_interaction(123))
-    assert not view.is_finished()
-    assert not _buttons(view)[0].disabled
-
-
-def test_bound_controls_require_invoker_and_exact_button_coverage() -> None:
-    card = _requested_card()
-    for kwargs in (
-        {"allowed_user_id": 123},
-        {"controls": {}},
-        {"allowed_user_id": 123, "controls": {}},
-        {"allowed_user_id": 123, "controls": {"another-card": AsyncMock()}},
-    ):
-        with pytest.raises(ValueError):
-            build_card_view(card, **kwargs)
-
-
-def test_many_worker_controls_fit_discord_rows_without_dropping_any() -> None:
-    original = _requested_card()
-    card = original.model_copy(
-        update={
-            "buttons": tuple(
-                CardButton(label=f"Stop {index}", style="primary", custom_id=f"worker:{index}")
-                for index in range(8)
-            )
-        }
-    )
-    with pytest.raises(ValueError):
-        build_card_view(card)
-    view = build_card_view(
-        card,
-        allowed_user_id=123,
-        controls={f"worker:{index}": AsyncMock(return_value=True) for index in range(8)},
-    )
-    assert [len(row.children) for row in _action_rows(view)] == [5, 3]
-    assert [button.custom_id for button in _buttons(view)] == [
-        f"worker:{index}" for index in range(8)
-    ]
 
 
 def test_requested_card_renders_headline_facts_button_and_footer_in_order() -> None:

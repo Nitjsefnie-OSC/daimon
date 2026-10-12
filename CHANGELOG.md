@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add opt-in fleet orchestration tools over the shared host service, with current root authorization, immutable clone derivation, original-limit resume checks and a journal-backed cross-review barrier declared in each primary's result contract. Reviewers use ordinary worker capacity. Missing owner bindings refuse; ordinary agent-chat restrictions are unchanged.
 - Show opted-in worker fleets on one Discord status card with scoped Stop and Resume controls, and post the orchestrator's final answer only after result review succeeds.
-- Show opted-in worker fleets on one Discord status card with scoped Stop and Resume controls, and post the orchestrator's final answer only after result review succeeds; intermediate sealed answers stay private even when the turn fails.
+- Show opted-in worker fleets on one Discord status card with persistent, scoped Stop and Resume controls using the current actor's permissions, and post the orchestrator's final answer only after result review succeeds; intermediate sealed answers stay private even when the turn fails.
 
 - Preserve native required-action termination when the backend cannot accept tool-confirmation events.
 - Refuse malformed chat approval requests without failing sibling decisions, and derive confirmation gates for registered tools from the shared safety table.
