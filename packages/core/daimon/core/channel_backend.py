@@ -23,7 +23,7 @@ import json
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -51,7 +51,14 @@ from mux.contracts.ids import ChannelRef, Provider
 from mux.contracts.profile import SUPPORTED, Capability
 from mux.contracts.resources import AgentSpec
 from mux.errors import InvalidConfig, UnsupportedCapability
-from mux.profiles import backend_selection, get_profile, shared_threads_available
+from mux.profiles import (
+    RUNNABLE_PROFILES,
+    backend_selection,
+    get_profile,
+    runnable_selection,
+    shared_threads_available,
+)
+from mux.state.store import ConfigRevisionConflict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -62,12 +69,6 @@ class BackendUnsupported(DaimonError):
 
     Admission turns it into `AdmissionDenied(reason="backend_unsupported")`.
     """
-
-
-RUNNABLE_PROFILES: frozenset[str] = frozenset(
-    {"anthropic.managed_agents", "openai.persistent_workspace", "gemini.inline_reuse"}
-)
-"""Profiles this release's turn path can run. Widened as drivers are wired in."""
 
 
 def channel_ref(tenant_id: uuid.UUID, platform: str, channel_id: str) -> ChannelRef:
@@ -100,7 +101,11 @@ async def set_channel_backend(
     resolved = resolve_default(config)
     get_profile(resolved.profile)
     latest = await current_backend(session, channel)
-    if latest is not None and latest.digest == resolved.content_digest():
+    if (
+        latest is not None
+        and latest.digest == resolved.content_digest()
+        and await mux_state.config_origin(session, channel, latest.local) == "channel"
+    ):
         return latest
     revision = ConfigRevision.create(
         channel, await mux_state.next_config_local(session, channel), resolved
@@ -109,8 +114,18 @@ async def set_channel_backend(
 
 
 async def clear_channel_backend(session: AsyncSession, channel: ChannelRef) -> ConfigRevision:
-    """Return the channel to the default backend, as a new revision."""
-    return await set_channel_backend(session, channel, BackendConfig())
+    """Clear the override while retaining an immutable default revision for thread pins."""
+    await policy_store.lock_policy_writes_exclusive(session, tenant_id=uuid.UUID(channel.tenant_id))
+    latest = await current_backend(session, channel)
+    if (
+        latest is not None
+        and await mux_state.config_origin(session, channel, latest.local) == "channel_clear"
+    ):
+        return latest
+    revision = ConfigRevision.create(
+        channel, await mux_state.next_config_local(session, channel), resolve_default(None)
+    )
+    return await mux_state.put_config_revision(session, revision, origin="channel_clear")
 
 
 def check_backend(
@@ -135,23 +150,7 @@ def check_backend(
             error=str(err),
         )
         raise BackendUnsupported(str(err)) from err
-    runnable = (
-        revision.profile in RUNNABLE_PROFILES
-        and (
-            revision.model is None
-            if revision.backend == "anthropic"
-            else bool(revision.model and revision.model.strip())
-        )
-        and revision.thread_mode in ("per_caller", "shared")
-        and (
-            revision.backend != "openai"
-            or (revision.model == "gpt-6-luna" and revision.thread_mode == "per_caller")
-        )
-        and (
-            revision.backend != "gemini"
-            or (revision.model == "gemini-3.8-flash" and revision.thread_mode == "per_caller")
-        )
-    )
+    runnable = revision.profile in RUNNABLE_PROFILES and runnable_selection(revision)
     if not runnable:
         log.info(
             "turn.backend_unsupported",
@@ -501,7 +500,7 @@ class AgentBackendService:
             return await self._policy(session, tenant_id)
 
     async def resolve(
-        self, channel: ChannelRef, agent_name: str | None, *, retained_revision: int | None = None
+        self, channel: ChannelRef, agent: BackendAgent, *, retained_revision: int | None = None
     ) -> BackendResolution:
         if not self.enabled:
             return BackendResolution("default", resolve_default(None))
@@ -509,7 +508,7 @@ class AgentBackendService:
             revision, _shared, source = await resolve_turn_backend(
                 session,
                 channel,
-                agent_name,
+                agent,
                 enabled=self.enabled,
                 retained_revision=retained_revision,
             )
@@ -536,7 +535,7 @@ def make_backend_service(
 async def resolve_turn_backend(
     session: AsyncSession,
     channel: ChannelRef,
-    agent: str | BackendAgent | None,
+    agent: BackendAgent,
     *,
     enabled: bool,
     retained_revision: int | None = None,
@@ -547,24 +546,23 @@ async def resolve_turn_backend(
     if retained_revision is not None:
         retained = await mux_state.get_config_revision(session, channel, retained_revision)
         origin = await mux_state.config_origin(session, channel, retained_revision)
-        if retained is None or origin not in ("channel", "agent"):
+        if retained is None or origin not in ("channel", "channel_clear", "agent"):
             raise AgentBackendRefused("stale_revision")
-        return retained, retained.thread_mode == "shared", origin
+        source: Literal["channel", "agent"] = "agent" if origin == "agent" else "channel"
+        return retained, retained.thread_mode == "shared", source
+    if not isinstance(cast(object, agent), BackendAgent):
+        raise AgentBackendRefused("agent_identity_required")
     tenant_id = uuid.UUID(channel.tenant_id)
-    if isinstance(agent, BackendAgent) and agent.tenant_id != tenant_id:
+    if agent.tenant_id != tenant_id:
         raise AgentBackendRefused("tenant_mismatch")
-    await policy_store.lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+    await policy_store.lock_policy_writes_shared(session, tenant_id=tenant_id)
     override, ever_shared = await current_backend_and_sharing(session, channel)
-    if override is not None:
-        return override, ever_shared, "channel"
-    name = agent.name if isinstance(agent, BackendAgent) else agent
-    setting = await agent_backends.current_for_name(session, tenant_id, name) if name else None
     if (
-        isinstance(agent, BackendAgent)
-        and setting is not None
-        and setting.agent_id != agent.agent_id
+        override is not None
+        and await mux_state.config_origin(session, channel, override.local) != "channel_clear"
     ):
-        raise AgentBackendRefused("stale_revision")
+        return override, ever_shared, "channel"
+    setting = await agent_backends.current(session, tenant_id, agent.agent_id)
     if setting is None or setting.backend is None:
         return None, ever_shared, "default"
     policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)
@@ -572,15 +570,21 @@ async def resolve_turn_backend(
         raise AgentBackendRefused("backend_not_allowed")
     selection = backend_selection(setting.backend)
     check_backend(ConfigRevision.create(channel, 1, selection))
-    effective = await mux_state.effective_revision(
-        session, channel, selection.content_digest(), "agent"
-    )
-    if effective is None:
+    for _ in range(3):
+        effective = await mux_state.effective_revision(
+            session, channel, selection.content_digest(), "agent"
+        )
+        if effective is not None:
+            return effective, ever_shared, "agent"
         effective = ConfigRevision.create(
             channel, await mux_state.next_config_local(session, channel), selection
         )
-        await mux_state.put_config_revision(session, effective, origin="agent")
-    return effective, ever_shared, "agent"
+        try:
+            await mux_state.put_config_revision(session, effective, origin="agent")
+        except ConfigRevisionConflict:
+            continue
+        return effective, ever_shared, "agent"
+    raise AgentBackendRefused("revision_busy")
 
 
 async def load_backend_agent(
@@ -694,7 +698,9 @@ def _native_agent_requirements(spec: AgentSpec) -> tuple[Capability, ...]:
 
 
 async def current_agent_backend(
-    session: AsyncSession, tenant_id: uuid.UUID, agent_name: str
+    session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> AgentBackendRevision | None:
-    """Read a host-authorized canonical agent name without new selection or native I/O."""
-    return await agent_backends.current_for_name(session, tenant_id, agent_name)
+    """Read the current preference for a host-resolved scoped resource identity."""
+    if not isinstance(cast(object, agent_id), uuid.UUID):
+        raise AgentBackendRefused("agent_identity_required")
+    return await agent_backends.current(session, tenant_id, agent_id)

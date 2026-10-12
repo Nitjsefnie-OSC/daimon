@@ -2030,7 +2030,9 @@ Admin backend preferences use the existing neutral-path flags: both
 `turn.path=mux` and `turn.channel_backends=true` must be set. No preference
 means the same Anthropic agent and model as before. An explicit channel
 configuration takes priority over the agent preference, which takes priority
-over that default. Clearing an agent preference restores inheritance; reverting
+over that default. Clearing a channel override restores agent inheritance;
+explicitly selecting Anthropic remains a channel override. Clearing an agent
+preference restores inheritance; reverting
 appends a revision with the previous value. Existing threads retain their
 immutable configuration, rather than following a later preference change.
 
@@ -2061,3 +2063,13 @@ Disable the feature through the existing flags to stop new preference selection;
 retain stored revisions and audit history. Destructive schema downgrade removes
 agent-origin materializations and preference history and must not be used while
 threads depend on those revisions. Default/channel-origin history survives.
+
+Backend resolution requires the host-resolved scoped agent identity; names are
+only display snapshots. Recreated agents start without the deleted identity's
+preference. Read-only selection uses the existing shared policy fence. Concurrent
+materializations use the existing immutable insert conflict check and a bounded
+retry, while operator writes retain the existing exclusive fence. A held writer
+causes acquisition-only refusal/retry through the existing transaction owner;
+readers do not bypass policy isolation. The generic StateStore latest-revision
+API includes all materializations; explicit channel override reads use
+`current_backend`, including immutable clear markers.

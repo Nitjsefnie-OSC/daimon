@@ -171,7 +171,10 @@ async def latest_config_revision(
     selection = _channel_where(channel)
     if overrides_only:
         selection.extend(
-            (ChannelConfigRevision.origin == "channel", ChannelConfigRevision.local > 0)
+            (
+                ChannelConfigRevision.origin.in_(("channel", "channel_clear")),
+                ChannelConfigRevision.local > 0,
+            )
         )
     body = await session.scalar(
         select(ChannelConfigRevision.revision)
@@ -201,7 +204,10 @@ async def latest_config_revision_and_sharing(
     selection = _channel_where(channel)
     if overrides_only:
         selection.extend(
-            (ChannelConfigRevision.origin == "channel", ChannelConfigRevision.local > 0)
+            (
+                ChannelConfigRevision.origin.in_(("channel", "channel_clear")),
+                ChannelConfigRevision.local > 0,
+            )
         )
     row = (
         await session.execute(

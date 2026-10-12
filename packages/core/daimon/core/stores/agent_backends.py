@@ -75,22 +75,3 @@ async def put_revision(
     session.add(row)
     await session.flush()
     return AgentBackendRevision.model_validate(row)
-
-
-async def current_for_name(
-    session: AsyncSession, tenant_id: uuid.UUID, agent_name: str
-) -> AgentBackendRevision | None:
-    rows = (
-        await session.scalars(
-            select(AgentBackendRevisionRecord)
-            .where(
-                AgentBackendRevisionRecord.tenant_id == tenant_id,
-                AgentBackendRevisionRecord.agent_name == agent_name,
-            )
-            .distinct(AgentBackendRevisionRecord.agent_id)
-            .order_by(AgentBackendRevisionRecord.agent_id, AgentBackendRevisionRecord.local.desc())
-        )
-    ).all()
-    if len(rows) > 1:
-        raise ValueError("agent name identifies more than one configured agent")
-    return AgentBackendRevision.model_validate(rows[0]) if rows else None
