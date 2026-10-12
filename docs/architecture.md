@@ -1739,7 +1739,10 @@ An unprompted Discord turn cancelled before it has an answer stays silent.
 Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 `{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
 answer as a fresh thread reply mentioning only the requester. Missing or false
-entries keep the existing in-place answer. Discord adds eyes before admission;
+entries keep the existing in-place answer. On Discord the fresh answer carries the
+turn's summary line; the status card above it shows "Done." without the summary and
+is then deleted, so a card that cannot be deleted never repeats the summary.
+Discord adds eyes before admission;
 Slack adds eyes at admission. Both clear eyes independently of completion pings.
 Recovery lifecycles retain this policy;
 continuity notices and feedback target the new answer. Teams posts the answer fresh (with

@@ -933,9 +933,15 @@ class DiscordTurnLifecycle:
             cost = float(debit_amount(cost, markup=self._markup))
         self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
-    async def _flush_terminal(self) -> None:
+    async def _flush_terminal(self, *, summary_on_card: bool = True) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
-        bypassing debounce."""
+        bypassing debounce.
+
+        ``summary_on_card=False`` is for an answer posted as a fresh message:
+        that message carries the summary, so the card shows "Done." without it.
+        The card is deleted only after the answer is up, best effort, so a card
+        with the summary would show it twice until then, or for good (#787).
+        """
         if self._sessionmaker is not None and self._tenant_id is not None:
             try:
                 async with self._sessionmaker() as session:
@@ -953,8 +959,12 @@ class DiscordTurnLifecycle:
         self._terminal = True
         now = self._clock()
         data = to_embed_data(self._state, now=now)
-        embed = build_discord_embed(data)
-        self._terminal_embed = embed
+        self._terminal_embed = build_discord_embed(data)
+        embed = (
+            self._terminal_embed
+            if summary_on_card
+            else build_discord_embed(dataclasses.replace(data, footer=None, description="Done."))
+        )
         if self._message_ref is None:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
             self._card_message_ref = self._message_ref
@@ -1040,12 +1050,19 @@ class DiscordTurnLifecycle:
             await self._discard_embed()
             log.info("turn.terminal_success", has_text=False, unprompted=True)
             return
-        self._apply_usage(state)
-        self._state = update(self._state, EmbedEvent(kind="done", label=""))
-        await self._flush_terminal()
-
         response_text = extract_final_response(state.content)
         cancelled = state.termination == TerminationReason.INTERRUPTED
+        notify = (
+            self._notify_on_completion
+            and self._requester_id is not None
+            and not self._unprompted
+            and not cancelled
+        )
+        self._apply_usage(state)
+        self._state = update(self._state, EmbedEvent(kind="done", label=""))
+        # A pinged answer is a fresh message with the summary; the card goes.
+        await self._flush_terminal(summary_on_card=not (notify and response_text))
+
         if cancelled:
             if not response_text:
                 await self._edit_message(
@@ -1105,12 +1122,6 @@ class DiscordTurnLifecycle:
         )
         if use_name_prefix:
             self._name_prefix_sent = True
-        notify = (
-            self._notify_on_completion
-            and self._requester_id is not None
-            and not self._unprompted
-            and not cancelled
-        )
         mentions = discord.AllowedMentions.none()
         if notify:
             assert self._requester_id is not None
