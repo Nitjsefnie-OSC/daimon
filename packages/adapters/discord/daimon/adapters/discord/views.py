@@ -36,6 +36,33 @@ import discord
 log = structlog.get_logger()
 
 
+async def check_control_invoker(
+    interaction: discord.Interaction, *, allowed_user_id: int, handled: bool
+) -> bool:
+    """Apply the same invoker and single-handler gate to classic and V2 cards."""
+    if interaction.user.id != allowed_user_id:
+        await interaction.response.send_message(
+            "Only the command invoker can use these buttons.", ephemeral=True
+        )
+        return False
+    if handled:
+        await interaction.response.send_message("Already handled.", ephemeral=True)
+        return False
+    return True
+
+
+async def finish_control(
+    interaction: discord.Interaction, *, view: discord.ui.View | discord.ui.LayoutView
+) -> None:
+    """A completed Stop or Resume uses the existing missing-card boundary."""
+    try:
+        await interaction.response.edit_message(view=view)
+    except discord.HTTPException as err:
+        if err.code != 10008:
+            raise
+        log.info("turn.cancel_message_missing")
+
+
 class GuardedView(discord.ui.View):
     """Base View with user-gating and single-handler semantics."""
 
@@ -46,19 +73,9 @@ class GuardedView(discord.ui.View):
         self.message: discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # discord.py base uses broader type
-        if interaction.user.id != self.allowed_user_id:
-            await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
-                ephemeral=True,
-            )
-            return False
-        if self._handled:
-            await interaction.response.send_message(
-                "Already handled.",
-                ephemeral=True,
-            )
-            return False
-        return True
+        return await check_control_invoker(
+            interaction, allowed_user_id=self.allowed_user_id, handled=self._handled
+        )
 
     def _finalize(self) -> None:
         self._handled = True
@@ -96,9 +113,4 @@ class CancelView(GuardedView):
     ) -> None:
         self._cancel.set()
         self._finalize()
-        try:
-            await interaction.response.edit_message(view=self)
-        except discord.HTTPException as err:
-            if err.code != 10008:
-                raise
-            log.info("turn.cancel_message_missing")
+        await finish_control(interaction, view=self)

@@ -37,3 +37,12 @@ Ingress receipts also expose actual HTTP message-fetch replies and discord.py's
 parsed message references. Channel bursts retain each authored identity and
 separate production admission; chunk replies bind to an actually emitted SDK
 message. See the source-pinned burst/chunk controls in the ingress contract.
+
+The posted-card renderer accepts optional invoker-bound `controls`. Callbacks
+come from the authenticated operation owner, which must recheck current
+authority and version before writing. They return whether the write was
+accepted; that is not a worker completion or review verdict. A refusal keeps
+controls available, while accepted writes retire the old controls. This uses
+the existing Stop guard and missing-message boundary. Calls without controls
+retain their existing serialized components. Fleet status and Resume service
+binding are separate from this rendering seam.
