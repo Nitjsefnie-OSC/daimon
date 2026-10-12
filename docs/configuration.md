@@ -1327,7 +1327,7 @@ pauses the same interval between passes.
 Run the headless usage sweep: settle the MCP agent-chat sessions whose turns nobody read
 to the end (each headless send leaves a settle request; a status read that sees the turn
 end settles it first). It reads only the sessions those requests name. When off, such a
-session is billed the next time it is read or continued after its turn ends.
+session is billed the next time a read sees its last turn ended.
 
 ### `DAIMON_SCHEDULER__MAX_AGE_S`
 

@@ -143,24 +143,49 @@ def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
     return sent.data[0].id
 
 
-async def _request_settle(runtime: McpRuntime, session_id: str, turn_event_id: str) -> None:
-    """Leave a settle request for the turn just sent.
+async def _send_billed(runtime: McpRuntime, session_id: str, message: str) -> str:
+    """Send a headless turn's message with its settle request written first.
 
     Nothing meters a headless turn live, so its calls are billed by
     `usage_sweep.settle_finished_turn` once a status or transcript read sees
-    the turn ended, or by the scheduler drain of requests nobody polled.
-
-    Named boundary: the turn is already running, so a failed write is logged
-    rather than failing the send; a later send or poll on the session settles
-    its calls too.
+    the turn ended, or by the scheduler drain of the requests no read cleared.
+    The request is committed before the send, so an accepted send always has
+    one. A send Managed Agents rejected (a 4xx, or nothing accepted) withdraws
+    it, restoring any request it replaced; after an error that may hide an
+    accepted send (a timeout, a 5xx) it stays. Naming the accepted message is
+    best effort: an unnamed request waits on the first message processed after
+    it was written. Returns the message's event id (the turn boundary).
     """
+    async with runtime.session_factory.begin() as db:
+        previous, requested_at = await session_settle_state.request_settle(
+            db, managed_session_id=session_id
+        )
+    try:
+        sent = await runtime.client.beta.sessions.events.send(
+            session_id,
+            events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],
+        )
+        turn_event_id = _turn_boundary(sent)
+    except (ToolError, anthropic.APIStatusError) as err:
+        if isinstance(err, anthropic.APIStatusError) and err.status_code >= 500:
+            raise
+        async with runtime.session_factory.begin() as db:
+            await session_settle_state.withdraw_settle_request(
+                db, managed_session_id=session_id, requested_at=requested_at, previous=previous
+            )
+        raise
     try:
         async with runtime.session_factory.begin() as db:
-            await session_settle_state.request_settle(
-                db, managed_session_id=session_id, turn_event_id=turn_event_id
+            await session_settle_state.name_settle_turn(
+                db,
+                managed_session_id=session_id,
+                requested_at=requested_at,
+                turn_event_id=turn_event_id,
             )
     except SQLAlchemyError:
-        log.exception("billing.settle_request_failed", managed_session_id=session_id)
+        # Named boundary: the turn is running and its request stands.
+        log.exception("billing.settle_request_unnamed", managed_session_id=session_id)
+    return turn_event_id
 
 
 def _settle_when_finished(runtime: McpRuntime) -> OnRead:
@@ -640,17 +665,7 @@ async def _start_turn_impl(
     if recheck is not None:
         await recheck()
     turn_started_at = now()
-    sent = await runtime.client.beta.sessions.events.send(
-        session.id,
-        events=[
-            {
-                "type": "user.message",
-                "content": [{"type": "text", "text": message}],
-            }
-        ],
-    )
-    turn_event_id = _turn_boundary(sent)
-    await _request_settle(runtime, session.id, turn_event_id)
+    turn_event_id = await _send_billed(runtime, session.id, message)
 
     return {
         "handle": session.id,
@@ -727,17 +742,8 @@ async def _continue_turn_impl(
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
                 raise ToolError("This session is closed.")
-        sent = await runtime.client.beta.sessions.events.send(
-            handle,
-            events=[
-                {
-                    "type": "user.message",
-                    "content": [{"type": "text", "text": message}],
-                }
-            ],
-        )
-    turn_event_id = _turn_boundary(sent)
-    await _request_settle(runtime, handle, turn_event_id)
+        # Inside the fence, so settle requests follow the order of the sends.
+        turn_event_id = await _send_billed(runtime, handle, message)
     return {
         "handle": handle,
         "turn_event_id": turn_event_id,
@@ -774,7 +780,7 @@ async def _get_session_impl(
     """Return one session's status/metadata (no reply text).
 
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03). ``on_read`` (the tool's
+    cross-agent handles. ``on_read`` (the tool's
     ``_settle_when_finished``) sees the session read.
     """
     s = await _verify_agent_owns_session(runtime, auth, handle)

@@ -60,9 +60,9 @@ that turn ends.
 
 `settle_session` in `packages/core/daimon/core/usage_sweep.py` is the one
 path that bills model calls no live stream metered. It lists the session's
-`span.model_request_end` events newest first, skips those with a
-`usage_events` row (written in the same transaction as the debit), and
-replays the rest through the recorder. Price, markup, budget channel, the
+`span.model_request_end` events oldest first from its watermark, skips those
+with a `usage_events` row (written in the same transaction as the debit),
+and replays the rest through the recorder. Price, markup, budget channel, the
 `turn_debit` reason and the `turn:<session>:<event>` key are the live
 path's, so a call recorded twice is debited once.
 
@@ -72,22 +72,31 @@ path's, so a call recorded twice is debited once.
   budget, outside the turn ceiling. This bills calls made while the adapter
   was down (a deploy or crash mid-turn) or after an interrupt or ceiling.
 - **Headless agent-chat turns.** MCP `start_turn`, `continue_turn` and `ask`
-  never drive a stream. Each send records a settle request for its own
-  `user.message`. When `get_my_session`, `list_events` or `ask`'s own wait
-  next reads the session `idle` or `terminated`, and a `session.status_idle`
-  or `session.status_terminated` event is listed after that message (a bare
-  `idle` right after a send can be the previous turn's), the read settles the
-  session with the same bounds before it returns, and clears the request
-  once the settle has read to the end. The recorder is built from the
-  session's stamps (below). A billing error is logged as
+  never drive a stream. Each send first commits a settle request (inside
+  `continue_turn`'s session fence, so requests follow the order of sends),
+  then sends, then names the accepted `user.message` on the request. If the
+  request cannot be written nothing is sent. A send Managed Agents rejects (a
+  4xx) withdraws its request and restores the one it replaced; after an error
+  that may hide an accepted send (a timeout, a 5xx) the request stays. When
+  `get_my_session`, `list_events` or `ask`'s own wait next reads the session
+  `terminated`, or `idle` with the turn's own message listed and a
+  `session.status_idle` or `session.status_terminated` event listed after it
+  (a bare `idle` right after a send is the previous turn's, and a message not
+  listed yet means the turn has not ended), the read settles the session
+  before it returns and clears the request once the settle has read to the
+  end. A request whose message could not be named waits on the first message
+  processed after it was written. The whole step, database work included, is
+  bounded by 5 seconds; out of budget, the request stays. The recorder is
+  built from the session's stamps (below). A billing error is logged as
   `billing.settle_failed` and never fails the read.
-- **Progress.** `usage_reconcile_progress.covered_through` is the newest
-  call time a completed settle read. The next settle lists from ten minutes
-  before it, so it usually costs one read; a call Managed Agents lists later
-  than that is billed only by a full read ([the backlog](#the-backlog)
-  settle). No automatic settle reads a call made before the backlog cutoff.
-  A settle cut short by its page or time bound keeps every debit it wrote
-  and leaves the watermark, and the request, for the next one.
+- **Progress.** `usage_reconcile_progress.covered_through` is where the
+  next settle starts listing. It moves to each page's newest call as soon
+  as the page is billed, so a settle cut short by its page or time bound
+  keeps its debits and the next one resumes where it stopped. A settle that
+  reads to the end leaves it ten minutes before the newest call, so the next
+  usually costs one read and still sees a call Managed Agents lists a little
+  late; one listed later than that is not read again. No automatic settle
+  reads a call made before the backlog cutoff.
 - **Attribution.** For sessions billed by their stamps, `daimon_tenant` is
   the billed tenant (it must exist in this database), `daimon_account`
   resolves to the owning person's platform user, `daimon_budget_channel` is
@@ -585,12 +594,13 @@ after their Stripe events.
 **The sweep.** The sweep is on by default
 (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=false` turns it off). It runs on its
 own scheduler loop and settles the pending headless settle requests no read
-cleared, oldest first, 50 a pass: a session whose turn has ended is settled
-and its request cleared; one still running keeps its request; a deleted one
-has it cleared. It reads only the sessions those requests name, never the
-whole workspace, and never calls before the backlog cutoff. While it is off,
-such a session is billed the next time it is read or continued after its
-turn ends. Each pass logs `usage_sweep.completed` with `pending` and
+cleared, 50 a pass, least recently visited first: a session whose turn has
+ended is settled and its request cleared; a deleted one has it cleared; one
+still running, or one whose read fails, keeps its request and goes to the
+back of the queue, so it never holds up the others. A rate limit ends the
+pass. It reads only the sessions those requests name, never the whole
+workspace, and never calls before the backlog cutoff. While it is off, such
+a session is billed the next time a read sees its last turn ended. Each pass logs `usage_sweep.completed` with `pending` and
 `recorded`.
 
 A settle bills every session whose `daimon_tenant` stamp names a tenant in
@@ -610,11 +620,13 @@ it, so new turns are billed for every tenant and the backlog for none.
 
 `daimon usage settle-backlog --internal UUID [--internal UUID ...]` settles
 the backlog of every MCP agent-chat session a turn outcome names (or only
-those given with `--session`), each over its whole history. An internal
-tenant's unbilled calls are debited; every other tenant's are waived: the
-session's watermark is set to the cutoff, marking it settled, and
-`billing.backlog_waived` logs the tenant's would-be debit, but nothing is
-charged. Exempt sessions are skipped. It is a dry run unless `--apply` is
+those given with `--session`), each from the start of its history up to the
+cutoff, so applying writes exactly the calls the dry run counted; later
+calls are ordinary billing. An internal tenant's unbilled calls are debited;
+every other tenant's are waived: the session's watermark is raised to the
+cutoff, marking it settled, and `billing.backlog_waived` logs the tenant's
+would-be debit, but nothing is charged. A re-run reports the waived calls
+again and still charges nothing. Exempt sessions are skipped. It is a dry run unless `--apply` is
 given, and prints per tenant whether its backlog is debited or waived, the
 sessions and calls it covers, their raw cost and the would-be debit.
 Recording is idempotent, so applying twice debits once.
@@ -627,8 +639,9 @@ exactly as the recorder would, and `usage_sweep.exempt_skipped` is logged with
 model with no published rates, which prices at zero as in the recorder),
 `model_calls`, `cost_usd` (the raw price) and `would_be_debit_usd` (with
 `DAIMON_BILLING__MARKUP` applied). Nothing is written for these sessions, not
-even a watermark, so each line covers the session's whole history: total the
-absorbed spend by distinct `managed_session_id` (taking its latest line).
+even a watermark, so each line covers the session's history since the
+backlog cutoff: total the absorbed spend by distinct `managed_session_id`
+(taking its latest line).
 
 ## Settings that turn things on
 

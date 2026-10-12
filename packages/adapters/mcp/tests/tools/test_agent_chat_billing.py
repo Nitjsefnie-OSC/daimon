@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anthropic
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
@@ -47,6 +48,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import session_settle_state, tenant_ledger
 from daimon.core.stores.domain import TenantLedgerRow
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
@@ -59,6 +61,7 @@ from daimon.testing.ma import (
     list_response,
 )
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _MA_AGENT_ID = "ag_billing001"
@@ -77,11 +80,17 @@ class _Agent:
         self.ids = itertools.count(1)
         # False: the turn is still running when the send returns.
         self.finishes = True
+        # A status code: Managed Agents answers the send with it and stores nothing.
+        self.reject: int | None = None
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         m = re.fullmatch(r"/v1/sessions/([^/]+)/events", request.url.path)
         if request.method != "POST" or m is None:
             raise NotHandled
+        if self.reject is not None:
+            return httpx.Response(
+                self.reject, json={"type": "error", "error": {"type": "api_error", "message": "no"}}
+            )
         response = make_fake_sessions_handler(self.state)(request)
         if not self.finishes:
             return response
@@ -215,8 +224,10 @@ class _World:
         return info.status
 
     async def pending(self) -> str | None:
+        """The pending request's turn ("unnamed" before the send names it), or None."""
         async with self.sessionmaker() as s:
-            return await session_settle_state.settle_request(s, managed_session_id=self.sid)
+            request = await session_settle_state.settle_request(s, managed_session_id=self.sid)
+        return None if request is None else request.turn_event_id or "unnamed"
 
 
 async def _world(
@@ -342,3 +353,54 @@ async def test_an_exempt_callers_session_is_never_debited(
 
     assert await _ledger(world, db_session) == {}
     assert await world.pending() is None
+
+
+async def test_the_request_is_written_before_the_send(
+    world: _World, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request that cannot be written stops the turn before anything is sent."""
+    monkeypatch.setattr(
+        session_settle_state,
+        "request_settle",
+        AsyncMock(side_effect=SQLAlchemyError("database unavailable")),
+    )
+
+    with pytest.raises(SQLAlchemyError):
+        await world.start()
+
+    assert world.state.sent_batches == [], "nothing was sent, so nothing can go unbilled"
+
+
+async def test_a_send_whose_turn_could_not_be_named_is_still_billed(
+    world: _World, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        session_settle_state,
+        "name_settle_turn",
+        AsyncMock(side_effect=SQLAlchemyError("database unavailable")),
+    )
+    started = await world.start()
+    monkeypatch.undo()
+    assert await world.pending() == "unnamed", "the request written before the send stands"
+
+    # The turn's own message is listed after the request: the fake's echo has no
+    # processed time yet, as Managed Agents echoes a send.
+    await world.poll()
+    await sweep_headless_usage(world.client, world.sessionmaker, markup=_MARKUP)
+
+    assert started["turn_event_id"]
+    assert len(await _ledger(world, db_session)) == 2
+    assert await world.pending() is None
+
+
+@pytest.mark.parametrize(("status", "kept"), [(400, False), (503, True)])
+async def test_a_failed_send_withdraws_its_request_only_when_rejected(
+    world: _World, db_session: AsyncSession, status: int, kept: bool
+) -> None:
+    """A 4xx was not accepted; a 5xx may hide an accepted send, so its request stays."""
+    world.agent.reject = status
+
+    with pytest.raises(anthropic.APIStatusError):
+        await world.start()
+
+    assert (await world.pending() == "unnamed") is kept

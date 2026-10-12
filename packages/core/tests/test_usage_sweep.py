@@ -16,6 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
+import anthropic
 import httpx
 import pytest
 import structlog.testing
@@ -27,6 +28,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
+from daimon.core import usage_sweep
 from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import (
@@ -127,7 +129,7 @@ def _session(
 
 class _MA:
     """Sessions and their events, listed as MA lists them: `processed_at` order
-    (`order=desc` reverses it), `types[]` and `created_at[gte]` filters on
+    (`order=desc` reverses it), `types[]` and `created_at[gte|lt]` filters on
     `processed_at`, cursor pages. Records every events listing."""
 
     def __init__(self, *sessions: BetaManagedAgentsSession, stall_s: float = 0.0) -> None:
@@ -152,14 +154,16 @@ class _MA:
         params = request.url.params
         self.listings.append(params)
         types = set(params.get_list("types[]"))
-        gte = params.get("created_at[gte]")
+        gte, lt = params.get("created_at[gte]"), params.get("created_at[lt]")
         floor = datetime.fromisoformat(gte) if gte else None
+        ceiling = datetime.fromisoformat(lt) if lt else None
         listed = sorted(
             (
                 e
                 for e in self.events.get(match["sid"], [])
                 if (not types or e["type"] in types)
                 and (floor is None or datetime.fromisoformat(e["processed_at"]) >= floor)
+                and (ceiling is None or datetime.fromisoformat(e["processed_at"]) < ceiling)
             ),
             key=lambda e: e["processed_at"],
             reverse=params.get("order") == "desc",
@@ -265,7 +269,7 @@ async def test_a_completed_settle_moves_the_watermark_and_the_next_reads_from_it
 
     async with db_session_factory() as s:
         through = await session_settle_state.covered_through(s, managed_session_id=SESSION)
-    assert through == NOW + timedelta(minutes=5)
+    assert through == NOW + timedelta(minutes=5) - timedelta(minutes=10)
     floor = ma.listings[-1].get("created_at[gte]")
     assert floor is not None, "the second settle lists from the watermark"
     assert datetime.fromisoformat(floor) == NOW + timedelta(seconds=1) - timedelta(minutes=10)
@@ -312,7 +316,8 @@ async def test_a_page_bound_leaves_the_watermark_for_the_next_settle(
         through = await session_settle_state.covered_through(s, managed_session_id=SESSION)
     rest = await settle_session(ma.client, db_session_factory, SESSION, record=record)
 
-    assert (first.debited, first.complete, through) == (100, False, None)
+    assert (first.debited, first.complete) == (100, False)
+    assert through == NOW + timedelta(seconds=99), "the watermark is saved after every page"
     assert (rest.debited, rest.complete) == (50, True)
     assert len(await _ledger(db_session)) == 150
 
@@ -456,14 +461,34 @@ async def test_an_exempt_session_is_never_debited_and_its_cost_is_logged(
 # ---------------------------------------------------------------------------
 
 
-async def _request(sessionmaker: async_sessionmaker[AsyncSession], turn: str = BOUNDARY) -> None:
+async def _request(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    turn: str | None = BOUNDARY,
+    *,
+    session_id: str = SESSION,
+) -> datetime:
+    """A settle request as a send leaves it: written first, then named (unless `turn=None`)."""
     async with sessionmaker() as s, s.begin():
-        await session_settle_state.request_settle(s, managed_session_id=SESSION, turn_event_id=turn)
+        _, requested_at = await session_settle_state.request_settle(
+            s, managed_session_id=session_id
+        )
+        if turn is not None:
+            await session_settle_state.name_settle_turn(
+                s, managed_session_id=session_id, requested_at=requested_at, turn_event_id=turn
+            )
+    return requested_at
+
+
+async def _pending_request(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> session_settle_state.PendingSettle | None:
+    async with sessionmaker() as s:
+        return await session_settle_state.settle_request(s, managed_session_id=SESSION)
 
 
 async def _pending(sessionmaker: async_sessionmaker[AsyncSession]) -> str | None:
-    async with sessionmaker() as s:
-        return await session_settle_state.settle_request(s, managed_session_id=SESSION)
+    request = await _pending_request(sessionmaker)
+    return None if request is None else request.turn_event_id or "unnamed"
 
 
 async def test_a_stale_idle_before_the_turn_ends_does_not_settle(
@@ -482,7 +507,8 @@ async def test_a_stale_idle_before_the_turn_ends_does_not_settle(
     ]
     await _request(db_session_factory)
 
-    assert await turn_ended(ma.client, SESSION, BOUNDARY) is False
+    request = await _pending_request(db_session_factory)
+    assert request is not None and await turn_ended(ma.client, SESSION, request) is False
     assert await settle_finished_turn(ma.client, db_session_factory, session, markup=MARKUP) is None
     assert await _pending(db_session_factory) == BOUNDARY, "the request waits for the turn"
     assert await _ledger(db_session) == {}
@@ -539,10 +565,11 @@ async def test_a_newer_send_keeps_its_own_request(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    first = await _request(db_session_factory)
     await _request(db_session_factory, "evt_turn_b")
     async with db_session_factory() as s, s.begin():
         await session_settle_state.clear_settle_request(
-            s, managed_session_id=SESSION, turn_event_id=BOUNDARY
+            s, managed_session_id=SESSION, requested_at=first
         )
     assert await _pending(db_session_factory) == "evt_turn_b"
 
@@ -572,18 +599,15 @@ async def test_the_drain_settles_finished_sends_and_leaves_running_ones(
     ma = _MA(done, running)
     ma.turn("evt_a")
     ma.turn("evt_r", session_id="sesn_running")
-    async with db_session_factory() as s, s.begin():
-        for sid in (SESSION, "sesn_running", "sesn_gone"):
-            await session_settle_state.request_settle(
-                s, managed_session_id=sid, turn_event_id=BOUNDARY
-            )
+    for sid in (SESSION, "sesn_running", "sesn_gone"):
+        await _request(db_session_factory, session_id=sid)
 
     debited = await sweep_headless_usage(ma.client, db_session_factory, markup=MARKUP)
 
     async with db_session_factory() as s:
         pending = await session_settle_state.list_settle_requests(s, limit=10)
     assert debited == 1
-    assert pending == [("sesn_running", BOUNDARY)], "running kept; settled and gone cleared"
+    assert pending == ["sesn_running"], "running kept; settled and gone cleared"
     assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}
 
 
@@ -594,7 +618,7 @@ async def test_the_drain_settles_finished_sends_and_leaves_running_ones(
 
 async def _cutoff(sessionmaker: async_sessionmaker[AsyncSession], at: datetime) -> None:
     async with sessionmaker() as s, s.begin():
-        await session_settle_state.advance(
+        await session_settle_state.set_watermark(
             s, managed_session_id=session_settle_state.BACKLOG_CUTOFF_ID, through=at
         )
 
@@ -690,3 +714,178 @@ def _outcome(session_id: str, tenant_id: uuid.UUID) -> turn_outcomes.OutcomeReco
         release="test",
         usage_refs=[],
     )
+
+
+# ---------------------------------------------------------------------------
+# Review regressions: backlog scope, turn-end proof, durable progress, read
+# budget, drain isolation
+# ---------------------------------------------------------------------------
+
+
+async def test_backlog_apply_debits_exactly_the_calls_the_dry_run_reported(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    ma = _MA(_session(tenant.id))
+    ma.events[SESSION] = [_call("old", at=NOW - timedelta(days=1)), _call("new", at=NOW)]
+    await _cutoff(db_session_factory, NOW - timedelta(hours=1))
+    args: dict[str, Any] = {
+        "internal": frozenset({tenant.id}),
+        "markup": MARKUP,
+        "session_ids": [SESSION],
+    }
+
+    dry = await settle_backlog(ma.client, db_session_factory, **args)
+    applied = await settle_backlog(ma.client, db_session_factory, apply=True, **args)
+
+    ledger = await _ledger(db_session)
+    assert set(ledger) == {f"turn:{SESSION}:old"}, "the post-cutoff call is ordinary billing"
+    assert [(t.calls, t.debit_usd) for t in dry] == [(1, -ledger[f"turn:{SESSION}:old"].delta_usd)]
+    assert [(t.calls, t.debit_usd) for t in applied] == [(t.calls, t.debit_usd) for t in dry]
+
+
+@pytest.mark.parametrize("previous_idle", [False, True], ids=["nothing-listed", "previous-idle"])
+async def test_a_turn_not_listed_yet_cannot_be_taken_as_ended(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    previous_idle: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    ma = _MA(session)
+    if previous_idle:
+        ma.events[SESSION] = [_idle("previous_idle", at=NOW - timedelta(minutes=1))]
+    await _request(db_session_factory)
+
+    await settle_finished_turn(ma.client, db_session_factory, session, markup=MARKUP)
+    assert await _pending(db_session_factory) == BOUNDARY, "the request waits for its message"
+    ma.turn("later_call")
+    await sweep_headless_usage(ma.client, db_session_factory, markup=MARKUP)
+
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:later_call"}
+
+
+async def test_an_unnamed_request_waits_on_the_first_message_after_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The write naming the accepted send failed: the request still finds its turn."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    ma = _MA(session)
+    ma.events[SESSION] = [
+        _message("evt_previous", at=NOW - timedelta(days=1)),
+        _idle("previous_idle", at=NOW - timedelta(days=1)),
+    ]
+    await _request(db_session_factory, turn=None)
+    request = await _pending_request(db_session_factory)
+    assert request is not None and request.turn_event_id is None
+
+    assert await turn_ended(ma.client, SESSION, request) is False
+    after = request.requested_at + timedelta(seconds=1)
+    ma.events[SESSION] += [_message("evt_new", at=after), _call("evt_c", at=after)]
+    assert await turn_ended(ma.client, SESSION, request) is False
+    ma.events[SESSION].append(_idle("evt_idle", at=after + timedelta(seconds=1)))
+    assert await turn_ended(ma.client, SESSION, request) is True
+
+
+@pytest.mark.parametrize(("max_pages", "count"), [(1, 150), (10, 1001)])
+async def test_repeated_bounded_settles_make_forward_progress(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    max_pages: int,
+    count: int,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    ma = _MA(_session(tenant.id))
+    ma.events[SESSION] = [_call(f"call_{i}", at=NOW + timedelta(seconds=i)) for i in range(count)]
+    record = _chat_recorder(db_session_factory, tenant.id, ma)
+
+    for _ in range(3):
+        await settle_session(
+            ma.client, db_session_factory, SESSION, record=record, max_pages=max_pages
+        )
+
+    assert len(await _ledger(db_session)) == count
+
+
+async def test_the_read_budget_covers_the_database_work(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    ma = _MA(session)
+    ma.turn("evt_a")
+    await _request(db_session_factory)
+    real = usage_sweep.session_billing
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.25)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(usage_sweep, "session_billing", slow)
+    started = time.monotonic()
+    result = await settle_finished_turn(
+        ma.client, db_session_factory, session, markup=MARKUP, budget_s=0.05
+    )
+
+    assert time.monotonic() - started < 0.2
+    assert result is None and await _pending(db_session_factory) == BOUNDARY
+
+
+async def test_a_session_the_drain_cannot_read_never_blocks_the_others(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    ma = _MA(session)
+    ma.turn("good_call")
+    await _request(db_session_factory, "bad", session_id="sesn_poison")
+    await _request(db_session_factory)
+    real = ma.client.beta.sessions.retrieve
+
+    async def retrieve(session_id: str, **kwargs: Any) -> Any:
+        if session_id == "sesn_poison":
+            response = httpx.Response(403, request=httpx.Request("GET", "https://x/v1/sessions"))
+            raise anthropic.PermissionDeniedError("forbidden", response=response, body={})
+        return await real(session_id, **kwargs)
+
+    monkeypatch.setattr(ma.client.beta.sessions, "retrieve", retrieve)
+    await sweep_headless_usage(ma.client, db_session_factory, markup=MARKUP)
+
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:good_call"}
+    async with db_session_factory() as s:
+        assert await session_settle_state.list_settle_requests(s, limit=10) == ["sesn_poison"]
+
+
+async def test_the_drain_visits_waiting_sessions_in_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requests still running go to the back of the queue, so later ones get visited."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    monkeypatch.setattr(usage_sweep, "_DRAIN_BATCH", 1)
+    running = _session(tenant.id, session_id="sesn_running", status="running")
+    done = _session(tenant.id)
+    ma = _MA(running, done)
+    ma.turn("evt_a")
+    await _request(db_session_factory, session_id="sesn_running")
+    await _request(db_session_factory)
+
+    await sweep_headless_usage(ma.client, db_session_factory, markup=MARKUP)
+    await sweep_headless_usage(ma.client, db_session_factory, markup=MARKUP)
+
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}

@@ -5,6 +5,7 @@ Per `guideline:architecture`: this module does NOT swallow exceptions.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 from daimon.core._models import SessionSettleState
@@ -37,8 +38,25 @@ async def backlog_cutoff(session: AsyncSession) -> datetime | None:
     return await covered_through(session, managed_session_id=BACKLOG_CUTOFF_ID)
 
 
-async def advance(session: AsyncSession, *, managed_session_id: str, through: datetime) -> None:
-    """Move the watermark to `through`; it never moves backwards."""
+async def set_watermark(
+    session: AsyncSession, *, managed_session_id: str, through: datetime
+) -> None:
+    """Set where the session's next settle starts listing."""
+    stmt = insert(SessionSettleState).values(
+        managed_session_id=managed_session_id, covered_through=through
+    )
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[SessionSettleState.managed_session_id],
+            set_={"covered_through": stmt.excluded.covered_through, "updated_at": func.now()},
+        )
+    )
+
+
+async def mark_settled_through(
+    session: AsyncSession, *, managed_session_id: str, through: datetime
+) -> None:
+    """Raise the watermark to at least `through` (never lowering it)."""
     stmt = insert(SessionSettleState).values(
         managed_session_id=managed_session_id, covered_through=through
     )
@@ -55,63 +73,130 @@ async def advance(session: AsyncSession, *, managed_session_id: str, through: da
     )
 
 
-async def request_settle(
-    session: AsyncSession, *, managed_session_id: str, turn_event_id: str
-) -> None:
-    """Record that the turn sent as `turn_event_id` must be settled once it ends.
+@dataclass(frozen=True)
+class PendingSettle:
+    """A headless send's settle request: its turn (None until the send names it)."""
 
-    A later send on the session replaces the request: settling it covers the
-    earlier turn's calls too.
-    """
-    stmt = insert(SessionSettleState).values(
-        managed_session_id=managed_session_id,
-        settle_turn_event_id=turn_event_id,
-        settle_requested_at=func.now(),
-    )
-    await session.execute(
-        stmt.on_conflict_do_update(
-            index_elements=[SessionSettleState.managed_session_id],
-            set_={
-                "settle_turn_event_id": stmt.excluded.settle_turn_event_id,
-                "settle_requested_at": stmt.excluded.settle_requested_at,
-                "updated_at": func.now(),
-            },
-        )
-    )
+    turn_event_id: str | None
+    requested_at: datetime
 
 
-async def settle_request(session: AsyncSession, *, managed_session_id: str) -> str | None:
-    """The turn a pending settle request waits on, or None if none is pending."""
-    return (
+async def settle_request(session: AsyncSession, *, managed_session_id: str) -> PendingSettle | None:
+    """The session's pending settle request, if any."""
+    row = (
         await session.execute(
-            select(SessionSettleState.settle_turn_event_id).where(
+            select(
+                SessionSettleState.settle_turn_event_id, SessionSettleState.settle_requested_at
+            ).where(
                 SessionSettleState.managed_session_id == managed_session_id,
                 SessionSettleState.settle_requested_at.is_not(None),
             )
         )
-    ).scalar_one_or_none()
+    ).one_or_none()
+    if row is None or row[1] is None:
+        return None
+    return PendingSettle(turn_event_id=row[0], requested_at=row[1])
 
 
-async def clear_settle_request(
-    session: AsyncSession, *, managed_session_id: str, turn_event_id: str
+async def request_settle(
+    session: AsyncSession, *, managed_session_id: str
+) -> tuple[PendingSettle | None, datetime]:
+    """Record, before a send, that the session must be settled once that turn ends.
+
+    The request names no turn yet (`name_settle_turn` does once the send is
+    accepted). Returns the request it replaced, for `withdraw_settle_request`
+    if the send fails, and its own `requested_at`, which versions it.
+    """
+    previous = await settle_request(session, managed_session_id=managed_session_id)
+    stmt = insert(SessionSettleState).values(
+        managed_session_id=managed_session_id,
+        settle_turn_event_id=None,
+        settle_requested_at=func.clock_timestamp(),
+    )
+    requested_at = (
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[SessionSettleState.managed_session_id],
+                set_={
+                    "settle_turn_event_id": None,
+                    "settle_requested_at": stmt.excluded.settle_requested_at,
+                    "updated_at": func.now(),
+                },
+            ).returning(SessionSettleState.settle_requested_at)
+        )
+    ).scalar_one()
+    assert requested_at is not None  # just written
+    return previous, requested_at
+
+
+async def name_settle_turn(
+    session: AsyncSession, *, managed_session_id: str, requested_at: datetime, turn_event_id: str
 ) -> None:
-    """Clear the request for `turn_event_id`; a newer send's request is kept."""
+    """Name the accepted send's `user.message` on the request written before it."""
     await session.execute(
         update(SessionSettleState)
         .where(
             SessionSettleState.managed_session_id == managed_session_id,
-            SessionSettleState.settle_turn_event_id == turn_event_id,
+            SessionSettleState.settle_requested_at == requested_at,
+        )
+        .values(settle_turn_event_id=turn_event_id)
+    )
+
+
+async def withdraw_settle_request(
+    session: AsyncSession,
+    *,
+    managed_session_id: str,
+    requested_at: datetime,
+    previous: PendingSettle | None,
+) -> None:
+    """Undo a request whose send failed, restoring the one it replaced."""
+    await session.execute(
+        update(SessionSettleState)
+        .where(
+            SessionSettleState.managed_session_id == managed_session_id,
+            SessionSettleState.settle_requested_at == requested_at,
+        )
+        .values(
+            settle_turn_event_id=previous.turn_event_id if previous else None,
+            settle_requested_at=previous.requested_at if previous else None,
+            updated_at=func.now(),
+        )
+    )
+
+
+async def clear_settle_request(
+    session: AsyncSession, *, managed_session_id: str, requested_at: datetime
+) -> None:
+    """Clear the request written at `requested_at`; a newer send's request is kept."""
+    await session.execute(
+        update(SessionSettleState)
+        .where(
+            SessionSettleState.managed_session_id == managed_session_id,
+            SessionSettleState.settle_requested_at == requested_at,
         )
         .values(settle_turn_event_id=None, settle_requested_at=None, updated_at=func.now())
     )
 
 
-async def list_settle_requests(session: AsyncSession, *, limit: int) -> list[tuple[str, str]]:
-    """Up to `limit` pending requests, oldest first, as (session id, turn event id)."""
+async def list_settle_requests(session: AsyncSession, *, limit: int) -> list[str]:
+    """Up to `limit` sessions with a pending request, least recently visited first."""
     rows = await session.execute(
-        select(SessionSettleState.managed_session_id, SessionSettleState.settle_turn_event_id)
+        select(SessionSettleState.managed_session_id)
         .where(SessionSettleState.settle_requested_at.is_not(None))
-        .order_by(SessionSettleState.settle_requested_at)
+        .order_by(SessionSettleState.updated_at)
         .limit(limit)
     )
-    return [(sid, turn) for sid, turn in rows.tuples() if turn is not None]
+    return list(rows.scalars())
+
+
+async def touch_settle_request(session: AsyncSession, *, managed_session_id: str) -> None:
+    """Send a request the drain visited without clearing it to the back of the queue."""
+    await session.execute(
+        update(SessionSettleState)
+        .where(
+            SessionSettleState.managed_session_id == managed_session_id,
+            SessionSettleState.settle_requested_at.is_not(None),
+        )
+        .values(updated_at=func.now())
+    )
