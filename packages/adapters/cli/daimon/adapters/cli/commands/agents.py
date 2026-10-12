@@ -68,16 +68,19 @@ from typer.core import TyperGroup
 class AgentCommands(TyperGroup):
     """Discover optional commands only when the agent group is used."""
 
-    def list_commands(self, ctx: click.Context) -> list[str]:
-        commands = super().list_commands(ctx)
+    def _prune_disabled(self) -> None:
         if not channel_backend.backend_selection_enabled(load_turn_settings()):
-            commands.remove("backend")
-        return commands
+            self.commands.pop("backend", None)
 
-    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
-        if cmd_name == "backend" and cmd_name not in self.list_commands(ctx):
-            return None
-        return super().get_command(ctx, cmd_name)
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        self._prune_disabled()
+        return super().list_commands(ctx)
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        self._prune_disabled()
+        return super().resolve_command(ctx, args)
 
 
 agents_app = typer.Typer(

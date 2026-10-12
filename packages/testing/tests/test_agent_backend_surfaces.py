@@ -806,6 +806,7 @@ print(json.dumps({"groups": [name for name in command.list_commands(context)
     if isinstance(command.get_command(context, name), click.Group)],
     "help": help_result.stdout, "exit": help_result.exit_code,
     "backend_help": backend_result.stdout, "backend_exit": backend_result.exit_code,
+    "backend_output": backend_result.output,
     "root_help": root_result.stdout, "root_exit": root_result.exit_code}))
 """
     result = subprocess.run(
@@ -834,6 +835,12 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
     assert actual["groups"] == ["rule"]
     assert actual["help"] == reference["stdout"]
     assert actual["backend_exit"] == 2
+    assert [
+        line.strip("│ ")
+        for line in actual["backend_output"].splitlines()
+        if "No such command" in line
+    ] == ["No such command 'backend'."]
+    assert "Did you mean" not in actual["backend_output"]
     assert "backend" not in actual["root_help"]
 
 
