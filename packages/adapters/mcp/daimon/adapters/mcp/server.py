@@ -92,6 +92,7 @@ from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
+from daimon.core import headless_turn_billing
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -106,6 +107,7 @@ from daimon.core.operator_tokens import scope_tag
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.agent_avatars import get_avatar_by_token
+from daimon.core.turn.outcomes import drain_outcomes
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
 from fastmcp.server.transforms import Visibility
@@ -383,6 +385,10 @@ def create_mcp_app(
                 yield
         finally:
             await identity_middleware.drain_audit()
+            # Headless turns still being watched: their outcomes are written
+            # as `unknown`, and the next catch-up on each session bills them.
+            await headless_turn_billing.shutdown()
+            await drain_outcomes()
 
     # Session state is keyed per request (StripSessionIdMiddleware, below) and
     # kept a day: bound it. Nothing needs it past the request.

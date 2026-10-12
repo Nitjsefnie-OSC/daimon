@@ -56,6 +56,8 @@ or a turn ceiling, or while the adapter process is down, are not seen by the
 driver at all; the [turn-end catch-up](#the-turn-end-catch-up) bills them
 the next time a chat turn on that session ends, and
 [the sweep](#the-tables) is the backstop for sessions no turn revisits.
+Headless agent-chat turns, which no driver streams at all, run the same
+catch-up when they end: see [Headless agent-chat turns](#headless-agent-chat-turns).
 
 ### The turn-end catch-up
 
@@ -122,10 +124,56 @@ front of the user's message and does not count against the turn ceiling.
   user of the turn that caught it up, which is not necessarily the person
   whose turn was cut off; the tenant debit and channel budget are unaffected.
   It is not part of that turn's own cost in its turn outcome or footer.
-- **What it does not reach.** A session no chat turn touches again (a thread
-  nobody writes in after the crash, a headless or MCP `start_turn` session,
-  a session replaced or deleted before the next turn) is recovered only by
-  the sweep, which is off by default.
+- **What it does not reach.** A session no turn touches again (a thread
+  nobody writes in after the crash, a session replaced or deleted before the
+  next turn) is recovered only by the sweep, which is off by default.
+
+### Headless agent-chat turns
+
+MCP `start_turn`, `continue_turn` and `ask` send a message and return; no
+driver streams the session, so nothing meters the turn live.
+`packages/core/daimon/core/headless_turn_billing.py` bills them through the
+turn-end catch-up instead.
+
+- **When.** After the message is sent, the tool spawns one background watcher
+  for the turn and returns at once. The watcher polls the session's status
+  (2 s, backing off to 30 s) until it is `terminated`, or `idle` with a
+  `session.status_idle` event listed after the turn's own `user.message` (a
+  bare `idle` right after a send can be the previous turn's). It then runs
+  one catch-up pass on the session. A watcher gives up after the 45-minute
+  turn ceiling or five failed status reads in a row; it still runs the pass
+  with whatever is listed by then, unless the session is gone.
+- **Same charge as a chat turn.** The pass's recorder is the chat path's:
+  `record_turn_usage` at the model frozen in the session's agent snapshot,
+  the deployment markup, the session's `daimon_budget_channel` stamp, the
+  caller's platform user, reason `turn_debit` and the
+  `turn:<session>:<event>` key. A session stamped `daimon_billing_exempt` is
+  not debited. The pass is the [turn-end catch-up](#the-turn-end-catch-up)
+  itself, with its 5-second budget and durable progress, so it also bills
+  calls an earlier turn on the session left unbilled, and the sweep (if
+  switched on) or a second pass finds every call already recorded.
+- **Poll fallback.** When `get_my_session` reads the session `idle` or
+  `terminated` and no watcher for it is pending in this process, it runs one
+  catch-up pass in the background, at most once per 30 seconds per session.
+  This covers a turn whose watcher was lost to a restart, provided the
+  caller polls the session again; a later `continue_turn` on the session
+  covers it too.
+- **Outcome.** `start_turn` and `continue_turn` hand their
+  [turn outcome](#turn-outcomes) to the watcher, which writes it when the turn
+  ends: reason `completed`, `requires_action`, `upstream` (retries exhausted)
+  or `session_terminated`, with the model calls listed after the turn's own
+  message, their tokens and their pre-markup cost. A watcher that gives up,
+  or is cancelled when the MCP server shuts down, writes `unknown` with no
+  usage. `ask` still writes its own outcome without usage.
+- **Bounds.** At most 256 watchers are pending per process; past that a turn
+  is not watched, its outcome is written as `unknown`, and the next catch-up
+  on the session bills it. Watchers live in the MCP server process; a deploy
+  cancels them.
+- **Before this.** Headless turns dispatched before this change were billed
+  only by the sweep. Their unbilled calls are debited the next time a
+  catch-up runs on the same session (a new turn on it, or a status poll that
+  sees it finished); sessions nobody touches again stay unbilled unless the
+  sweep is switched on.
 
 The posture is a union in `packages/core/daimon/core/turn/posture.py`:
 `Billed(record=...)` or `BillingExempt(reason=...)`. There is deliberately no
@@ -283,15 +331,15 @@ Two boundaries of the design worth stating plainly:
   current turn cap before taking a new queue ticket. Once the adapter observes
   a lower cap, running turns finish, but new turns wait until enough slots are
   free. An MCP `start_turn` session is worse. Its spend reaches the ledger only
-  when the scheduler's usage sweep next reads the
-  session: up to two sweep passes plus one tick interval later, and not at
-  all while the sweep is switched off (its default, see "The sweep" below).
-  Until then the gate reads a balance that leaves out earlier headless turns,
-  and MCP turns have no concurrency cap. The overdraft is therefore bounded
-  by what a tenant can start between two sweeps, not by N concurrent turns.
+  when the turn ends and its watcher's catch-up pass runs (see
+  [Headless agent-chat turns](#headless-agent-chat-turns)), not per model
+  call. Until then the gate reads a balance that leaves out headless turns
+  still running, and MCP turns have no concurrency cap. The overdraft is
+  therefore bounded by the headless turns a tenant has running at once, not
+  by N concurrent chat turns.
   `formal/metering/BalanceGate.tla` checks the concurrent-turn bound for chat
   turns, where it holds, and has a counterexample in which headless turns
-  exceed it. The between-sweeps bound is stated here, not model-checked.
+  exceed it. The headless bound is stated here, not model-checked.
   Neither bound covers a refund or dispute of credit already spent: that
   clawback is a further debit, and can take the balance lower still.
 - **`BillingExempt` usage is absorbed by the operator, not debited to the
@@ -576,8 +624,9 @@ after their Stripe events.
 (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=false`): the current implementation
 lists every session in the Managed Agents workspace and reads their events,
 which drained the workspace request rate limit and stalled turn admission.
-While it is off, three things pause: usage from MCP `start_turn` sessions
-(and other headless sessions with no live recorder) is not debited; usage a
+While it is off, three things pause: usage from headless sessions no MCP
+watcher or catch-up reaches (see
+[Headless agent-chat turns](#headless-agent-chat-turns)) is not debited; usage a
 live adapter missed (a crashed adapter, an interrupted turn) is not
 recovered unless a later chat turn on the same session runs the
 [turn-end catch-up](#the-turn-end-catch-up); and absorbed spend for exempt sessions is not logged. Turning it
@@ -588,8 +637,9 @@ active sessions is planned; until it ships, the rest of this section
 describes the sweep when it is switched on.
 
 An MCP `start_turn` creates a session and sends a message but
-never drives the stream, so the inline hook never fires for it.
-`packages/core/daimon/core/usage_sweep.py` closes that hole. On its own
+never drives the stream, so the inline hook never fires for it. Its watcher
+bills it when the turn ends; `packages/core/daimon/core/usage_sweep.py` is
+the backstop. On its own
 scheduler loop, pausing the tick interval between passes, it lists Managed
 Agents sessions, skips any without a `daimon_tenant` stamp, belonging to a
 tenant this deployment does not own, or stamped `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
@@ -793,10 +843,12 @@ unknown cost; `known_cost_usd` is the subtotal of fully priced turns, and
 `measured_turns` distinguishes measured rows from history. Token totals include
 only measured rows. Existing-session CLI runs without model metadata can report
 tokens with unknown cost. Separately metered tool models and auxiliary API calls
-are not included in these model-span totals. MCP agent-chat and hub
-start/continue/ask calls record outcomes, but their SDK polling paths do not
-consume model spans: usage fields remain null and summaries do not count them
-as measured turns. Their admission refusals still record measured zero usage.
+are not included in these model-span totals. MCP agent-chat
+`start_turn`/`continue_turn` outcomes are written when the turn ends and
+carry its model spans (see
+[Headless agent-chat turns](#headless-agent-chat-turns)); one whose watcher
+gave up, and every `ask`, keeps null usage fields, and summaries do not count
+those as measured turns. Their admission refusals still record measured zero usage.
 Library headless calls without an outcome session factory are unobserved.
 
 Telemetry inherits the outcome writer's bounded best-effort delivery: database

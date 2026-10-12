@@ -1900,12 +1900,14 @@ MCP agent-chat and hub `ask` calls also record one outcome, attributed to tenant
 account, agent and session with platform `mcp` and origin `chat`. A returned idle
 reply is `completed`, an observed terminated session is `session_terminated`, and
 the bounded polling deadline is `ceiling`. Shared admission gates record balance,
-cap and access-policy refusals. `start_turn` and `continue_turn` record the
-accepted dispatch with reason `unknown`: they return before model execution ends,
-so these records are dispatch observations, not claims of terminal completion.
-No follow-up terminal update or model-span usage capture is implemented for these
-SDK polling paths. Their usage fields remain null rather than implying zero
-model calls or cost. Channel/thread identifiers are unavailable on these calls.
+cap and access-policy refusals. `start_turn` and `continue_turn` return before
+model execution ends; their outcome is handed to a background watcher
+(`daimon.core.headless_turn_billing`) that writes it when the session reaches
+idle after the turn's own message, with the terminal reason and the turn's
+model-span usage, and bills the session through the turn-end catch-up. A
+watcher that gives up after the turn ceiling, or is cancelled at shutdown,
+writes reason `unknown` with null usage. `ask` keeps null usage fields rather
+than implying zero model calls or cost. Channel/thread identifiers are unavailable on these calls.
 Identity resolution failures before tenant attribution and adapter readiness /
 draining gates before the turn boundary are outside this coverage. Library-only
 headless calls without a session factory remain unrecorded.

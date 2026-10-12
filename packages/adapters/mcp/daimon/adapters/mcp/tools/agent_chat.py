@@ -90,6 +90,7 @@ from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
 from daimon.core.github_app_session import close_headless_app_session
+from daimon.core.headless_turn_billing import DispatchedTurn, catch_up_session, watch_turn
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
@@ -112,6 +113,9 @@ from pydantic.json_schema import SkipJsonSchema
 from mcp.types import ImageContent, TextContent
 
 log = structlog.get_logger(__name__)
+
+AfterSend = Callable[[BetaManagedAgentsSession, str], None]
+"""Told the session and the accepted ``user.message`` id once a turn is sent."""
 
 # Each transcript page costs two upstream calls (ownership retrieve + events
 # list), so an uncapped walk on a long session can outlast any client timeout.
@@ -420,6 +424,7 @@ async def _start_turn_impl(
     *,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
+    after_send: AfterSend | None = None,
 ) -> dict[str, str]:
     """Create a new MA session for the caller's agent and send the first message.
 
@@ -462,6 +467,9 @@ async def _start_turn_impl(
     immediately before the session is created and again before the message
     is sent, so a pin or allowlist change saved during the lookups above
     stops the turn rather than only the next one.
+
+    ``after_send`` (the tool's ``_bill_when_finished``) is told the session
+    and the accepted event once the message is sent; it never blocks.
     """
     _require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
@@ -595,6 +603,8 @@ async def _start_turn_impl(
         ],
     )
     turn_event_id = _turn_boundary(sent)
+    if after_send is not None:
+        after_send(session, turn_event_id)
 
     return {
         "handle": session.id,
@@ -612,6 +622,7 @@ async def _continue_turn_impl(
     *,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
+    after_send: AfterSend | None = None,
 ) -> dict[str, str]:
     """Send a follow-up message on an existing session.
 
@@ -629,6 +640,7 @@ async def _continue_turn_impl(
     follow-up: the session's memory is writable and its stamp lacks the seal,
     so sealed messages would outlive an unseal (`_bound_seal`). The session's
     own budget channel, which a billed follow-up is charged to, is gated too.
+    ``after_send`` is as for ``_start_turn_impl``.
     """
     _require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
@@ -681,6 +693,8 @@ async def _continue_turn_impl(
             ],
         )
     turn_event_id = _turn_boundary(sent)
+    if after_send is not None:
+        after_send(session, turn_event_id)
     return {
         "handle": handle,
         "turn_event_id": turn_event_id,
@@ -711,14 +725,74 @@ async def _get_session_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     handle: str,
+    *,
+    on_read: Callable[[BetaManagedAgentsSession], None] | None = None,
 ) -> SessionInfo:
-    """Return one session's status/metadata (no reply text, no side effects).
+    """Return one session's status/metadata (no reply text).
 
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03).
+    cross-agent handles (WR-03). ``on_read`` (the tool's
+    ``_catch_up_when_finished``) sees the session read; it never blocks.
     """
     s = await _verify_agent_owns_session(runtime, auth, handle)
+    if on_read is not None:
+        on_read(s)
     return SessionInfo.from_ma(s)
+
+
+def _bill_when_finished(
+    runtime: McpRuntime, auth: AuthIdentity, *, owns_outcome: bool
+) -> AfterSend:
+    """Bill a sent headless turn once it ends (`headless_turn_billing.watch_turn`).
+
+    No stream is driven for these turns, so nothing meters their model calls
+    live. A background watcher waits for the turn to end, then runs the
+    turn-end catch-up at the chat path's pricing, markup, key and channel.
+    With ``owns_outcome`` the dispatch's own turn outcome is handed to the
+    watcher, which writes it with the real reason and usage; ``ask`` finishes
+    its own outcome and passes False.
+    """
+
+    def after_send(session: BetaManagedAgentsSession, turn_event_id: str) -> None:
+        observation = current_outcome.get() if owns_outcome else None
+        if observation is not None:
+            observation.hand_off()
+        watch_turn(
+            anthropic=runtime.client,
+            sessionmaker=runtime.session_factory,
+            turn=DispatchedTurn(
+                session=session,
+                tenant_id=auth.tenant_id,
+                platform_user_id=auth.platform_user_id,
+                turn_event_id=turn_event_id,
+            ),
+            markup=runtime.settings.billing.markup,
+            observation=observation,
+        )
+
+    return after_send
+
+
+def _catch_up_when_finished(
+    runtime: McpRuntime, auth: AuthIdentity
+) -> Callable[[BetaManagedAgentsSession], None]:
+    """Run a throttled background catch-up when a status read sees the session done.
+
+    The fallback for a turn whose watcher this process never ran or lost (a
+    restart): a host polls ``get_my_session`` until idle anyway.
+    """
+
+    def on_read(session: BetaManagedAgentsSession) -> None:
+        catch_up_session(
+            anthropic=runtime.client,
+            sessionmaker=runtime.session_factory,
+            session=session,
+            tenant_id=auth.tenant_id,
+            platform_user_id=auth.platform_user_id,
+            markup=runtime.settings.billing.markup,
+        )
+
+    return on_read
 
 
 async def _archive_my_session_impl(
@@ -1004,6 +1078,7 @@ async def _ask_impl(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
+    after_send: AfterSend | None = None,
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
@@ -1015,10 +1090,12 @@ async def _ask_impl(
     the first poll would hand back the previous turn's answer.
     """
     if handle is None:
-        started = await _start_turn_impl(runtime, auth, message, now=now, recheck=recheck)
+        started = await _start_turn_impl(
+            runtime, auth, message, now=now, recheck=recheck, after_send=after_send
+        )
     else:
         started = await _continue_turn_impl(
-            runtime, auth, handle, message, now=now, recheck=recheck
+            runtime, auth, handle, message, now=now, recheck=recheck, after_send=after_send
         )
     handle = started["handle"]
     if (observation := current_outcome.get()) is not None:
@@ -1197,7 +1274,12 @@ def register_agent_chat_tools(
             agent_names=pin_names,
         )
         return await _start_turn_impl(
-            runtime, auth, message, bundle, recheck=recheck_for(auth, "start_turn")
+            runtime,
+            auth,
+            message,
+            bundle,
+            recheck=recheck_for(auth, "start_turn"),
+            after_send=_bill_when_finished(runtime, auth, owns_outcome=True),
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1219,7 +1301,14 @@ def register_agent_chat_tools(
             agent_names=pin_names,
         )
         return _ask_tool_result(  # type: ignore[return-value]
-            await _ask_impl(runtime, auth, message, handle=handle, recheck=recheck_for(auth, "ask"))
+            await _ask_impl(
+                runtime,
+                auth,
+                message,
+                handle=handle,
+                recheck=recheck_for(auth, "ask"),
+                after_send=_bill_when_finished(runtime, auth, owns_outcome=False),
+            )
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1242,7 +1331,12 @@ def register_agent_chat_tools(
             agent_names=pin_names,
         )
         return await _continue_turn_impl(
-            runtime, auth, handle, message, recheck=recheck_for(auth, "continue_turn")
+            runtime,
+            auth,
+            handle,
+            message,
+            recheck=recheck_for(auth, "continue_turn"),
+            after_send=_bill_when_finished(runtime, auth, owns_outcome=True),
         )
 
     @mcp.tool(tags={"agent-chat"}, name="get_my_session")  # pyright: ignore[reportArgumentType]
@@ -1253,7 +1347,10 @@ def register_agent_chat_tools(
         ``idle``/``terminated``) before reading the transcript with
         ``list_events``.
         """
-        return await _get_session_impl(runtime, await _auth(ctx), handle)
+        auth = await _auth(ctx)
+        return await _get_session_impl(
+            runtime, auth, handle, on_read=_catch_up_when_finished(runtime, auth)
+        )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def archive_my_session(ctx: Context, handle: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]

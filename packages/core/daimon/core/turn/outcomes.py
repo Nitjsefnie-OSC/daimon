@@ -104,6 +104,21 @@ class TurnObservation:
     _samples: dict[tuple[str, str], UsageSample] = field(
         default_factory=lambda: dict[tuple[str, str], UsageSample]()
     )
+    _handed_off: bool = False
+
+    @property
+    def handed_off(self) -> bool:
+        return self._handed_off
+
+    def hand_off(self) -> None:
+        """Leave the terminal write to whoever outlives the dispatch.
+
+        A headless turn is still running when its dispatch returns; the task
+        that sees it end finishes this observation with the real reason and
+        usage. `observe_turn` then skips its own `unknown` finish on a normal
+        exit (a failure still finishes it at once).
+        """
+        self._handed_off = True
 
     def note_usage(
         self, event: BetaManagedAgentsSpanModelRequestEndEvent, *, metered: bool = False
@@ -228,7 +243,8 @@ def observe_turn(
             raise
         finally:
             # Normal driver paths already provided their exact terminal reason.
-            observation.finish(reason=TerminationReason.UNKNOWN)
+            if not observation.handed_off:
+                observation.finish(reason=TerminationReason.UNKNOWN)
 
 
 def record_refusal(
