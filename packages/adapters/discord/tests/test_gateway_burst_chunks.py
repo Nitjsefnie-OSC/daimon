@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -66,7 +65,7 @@ class SourceBurstClock:
     """Exact authored burst offsets; real native gates remain independent."""
 
     def __init__(self) -> None:
-        self.initial_monotonic = time.monotonic()
+        self.initial_monotonic = 1000.0
         self.initial_utc = datetime.now(UTC)
         self.elapsed = 0.0
 
