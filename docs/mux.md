@@ -1984,3 +1984,13 @@ thread retains its session and revision, while a new private thread runs
 OpenAI. An unavailable retained backend produces the typed
 `backend_unsupported` refusal before provider I/O, without changing either
 binding. This does not certify live provider behavior or OpenAI shared threads.
+
+### Output delivery pagination
+
+Delivery follows every Files API page through the authorized output port, so
+retained oversized entries cannot hide a newer deliverable file. Oversized
+outputs remain listed; successful notices enter the bounded notice cache, and
+the caller's explicit discard threshold applies only to smaller skipped files.
+The port's `all_pages` option defaults to false for workspace-transfer and other
+existing consumers. Delivery opts in; SDK cursors, MA headers and errors are
+preserved across later pages, with authorization checked before the first call.

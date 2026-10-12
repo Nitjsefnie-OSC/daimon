@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2578,
+  "files_scanned": 2580,
   "parse_errors": [],
   "calls": [
     {
@@ -5261,6 +5261,31 @@
       "request_keys": [],
       "response_access": [
         "listing.data"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_output_pagination_port_requests.py",
+      "line": 76,
+      "end": 78,
+      "scope": "test_all_output_pages_match_main_requests_and_late_sdk_errors",
+      "category": "test",
+      "resource": "files.list",
+      "call": "legacy.beta.files.list(scope_id='sess_output', betas=[MA_BETA], limit=1000)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_output_pagination_port_requests.py",
+      "line": 65,
+      "end": 67,
+      "scope": "test_all_output_pages_match_main_requests_and_late_sdk_errors",
+      "category": "test",
+      "resource": "files.list",
+      "call": "legacy.beta.files.list(scope_id='sess_output', betas=[MA_BETA], limit=1000)",
+      "request_keys": [],
+      "response_access": [
+        "item.id",
+        "item.model_dump"
       ]
     },
     {
@@ -16493,6 +16518,15 @@
       "module": "anthropic.types.beta",
       "names": [
         "FileMetadata"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_output_pagination_port_requests.py",
+      "line": 5,
+      "module": "anthropic",
+      "names": [
+        "APIStatusError"
       ],
       "category": "test"
     },

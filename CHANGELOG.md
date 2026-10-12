@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Prove offline that a shared Anthropic thread keeps its provider after an OpenAI channel switch, while new threads run OpenAI and an unavailable original backend refuses explicitly.
+- Preserve oversized output files and main's notice deduplication while following every delivery listing page through the scoped output port.
 
 - Pin historical Anthropic financial fixtures to fixed offline test clocks while preserving expired-envelope and stale-price refusals.
 - Make offline Anthropic replay regeneration independent of local Git history, and retain pending PDF validation when optional parser tooling is unavailable.
