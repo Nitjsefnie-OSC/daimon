@@ -479,15 +479,19 @@ all turns; the cap gate applies even without Stripe.
 
 ## Promo codes
 
-An operator can hand out credit as a code that a tenant admin redeems. Nothing
-is visible until some code can be redeemed: only then does `/billing` show
-admins a **Redeem code** button, and the Discord ready message and the Slack
-install page point them at it.
+An operator can hand out credit as a code. A **server-wide** code is redeemed
+by a server or workspace admin and credits the whole tenant. A **channel**
+code (`--channel-cap`) can be redeemed by any member and credits the channel
+they redeem it in. Nothing is visible until some code can be redeemed: only
+then does `/billing` show a **Redeem code** button, to admins for any code
+and to members for a channel code, and the Discord ready message and the
+Slack install page point people at it.
 
 ```sh
 daimon promo create --amount 20                    # prints a generated code once
 daimon promo create --amount 50 --timed \
   --starts 2026-06-01T09:00Z --ends 2026-06-03T18:00Z --max-redemptions 40
+daimon promo create --amount 10 --channel-cap 30 --max-redemptions 100  # channel code
 daimon promo list
 daimon promo redemptions CODE_ID
 daimon promo revoke CODE_ID
@@ -499,10 +503,36 @@ dash-separated groups of five; matching ignores case, spaces and dashes, and
 reads O as 0 and I or L as 1. `--code` sets a chosen code of at least 12
 characters instead. `--amount` is at most $999,999.99. `--redeem-from` and
 `--redeem-until` bound when it can be redeemed, and `--max-redemptions` how
-many tenants may redeem it. Each tenant redeems a code at most once.
+many times it may be redeemed in all. Each tenant redeems a server-wide code
+at most once.
 
 - **Credit** codes add a `promo_credit` ledger entry at once, keyed
   `promo:{code_id}:{tenant_id}`. It is ordinary credit and never expires.
+- **Channel** codes are credit codes with `--channel-cap`, which must be at
+  least `--amount`; a timed code cannot have one. Anyone can redeem one from
+  `/billing` in a channel (a thread counts as its parent channel), once per
+  person per channel, until that channel has taken `--channel-cap` from the
+  code: with `--amount 10 --channel-cap 30`, three people in a channel can
+  each add $10. Each redemption writes a `promo_credit` entry with the
+  channel's `channel_id`, keyed `promo:{code_id}:{tenant_id}:{channel_id}:{account_id}`,
+  and raises the channel's [budget](#channel-budgets) limit by the amount, so
+  the channel can spend that much more and the credit pays for it. A channel
+  with no budget has no limit to raise: the credit adds to the tenant's
+  balance, which that channel already spends from. Budgets only count
+  debits, so the credit entry never lowers a channel's spend. A channel code
+  cannot be redeemed in a DM, a Slack group DM or a Teams 1:1 chat, or with
+  the MCP tool. On Slack the conversation's type comes from
+  `conversations.info`, not its id (a group DM can have a `G` id like a
+  private channel), and a conversation Slack won't describe as a channel is
+  refused for a channel code.
+- **Rolling out channel codes.** Migration `0088_channel_promo_codes` only
+  adds: a nullable `promo_codes.channel_cap_usd`, the
+  `promo_channel_redemptions` table and a nullable
+  `promo_redeem_failures.account_id`, so workers of the previous release keep
+  redeeming server-wide codes during the rollout and after an
+  application-only rollback. Those workers don't know channel codes and would
+  credit one server-wide, so create channel codes only once every worker
+  runs this release.
 - **Timed** codes grant their amount only between `--starts` and `--ends`.
   Redemption stays open until `--ends` unless `--redeem-until` is earlier. A
   code redeemed before its start is granted by the scheduler when the window
@@ -532,12 +562,18 @@ as `$62.40` `total credit left`, a total that already includes live timed credit
 and under it `Includes $25.00 that expires. It's used first.` (everything left in
 timed credit). Below zero (an operator-funded tenant) it reads `No credit left`
 and `$3.10 spent beyond it`, still with that line. **Expiry dates** lists each
-timed credit with its end date, soonest first (five, then a count of the rest). Admins redeem from `/billing` on Discord or Slack,
-`billing` on Teams, or with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
-`invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
-`already_redeemed` and `throttled`; five refusals in 15 minutes pause a
-tenant's attempts, which are serialized per tenant so parallel guesses
-cannot slip past. Revoking stops new redemptions only: redeemed credit,
+timed credit with its end date, soonest first (five, then a count of the rest). Codes are redeemed from `/billing` on Discord or Slack,
+`billing` on Teams, or, server-wide codes only, with the admin-only MCP tool
+`redeem_promo_code`. Admin rights are read again when the code is submitted.
+Refusals are one of `invalid`, `revoked`, `not_started`, `expired`,
+`exhausted`, `already_redeemed`, `throttled`, `admin_only` (a member tried a
+server-wide code), `needs_channel` (a channel code outside a channel),
+`already_redeemed_in_channel` and `channel_cap_reached`, each shown as one
+plain sentence. Every attempt, allowed or refused, writes a
+`panel:promo_redeem` security audit row with the channel it was made in.
+Five refusals in 15 minutes pause that person's attempts, and only theirs:
+another member's, or an admin's, are unaffected. One person's attempts are
+serialized so parallel guesses cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
 
 An integration can issue codes over MCP with an operator token holding
@@ -553,15 +589,16 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 
 | Table | Holds |
 | --- | --- |
-| `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique `idempotency_key` prevents replayed writes; top-ups also check the payment intent to recognize older event-keyed credits. Debits carry the `channel_id` they count against, if any. |
+| `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique `idempotency_key` prevents replayed writes; top-ups also check the payment intent to recognize older event-keyed credits. Debits carry the `channel_id` they count against, if any, and a channel code's credit the channel it was redeemed in. |
 | `usage_events` | token counts per model call, with the same `channel_id`. No money column; cost is computed on read. |
 | `usage_reconcile_progress` | per Managed Agents session, the [turn-end catch-up](#the-turn-end-catch-up)'s forward position, the stored page cursors of its unfinished forward and repair listings, and whether a due repair page was missed. |
 | `payment_events` | Stripe webhook dedup, keyed by the Stripe event id, with the compare-and-set `credited_at`. Explicitly not a ledger. |
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
-| `promo_codes` | deployment-wide codes, by hash, with their amount, windows and redemption limit. |
-| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
-| `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
+| `promo_codes` | deployment-wide codes, by hash, with their amount, windows, redemption limit and, for a channel code, `channel_cap_usd`. |
+| `promo_redemptions` | one row per server-wide code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
+| `promo_channel_redemptions` | one row per channel code, channel and person, for the per-person rule and the channel cap. |
+| `promo_redeem_failures` | refused redemption attempts per person (`account_id`), for the throttle. |
 | `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
 | `platform_user_names`, `platform_channel_names` | the last name each platform sent for a person (display name and handle) or a channel, so `/billing` can name them when the platform does not answer; see [What you can see](#what-you-can-see). |
 

@@ -430,7 +430,7 @@ class BillingPanelView(_InvokerOnly):
         if is_admin:
             rows.append(discord.ui.ActionRow(_TopUpSelect(state)))
         actions: list[discord.ui.Button[BillingPanelView]] = []
-        if is_admin and state.has_redeemable_promo_code:
+        if state.has_redeemable_promo_code:
             actions.append(_RedeemButton())
         if state.timed_credit:
             actions.append(_ExpiryButton())
@@ -469,9 +469,10 @@ class _ExpiryButton(discord.ui.Button["BillingPanelView"]):
 
 
 class _RedeemButton(discord.ui.Button["BillingPanelView"]):
-    """Opens the redeem-code modal. Admin panel only, while a code is redeemable.
+    """Opens the redeem-code modal while a code the viewer may redeem is redeemable.
 
-    Re-gated on click and on submit.
+    Anyone the panel shows it to may open the modal; what a code may do is
+    decided on submit (a server-wide code needs a live admin).
     """
 
     def __init__(self) -> None:
@@ -480,8 +481,6 @@ class _RedeemButton(discord.ui.Button["BillingPanelView"]):
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
         if view is None:
-            return
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
             return
 
         async def rerender(submitted: discord.Interaction) -> None:

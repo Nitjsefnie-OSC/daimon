@@ -57,6 +57,8 @@ async def _redeem_promo_code_impl(
         account_id=auth.account_id,
         code=code,
         now=datetime.now(UTC),
+        channel=None,  # no channel here: a channel code is refused as needs_channel
+        is_admin=True,  # checked by _require_admin above
     )
     if isinstance(result, promo_credit.PromoRedeemRefused):
         return RedeemPromoCodeResult(

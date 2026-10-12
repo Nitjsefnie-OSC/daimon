@@ -1001,6 +1001,13 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # redeemed_by_account_id with ON DELETE SET NULL, so erasure severs who
             # redeemed a code while the tenant keeps its credit history.
             "promo_redemptions",
+            # Same shape for a channel code's redemptions: the nullable
+            # redeemed_by_account_id is ON DELETE SET NULL, and the severed row
+            # still counts toward the channel's cap.
+            "promo_channel_redemptions",
+            # A refused redeem attempt holds no content, lives 15 minutes for the
+            # throttle, and its account_id is ON DELETE CASCADE.
+            "promo_redeem_failures",
             # Repo authorization and grants belong to the tenant. Their nullable
             # creator references are erased by ON DELETE SET NULL.
             "tenant_github_repos",

@@ -97,6 +97,7 @@ from daimon.core.billing_panel import (
     month_start,
     more_channel_budgets,
     more_spenders,
+    redeemed_text,
     spend_over_cap,
     spender_line,
     stored_name_labels,
@@ -112,7 +113,12 @@ from daimon.core.platform_names import (
     resolve_names,
 )
 from daimon.core.promo_codes import describe_refusal
-from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_promo_code
+from daimon.core.promo_credit import (
+    PromoChannel,
+    PromoRedeemed,
+    PromoRedeemRefused,
+    redeem_promo_code,
+)
 from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.usage_events import (
@@ -139,6 +145,7 @@ from microsoft_teams.cards import (
     TextInput,
     ToggleVisibilityAction,
 )
+from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
@@ -146,7 +153,6 @@ VERB = "billing"
 ADMIN_ONLY = "Only an admin can top up credit."
 UNKNOWN_AMOUNT = "That top-up amount is not offered."
 NOT_CONFIGURED = "Card payments aren't set up here.\n\nAsk the team running Daimon to add credit."
-REDEEM_ADMIN_ONLY = "Only an admin can redeem a promo code."
 LOOKUP_ADMIN_ONLY = "Only an admin can look up a person's spend."
 PICK_A_PERSON = "Pick a person to look up."
 PERSON_INPUT = "person"
@@ -338,19 +344,14 @@ async def _no_roster(_team_id: str, _user_id: str) -> str | None:
     return None
 
 
-def redeemed_text(result: PromoRedeemed) -> str:
-    amount = f"**${result.amount_usd:,.2f}**"
-    if result.credit_ends_at is None:
-        return f"🎟️ Added {amount} of credit.\n\nBalance: **${result.balance_usd:,.2f}**"
-    if not result.granted and result.credit_starts_at is not None:
-        return (
-            f"🎟️ Credit scheduled: {amount} from {card_time(result.credit_starts_at)} "
-            f"until {card_time(result.credit_ends_at)}."
-        )
-    return (
-        f"🎟️ Added {amount} of credit.\n\n"
-        "Used before credit with no expiry. Anything unused expires "
-        f"{card_time(result.credit_ends_at)}."
+def redeemed_card_text(result: PromoRedeemed) -> str:
+    """What a redemption did, in card markdown; Teams names no channel by id."""
+    return redeemed_text(
+        result,
+        bold=lambda text: f"**{text}**",
+        when=card_time,
+        channel=lambda _channel_id: "this channel",
+        owner="the organization's",
     )
 
 
@@ -373,15 +374,16 @@ def _sub_card(*items: CardElement) -> AdaptiveCard:
 
 
 def _actions(state: BillingPanelState, place: str | None) -> list[Action]:
-    """`Add credit` and `Redeem code` for an admin; `Expiry dates` with timed credit."""
+    """`Add credit` for an admin, `Redeem code` while a code the viewer may redeem is
+    redeemable, and `Expiry dates` with timed credit."""
     actions: list[Action] = []
     if state.is_admin:
         amounts = ColumnSet(columns=[_topup(amount, state, place) for amount in TOPUP_AMOUNTS])
         actions.append(ShowCardAction(title=ADD_CREDIT, card=_sub_card(amounts)))
-        if state.has_redeemable_promo_code:
-            code = TextInput(id=CODE_INPUT, placeholder="XXXXX-XXXXX-XXXXX-XXXXX", max_length=100)
-            redeem = ActionSet(actions=[button(VERB, "Redeem", "redeem", place=place or "")])
-            actions.append(ShowCardAction(title=REDEEM_CODE, card=_sub_card(code, redeem)))
+    if state.has_redeemable_promo_code:
+        code = TextInput(id=CODE_INPUT, placeholder="XXXXX-XXXXX-XXXXX-XXXXX", max_length=100)
+        redeem = ActionSet(actions=[button(VERB, "Redeem", "redeem", place=place or "")])
+        actions.append(ShowCardAction(title=REDEEM_CODE, card=_sub_card(code, redeem)))
     if state.timed_credit:
         actions.append(ToggleVisibilityAction(title=EXPIRY_DATES, target_elements=[EXPIRY_ID]))
     if state.is_admin:
@@ -724,7 +726,12 @@ class BillingPanel:
     async def _redeem(
         self, actor: Actor, code: str, place: str | None
     ) -> AdaptiveCardInvokeResponse:
-        """Redeem for a live admin; a refusal leaves the card, and the typed code, as it was."""
+        """Redeem a code; a refusal leaves the card, and the typed code, as it was.
+
+        A server-wide code needs a live admin; a channel code credits the channel
+        the command was typed in, for anyone, and is refused in a personal chat.
+        """
+        channel_id = self._channel_of(place, actor.user_id)
         audit = functools.partial(
             record_panel_write,
             self._runtime.sessionmaker,
@@ -732,24 +739,36 @@ class BillingPanel:
             platform="teams",
             platform_user_id=actor.user_id,
             op="promo_redeem",
+            target_channel_id=channel_id,
         )
-        if not actor.is_admin:
-            await audit(outcome="denied", reason="needs_admin")
-            return toast(REDEEM_ADMIN_ONLY)
         if not code.strip():
+            await audit(outcome="denied", reason="empty_code")
             return toast(ENTER_CODE)
-        result = await redeem_promo_code(
-            self._runtime.sessionmaker,
-            tenant_id=actor.tenant_id,
-            account_id=await get_or_create_account(self._runtime, actor),
-            code=code,
-            now=datetime.now(UTC),
-        )
+        try:
+            result = await redeem_promo_code(
+                self._runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                account_id=await get_or_create_account(self._runtime, actor),
+                code=code,
+                now=datetime.now(UTC),
+                channel=None
+                if channel_id is None
+                else PromoChannel(platform="teams", channel_id=channel_id),
+                is_admin=actor.is_admin,
+            )
+        except (DaimonError, SQLAlchemyError):
+            # `guarded` answers the click; the audit trail records the failure.
+            await audit(outcome="error", reason="failed")
+            raise
         if isinstance(result, PromoRedeemRefused):
             await audit(outcome="denied", reason=f"promo:{result.reason}")
             return toast(describe_refusal(result.reason))
         await audit(outcome="allowed", reason="completed")
         card = await self._panel(
-            actor.tenant_id, actor.user_id, True, notice=redeemed_text(result), place=place
+            actor.tenant_id,
+            actor.user_id,
+            actor.is_admin,
+            notice=redeemed_card_text(result),
+            place=place,
         )
         return replace_card(card)

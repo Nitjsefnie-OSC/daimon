@@ -999,7 +999,8 @@ class TenantLedger(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # Set on debits only: the parent channel whose budget the spend counts against.
+    # On a debit: the parent channel whose budget the spend counts against. On a
+    # channel promo credit: the channel it was redeemed for (budgets read debits only).
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -1157,6 +1158,10 @@ class PromoCode(Base):
             " AND (max_redemptions IS NULL OR redeemed_count <= max_redemptions)",
             name="ck_promo_codes_redeemed_count",
         ),
+        CheckConstraint(
+            "channel_cap_usd IS NULL OR (kind = 'credit' AND channel_cap_usd >= amount_usd)",
+            name="ck_promo_codes_channel_cap",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1180,6 +1185,9 @@ class PromoCode(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set on a channel code: any member may redeem it into their own channel's
+    # budget, and one channel takes at most this much from it.
+    channel_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
 
 class PromoRedemption(Base):
@@ -1191,6 +1199,7 @@ class PromoRedemption(Base):
     and `reconciled_at` when late-recorded spend inside the window was
     credited back out of that remainder.
     The redeeming account is attribution only, severed by account erasure.
+    A channel code's redemptions live in `promo_channel_redemptions`.
     """
 
     __tablename__ = "promo_redemptions"
@@ -1221,11 +1230,56 @@ class PromoRedemption(Base):
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PromoChannelRedemption(Base):
+    """One person's redemption of a channel code into one channel of their tenant.
+
+    Once per code, tenant, channel and person; the code's `channel_cap_usd`
+    bounds how many rows one channel may have. The redeeming account is
+    attribution (severed by account erasure), and a severed row still counts
+    toward the channel's cap.
+    """
+
+    __tablename__ = "promo_channel_redemptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "promo_code_id",
+            "tenant_id",
+            "channel_id",
+            "redeemed_by_account_id",
+            name="uq_promo_channel_redemptions_person",
+        ),
+        Index("promo_channel_redemptions_channel_idx", "promo_code_id", "tenant_id", "channel_id"),
+        Index("promo_channel_redemptions_tenant_idx", "tenant_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    promo_code_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("promo_codes.id", ondelete="RESTRICT"), nullable=False
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    redeemed_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class PromoRedeemFailure(Base):
-    """One refused redemption attempt, counted to throttle guessing per tenant."""
+    """One refused redemption attempt, counted to throttle guessing per person.
+
+    `account_id` is who tried; rows without one (written before it existed,
+    or by a caller with no account) form one shared bucket per tenant.
+    """
 
     __tablename__ = "promo_redeem_failures"
-    __table_args__ = (Index("promo_redeem_failures_tenant_idx", "tenant_id", "attempted_at"),)
+    __table_args__ = (
+        Index("promo_redeem_failures_tenant_idx", "tenant_id", "attempted_at"),
+        Index("promo_redeem_failures_account_idx", "tenant_id", "account_id", "attempted_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -1234,6 +1288,9 @@ class PromoRedeemFailure(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True
+    )
 
 
 class AgentFile(Base):
