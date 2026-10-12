@@ -124,6 +124,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
 if TYPE_CHECKING:
+    from daimon.adapters.mcp.tools.fleet import FleetToolService
     from stripe._http_client import HTTPClient as StripeHTTPClient
 
 log = structlog.get_logger(__name__)
@@ -245,6 +246,7 @@ def create_mcp_app(
     anthropic: AsyncAnthropic | None = None,
     billing_config: BillingConfig | None = None,
     stripe_http_client: StripeHTTPClient | None = None,
+    fleet_service: FleetToolService | None = None,
 ) -> Starlette:
     """ASGI app factory.
 
@@ -456,6 +458,10 @@ def create_mcp_app(
     register_credential_request_tools(mcp, runtime)
     register_setup_target_tools(mcp, runtime)
     register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
+    if effective_settings.fleet.enabled:
+        from daimon.adapters.mcp.tools.fleet import register_fleet_tools
+
+        register_fleet_tools(mcp, runtime, enabled=True, service=fleet_service)
     register_github_app_tools(mcp, runtime)
     register_github_connect_tools(mcp, runtime)
     register_github_request_tools(mcp, runtime)
