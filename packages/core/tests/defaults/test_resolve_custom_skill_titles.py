@@ -30,7 +30,7 @@ async def test_resolve_custom_skill_titles_strips_the_tenant_prefix_from_own_ski
         "GET",
         r"/v1/skills",
         lambda _req, _m: list_response(
-            [_skill(id="skill_auth", display_title=f"{str(tenant_id)[:8]}-cli-auth")]
+            [_skill(id="skill_auth", display_title=f"{tenant_id.hex}-cli-auth")]
         ),
     )
     agent = ma_agent(skills=[{"type": "custom", "skill_id": "skill_auth", "version": "1"}])
@@ -51,7 +51,7 @@ async def test_resolve_custom_skill_titles_omits_another_tenants_skill() -> None
         "GET",
         r"/v1/skills",
         lambda _req, _m: list_response(
-            [_skill(id="skill_theirs", display_title=f"{str(other_tenant_id)[:8]}-secret")]
+            [_skill(id="skill_theirs", display_title=f"{other_tenant_id.hex}-secret")]
         ),
     )
     agent = ma_agent(skills=[{"type": "custom", "skill_id": "skill_theirs", "version": "1"}])
@@ -92,8 +92,8 @@ async def test_resolve_custom_skill_titles_covers_every_agent_in_one_listing() -
         calls.append(request.url.path)
         return list_response(
             [
-                _skill(id="skill_a", display_title=f"{str(tenant_id)[:8]}-alpha"),
-                _skill(id="skill_b", display_title=f"{str(tenant_id)[:8]}-beta"),
+                _skill(id="skill_a", display_title=f"{tenant_id.hex}-alpha"),
+                _skill(id="skill_b", display_title=f"{tenant_id.hex}-beta"),
             ]
         )
 

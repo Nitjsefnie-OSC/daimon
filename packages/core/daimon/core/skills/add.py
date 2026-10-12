@@ -42,8 +42,9 @@ from daimon.core.defaults.ma_index import (
     find_skill_by_display_title,
     list_agents_by_tenant,
     list_skills_strict,
+    skill_mount_bodies,
 )
-from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
+from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
@@ -56,7 +57,7 @@ from daimon.core.skills.ingest import (
     bundle_from_upload,
     require_upload_suffix,
 )
-from daimon.core.skills.reference_lock import guarded_agent_update
+from daimon.core.skills.reference_lock import ReferenceScope, guarded_agent_update
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
@@ -287,11 +288,16 @@ async def add_agent_skill(
         skill_id, version, action = known_id, existing.anthropic_latest_version, "unchanged"
     else:
         skill_id = known_id or await _find_own_skill(
-            client, tenant_id=tenant_id, agent_name=agent_name, name=preview.name
+            client,
+            tenant_id=tenant_id,
+            agent_name=agent_name,
+            name=preview.name,
+            tenants=sessionmaker,
         )
         await _refuse_mount_clash(
             client,
             tenant_id=tenant_id,
+            tenants=sessionmaker,
             agent=agent,
             agent_name=agent_name,
             name=preview.name,
@@ -368,7 +374,12 @@ async def add_agent_skill(
 
 
 async def _find_own_skill(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, agent_name: str, name: str
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    name: str,
+    tenants: ReferenceScope | None,
 ) -> str | None:
     """This agent's existing skill of that name, after refusing a shared-name clash.
 
@@ -379,7 +390,7 @@ async def _find_own_skill(
     agent holding it.
     """
     conflict = await find_conflicting_skill_mount(
-        client, tenant_id=tenant_id, name=name, agent_name=agent_name
+        client, tenant_id=tenant_id, name=name, agent_name=agent_name, tenants=tenants
     )
     if conflict is not None:
         raise SkillIngestError(
@@ -387,7 +398,7 @@ async def _find_own_skill(
             f"clash on the agent. Rename this one (e.g. {name}-2)."
         )
     title = tenant_scoped_display_title(tenant_id=tenant_id, name=name, agent_name=agent_name)
-    own = await find_skill_by_display_title(client, title, on_truncation="raise")
+    own = await find_skill_by_display_title(client, title, on_truncation="raise", tenants=tenants)
     return own.id if own is not None else None
 
 
@@ -418,6 +429,7 @@ async def _refuse_mount_clash(
     client: AsyncAnthropic,
     *,
     tenant_id: uuid.UUID,
+    tenants: ReferenceScope | None,
     agent: BetaManagedAgentsAgent,
     agent_name: str,
     name: str,
@@ -429,14 +441,12 @@ async def _refuse_mount_clash(
     attached by id, or kept by an older fork, as `{other}/name` would sit beside this agent's
     `{agent}/name` and break its sessions.
     """
-    bodies: dict[str, str] = {}
-    for row in await list_skills_strict(client):
-        body = strip_tenant_prefix(tenant_id=tenant_id, display_title=row.display_title or "")
-        if row.source == "custom" and body is not None:
-            bodies[row.id] = body
-    for skill in agent.skills:
-        if skill.skill_id == own_skill_id:
-            continue
+    rows = {row.id: row for row in await list_skills_strict(client, tenants=tenants)}
+    others = [skill for skill in agent.skills if skill.skill_id != own_skill_id]
+    bodies = await skill_mount_bodies(
+        client, rows, (s.skill_id for s in others), tenant_id=tenant_id
+    )
+    for skill in others:
         body = skill.skill_id if skill.type == "anthropic" else bodies.get(skill.skill_id)
         # Its title may carry another agent's name, so it is not repeated.
         if body is not None and body.rsplit("/", 1)[-1] == name:
@@ -469,7 +479,9 @@ async def _attach(
                 f"Uploaded, but not attached: the agent would have {len(merged)} skills and "
                 f"the limit is {AGENT_SKILL_CAP}. Remove one, then add this again."
             )
-        collision = await find_attach_mount_collision(client, tenant_id=tenant_id, skills=merged)
+        collision = await find_attach_mount_collision(
+            client, tenant_id=tenant_id, skills=merged, tenants=sessionmaker
+        )
         if collision is not None:
             raise SkillIngestError(f"Uploaded, but not attached: {collision}")
         attached = True

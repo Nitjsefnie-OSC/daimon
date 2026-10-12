@@ -27,7 +27,7 @@ from daimon.core.errors import StoreError
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from daimon.core.stores.security_audit import erase_tenant
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Text, delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -46,6 +46,17 @@ async def list_all_tenant_ids(session: AsyncSession) -> set[uuid.UUID]:
     can hold sessions tagged with tenant_ids from other deployments/evals."""
     rows = (await session.execute(select(Tenant.id))).scalars().all()
     return set(rows)
+
+
+async def list_tenant_ids_with_prefixes(
+    session: AsyncSession, *, prefixes: set[str]
+) -> list[uuid.UUID]:
+    """Every tenant id beginning with one of `prefixes` (each a few hex chars)."""
+    if not prefixes:
+        return []
+    id_text = func.cast(Tenant.id, Text)
+    stmt = select(Tenant.id).where(or_(*(id_text.like(f"{p}%") for p in sorted(prefixes))))
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def get_tenant_liveness(

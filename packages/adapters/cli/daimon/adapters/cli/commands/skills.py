@@ -324,7 +324,7 @@ async def list_skills(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    all_rows, truncated = await list_skills_lenient(rt.anthropic)
+    all_rows, truncated = await list_skills_lenient(rt.anthropic, tenants=rt.sessionmaker)
     if truncated:
         console.print(
             "[yellow]Warning: skill list is truncated at the MA page limit — "
@@ -382,7 +382,9 @@ async def get_skill(
         )
     # Session closed. MA calls below.
     canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=name)
-    skill = await find_skill_by_display_title(rt.anthropic, canonical, on_truncation="degrade")
+    skill = await find_skill_by_display_title(
+        rt.anthropic, canonical, on_truncation="degrade", tenants=rt.sessionmaker
+    )
     if skill is None:
         raise StoreError(f"no skill named {name!r} in your account.")
     version_count = 0
@@ -441,7 +443,9 @@ async def delete_skill(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=name)
-    skill = await find_skill_by_display_title(rt.anthropic, canonical, on_truncation="degrade")
+    skill = await find_skill_by_display_title(
+        rt.anthropic, canonical, on_truncation="degrade", tenants=rt.sessionmaker
+    )
     if skill is None:
         raise StoreError(f"no skill named {name!r} in your account.")
 

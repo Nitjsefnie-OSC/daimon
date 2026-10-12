@@ -35,6 +35,7 @@ from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     list_skills_lenient,
     list_skills_strict,
+    skill_mount_bodies,
 )
 from daimon.core.defaults.metadata import (
     skill_owner_candidates,
@@ -137,7 +138,7 @@ async def choose_channel_skill(
     `current` is the channel's skills. Raises SkillsListTruncatedError when
     the workspace's skills can't all be read.
     """
-    rows = await list_skills_strict(client)
+    rows = await list_skills_strict(client, tenants=session)
     found = _find(rows, tenant_id=tenant_id, skill=skill.strip())
     bodies = _tenant_bodies(rows, tenant_id)
     if found is None or found.id not in bodies:
@@ -157,7 +158,10 @@ async def choose_channel_skill(
     ):
         return "not_usable"
     owner = min(owners) if owners else None
-    name = body.rsplit("/", 1)[-1]
+    by_id = {row.id: row for row in rows}
+    name = (await skill_mount_bodies(client, by_id, [found.id], tenant_id=tenant_id))[
+        found.id
+    ].rsplit("/", 1)[-1]
     if not found.latest_version:
         return "no_version"
     others = [row for row in current if row.skill_id != found.id]
@@ -165,7 +169,8 @@ async def choose_channel_skill(
     extra = [row.skill_id for row in others if row.skill_id not in held]
     if found.id not in held and len(held) + len(extra) + 1 > AGENT_SKILL_CAP:
         return "too_many"
-    mounts = [bodies[sid].rsplit("/", 1)[-1] for sid in (*held, *extra) if sid in bodies]
+    mount_bodies = await skill_mount_bodies(client, by_id, (*held, *extra), tenant_id=tenant_id)
+    mounts = [body.rsplit("/", 1)[-1] for body in mount_bodies.values()]
     if found.id not in held and name in mounts:
         return "mount_clash"
     return ChannelSkillChoice(
@@ -286,8 +291,14 @@ async def turn_channel_skills(
         return ()
     bodies: dict[str, str] | None
     try:
-        listed, truncated = await list_skills_lenient(client)
-        bodies = None if truncated else _tenant_bodies(listed, tenant_id)
+        listed, truncated = await list_skills_lenient(client, tenants=sessionmaker)
+        held = [s.skill_id for s in agent.skills]
+        by_id = {row.id: row for row in listed}
+        bodies = (
+            None
+            if truncated
+            else await skill_mount_bodies(client, by_id, held, tenant_id=tenant_id)
+        )
     except (anthropic.APIError, SkillsListTruncatedError):
         _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
         bodies = None

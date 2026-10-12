@@ -145,12 +145,14 @@ def _generate_rsa_keypair() -> str:
 
 
 def test_tenant_scoped_display_title_uses_tenant_prefix_and_agent_slash_name() -> None:
-    """Title scheme: {t8}-{agent_name}/{name}, tenant-prefixed."""
+    """Title scheme: {tenant_id.hex}-{agent_name}/{name}, prefixed with the full id."""
     tenant_id = uuid.UUID("12345678-0000-0000-0000-000000000000")
     title = tenant_scoped_display_title(
         tenant_id=tenant_id, name="brainstorming", agent_name="my-agent"
     )
-    assert title == "12345678-my-agent/brainstorming", "title must be {t8}-{agent_name}/{name}"
+    assert title == f"{tenant_id.hex}-my-agent/brainstorming", (
+        "title must be {tenant_id.hex}-{agent_name}/{name}"
+    )
 
 
 def test_tenant_scoped_display_title_truncates_over_64_chars() -> None:
@@ -167,14 +169,14 @@ def test_tenant_scoped_display_title_truncates_over_64_chars() -> None:
 def test_tenant_scoped_display_title_accepts_exact_64_char_boundary() -> None:
     """Exactly 64 chars passes through verbatim; 65 chars triggers mangle."""
     tenant_id = uuid.UUID("00000000-0000-0000-0000-000000000000")
-    # prefix = "00000000-" (9 chars); body must fill exactly 55 chars for total 64
-    body = "a" * 55
+    # prefix = 32 hex + "-" (33 chars); body must fill exactly 31 chars for total 64
+    body = "a" * 31
     title = tenant_scoped_display_title(tenant_id=tenant_id, name=body)
     assert len(title) == 64, "exactly 64 chars must pass through unchanged"
     assert "~" not in title, "no mangle for exactly 64 chars"
 
-    # 56-char body → 9 + 56 = 65 → triggers mangle
-    long_body = "a" * 56
+    # 32-char body → 33 + 32 = 65 → triggers mangle
+    long_body = "a" * 32
     mangled = tenant_scoped_display_title(tenant_id=tenant_id, name=long_body)
     assert len(mangled) == 64, "mangled title must still be 64 chars"
     assert "~" in mangled, "mangle marker must appear when over 64 chars"
@@ -2717,8 +2719,8 @@ async def test_sync_creates_two_distinct_skills_when_two_tenants_sync_same_named
         f"got title_a={title_a!r} == title_b={title_b!r}"
     )
 
-    t8_a = str(cli_a.tenant_id)[:8]
-    t8_b = str(cli_b.tenant_id)[:8]
+    t8_a = cli_a.tenant_id.hex
+    t8_b = cli_b.tenant_id.hex
 
     assert title_a.startswith(t8_a + "-"), (
         f"SC-4: tenant A's title must start with its t8 prefix {t8_a!r}, got {title_a!r}"
@@ -2767,7 +2769,7 @@ async def test_recovery_refuses_to_push_version_onto_foreign_tenant_skill(
         tenant_id=foreign_tenant_id, name="o-r", agent_name="agent"
     )
     # Confirm the foreign prefix differs from the caller's.
-    assert not foreign_title.startswith(str(cli.tenant_id)[:8] + "-"), (
+    assert not foreign_title.startswith(cli.tenant_id.hex + "-"), (
         "test setup: foreign title must not share caller tenant prefix"
     )
 
@@ -2792,6 +2794,7 @@ async def test_recovery_refuses_to_push_version_onto_foreign_tenant_skill(
         _display_title: str,
         *,
         on_truncation: str = "degrade",
+        tenants: object = None,
     ) -> SkillListResponse:
         return foreign_skill
 

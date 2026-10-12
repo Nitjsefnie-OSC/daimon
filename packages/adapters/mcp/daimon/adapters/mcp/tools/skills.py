@@ -458,7 +458,7 @@ async def _list_impl(
     auth: AuthIdentity,
     origin_context_id: str | None = None,
 ) -> list[SkillInfo]:
-    rows, _truncated = await list_skills_lenient(runtime.client)
+    rows, _truncated = await list_skills_lenient(runtime.client, tenants=runtime.session_factory)
     caller = await _skill_view(runtime, auth, origin_context_id)
     owners = await load_skill_owners(runtime, caller, auth.tenant_id)
     result: list[SkillInfo] = []
@@ -485,7 +485,9 @@ async def _get_impl(
     origin_context_id: str | None = None,
 ) -> SkillDetail:
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
-    skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
+    skill = await find_skill_by_display_title(
+        runtime.client, canonical, on_truncation="degrade", tenants=runtime.session_factory
+    )
     if skill is None or await _hidden(runtime, auth, skill, origin_context_id):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     version_count = 0
@@ -515,7 +517,9 @@ async def _delete_impl(
             "deleted from chat. Use remove_skill to detach it from an agent you own."
         )
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
-    skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
+    skill = await find_skill_by_display_title(
+        runtime.client, canonical, on_truncation="degrade", tenants=runtime.session_factory
+    )
     if skill is None or await _hidden(runtime, auth, skill):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     # A skill an agent pins or a channel rule adds is resolved at every session

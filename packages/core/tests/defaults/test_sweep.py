@@ -29,7 +29,7 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
-_T8 = str(TENANT_ID)[:8]
+_T8 = TENANT_ID.hex
 
 
 def _tagged_agent(
@@ -607,8 +607,8 @@ async def test_sweep_noop_when_all_present(db_session: AsyncSession) -> None:
 # Two tenant UUIDs for cross-tenant tests.
 _TENANT_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 _TENANT_B = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000002")
-_T8_A = str(_TENANT_A)[:8]
-_T8_B = str(_TENANT_B)[:8]
+_T8_A = _TENANT_A.hex
+_T8_B = _TENANT_B.hex
 
 
 async def test_sweep_skips_cross_tenant_and_synced_and_legacy_skills_when_tenant_a_sweeps(

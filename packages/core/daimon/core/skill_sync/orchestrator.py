@@ -350,7 +350,11 @@ async def _process_one(
         # and only fails at SESSION create when both are attached to one agent.
         # Refuse to create the collider here instead.
         conflict = await find_conflicting_skill_mount(
-            anthropic_client, tenant_id=tenant_id, name=pending.name, agent_name=agent_name
+            anthropic_client,
+            tenant_id=tenant_id,
+            name=pending.name,
+            agent_name=agent_name,
+            tenants=sessionmaker,
         )
         if conflict is not None:
             raise DefaultsError(
@@ -378,7 +382,7 @@ async def _process_one(
             # The _upload_all except-Exception boundary records it in
             # report.failed_uploads.
             recovered = await find_skill_by_display_title(
-                anthropic_client, display_title, on_truncation="raise"
+                anthropic_client, display_title, on_truncation="raise", tenants=sessionmaker
             )
             if recovered is None:
                 raise
@@ -390,7 +394,7 @@ async def _process_one(
             if strip_tenant_prefix(tenant_id=tenant_id, display_title=recovered_title) is None:
                 raise DefaultsError(
                     f"duplicate-title collision resolved to a skill outside this tenant's "
-                    f"namespace (tenant={str(tenant_id)[:8]}, recovered.display_title="
+                    f"namespace (tenant={tenant_id}, recovered.display_title="
                     f"{recovered.display_title!r}); push refused (#138)"
                 ) from err
             resp = await anthropic_client.beta.skills.versions.create(

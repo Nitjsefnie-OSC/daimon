@@ -325,7 +325,7 @@ async def test_load_agent_details_lists_skills_only_when_a_custom_skill_is_attac
                         "id": "skill_1",
                         "type": "skill",
                         "created_at": "2026-01-01T00:00:00Z",
-                        "display_title": f"{str(tenant.id)[:8]}-forecasting",
+                        "display_title": f"{tenant.id.hex}-forecasting",
                         "latest_version": "1",
                     }
                 ],

@@ -506,7 +506,7 @@ async def test_remove_skill_impl_detaches_by_resolved_display_name(
                 SkillListResponse(
                     id="skill_build",
                     type="custom",
-                    display_title=f"{str(tenant_id)[:8]}-build-models",
+                    display_title=f"{tenant_id.hex}-build-models",
                     latest_version="1",
                     created_at="2026-04-21T00:00:00Z",
                     updated_at="2026-04-21T00:00:00Z",

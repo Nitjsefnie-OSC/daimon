@@ -68,7 +68,7 @@ def test_build_metadata_stamps_isolated_when_true() -> None:
 # ---------------------------------------------------------------------------
 
 _TENANT_ID = uuid.UUID("0b8b5903-1234-5678-9abc-def012345678")
-_T8 = "0b8b5903"  # str(_TENANT_ID)[:8]
+_T8 = _TENANT_ID.hex  # the full id, 32 hex chars
 
 
 def test_tenant_scoped_display_title_seeded_shape_short_name() -> None:
@@ -79,7 +79,7 @@ def test_tenant_scoped_display_title_seeded_shape_short_name() -> None:
 
 
 def test_tenant_scoped_display_title_seeded_shape_produces_prefix_dash_name() -> None:
-    """seeded shape must produce f'{str(tenant_id)[:8]}-{name}' for short names"""
+    """seeded shape must produce f'{tenant_id.hex}-{name}' for short names"""
     name = "brainstorming"
     result = tenant_scoped_display_title(tenant_id=_TENANT_ID, name=name)
     assert result == f"{_T8}-{name}", (
@@ -95,24 +95,24 @@ def test_tenant_scoped_display_title_synced_shape() -> None:
 
 
 def test_tenant_scoped_display_title_boundary_63_chars_unmangled() -> None:
-    # prefix is 9 chars ("0b8b5903-"), so body must be 54 to reach total 63
-    body = "x" * 54
+    # prefix is 33 chars (32 hex + "-"), so body must be 30 to reach total 63
+    body = "x" * 30
     result = tenant_scoped_display_title(tenant_id=_TENANT_ID, name=body)
     assert len(result) == 63, "63-char title must not be mangled"
     assert result == f"{_T8}-{body}", "63-char title must be verbatim prefix+body"
 
 
 def test_tenant_scoped_display_title_boundary_64_chars_unmangled() -> None:
-    # body must be 55 to reach total 64
-    body = "x" * 55
+    # body must be 31 to reach total 64
+    body = "x" * 31
     result = tenant_scoped_display_title(tenant_id=_TENANT_ID, name=body)
     assert len(result) == 64, "64-char title must not be mangled"
     assert result == f"{_T8}-{body}", "64-char title must be verbatim prefix+body"
 
 
 def test_tenant_scoped_display_title_boundary_65_chars_mangled_to_64() -> None:
-    # body must be 56 to reach total 65 → triggers mangling
-    body = "x" * 56
+    # body must be 32 to reach total 65 → triggers mangling
+    body = "x" * 32
     result = tenant_scoped_display_title(tenant_id=_TENANT_ID, name=body)
     assert len(result) == 64, "mangled title must be exactly 64 chars"
     assert re.search(r"~[0-9a-f]{4}$", result), "mangled title must end with ~<4 hex chars>"
@@ -181,6 +181,33 @@ def test_strip_tenant_prefix_mangle_stability() -> None:
     assert re_prefixed == title, (
         "re-prefixing a stripped mangled title must reproduce the same 64-char string — no re-mangle"
     )
+
+
+# Two tenants whose ids share their first 8 hex chars.
+_TWIN_A = uuid.UUID("0b8b5903-0000-4000-8000-00000000000a")
+_TWIN_B = uuid.UUID("0b8b5903-ffff-4fff-8fff-00000000000b")
+
+
+def test_title_carries_the_whole_tenant_id() -> None:
+    title = tenant_scoped_display_title(tenant_id=_TWIN_A, name="notes")
+    assert title == f"{_TWIN_A.hex}-notes", "the prefix is the full id, not its first 8 chars"
+
+
+def test_tenants_sharing_an_8_hex_prefix_never_own_each_others_skills() -> None:
+    for owner, other in ((_TWIN_A, _TWIN_B), (_TWIN_B, _TWIN_A)):
+        for kwargs in (
+            {"name": "notes"},
+            {"name": "notes", "agent_name": "bot"},
+            {"name": "x" * 60},
+        ):
+            title = tenant_scoped_display_title(tenant_id=owner, **kwargs)
+            assert strip_tenant_prefix(tenant_id=owner, display_title=title) is not None
+            assert strip_tenant_prefix(tenant_id=other, display_title=title) is None, (
+                "a tenant sharing the first 8 hex chars must not strip another's title"
+            )
+    assert tenant_scoped_display_title(tenant_id=_TWIN_A, name="notes") != (
+        tenant_scoped_display_title(tenant_id=_TWIN_B, name="notes")
+    ), "same name, different tenant: different titles, so lookups cannot cross"
 
 
 def _scoped_body(agent_name: str, name: str = "notes") -> str:

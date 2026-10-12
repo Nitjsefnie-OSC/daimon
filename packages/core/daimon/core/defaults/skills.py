@@ -30,6 +30,7 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.errors import DefaultsError
+from daimon.core.skills.reference_lock import ReferenceScope
 from daimon.core.specs import SkillRef
 
 
@@ -39,6 +40,7 @@ async def resolve_refs(
     refs: list[SkillRef],
     tenant_id: uuid.UUID,
     skills_view: Sequence[SkillListResponse] | None = None,
+    tenants: ReferenceScope | None = None,
 ) -> list[BetaManagedAgentsSkillParams]:
     """Resolve authoring-time SkillRef list to MA skill parameters.
 
@@ -57,7 +59,9 @@ async def resolve_refs(
         else:
             canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=ref.skill_id)
             if skills_view is None:
-                sk = await find_skill_by_display_title(client, canonical, on_truncation="degrade")
+                sk = await find_skill_by_display_title(
+                    client, canonical, on_truncation="degrade", tenants=tenants
+                )
             else:
                 matches = match_skills_by_display_title(list(skills_view), canonical)
                 sk = matches[0] if matches else None
@@ -76,6 +80,7 @@ async def resolve_skill_names(
     *,
     tenant_id: uuid.UUID,
     is_skill_hidden: Callable[[str, str], bool] | None = None,
+    tenants: ReferenceScope | None = None,
 ) -> list[BetaManagedAgentsSkillParams]:
     """Resolve a mixed list of skill names and skill-param dicts.
 
@@ -113,7 +118,9 @@ async def resolve_skill_names(
     for entry in entries:
         if isinstance(entry, str):
             canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=entry)
-            sk = await find_skill_by_display_title(client, canonical, on_truncation="degrade")
+            sk = await find_skill_by_display_title(
+                client, canonical, on_truncation="degrade", tenants=tenants
+            )
             if sk is None or hidden(sk.id, sk.display_title):
                 unresolved.append(entry)
                 continue
@@ -133,7 +140,7 @@ async def resolve_skill_names(
         )
 
     if unresolved:
-        rows, truncated = await list_skills_lenient(client)
+        rows, truncated = await list_skills_lenient(client, tenants=tenants)
         # Build the available list: only this tenant's custom skills (bare names)
         # plus anthropic built-in names. Cross-tenant titles are never shown.
         available: list[str] = []
@@ -162,6 +169,7 @@ async def resolve_custom_skill_titles(
     *,
     agents: Sequence[BetaManagedAgentsAgent],
     tenant_id: uuid.UUID,
+    tenants: ReferenceScope | None = None,
 ) -> tuple[dict[str, str], bool]:
     """Map MA skill id -> bare display name for ``agents``' own-namespace custom skills.
 
@@ -179,7 +187,7 @@ async def resolve_custom_skill_titles(
     """
     if not any(sk.type == "custom" for agent in agents for sk in agent.skills):
         return {}, False
-    rows, truncated = await list_skills_lenient(client)
+    rows, truncated = await list_skills_lenient(client, tenants=tenants)
     titles: dict[str, str] = {}
     for sk in rows:
         if sk.display_title is None:

@@ -147,7 +147,11 @@ async def sweep_removed_skills(
     decision; _run_sweep's existing except (APIError, DaimonError) boundary converts
     it to ResourceOutcome(FAILED, "<sweep>") with zero deletions.
     """
-    all_skills = skills_view if skills_view is not None else await list_skills_strict(client)
+    all_skills = (
+        skills_view
+        if skills_view is not None
+        else await list_skills_strict(client, tenants=session)
+    )
     # Skills carry no daimon_managed marker (MA skills have no metadata field),
     # so — unlike the agent/env sweeps — we cannot tell a defaults-created skill
     # from a user-synced one. Spare any skill an agent still pins so the sweep

@@ -372,7 +372,7 @@ async def test_reconcile_tenant_defaults_applies_tenant_prefix_to_skill_title(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """provision_idempotent: the reconciled skill's display_title carries the
-    {tenant_id[:8]}- prefix, proving the ISO-04 tenant-prefixed reconcile_skill
+    {tenant_id.hex}- prefix, proving the ISO-04 tenant-prefixed reconcile_skill
     path is reached (W3 coverage)."""
     _write_seed_tree(tmp_path)
     result = await provision_tenant(
@@ -404,7 +404,7 @@ async def test_reconcile_tenant_defaults_applies_tenant_prefix_to_skill_title(
         tmp_path,
         tenant_id=result.tenant_id,
     )
-    expected_prefix = f"{str(result.tenant_id)[:8]}-"
+    expected_prefix = f"{result.tenant_id.hex}-"
     assert expected_prefix in skill_payload["body"], (
         "skill create must carry the tenant-prefixed display_title (ISO-04)"
     )
@@ -587,7 +587,7 @@ async def test_reconcile_tenant_defaults_seed_tree_with_skill_ref_pins_tenant_sk
         tenant_id=result.tenant_id,
     )
 
-    expected_prefix = f"{str(result.tenant_id)[:8]}-"
+    expected_prefix = f"{result.tenant_id.hex}-"
 
     # Leg 1: create-prefixed — skill outcome is CREATED (not FAILED/SKIPPED).
     assert [o.action for o in report.skills] == [Action.CREATED], (

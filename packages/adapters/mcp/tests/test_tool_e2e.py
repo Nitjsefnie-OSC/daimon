@@ -225,7 +225,7 @@ async def test_list_skills_end_to_end(
     await db_session.commit()
 
     # Use canonical prefixed display_title so the tenant-scoped list includes this skill.
-    e2e_skill_title = f"{str(tenant_id)[:8]}-e2e-skill"
+    e2e_skill_title = f"{tenant_id.hex}-e2e-skill"
     router = MARouter()
     router.add(
         "GET",

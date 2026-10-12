@@ -157,6 +157,17 @@ def build_metadata(
 _DISPLAY_TITLE_MAX = 64
 
 
+def _tenant_title_prefix(tenant_id: uuid.UUID) -> str:
+    """The whole tenant id, 32 hex chars without dashes, then "-" (33 chars).
+
+    Every tenant's skills live in one MA workspace and a skill carries no
+    metadata, so this prefix is the only thing that says whose a skill is. It
+    holds the full id, as agents and environments compare it; a shorter one
+    lets two tenants whose ids begin alike reach each other's skills.
+    """
+    return f"{uuid.UUID(str(tenant_id)).hex}-"
+
+
 def tenant_scoped_display_title(
     *, tenant_id: uuid.UUID, name: str, agent_name: str | None = None
 ) -> str:
@@ -164,8 +175,9 @@ def tenant_scoped_display_title(
     function allowed to produce a tenant-owned skill display_title — use it
     at every create/lookup/dedup/recovery site.
 
-    Prefix is ``f"{str(tenant_id)[:8]}-"`` (9 chars). Body is ``name`` when
-    ``agent_name`` is None (seeded shape) or ``f"{agent_name}/{name}"`` (synced shape).
+    Prefix is the full tenant id: ``f"{tenant_id.hex}-"`` (33 chars, see
+    `_tenant_title_prefix`). Body is ``name`` when ``agent_name`` is None
+    (seeded shape) or ``f"{agent_name}/{name}"`` (synced shape).
 
     If prefix + body fits within _DISPLAY_TITLE_MAX (64 chars), return as-is.
     Otherwise truncate: ``f"{prefix}{body[:keep]}~{digest}"`` where ``digest`` is
@@ -174,7 +186,7 @@ def tenant_scoped_display_title(
     over the full body so two long names sharing a long prefix still get distinct
     titles.
     """
-    prefix = f"{str(tenant_id)[:8]}-"
+    prefix = _tenant_title_prefix(tenant_id)
     body = name if agent_name is None else f"{agent_name}/{name}"
     full = f"{prefix}{body}"
     if len(full) <= _DISPLAY_TITLE_MAX:
@@ -184,7 +196,7 @@ def tenant_scoped_display_title(
     return f"{prefix}{body[:keep]}~{digest}"
 
 
-_TENANT_PREFIX_LEN = 9  # f"{str(tenant_id)[:8]}-"
+_TENANT_PREFIX_LEN = 33  # f"{tenant_id.hex}-"
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -271,13 +283,13 @@ def find_mount_collision(
 
 
 def strip_tenant_prefix(*, tenant_id: uuid.UUID, display_title: str) -> str | None:
-    """Strip the tenant id-8 prefix from a display_title and return the body.
+    """Strip the tenant's full-id prefix from a display_title and return the body.
 
     Prefix-matches against the KNOWN ``tenant_id`` — never splits on "-" (names
     like ``cli-auth`` contain dashes). Returns the remainder on match, None
     otherwise. None means "not this tenant's skill — filter it out".
     """
-    prefix = f"{str(tenant_id)[:8]}-"
+    prefix = _tenant_title_prefix(tenant_id)
     if display_title.startswith(prefix):
         return display_title[len(prefix) :]
     return None

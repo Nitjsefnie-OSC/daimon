@@ -1022,6 +1022,20 @@ setup thread under a channel kept to its own agents reaches only them, and
 nothing outside reaches them. Their uploads are hidden outside it like its other agent-scoped
 skills, keyed by the upload row's agent.
 
+**Skill titles carry the tenant.** Every tenant's skills live in one MA
+workspace, and a skill has no metadata, so its `display_title` is the only
+thing naming its tenant. `tenant_scoped_display_title`
+(`packages/core/daimon/core/defaults/metadata.py`) writes the full tenant id
+(`{tenant_id.hex}-`, 33 characters, then the body shortened to fit MA's 64),
+and `strip_tenant_prefix` is the one ownership test that list, lookup, attach,
+delete, the sweep, mount checks and fork all go through. A title written
+earlier carries only the first 8 hex characters: the skills listing
+(`ma_index`, given the tenants table) reads it as its tenant's full-id title
+when exactly one tenant has those characters, and leaves it nobody's, with a
+log line, when several do. Fork leaves off any custom skill its tenant doesn't
+own. A shortened title can cut the name a skill mounts under, so mount checks
+read that name off the skill's latest version (`skill_mount_bodies`).
+
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
 session, assembles every `create_session` argument (credential env mount, MCP

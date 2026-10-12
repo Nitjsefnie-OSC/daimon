@@ -195,7 +195,9 @@ async def _reconcile_core(
         skills_view = None
         if skill_dirs:
             try:
-                skills_view = await list_skills_strict(client)
+                skills_view = await list_skills_strict(
+                    client, tenants=skill_session or session_factory
+                )
             except (APIError, DaimonError) as err:
                 _log.warning("defaults.skills_list_failed", error=str(err))
                 for skill_dir in skill_dirs:

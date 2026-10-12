@@ -63,7 +63,12 @@ async def reconcile_skill(
     matches = (
         match_skills_by_display_title(skills_view, display_title)
         if skills_view is not None
-        else await find_skills_by_display_title(client, display_title, on_truncation="raise")
+        else await find_skills_by_display_title(
+            client,
+            display_title,
+            on_truncation="raise",
+            tenants=db_session or session_factory,
+        )
     )
     ma_match = matches[0] if matches else None
     duplicates = matches[1:] if len(matches) > 1 else []
@@ -78,7 +83,7 @@ async def reconcile_skill(
                 raise DefaultsError(
                     f"reconcile_skill: dedup found skill {dup.id!r} with display_title "
                     f"{dup.display_title!r} that does not carry tenant prefix for "
-                    f"{str(tenant_id)[:8]}; refusing to delete a skill we do not own"
+                    f"{tenant_id}; refusing to delete a skill we do not own"
                 )
             _log.info(
                 "reconcile.delete_duplicate",

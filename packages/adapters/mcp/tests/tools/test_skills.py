@@ -63,7 +63,7 @@ async def test_list_impl_returns_skill_info_list(
             [
                 SkillListResponse(
                     id="sk_1",
-                    display_title=f"{str(tenant_id)[:8]}-my-skill",
+                    display_title=f"{tenant_id.hex}-my-skill",
                     source="custom",
                     type="custom",
                     created_at="2026-01-01T00:00:00Z",
@@ -97,7 +97,7 @@ async def test_get_impl_returns_skill_detail_with_version_count(
             [
                 SkillListResponse(
                     id="sk_x",
-                    display_title=f"{str(tenant_id)[:8]}-found",
+                    display_title=f"{tenant_id.hex}-found",
                     source="custom",
                     type="custom",
                     created_at="2026-01-01T00:00:00Z",
@@ -142,8 +142,8 @@ async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_buil
     tenant_b = uuid.uuid4()
     account_id = uuid.uuid4()
 
-    own_skill_display_title = f"{str(tenant_a)[:8]}-my-skill"
-    foreign_skill_display_title = f"{str(tenant_b)[:8]}-their-skill"
+    own_skill_display_title = f"{tenant_a.hex}-my-skill"
+    foreign_skill_display_title = f"{tenant_b.hex}-their-skill"
 
     router = MARouter()
     router.add(
@@ -212,7 +212,7 @@ async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name(
             [
                 SkillListResponse(
                     id="sk_synced",
-                    display_title=f"{str(tenant_id)[:8]}-daimon/tool-x",
+                    display_title=f"{tenant_id.hex}-daimon/tool-x",
                     source="custom",
                     type="custom",
                     created_at="2026-01-01T00:00:00Z",
@@ -248,7 +248,7 @@ async def test_get_impl_foreign_tenant_bare_name_raises_not_found() -> None:
             [
                 SkillListResponse(
                     id="sk_b",
-                    display_title=f"{str(tenant_b)[:8]}-their-skill",
+                    display_title=f"{tenant_b.hex}-their-skill",
                     source="custom",
                     type="custom",
                     created_at="2026-01-01T00:00:00Z",
@@ -288,7 +288,7 @@ async def test_delete_impl_calls_delete_skill_and_versions(
             [
                 SkillListResponse(
                     id="sk_d",
-                    display_title=f"{str(tenant_id)[:8]}-doomed",
+                    display_title=f"{tenant_id.hex}-doomed",
                     source="custom",
                     type="custom",
                     created_at="2026-01-01T00:00:00Z",
@@ -322,7 +322,7 @@ def _doomed_skill_router(tenant_id: uuid.UUID, deleted: list[str]) -> MARouter:
             [
                 SkillListResponse(
                     id="sk_d",
-                    display_title=f"{str(tenant_id)[:8]}-doomed",
+                    display_title=f"{tenant_id.hex}-doomed",
                     source="custom",
                     type="custom",
                     created_at="2026-01-01T00:00:00Z",
@@ -808,7 +808,7 @@ def _skills_one_router() -> MARouter:
             [
                 SkillListResponse(
                     id="sk_1",
-                    display_title=f"{str(_DISPATCH_TEST_TENANT_ID)[:8]}-my-skill",
+                    display_title=f"{_DISPATCH_TEST_TENANT_ID.hex}-my-skill",
                     source="custom",
                     type="custom",
                     created_at="2026-01-01T00:00:00Z",

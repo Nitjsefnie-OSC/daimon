@@ -100,7 +100,7 @@ async def _split_scoped_skills(
     """Split off the skills scoped to one agent: a copy must not reach into another's."""
     if not any(skill.get("type") == "custom" for skill in skills):
         return _SkillSplit(skills, [], [])
-    rows = {row.id: row for row in await list_skills_strict(anthropic)}
+    rows = {row.id: row for row in await list_skills_strict(anthropic, tenants=sessionmaker)}
     body_by_id = {
         skill_id: body
         for skill_id, row in rows.items()
@@ -123,7 +123,11 @@ async def _split_scoped_skills(
             stored_owner=upload.agent_name if upload is not None else None,
             agent_names=agent_names,
         )
-        if not owners:
+        if skill.get("type") == "custom" and body is None:
+            # Not this tenant's by its title (another's, a prefix several
+            # tenants share, or gone): never attached to a new agent.
+            split.dropped.append(skill_id)
+        elif not owners:
             split.kept.append(skill)
         elif owners == frozenset({source_name}) and body is not None:
             pinned = skill.get("version")

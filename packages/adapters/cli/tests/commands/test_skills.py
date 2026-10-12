@@ -1091,13 +1091,14 @@ def test_skills_list_with_guild_override_lists_that_guilds_skills(
 
     without_override = CliRunner().invoke(main_mod.app, ["skills", "list"])
     assert without_override.exit_code == 0, without_override.stdout
-    assert "guild-only-skill" not in without_override.stdout, (
+    # Matched by id: the full-id title is wider than the test terminal's table.
+    assert "sk_guild" not in without_override.stdout, (
         "the local cli:local tenant must not see another guild's skills"
     )
 
     with_override = CliRunner().invoke(main_mod.app, ["skills", "--guild", guild_id, "list"])
     assert with_override.exit_code == 0, with_override.stdout
-    assert "guild-only-skill" in with_override.stdout, (
+    assert "sk_guild" in with_override.stdout, (
         "--guild must resolve to that guild's tenant and list its skills"
     )
 

@@ -112,6 +112,7 @@ async def reconcile_agent(
         refs=spec.skills,
         tenant_id=tenant_id,
         skills_view=skills_view if dry_run else None,
+        tenants=references,
     )
     matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
     ma_match = matches[0] if matches else None

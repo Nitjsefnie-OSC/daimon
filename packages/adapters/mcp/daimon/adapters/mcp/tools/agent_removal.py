@@ -197,7 +197,7 @@ async def _remove_skill_impl(
     )
 
     titles, _truncated = await resolve_custom_skill_titles(
-        runtime.client, agents=[agent], tenant_id=auth.tenant_id
+        runtime.client, agents=[agent], tenant_id=auth.tenant_id, tenants=runtime.session_factory
     )
     target_id: str | None = None
     for sk in agent.skills:

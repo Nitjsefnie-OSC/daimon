@@ -309,7 +309,7 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills(
                 SkillListResponse(
                     id="skill_build",
                     type="custom",
-                    display_title=f"{str(tenant_id)[:8]}-build-models",
+                    display_title=f"{tenant_id.hex}-build-models",
                     latest_version="1",
                     created_at="2026-04-21T00:00:00Z",
                     updated_at="2026-04-21T00:00:00Z",
@@ -367,7 +367,7 @@ async def test_list_agents_impl_includes_mcp_servers_and_skills(
                 SkillListResponse(
                     id="skill_build",
                     type="custom",
-                    display_title=f"{str(tenant_id)[:8]}-build-models",
+                    display_title=f"{tenant_id.hex}-build-models",
                     latest_version="1",
                     created_at="2026-04-21T00:00:00Z",
                     updated_at="2026-04-21T00:00:00Z",
@@ -1745,7 +1745,17 @@ async def test_fork_agent_impl_copies_source_skills(
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
-    router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
+    # skill_abc is a library skill of this tenant: its title says so.
+    library = SkillListResponse(
+        id="skill_abc",
+        display_title=tenant_scoped_display_title(tenant_id=tenant_id, name="abc"),
+        source="custom",
+        type="skill",
+        created_at="2026-04-21T00:00:00Z",
+        updated_at="2026-04-21T00:00:00Z",
+        latest_version="2",
+    ).model_dump(mode="json")
+    router.add("GET", r"/v1/skills", lambda _req, _m: list_response([library]))
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
@@ -2304,7 +2314,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
                 SkillListResponse(
                     id="skill_build",
                     type="custom",
-                    display_title=f"{str(tenant_id)[:8]}-build-models",
+                    display_title=f"{tenant_id.hex}-build-models",
                     latest_version="1",
                     created_at="2026-04-21T00:00:00Z",
                     updated_at="2026-04-21T00:00:00Z",
@@ -3941,8 +3951,8 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
     tenant_b = uuid.uuid4()
     account_id = uuid.uuid4()
 
-    tenant_a_skill_title = f"{str(tenant_a)[:8]}-my-skill"
-    tenant_b_skill_title = f"{str(tenant_b)[:8]}-their-skill"
+    tenant_a_skill_title = f"{tenant_a.hex}-my-skill"
+    tenant_b_skill_title = f"{tenant_b.hex}-their-skill"
 
     router = MARouter()
     router.add(
@@ -4065,7 +4075,7 @@ async def test_agent_info_skill_names_are_bare_for_own_namespace_pins(
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
-    own_skill_title = f"{str(tenant_id)[:8]}-cli-auth"
+    own_skill_title = f"{tenant_id.hex}-cli-auth"
 
     router = MARouter()
     router.add(

@@ -296,7 +296,7 @@ async def load_agent_details(
     )
     files = await agent_files.list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     skill_titles, skills_truncated = await resolve_custom_skill_titles(
-        anthropic, agents=[agent], tenant_id=tenant_id
+        anthropic, agents=[agent], tenant_id=tenant_id, tenants=session
     )
     return build_agent_details(
         agent=agent,

@@ -10,8 +10,9 @@ others are left alone and a warning is logged.
 
 from __future__ import annotations
 
+import re
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterable, Mapping
 from typing import Literal
 
 import sentry_sdk
@@ -30,9 +31,17 @@ from daimon.core.defaults.metadata import (
     find_conflicting_skill_body,
     find_mount_collision,
     strip_tenant_prefix,
+    tenant_scoped_display_title,
 )
 from daimon.core.errors import DaimonError, SkillsListTruncatedError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skills.reference_lock import ReferenceScope
+from daimon.core.stores.tenants import list_tenant_ids_with_prefixes
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# A title stamped before titles carried the whole tenant id: 8 hex chars, "-",
+# the body. A full-id title has a hex char where this one has its "-".
+_SHORT_PREFIX_TITLE = re.compile(r"([0-9a-f]{8})-(.+)", re.DOTALL)
 
 _log = structlog.get_logger(__name__)
 
@@ -244,8 +253,55 @@ async def list_environments_by_tenant(
     return results
 
 
+async def _owned_titles(
+    rows: list[SkillListResponse], tenants: ReferenceScope | None
+) -> list[SkillListResponse]:
+    """Read each short-prefix title as its tenant's full-id title, when it has one.
+
+    A title stamped with 8 hex chars of a tenant id is that tenant's only when
+    exactly one tenant of this deployment has those 8 chars: its row is read
+    under the title `tenant_scoped_display_title` gives it now, so ownership
+    (`strip_tenant_prefix`) and lookups by name treat it like any other. One
+    prefix several tenants share is nobody's, and is logged. One bounded read
+    of the tenants table (on `tenants`), only when such a title is listed;
+    with no `tenants` such a title stays nobody's.
+    """
+    short = {
+        row.id: match
+        for row in rows
+        if row.source == "custom"
+        and (match := _SHORT_PREFIX_TITLE.fullmatch(row.display_title or "")) is not None
+    }
+    if not short or tenants is None:
+        return rows
+    prefixes = {match.group(1) for match in short.values()}
+    if isinstance(tenants, AsyncSession):
+        ids = await list_tenant_ids_with_prefixes(tenants, prefixes=prefixes)
+    else:
+        async with tenants() as session:
+            ids = await list_tenant_ids_with_prefixes(session, prefixes=prefixes)
+    owners: dict[str, list[uuid.UUID]] = {p: [] for p in prefixes}
+    for tenant_id in ids:
+        owners[str(tenant_id)[:8]].append(tenant_id)
+    owned: list[SkillListResponse] = []
+    for row in rows:
+        match = short.get(row.id)
+        if match is not None and len(owners[match.group(1)]) == 1:
+            agent_name, sep, name = match.group(2).partition("/")
+            title = tenant_scoped_display_title(
+                tenant_id=owners[match.group(1)][0],
+                name=name if sep else match.group(2),
+                agent_name=agent_name if sep else None,
+            )
+            row = row.model_copy(update={"display_title": title})
+        elif match is not None and len(owners[match.group(1)]) > 1:
+            _log.warning("ma_index.skill_prefix_ambiguous", skill_id=row.id)
+        owned.append(row)
+    return owned
+
+
 async def _collect_skills_page(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic, tenants: ReferenceScope | None = None
 ) -> tuple[list[SkillListResponse], bool]:
     """Follow skill cursors and flag a full terminal page with no cursor."""
     rows: list[SkillListResponse] = []
@@ -255,16 +311,19 @@ async def _collect_skills_page(
         rows.extend(current.data)
         if len(current.data) >= _SKILLS_PAGE_LIMIT and not current.next_page:
             truncated = True
-    return rows, truncated
+    return await _owned_titles(rows, tenants), truncated
 
 
-async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
+async def list_skills_strict(
+    client: AsyncAnthropic, *, tenants: ReferenceScope | None = None
+) -> list[SkillListResponse]:
     """Return all MA skills, raising if the last full page has no cursor.
 
     Use in write contexts (create, delete, dedup) where making decisions on a
-    truncated view is unsafe.
+    truncated view is unsafe. `tenants` lets a short-prefix title be read as
+    its tenant's (`_owned_titles`).
     """
-    rows, page_full = await _collect_skills_page(client)
+    rows, page_full = await _collect_skills_page(client, tenants)
     if page_full:
         raise SkillsListTruncatedError(
             f"skills.list returned a full page of {_SKILLS_PAGE_LIMIT} rows — "
@@ -297,13 +356,15 @@ async def download_skill_version(client: AsyncAnthropic, *, skill_id: str, versi
         await content.close()
 
 
-async def list_skills_lenient(client: AsyncAnthropic) -> tuple[list[SkillListResponse], bool]:
+async def list_skills_lenient(
+    client: AsyncAnthropic, *, tenants: ReferenceScope | None = None
+) -> tuple[list[SkillListResponse], bool]:
     """Return (rows, truncated) for the MA skills page.
 
     When truncated: emits a structlog warning and a Sentry capture. Use in read
     contexts where degraded results are acceptable but should be observable.
     """
-    rows, page_full = await _collect_skills_page(client)
+    rows, page_full = await _collect_skills_page(client, tenants)
     if page_full:
         _log.warning("ma_index.skills_list_truncated", limit=_SKILLS_PAGE_LIMIT)
         sentry_sdk.capture_message("skills list truncated at MA API page limit", level="warning")
@@ -315,6 +376,7 @@ async def find_skills_by_display_title(
     display_title: str,
     *,
     on_truncation: Literal["raise", "degrade"],
+    tenants: ReferenceScope | None = None,
 ) -> list[SkillListResponse]:
     """Return all custom MA skills with `display_title`, canonical first.
 
@@ -333,7 +395,7 @@ async def find_skills_by_display_title(
     must choose explicitly: write/create/delete contexts use "raise"; read
     contexts use "degrade".
     """
-    rows, page_full = await _collect_skills_page(client)
+    rows, page_full = await _collect_skills_page(client, tenants)
     if page_full:
         if on_truncation == "raise":
             raise SkillsListTruncatedError(
@@ -357,12 +419,51 @@ def match_skills_by_display_title(
     return matches
 
 
+async def skill_mount_bodies(
+    client: AsyncAnthropic,
+    rows: Mapping[str, SkillListResponse],
+    skill_ids: Iterable[str],
+    *,
+    tenant_id: uuid.UUID,
+) -> dict[str, str]:
+    """Title body of each custom skill in `skill_ids`, its last segment the folder it mounts under.
+
+    For mount checks only, so a skill counts whether or not it is the tenant's:
+    one already on an agent mounts there regardless. The body is read off the
+    title unless that may be wrong, when the name comes from the skill's latest
+    version: a title shortened to fit MA's 64 chars (a "~", which a skill name
+    never holds, marks it) may have cut it, and a title the tenant doesn't own
+    gives no body. A shortened body cut before its "/" keeps only the start of
+    a long library name or of a long agent name; it is the agent's when the
+    name does not begin with it.
+    """
+    out: dict[str, str] = {}
+    for skill_id in skill_ids:
+        row = rows.get(skill_id)
+        if row is None or row.source != "custom":
+            continue
+        body = strip_tenant_prefix(tenant_id=tenant_id, display_title=row.display_title or "")
+        if body is None or "~" in body:
+            mount = (body or row.id).rsplit("/", 1)[-1]
+            async for version in client.beta.skills.versions.list(skill_id=row.id):
+                mount = version.name
+                if version.version == row.latest_version:
+                    break
+            head = (body or "").rpartition("/")[0]
+            if body is not None and not head and not mount.startswith(body[: body.rfind("~")]):
+                head = body[: body.rfind("~")]
+            body = f"{head}/{mount}" if head else mount
+        out[skill_id] = body
+    return out
+
+
 async def find_conflicting_skill_mount(
     client: AsyncAnthropic,
     *,
     tenant_id: uuid.UUID,
     name: str,
     agent_name: str | None,
+    tenants: ReferenceScope | None = None,
 ) -> SkillListResponse | None:
     """Return a tenant skill whose MA mount name would collide with creating
     ``name`` under the given shape (registry when ``agent_name`` is None,
@@ -377,18 +478,19 @@ async def find_conflicting_skill_mount(
     Truncation always raises SkillsListTruncatedError — this is a create-guard,
     and a truncated view can hide the collider.
     """
-    rows = await list_skills_strict(client)
-    bodies_by_title: dict[str, SkillListResponse] = {}
-    for sk in rows:
-        if sk.source != "custom":
-            continue
-        body = strip_tenant_prefix(tenant_id=tenant_id, display_title=sk.display_title or "")
-        if body is not None:
-            bodies_by_title[body] = sk
+    rows = {sk.id: sk for sk in await list_skills_strict(client, tenants=tenants)}
+    owned = [
+        sk.id
+        for sk in rows.values()
+        if strip_tenant_prefix(tenant_id=tenant_id, display_title=sk.display_title or "")
+        is not None
+    ]
+    bodies = await skill_mount_bodies(client, rows, owned, tenant_id=tenant_id)
+    by_body = {body: rows[skill_id] for skill_id, body in bodies.items()}
     conflict = find_conflicting_skill_body(
-        existing_bodies=list(bodies_by_title), name=name, agent_name=agent_name
+        existing_bodies=list(by_body), name=name, agent_name=agent_name
     )
-    return bodies_by_title[conflict] if conflict is not None else None
+    return by_body[conflict] if conflict is not None else None
 
 
 async def find_attach_mount_collision(
@@ -396,6 +498,7 @@ async def find_attach_mount_collision(
     *,
     tenant_id: uuid.UUID,
     skills: list[BetaManagedAgentsSkillParams],
+    tenants: ReferenceScope | None = None,
 ) -> str | None:
     """Return a human-readable description of a mount-name collision in a
     proposed agent skill list, else None.
@@ -408,21 +511,17 @@ async def find_attach_mount_collision(
     Truncation raises SkillsListTruncatedError — a truncated view can hide the
     collider, and attaching blind bricks the agent.
     """
-    rows = await list_skills_strict(client)
-    body_by_skill_id: dict[str, str] = {}
-    for sk in rows:
-        if sk.source != "custom":
-            continue
-        body = strip_tenant_prefix(tenant_id=tenant_id, display_title=sk.display_title or "")
-        if body is not None:
-            body_by_skill_id[sk.id] = body
+    rows = {sk.id: sk for sk in await list_skills_strict(client, tenants=tenants)}
     skill_ids = [s["skill_id"] for s in skills]
-    collision = find_mount_collision(skill_ids=skill_ids, body_by_skill_id=body_by_skill_id)
+    collision = find_mount_collision(
+        skill_ids=skill_ids,
+        body_by_skill_id=await skill_mount_bodies(client, rows, skill_ids, tenant_id=tenant_id),
+    )
     if collision is None:
         return None
-    mount_name, bodies = collision
+    mount_name, bodies_at = collision
     return (
-        f"skills {bodies!r} would all mount at {mount_name!r} on this agent — "
+        f"skills {bodies_at!r} would all mount at {mount_name!r} on this agent — "
         f"rename one (e.g. {mount_name}-2) and re-sync before attaching"
     )
 
@@ -432,7 +531,10 @@ async def find_skill_by_display_title(
     display_title: str,
     *,
     on_truncation: Literal["raise", "degrade"],
+    tenants: ReferenceScope | None = None,
 ) -> SkillListResponse | None:
     """Read-only adapter for callers that only need the canonical match."""
-    matches = await find_skills_by_display_title(client, display_title, on_truncation=on_truncation)
+    matches = await find_skills_by_display_title(
+        client, display_title, on_truncation=on_truncation, tenants=tenants
+    )
     return matches[0] if matches else None

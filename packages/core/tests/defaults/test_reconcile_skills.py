@@ -103,7 +103,7 @@ async def test_reconcile_skill_skips_when_content_matches_the_fingerprint(
     so an unchanged skill must cost reads only.
     """
     skill_dir = _write_skill(tmp_path)
-    ma_row = _existing_skill_row("sk_1", f"{str(tenant_id)[:8]}-brainstorming")
+    ma_row = _existing_skill_row("sk_1", f"{tenant_id.hex}-brainstorming")
     router = _router_with_skills([ma_row])
     router.add(
         "POST",
@@ -153,7 +153,7 @@ async def test_reconcile_skill_pushes_a_new_version_when_the_content_changed(
     agent's turns.
     """
     skill_dir = _write_skill(tmp_path, body="original guidance\n")
-    ma_row = _existing_skill_row("sk_1", f"{str(tenant_id)[:8]}-brainstorming")
+    ma_row = _existing_skill_row("sk_1", f"{tenant_id.hex}-brainstorming")
     router = _router_with_skills([ma_row])
     version_posts: list[str] = []
 
@@ -215,7 +215,7 @@ async def test_reconcile_skill_deletes_duplicates_keeping_newest(
     older = SkillListResponse(
         id="sk_old",
         type="custom",
-        display_title=f"{str(tenant_id)[:8]}-brainstorming",
+        display_title=f"{tenant_id.hex}-brainstorming",
         latest_version="1",
         created_at="2026-04-20T00:00:00Z",
         updated_at="2026-04-20T00:00:00Z",
@@ -224,7 +224,7 @@ async def test_reconcile_skill_deletes_duplicates_keeping_newest(
     newer = SkillListResponse(
         id="sk_new",
         type="custom",
-        display_title=f"{str(tenant_id)[:8]}-brainstorming",
+        display_title=f"{tenant_id.hex}-brainstorming",
         latest_version="1",
         created_at="2026-04-21T00:00:00Z",
         updated_at="2026-04-21T00:00:00Z",
@@ -299,9 +299,7 @@ async def test_reconcile_skill_dry_run_reports_a_content_change_without_writing(
     No POST handler is registered, so any write attempt trips the router.
     """
     skill_dir = _write_skill(tmp_path)
-    router = _router_with_skills(
-        [_existing_skill_row("sk_1", f"{str(tenant_id)[:8]}-brainstorming")]
-    )
+    router = _router_with_skills([_existing_skill_row("sk_1", f"{tenant_id.hex}-brainstorming")])
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_skill(
@@ -324,7 +322,7 @@ async def test_reconcile_skill_looks_up_prefixed_display_title(
     router AssertionError.
     """
     skill_dir = _write_skill(tmp_path)
-    prefixed = f"{str(tenant_id)[:8]}-brainstorming"
+    prefixed = f"{tenant_id.hex}-brainstorming"
     router = _router_with_skills([_existing_skill_row("sk_1", prefixed)])
     client = build_fake_anthropic_http(router.dispatch)
 
@@ -350,7 +348,7 @@ async def test_reconcile_skill_creates_with_same_prefixed_title(
     a title mismatch between find and create).
     """
     skill_dir = _write_skill(tmp_path)
-    prefixed = f"{str(tenant_id)[:8]}-brainstorming"
+    prefixed = f"{tenant_id.hex}-brainstorming"
     router = _router_with_skills([])
 
     captured_display_title: list[str] = []

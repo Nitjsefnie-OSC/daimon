@@ -360,7 +360,7 @@ async def _list_agents_impl(
     )
     rows = [row for row in rows if caller.sees_agent(row)]
     skill_titles, _truncated = await resolve_custom_skill_titles(
-        runtime.client, agents=rows, tenant_id=auth.tenant_id
+        runtime.client, agents=rows, tenant_id=auth.tenant_id, tenants=runtime.session_factory
     )
     return [AgentInfo.from_ma(a, skill_titles=skill_titles) for a in rows]
 
@@ -675,6 +675,7 @@ async def _update_agent_impl(
                 runtime.client,
                 skills,
                 tenant_id=auth.tenant_id,
+                tenants=runtime.session_factory,
                 is_skill_hidden=lambda skill_id, body: caller.hides_skill(
                     owners, skill_id=skill_id, body=body
                 ),
