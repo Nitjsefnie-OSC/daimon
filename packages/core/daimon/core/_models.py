@@ -69,6 +69,11 @@ class AgentAvatar(Base):
     )
 
 
+# Skill titles name a tenant by the first 8 hex chars of its id, so no two
+# tenants may share them (migration 0091 creates this index).
+TENANT_ID_PREFIX_INDEX = "uq_tenants_id_prefix"
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (
@@ -77,6 +82,7 @@ class Tenant(Base):
             "funding_mode IN ('prepaid', 'operator_funded')", name="ck_tenants_funding_mode"
         ),
         CheckConstraint("turn_cap IS NULL OR turn_cap > 0", name="ck_tenants_turn_cap"),
+        Index(TENANT_ID_PREFIX_INDEX, text("left(CAST(id AS TEXT), 8)"), unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
