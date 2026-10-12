@@ -15,7 +15,7 @@
   },
   "input_index": {
     "path": "index.json",
-    "sha256": "36ad7ea31702fa1f5afd4831fd917d4297b35f126c18ef6ce8e818ea6f590e25"
+    "sha256": "4859968d49792289eb521202c73c534a171bdcc3448ea3b49b0948d615e30c83"
   },
   "entries": [
     {
@@ -268,7 +268,7 @@
       },
       "input": {
         "path": "native/QA-D22-WHO-ANSWERS-HERE.json",
-        "sha256": "30de082abfc655b1f95594994abaa2ad1142e89f363cafebddb90232031fc1ee"
+        "sha256": "10b6ebaf702f8034ceaebbc62a9ddfcdcec7fe89d19adeef507e0e786cd1022b"
       },
       "bindings": [
         {
@@ -329,7 +329,7 @@
       },
       "input": {
         "path": "native/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
-        "sha256": "d46858109808e90d21df389df2c3ebf1e7091c23ca87bc6d9a0b919d27ca1b3d"
+        "sha256": "091e395402cd732228f6807e1e2cc98a5f5c4d9a227bf048f319fbbc382bd97f"
       },
       "bindings": [
         {
@@ -456,7 +456,7 @@
       },
       "input": {
         "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
-        "sha256": "5df8d24bc007eeefdf0884d49e468ad1a4d38ba3df5111d85a8a5b118e158055"
+        "sha256": "39bacc96cb1a20adf8da097302ce7625182e4103f9e2f7cf10dcf7a780f02988"
       },
       "bindings": [
         {
@@ -592,7 +592,7 @@
       },
       "input": {
         "path": "native/QA-ISO-TEAM-CHANNEL-ISOLATION.json",
-        "sha256": "887bcf1f434137a6373ed758cb238a0565fd2015fe37d955201eecda2c4bcd06"
+        "sha256": "03c62524ac5b37b4a74a519eafd61c8b3f3b7efd551be02ca081a725ebeb7103"
       },
       "bindings": [
         {
@@ -895,7 +895,7 @@
       },
       "input": {
         "path": "native/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
-        "sha256": "57c07eb8868f776bb3bb7e185fba2282e1e80be24e6e659110421c5132130a37"
+        "sha256": "0c2d4f270a6ab5e44e7ba649f220797c6dde802c8b13d984fb2a3df27ab45e0b"
       },
       "bindings": [
         {
@@ -960,7 +960,7 @@
       },
       "input": {
         "path": "native/QA-NEW18-SKILL-ADD-YES-PLEASE.json",
-        "sha256": "fed96831fcf45bfb592105f7b510871d175d894b73a5d0aaf7765925cc57a359"
+        "sha256": "e3c93592a180b073195e6c94459fb5cf3b8923d1cfaeca458b8d8fa1dc40acb8"
       },
       "bindings": [
         {
@@ -1100,7 +1100,7 @@
       },
       "input": {
         "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
-        "sha256": "c673fb5ded32dd1e20906e838d56177eaaa037e0df3dd14117c5fee7a1725f1e"
+        "sha256": "c376fd652dc7fc9812124b8c697112e4f51a74cd3362ad29edbf21964a2689f8"
       },
       "bindings": [
         {
@@ -1134,7 +1134,7 @@
       },
       "input": {
         "path": "native/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
-        "sha256": "98c5ceeb02fa56cdffa5d92b2d4f93f265ef3b487c129eaa4d84e68b4c652ba2"
+        "sha256": "38023fbeb619d2ea71a8a9b02d80c998027b80dcb188615870ba57042bc1baf0"
       },
       "bindings": [
         {
@@ -1174,7 +1174,7 @@
       },
       "input": {
         "path": "native/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
-        "sha256": "d2afc635ef906555b2ffd2979d799a604ec95206682f0d809e7fbad0c36c6306"
+        "sha256": "a036e6662ca3deeece32b50404354194b4fc3560e0283675df360841cbadecb5"
       },
       "bindings": [
         {
@@ -1488,7 +1488,7 @@
       },
       "input": {
         "path": "native/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
-        "sha256": "8c17b082ced2bead046749ac877533382e3d2ff8af9c14558f7d1fb38d97345c"
+        "sha256": "19aee0b0b9af9f9aac7d27ed966e11be609184cf9314742655c47e889c56e949"
       },
       "bindings": [
         {
