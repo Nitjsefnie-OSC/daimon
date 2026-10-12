@@ -307,30 +307,14 @@ async def test_a_successor_with_a_rebuilt_event_gets_the_stored_result(
 # The store
 
 
-async def test_a_run_and_its_workers_are_idempotent_by_key_and_ordinal(
+async def test_a_worker_is_bounded_by_its_run(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     run = await _run(db_session_factory)
-    again = await fleet.create_run(
-        db_session_factory,
-        tenant_id=run.tenant_id,
-        orchestrator_account_id=run.orchestrator_account_id,
-        orchestrator_session_id="other",
-        orchestrator_binding_id="other",
-        platform="discord",
-        channel_id="c",
-        thread_id="t",
-        operation_key="op-1",
-        total_budget_usd=Decimal("99"),
-        deadline_at=LATER,
-        max_workers=1,
-        created_by="x",
-    )
-    assert again == run
 
     worker = await _worker(db_session_factory, run, 0)
     assert await _worker(db_session_factory, run, 0) == worker
-    with pytest.raises(FleetConflict, match="another spec"):
+    with pytest.raises(FleetConflict, match="exists with other spec_digest"):
         await _worker(db_session_factory, run, 0, digest="d2")
     with pytest.raises(FleetConflict, match="allows 4 workers"):
         await _worker(db_session_factory, run, 4)
@@ -533,35 +517,6 @@ async def test_a_lost_worker_is_requeued_until_its_attempts_run_out(
     assert (lost.status, lost.error_code) == ("failed", "worker_lost")
 
 
-async def test_reservations_stay_within_the_worker_and_the_run_budget(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    run = await _run(db_session_factory, budget="3")
-    first = await _worker(db_session_factory, run, 0)
-    second = await _worker(db_session_factory, run, 1)
-    sm, tenant = db_session_factory, run.tenant_id
-    with pytest.raises(FleetConflict, match="worker's budget"):
-        await fleet.reserve(
-            sm, tenant_id=tenant, worker_id=first.id, expected_version=1, usd=Decimal("2.5")
-        )
-    first = await fleet.reserve(
-        sm, tenant_id=tenant, worker_id=first.id, expected_version=1, usd=Decimal("2")
-    )
-    with pytest.raises(FleetConflict, match="total budget"):
-        await fleet.reserve(
-            sm, tenant_id=tenant, worker_id=second.id, expected_version=1, usd=Decimal("1.5")
-        )
-    await fleet.reserve(
-        sm, tenant_id=tenant, worker_id=second.id, expected_version=1, usd=Decimal("1")
-    )
-    # Lowering a reservation gives the difference back to the run.
-    await fleet.reserve(
-        sm, tenant_id=tenant, worker_id=first.id, expected_version=first.version, usd=Decimal("0.5")
-    )
-    refreshed, _ = await fleet.run_status(sm, tenant_id=tenant, run_id=run.id)
-    assert refreshed.reserved_usd == Decimal("1.5")
-
-
 async def test_a_run_moves_along_its_transitions_and_records_its_end(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -617,7 +572,8 @@ async def test_the_sweep_finds_workers_past_their_deadline_or_without_a_live_lea
     ]
     assert leased and unleased and other
     store = PostgresStateStore(sm, trust_caller_clock=True)
-    clock = datetime.now(UTC)
+    async with sm() as session:  # the database clock: the epoch of started_at
+        clock = (await session.execute(text("SELECT now()"))).scalar_one()
     await store.acquire_lease(
         worker_slot(run, leased), holder="p", turn_id="t", now=clock, ttl=timedelta(minutes=5)
     )
@@ -665,3 +621,134 @@ async def test_a_worker_or_run_past_its_deadline_is_not_started(
         )
         is None
     )
+
+
+async def test_a_retry_with_any_other_input_is_a_conflict_not_the_old_row(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    base: dict[str, Any] = dict(
+        tenant_id=run.tenant_id,
+        orchestrator_account_id=run.orchestrator_account_id,
+        orchestrator_session_id=run.orchestrator_session_id,
+        orchestrator_binding_id=run.orchestrator_binding_id,
+        platform=run.platform,
+        channel_id=run.channel_id,
+        thread_id=run.thread_id,
+        operation_key="op-1",
+        total_budget_usd=run.total_budget_usd,
+        deadline_at=run.deadline_at,
+        max_workers=run.max_workers,
+        created_by="mcp:orchestrator",
+    )
+    assert await fleet.create_run(sm, **base) == run
+    for change in (
+        {"orchestrator_session_id": "other"},
+        {"thread_id": "other"},
+        {"total_budget_usd": Decimal("11")},
+        {"max_workers": 5},
+        {"quorum": 1},
+    ):
+        with pytest.raises(FleetConflict, match="exists with other"):
+            await fleet.create_run(sm, **{**base, **change})
+
+    worker = await _worker(sm, run, 0)
+    same: dict[str, Any] = dict(
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        ordinal=0,
+        role="research",
+        spec=SPEC,
+        spec_digest="d1",
+        backend="openai",
+        profile="openai.persistent_workspace",
+        model="gpt-6-luna",
+        budget_usd=Decimal("2"),
+        deadline_at=LATER,
+        max_turns=3,
+    )
+    assert await fleet.add_worker(sm, **same) == worker
+    for change in (
+        {"model": "gpt-6-terra"},
+        {"role": "review"},
+        {"budget_usd": Decimal("3")},
+        {"max_turns": 4},
+        {"result_contract": {"type": "object"}},
+    ):
+        with pytest.raises(FleetConflict, match="exists with other"):
+            await fleet.add_worker(sm, **{**same, **change})
+
+
+@pytest.mark.parametrize(
+    "amount", [Decimal("1.2345678"), Decimal("-1"), Decimal("NaN"), Decimal("1000000")]
+)
+async def test_an_amount_the_columns_cannot_store_exactly_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession], amount: Decimal
+) -> None:
+    with pytest.raises(FleetConflict, match="not a storable"):
+        await _run(db_session_factory, budget=str(amount))
+    run = await _run(db_session_factory, key="op-ok")
+    with pytest.raises(FleetConflict, match="not a storable"):
+        await fleet.add_worker(
+            db_session_factory,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            ordinal=0,
+            role="r",
+            spec=SPEC,
+            spec_digest="d",
+            backend="openai",
+            profile="p",
+            model="m",
+            budget_usd=amount,
+            deadline_at=LATER,
+            max_turns=1,
+        )
+
+
+async def test_a_caller_owned_transaction_commits_or_rolls_back_its_moves_together(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    worker = await _worker(sm, run, 0)
+    with pytest.raises(RuntimeError):
+        async with sm.begin() as session:
+            await fleet.finish(
+                session,
+                tenant_id=run.tenant_id,
+                worker_id=worker.id,
+                expected_version=1,
+                status="cancelled",
+                error_code="stopped",
+            )
+            await fleet.set_run_status(
+                session,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                expected_version=1,
+                status="cancelled",
+            )
+            raise RuntimeError("the wake enqueue failed")
+    unchanged, (still,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert (unchanged.status, still.status) == ("running", "pending")
+
+    async with sm.begin() as session:
+        await fleet.finish(
+            session,
+            tenant_id=run.tenant_id,
+            worker_id=worker.id,
+            expected_version=1,
+            status="cancelled",
+            error_code="stopped",
+        )
+        await fleet.set_run_status(
+            session, tenant_id=run.tenant_id, run_id=run.id, expected_version=1, status="cancelled"
+        )
+    ended, (done,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert (ended.status, done.status) == ("cancelled", "cancelled")
+
+    async with sm() as idle:
+        with pytest.raises(FleetConflict, match="active transaction"):
+            await fleet.run_status(idle, tenant_id=run.tenant_id, run_id=run.id)

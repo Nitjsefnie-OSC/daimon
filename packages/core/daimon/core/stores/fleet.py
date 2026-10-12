@@ -3,15 +3,23 @@
 Every write is one conditional UPDATE: the row's `version` must match, and its
 status must be one the target may follow (`WORKER_TRANSITIONS` /
 `RUN_TRANSITIONS`). A lost race or a refused move raises `FleetConflict` and
-changes nothing. The tenant concurrency cap is counted from these rows under a
-per-tenant advisory lock, so it survives restarts and can never drift.
+changes nothing. Each call takes a sessionmaker (it commits on its own) or the
+caller's session inside its transaction (it joins it). Creating a run or a
+worker again under the same key or ordinal returns the original only for the
+identical request.
+
+The tenant concurrency cap is counted from these rows under a per-tenant
+advisory lock, so it survives restarts and can never drift. It allocates pool
+places only. Money is not this module's: it validates that amounts are stored
+exactly, and the reservation and observed columns belong to the budget owner.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -37,6 +45,31 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _ACTIVE: tuple[WorkerStatus, ...] = ("starting", "running")
+_MICRO = Decimal("0.000001")
+_MAX_AMOUNT = Decimal("999999.999999")
+
+type Source = async_sessionmaker[AsyncSession] | AsyncSession
+"""A sessionmaker (the call commits on its own) or a caller's session inside its
+transaction (the call joins it, so a status change and, say, a wake enqueue
+commit together)."""
+
+
+@asynccontextmanager
+async def _transaction(source: Source) -> AsyncIterator[AsyncSession]:
+    if isinstance(source, AsyncSession):
+        if not source.in_transaction():
+            raise FleetConflict("a caller-owned fleet session needs an active transaction")
+        yield source
+    else:
+        async with source.begin() as session:
+            yield session
+
+
+def _amount(value: Decimal) -> Decimal:
+    """An amount the columns store exactly: finite, at least 0, whole micro-dollars."""
+    if not value.is_finite() or value < 0 or value > _MAX_AMOUNT or value % _MICRO:
+        raise FleetConflict(f"{value} is not a storable fleet amount")
+    return value
 
 
 def _run(row: FleetRunRow) -> FleetRun:
@@ -100,6 +133,12 @@ def _worker(row: FleetWorkerRow) -> FleetWorker:
     )
 
 
+def _check_intent(row: FleetRunRow | FleetWorkerRow, intent: Mapping[str, Any], what: str) -> None:
+    changed = sorted(key for key, value in intent.items() if getattr(row, key) != value)
+    if changed:
+        raise FleetConflict(f"{what} exists with other {', '.join(changed)}")
+
+
 def _worker_from(target: WorkerStatus) -> list[str]:
     return [status for status, nexts in WORKER_TRANSITIONS.items() if target in nexts]
 
@@ -109,7 +148,7 @@ def _run_from(target: RunStatus) -> list[str]:
 
 
 async def create_run(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     orchestrator_account_id: uuid.UUID,
@@ -125,26 +164,33 @@ async def create_run(
     created_by: str,
     quorum: int | None = None,
 ) -> FleetRun:
-    """A new running fleet run, or the one this tenant already made under the key."""
-    async with sessionmaker.begin() as session:
+    """A new running fleet run, or the same one again under the tenant's key.
+
+    The key binds the whole request: a retry with any other input raises
+    `FleetConflict` rather than returning a run made for something else.
+    """
+    intent: dict[str, Any] = {
+        "orchestrator_account_id": orchestrator_account_id,
+        "orchestrator_session_id": orchestrator_session_id,
+        "orchestrator_binding_id": orchestrator_binding_id,
+        "platform": platform,
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "total_budget_usd": _amount(total_budget_usd),
+        "deadline_at": deadline_at,
+        "max_workers": max_workers,
+        "quorum": quorum,
+        "created_by": created_by,
+    }
+    async with _transaction(sessionmaker) as session:
         await session.execute(
             insert(FleetRunRow)
             .values(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
-                orchestrator_account_id=orchestrator_account_id,
-                orchestrator_session_id=orchestrator_session_id,
-                orchestrator_binding_id=orchestrator_binding_id,
-                platform=platform,
-                channel_id=channel_id,
-                thread_id=thread_id,
                 operation_key=operation_key,
                 status="running",
-                total_budget_usd=total_budget_usd,
-                deadline_at=deadline_at,
-                max_workers=max_workers,
-                quorum=quorum,
-                created_by=created_by,
+                **intent,
             )
             .on_conflict_do_nothing(constraint="uq_fleet_run_operation")
         )
@@ -155,11 +201,12 @@ async def create_run(
                 )
             )
         ).scalar_one()
+        _check_intent(row, intent, f"run {operation_key}")
         return _run(row)
 
 
 async def add_worker(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     run_id: uuid.UUID,
@@ -176,12 +223,25 @@ async def add_worker(
     reviewer_of: uuid.UUID | None = None,
     result_contract: Mapping[str, JsonValue] | None = None,
 ) -> FleetWorker:
-    """A pending worker at `ordinal`, or the same one again; another spec there is a conflict.
+    """A pending worker at `ordinal`, or the same one again; any other input there conflicts.
 
     The run must be running, the ordinal below its `max_workers`, and the worker's
     deadline no later than the run's.
     """
-    async with sessionmaker.begin() as session:
+    intent: dict[str, Any] = {
+        "role": role,
+        "spec": dict(spec),
+        "spec_digest": spec_digest,
+        "backend": backend,
+        "profile": profile,
+        "model": model,
+        "budget_usd": _amount(budget_usd),
+        "deadline_at": deadline_at,
+        "max_turns": max_turns,
+        "reviewer_of": reviewer_of,
+        "result_contract": dict(result_contract) if result_contract is not None else None,
+    }
+    async with _transaction(sessionmaker) as session:
         run = (
             await session.execute(
                 select(FleetRunRow)
@@ -199,8 +259,7 @@ async def add_worker(
             )
         ).scalar_one_or_none()
         if existing is not None:
-            if existing.spec_digest != spec_digest:
-                raise FleetConflict(f"worker {ordinal} of run {run_id} has another spec")
+            _check_intent(existing, intent, f"worker {ordinal} of run {run_id}")
             return _worker(existing)
         if run.status != "running":
             raise FleetConflict(f"run {run_id} is {run.status}")
@@ -213,18 +272,8 @@ async def add_worker(
             run_id=run_id,
             tenant_id=tenant_id,
             ordinal=ordinal,
-            role=role,
-            spec=dict(spec),
-            spec_digest=spec_digest,
-            backend=backend,
-            profile=profile,
-            model=model,
             status="pending",
-            budget_usd=budget_usd,
-            deadline_at=deadline_at,
-            max_turns=max_turns,
-            reviewer_of=reviewer_of,
-            result_contract=dict(result_contract) if result_contract is not None else None,
+            **intent,
         )
         session.add(row)
         await session.flush()
@@ -233,7 +282,7 @@ async def add_worker(
 
 
 async def claim_worker(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     run_id: uuid.UUID,
@@ -241,12 +290,14 @@ async def claim_worker(
 ) -> FleetWorker | None:
     """The run's lowest pending worker, now `starting`, if the tenant has room.
 
-    A worker or run past its deadline is not started; the sweep ends it.
+    A worker or run past its deadline is not started; the sweep ends it. This is
+    pool allocation only, not financial admission: a paid dispatch must first pass
+    the budget owner's admission.
 
     The tenant's starting and running workers are counted under a per-tenant
     advisory lock, so concurrent claims (any process) never exceed `cap`.
     """
-    async with sessionmaker.begin() as session:
+    async with _transaction(sessionmaker) as session:
         await session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
             {"key": f"fleet:{tenant_id}"},
@@ -297,7 +348,7 @@ async def claim_worker(
 
 
 async def _move_worker(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     worker_id: uuid.UUID,
@@ -305,7 +356,7 @@ async def _move_worker(
     target: WorkerStatus,
     values: Mapping[str, Any],
 ) -> FleetWorker:
-    async with sessionmaker.begin() as session:
+    async with _transaction(sessionmaker) as session:
         row = (
             await session.execute(
                 update(FleetWorkerRow)
@@ -332,7 +383,7 @@ async def _move_worker(
 
 
 async def mark_running(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     worker_id: uuid.UUID,
@@ -351,7 +402,7 @@ async def mark_running(
 
 
 async def record_result(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     worker_id: uuid.UUID,
@@ -376,7 +427,7 @@ async def record_result(
 
 
 async def finish(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     worker_id: uuid.UUID,
@@ -398,7 +449,7 @@ async def finish(
 
 
 async def requeue(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     worker: FleetWorker,
@@ -429,73 +480,8 @@ async def requeue(
     )
 
 
-async def reserve(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    tenant_id: uuid.UUID,
-    worker_id: uuid.UUID,
-    expected_version: int,
-    usd: Decimal,
-) -> FleetWorker:
-    """Set a worker's reservation; its run's total moves with it, within the run's budget."""
-    async with sessionmaker.begin() as session:
-        row = (
-            await session.execute(
-                select(FleetWorkerRow)
-                .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.id == worker_id)
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if row is None or row.version != expected_version or row.status in TERMINAL:
-            raise FleetConflict(f"worker {worker_id} cannot reserve at version {expected_version}")
-        if not Decimal(0) <= usd <= row.budget_usd:
-            raise FleetConflict("a reservation must stay within the worker's budget")
-        delta = usd - row.reserved_usd
-        run = (
-            await session.execute(
-                update(FleetRunRow)
-                .where(
-                    FleetRunRow.tenant_id == tenant_id,
-                    FleetRunRow.id == row.run_id,
-                    FleetRunRow.reserved_usd + delta <= FleetRunRow.total_budget_usd,
-                )
-                .values(reserved_usd=FleetRunRow.reserved_usd + delta, updated_at=func.now())
-                .returning(FleetRunRow.id)
-            )
-        ).scalar_one_or_none()
-        if run is None:
-            raise FleetConflict("the reservation would exceed the run's total budget")
-        row.reserved_usd = usd
-        row.version += 1
-        await session.flush()
-        await session.refresh(row)
-        return _worker(row)
-
-
-async def set_observed(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    tenant_id: uuid.UUID,
-    run_id: uuid.UUID,
-    usd: Decimal,
-) -> FleetRun:
-    """Record the run's settled spend so far, as the budget watchdog last read it."""
-    async with sessionmaker.begin() as session:
-        row = (
-            await session.execute(
-                update(FleetRunRow)
-                .where(FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id)
-                .values(observed_usd=usd, updated_at=func.now())
-                .returning(FleetRunRow)
-            )
-        ).scalar_one_or_none()
-    if row is None:
-        raise FleetConflict(f"no fleet run {run_id} in this tenant")
-    return _run(row)
-
-
 async def set_run_status(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     run_id: uuid.UUID,
@@ -503,7 +489,7 @@ async def set_run_status(
     status: RunStatus,
 ) -> FleetRun:
     finished = {"finished_at": func.now()} if status not in RUN_TRANSITIONS else {}
-    async with sessionmaker.begin() as session:
+    async with _transaction(sessionmaker) as session:
         row = (
             await session.execute(
                 update(FleetRunRow)
@@ -528,9 +514,9 @@ async def set_run_status(
 
 
 async def run_status(
-    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, run_id: uuid.UUID
+    sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID
 ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:
-    async with sessionmaker() as session:
+    async with _transaction(sessionmaker) as session:
         run = (
             await session.execute(
                 select(FleetRunRow).where(
@@ -551,7 +537,7 @@ async def run_status(
 
 
 async def stale_workers(
-    sessionmaker: async_sessionmaker[AsyncSession], *, now: datetime, grace: timedelta
+    sessionmaker: Source, *, now: datetime, grace: timedelta
 ) -> Sequence[tuple[FleetRun, FleetWorker]]:
     """Starting or running workers the recovery sweep must look at.
 
@@ -559,7 +545,7 @@ async def stale_workers(
     for longer than `grace` and its slot holds no unexpired lease (its process is
     gone). `grace` covers the gap between a claim and the driver's first lease.
     """
-    async with sessionmaker() as session:
+    async with _transaction(sessionmaker) as session:
         rows = (
             await session.execute(
                 select(FleetRunRow, FleetWorkerRow)
@@ -602,7 +588,7 @@ class WorkerPool:
 
     async def claim(
         self,
-        sessionmaker: async_sessionmaker[AsyncSession],
+        sessionmaker: Source,
         *,
         tenant_id: uuid.UUID,
         run_id: uuid.UUID,
