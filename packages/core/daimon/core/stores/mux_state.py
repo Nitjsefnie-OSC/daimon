@@ -401,9 +401,14 @@ async def release_lease(session: AsyncSession, lease: Lease) -> None:
 
 
 async def active_lease(session: AsyncSession, slot: Slot) -> Lease | None:
-    """The slot's active lease as stored, expired or not; None if it has none."""
-    state = await _lease_state(session, slot, lock="share")
-    return state.active if state is not None else None
+    """The slot's active lease as stored, expired or not; None if it has none.
+
+    A plain read, without a row lock, so a sweep never blocks lease renewals.
+    """
+    active = (
+        await session.execute(select(ThreadLease.active).where(*_where_slot(ThreadLease, slot)))
+    ).scalar_one_or_none()
+    return Lease.model_validate(active) if active is not None else None
 
 
 # Operations

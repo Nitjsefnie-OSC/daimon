@@ -9,14 +9,14 @@ worker's result, which itself lives in the worker's journal.
 
 Every status change is a compare-and-swap on the row's `version`, along
 `WORKER_TRANSITIONS` / `RUN_TRANSITIONS`; a lost race or a refused move raises
-`FleetConflict`. Concurrency is a pool of its own: `WorkerPool` caps one
-process, and `claim_worker` caps a tenant from the durable rows, so a fan-out
-never takes the chat turns' slots and a restart cannot leak a slot.
+`FleetConflict`. Concurrency is a pool of its own
+(`daimon.core.stores.fleet.WorkerPool`): it caps one process, and caps a tenant
+from the durable rows, so a fan-out never takes the chat turns' slots and a
+restart cannot leak a slot.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import uuid
@@ -32,7 +32,6 @@ from mux.state.journal import JournalEntry
 from mux.state.lease import Lease, Slot
 from mux.state.store import StateStore
 from pydantic import JsonValue
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 type RunStatus = Literal["running", "collecting", "completed", "cancelled", "failed"]
 type WorkerStatus = Literal[
@@ -202,18 +201,21 @@ async def append_result(
 ) -> ResultPointer:
     """Append the worker's result to its own journal, once, under its lease.
 
-    The entry's source key is per worker, so a retry or a lease successor that
-    appends it again is a journal duplicate; the pointer then names the event
-    already stored.
+    The result entry is the worker's, not the caller's event: it is stored under an
+    id and source key derived from the worker, so it never repeats an event the
+    turn already journaled, and a retry or a lease successor (whatever event object
+    it rebuilt) is a journal duplicate. The pointer always names that one entry.
     """
+    result_id = result_source_key(worker.id)
+    entry = event.model_copy(update={"id": result_id})
     appended = await store.append_events(
         session,
-        [JournalEntry(source_key=result_source_key(worker.id), event=event)],
+        [JournalEntry(source_key=result_id, event=entry)],
         fence=lease,
         cursor=cursor,
         now=now,
     )
-    stored = appended.appended[0] if appended.appended else await _stored(store, session, event)
+    stored = appended.appended[0] if appended.appended else await _stored(store, session, result_id)
     payload = dict(stored.payload)
     return ResultPointer(
         session_id=session.id,
@@ -223,54 +225,13 @@ async def append_result(
     )
 
 
-async def _stored(store: StateStore, session: ResourceRef, event: Event) -> Event:
+async def _stored(store: StateStore, session: ResourceRef, event_id: str) -> Event:
     after = -1
     while True:
         page = await store.read_events(session.id, after=after)
         if not page:
-            raise FleetConflict(f"result event {event.id} is not in session {session.id}")
+            raise FleetConflict(f"result {event_id} is not in session {session.id}")
         for stored in page:
-            if stored.id == event.id:
+            if stored.id == event_id:
                 return stored
         after = page[-1].sequence
-
-
-class WorkerPool:
-    """The process's cap over worker turns, in front of the durable tenant cap.
-
-    `claim` takes a process slot, then a tenant slot through `claim_worker`; a
-    refused tenant claim gives the process slot back. The caller `release`s the
-    process slot when the worker's turn ends, on every path. The tenant slot needs
-    no release: it is the worker row's own status.
-    """
-
-    def __init__(self, *, max_concurrent_workers: int, max_concurrent_workers_per_tenant: int):
-        self._slots = asyncio.Semaphore(max_concurrent_workers)
-        self._tenant_cap = max_concurrent_workers_per_tenant
-
-    async def claim(
-        self,
-        sessionmaker: async_sessionmaker[AsyncSession],
-        *,
-        tenant_id: uuid.UUID,
-        run_id: uuid.UUID,
-    ) -> FleetWorker | None:
-        """The run's next pending worker, now `starting`, or None if no room."""
-        from daimon.core.stores.fleet import claim_worker
-
-        if self._slots.locked():
-            return None
-        await self._slots.acquire()
-        try:
-            worker = await claim_worker(
-                sessionmaker, tenant_id=tenant_id, run_id=run_id, cap=self._tenant_cap
-            )
-        except BaseException:
-            self._slots.release()
-            raise
-        if worker is None:
-            self._slots.release()
-        return worker
-
-    def release(self) -> None:
-        self._slots.release()

@@ -1481,8 +1481,8 @@ class FleetSettings(BaseModel):
         default=2,
         ge=1,
         description=(
-            "Most times a worker that was lost before its turn was sent is started "
-            "again. A worker whose turn was sent is reconciled, never resent."
+            "Most times in total a worker is started when it keeps being lost before "
+            "its turn is sent. A worker whose turn was sent is reconciled, never resent."
         ),
     )
 

@@ -9,6 +9,7 @@ per-tenant advisory lock, so it survives restarts and can never drift.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
@@ -240,6 +241,8 @@ async def claim_worker(
 ) -> FleetWorker | None:
     """The run's lowest pending worker, now `starting`, if the tenant has room.
 
+    A worker or run past its deadline is not started; the sweep ends it.
+
     The tenant's starting and running workers are counted under a per-tenant
     advisory lock, so concurrent claims (any process) never exceed `cap`.
     """
@@ -272,7 +275,9 @@ async def claim_worker(
                         FleetWorkerRow.tenant_id == tenant_id,
                         FleetWorkerRow.run_id == run_id,
                         FleetWorkerRow.status == "pending",
+                        FleetWorkerRow.deadline_at > func.now(),
                         FleetRunRow.status == "running",
+                        FleetRunRow.deadline_at > func.now(),
                     )
                     .order_by(FleetWorkerRow.ordinal)
                     .limit(1)
@@ -580,3 +585,42 @@ async def stale_workers(
             if lease is None or lease.expires_at <= now:
                 stale.append((run, worker))
         return stale
+
+
+class WorkerPool:
+    """The process's cap over worker turns, in front of the durable tenant cap.
+
+    `claim` takes a process slot, then a tenant slot through `claim_worker`; a
+    refused tenant claim gives the process slot back. The caller `release`s the
+    process slot when the worker's turn ends, on every path. The tenant slot needs
+    no release: it is the worker row's own status.
+    """
+
+    def __init__(self, *, max_concurrent_workers: int, max_concurrent_workers_per_tenant: int):
+        self._slots = asyncio.Semaphore(max_concurrent_workers)
+        self._tenant_cap = max_concurrent_workers_per_tenant
+
+    async def claim(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        *,
+        tenant_id: uuid.UUID,
+        run_id: uuid.UUID,
+    ) -> FleetWorker | None:
+        """The run's next pending worker, now `starting`, or None if no room."""
+        if self._slots.locked():
+            return None
+        await self._slots.acquire()
+        try:
+            worker = await claim_worker(
+                sessionmaker, tenant_id=tenant_id, run_id=run_id, cap=self._tenant_cap
+            )
+        except BaseException:
+            self._slots.release()
+            raise
+        if worker is None:
+            self._slots.release()
+        return worker
+
+    def release(self) -> None:
+        self._slots.release()

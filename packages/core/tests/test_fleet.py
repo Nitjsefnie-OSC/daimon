@@ -14,7 +14,6 @@ from daimon.core.fleet import (
     FleetRun,
     FleetWorker,
     ResultPointer,
-    WorkerPool,
     append_result,
     result_digest,
     run_settled,
@@ -23,18 +22,21 @@ from daimon.core.fleet import (
 )
 from daimon.core.stores import fleet, mux_state
 from daimon.core.stores.domain import TenantRow
+from daimon.core.stores.fleet import WorkerPool
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.testing.factories import make_account, make_tenant
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef
 from mux.contracts.resources import ProviderBinding
+from mux.state.journal import JournalEntry
 from mux.state.memory import MemoryStateStore
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 10, 12, 18, 0, tzinfo=UTC)
-LATER = NOW + timedelta(hours=1)
+# Deadlines are against the database clock, so they sit well after the real now.
+LATER = datetime.now(UTC) + timedelta(days=1)
 SPEC: dict[str, Any] = {"backend": "openai", "model": "gpt-6-luna", "system": "Research."}
 
 
@@ -199,15 +201,23 @@ def _final_message(session_id: str, text: str) -> Event:
     )
 
 
-async def test_a_result_is_appended_once_and_a_lease_successor_finds_the_same_entry() -> None:
-    store = MemoryStateStore()
-    run = _plain_run(max_workers=1)
-    worker = _status_worker("running")
+@pytest.fixture(params=["memory", "postgres"])
+async def bound(
+    request: pytest.FixtureRequest, db_session_factory: async_sessionmaker[AsyncSession]
+) -> tuple[Any, ...]:
+    """A worker's bound session and lease, on the memory store or Postgres."""
+    if request.param == "memory":
+        store: Any = MemoryStateStore()
+        run = _plain_run()
+    else:
+        store = PostgresStateStore(db_session_factory, trust_caller_clock=True)
+        run = await _run(db_session_factory)
+    worker = _status_worker("running", run_id=run.id, tenant_id=run.tenant_id)
     slot = worker_slot(run, worker)
     session = ResourceRef(id="sess_w0", kind="session", provider="openai", account_scope_id="p")
     await store.put_binding(
         ProviderBinding(
-            id="bind_w0",
+            id=f"bind_{uuid.uuid4()}",
             thread=slot.thread,
             provider="openai",
             profile="openai.persistent_workspace",
@@ -221,25 +231,77 @@ async def test_a_result_is_appended_once_and_a_lease_successor_finds_the_same_en
     lease = await store.acquire_lease(
         slot, holder="p1", turn_id="turn_1", now=NOW, ttl=timedelta(minutes=5)
     )
-    event = _final_message(session.id, "the answer")
+    return store, worker, slot, session, lease
 
-    first = await append_result(store, session, worker, event, lease=lease, cursor="c1", now=NOW)
 
-    # The first process dies; its successor takes the slot over and appends again.
+async def _successor(store: Any, slot: Any) -> Any:
     later = NOW + timedelta(minutes=6)
-    successor = await store.acquire_lease(
+    lease = await store.acquire_lease(
         slot, holder="p2", turn_id="turn_1", now=later, ttl=timedelta(minutes=5)
     )
-    assert successor.took_over
+    assert lease.took_over
+    return lease
+
+
+async def test_a_result_after_the_turn_journaled_its_final_message_is_one_entry_of_its_own(
+    bound: tuple[Any, ...],
+) -> None:
+    store, worker, slot, session, lease = bound
+    final = _final_message(session.id, "the answer")
+    # The worker turn already journaled its final message under its native key.
+    await store.append_events(
+        session,
+        [JournalEntry(source_key="native:m1", event=final)],
+        fence=lease,
+        cursor="c0",
+        now=NOW,
+    )
+
+    first = await append_result(store, session, worker, final, lease=lease, cursor="c1", now=NOW)
+    successor = await _successor(store, slot)
     again = await append_result(
-        store, session, worker, event, lease=successor, cursor="c1", now=later
+        store, session, worker, final, lease=successor, cursor="c1", now=NOW + timedelta(minutes=6)
     )
 
     assert again == first
-    assert first.excerpt == "the answer"
-    assert first.digest == result_digest(dict(event.payload))
-    stored = await store.read_events(session.id)
-    assert [e.id for e in stored] == ["ev_final"]  # one journal entry, not two
+    ids = [event.id for event in await store.read_events(session.id)]
+    assert ids == ["ev_final", f"fleet:{worker.id}:result"]  # no event id twice
+    assert first.sequence == 1 and first.excerpt == "the answer"
+    assert first.digest == result_digest(dict(final.payload))
+
+
+async def test_a_successor_with_a_rebuilt_event_gets_the_stored_result(
+    bound: tuple[Any, ...],
+) -> None:
+    store, worker, slot, session, lease = bound
+    first = await append_result(
+        store,
+        session,
+        worker,
+        _final_message(session.id, "the answer"),
+        lease=lease,
+        cursor="c1",
+        now=NOW,
+    )
+    successor = await _successor(store, slot)
+    rebuilt = _final_message(session.id, "the answer, reconstructed").model_copy(
+        update={"id": "ev_rebuilt"}
+    )
+
+    again = await append_result(
+        store,
+        session,
+        worker,
+        rebuilt,
+        lease=successor,
+        cursor="c1",
+        now=NOW + timedelta(minutes=6),
+    )
+
+    assert again == first  # the first stored result stands
+    assert [event.id for event in await store.read_events(session.id)] == [
+        f"fleet:{worker.id}:result"
+    ]
 
 
 # The store
@@ -572,3 +634,34 @@ async def test_the_sweep_finds_workers_past_their_deadline_or_without_a_live_lea
     assert {worker.id for _, worker in every} == {leased.id, unleased.id, other.id}
     async with sm() as session:
         assert await mux_state.active_lease(session, worker_slot(run, leased)) is not None
+
+
+async def test_a_worker_or_run_past_its_deadline_is_not_started(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    run = await _run(db_session_factory)
+    await _worker(db_session_factory, run, 0)
+    async with db_session_factory.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE fleet_worker SET deadline_at = now() - interval '1 second' WHERE run_id = :r"
+            ),
+            {"r": run.id},
+        )
+    assert (
+        await fleet.claim_worker(db_session_factory, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+        is None
+    )
+    late = await _run(db_session_factory, key="op-late")
+    await _worker(db_session_factory, late, 0)
+    async with db_session_factory.begin() as session:
+        await session.execute(
+            text("UPDATE fleet_run SET deadline_at = now() - interval '1 second' WHERE id = :r"),
+            {"r": late.id},
+        )
+    assert (
+        await fleet.claim_worker(
+            db_session_factory, tenant_id=late.tenant_id, run_id=late.id, cap=3
+        )
+        is None
+    )

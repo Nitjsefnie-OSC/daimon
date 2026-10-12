@@ -1298,8 +1298,8 @@ Most worker turns one process runs at once, across all tenants.
 
 `int` · optional · default `2`
 
-Most times a worker that was lost before its turn was sent is started again. A worker
-whose turn was sent is reconciled, never resent.
+Most times in total a worker is started when it keeps being lost before its turn is
+sent. A worker whose turn was sent is reconciled, never resent.
 
 ## Tool Safety
 
