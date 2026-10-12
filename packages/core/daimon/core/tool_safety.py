@@ -132,14 +132,23 @@ _READ_VERBS: Final[tuple[str, ...]] = (
     "check",
     "preview",
     "download",
-    # Question-and-answer and checking tools: they return an answer and change
-    # nothing ("deepwiki/ask_wiki_question", "eap/eap_verify_answer").
-    "ask",
-    "verify",
-    # A noun, but in a tool name it only ever names a report to read
-    # ("eap/eap_briefing").
+    # A noun, but in a tool name it usually names a report to read
+    # ("eap/eap_briefing"). A heuristic like every word here: a briefing tool
+    # that also sends or publishes says so ("send_briefing", "briefing_publish")
+    # and stays a write through `_WRITE_WORDS`.
     "briefing",
 )
+
+# Verbs that read only when the name also says what comes back. A bare "ask"
+# is an action (daimon's own agent_chat `ask` starts a turn in another agent),
+# and "verify_email" can send a code, so these two fail closed unless the name
+# is a question-and-answer shape: "ask_wiki_question" (DeepWiki),
+# "eap_verify_answer". The match is still only a name heuristic; a server that
+# misnames a write is caught by an operator `effects` pin, not by this list.
+_QUESTION_VERBS: Final[Mapping[str, frozenset[str]]] = {
+    "ask": frozenset({"question"}),
+    "verify": frozenset({"answer"}),
+}
 
 # Words that make a name a write wherever they appear: a write verb anywhere
 # ("get_or_create", "fetch_and_delete", "list_delete") or a conjunction that
@@ -340,11 +349,16 @@ def _name_says_read(tool_name: str) -> bool:
     words = [word for word in _WORD_SPLIT.split(spaced) if word]
     if not words or any(word in _WRITE_WORDS for word in words):
         return False
-    if words[0] in _READ_VERBS:
-        return True
     if words[0] in _ACTION_PREFIXES:
         return False
-    return len(words) > 1 and words[1] in _READ_VERBS
+    for slot in (0, 1)[: len(words)]:
+        verb = words[slot]
+        if verb in _READ_VERBS:
+            return True
+        objects = _QUESTION_VERBS.get(verb)
+        if objects is not None:
+            return any(word in objects for word in words[slot + 1 :])
+    return False
 
 
 def classify_tool(
