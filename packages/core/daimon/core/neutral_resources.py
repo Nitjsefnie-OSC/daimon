@@ -58,7 +58,7 @@ from mux.contracts._base import Contract
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.ports import Agents, ManagedAgents
-from mux.contracts.profile import SUPPORTED
+from mux.contracts.profile import SUPPORTED, Profile
 from mux.contracts.resources import (
     Agent,
     AgentPatch,
@@ -720,6 +720,7 @@ class ResolvedWorkerSpec:
     limits: WorkerLimits
     permissions: WorkerPermissions = dataclass_field(repr=False)
     digest: str
+    source_agent: tuple[ResourceRef, Revision] | None = None
 
 
 def _worker_subset(
@@ -748,7 +749,13 @@ def _worker_tools(requested: AgentSpec, granted: AgentSpec) -> None:
             raise WorkerSpecRefused("tools", "not_subset")
 
 
-def _worker_mcp(requested: AgentSpec, granted: AgentSpec) -> None:
+def _worker_mcp(requested: AgentSpec, granted: AgentSpec, profile: Profile) -> None:
+    if requested.mcp_servers and not profile.mcp_policy_keys:
+        raise WorkerSpecRefused("mcp", "unsupported")
+    if requested.mcp_servers and (
+        len(requested.mcp_servers) != 1 or requested.mcp_servers[0].credential_ref is None
+    ):
+        raise WorkerSpecRefused("mcp", "unsupported")
     available = {connection.name: connection for connection in granted.mcp_servers or ()}
     if len(available) != len(granted.mcp_servers or ()):
         raise WorkerSpecRefused("mcp", "ambiguous")
@@ -768,6 +775,12 @@ def _worker_mcp(requested: AgentSpec, granted: AgentSpec) -> None:
             or url.password is not None
             or url.query
             or url.fragment
+            or connection.transport != "streamable_http"
+            or any(char.isspace() for char in connection.url)
+            or "\\" in connection.url
+            or "%" in url.netloc
+            or "?" in connection.url
+            or "#" in connection.url
             or (connection.url, connection.transport, connection.credential_ref)
             != (old.url, old.transport, old.credential_ref)
         ):
@@ -775,20 +788,22 @@ def _worker_mcp(requested: AgentSpec, granted: AgentSpec) -> None:
         seen.add(connection.name)
         # Policy semantics must be declared, not arbitrary SDK pass-through.
         policy, allowed = dict(connection.tool_policy), dict(old.tool_policy)
-        if set(policy) - {"allowed_tools", "require_approval"}:
+        if set(policy) - set(profile.mcp_policy_keys):
             raise WorkerSpecRefused("mcp", "unsupported")
         tools, ceiling = policy.get("allowed_tools"), allowed.get("allowed_tools")
         if (
             not isinstance(tools, list)
             or not isinstance(ceiling, list)
             or not all(isinstance(name, str) and name for name in tools + ceiling)
+            or not tools
+            or len(set(tools)) != len(tools)
             or not set(tools) <= set(ceiling)
-            or policy.get("require_approval") not in ("always", "never")
-            or allowed.get("require_approval") not in ("always", "never")
-            or (
-                allowed.get("require_approval") == "always"
-                and policy["require_approval"] != "always"
+            or any(
+                policy.get(key) != allowed.get(key)
+                for key in set(policy) | set(allowed)
+                if key != "allowed_tools"
             )
+            or ("required" in policy and type(policy["required"]) is not bool)
         ):
             raise WorkerSpecRefused("mcp", "not_subset")
     servers = set(available)
@@ -976,13 +991,12 @@ def resolve_worker_spec(
                 + (ToolSpec(name=profile.execution_tool, kind="builtin"),)
             }
         )
-    if (
-        any(tool.permission == "ask" for tool in resolved.tools or ())
-        and profile.support_for("tool_confirmation") not in SUPPORTED
-    ):
+    # Native confirmation capability does not imply that the neutral tool
+    # compiler maps this per-tool field. Unproven ask controls refuse.
+    if any(tool.permission != "auto" for tool in resolved.tools or ()):
         raise WorkerSpecRefused("tools", "unsupported")
     _worker_tools(resolved, parent.spec)
-    _worker_mcp(resolved, parent.spec)
+    _worker_mcp(resolved, parent.spec, profile)
     for pin in resolved.skills or ():
         if pin.version is None:
             raise WorkerSpecRefused("skills", "unbound")
@@ -1030,6 +1044,12 @@ def resolve_worker_spec(
         "environment": environment.model_dump(mode="json") if environment is not None else None,
         "limits": cap.model_dump(mode="json"),
         "origin": str(fleet.origin_id),
+        "run": str(fleet.run_id),
+        "source": (
+            [spec.ref.model_dump(mode="json"), spec.revision.model_dump(mode="json")]
+            if isinstance(spec, Agent)
+            else None
+        ),
         "scope": fleet.scope.model_dump(mode="json"),
         "seals": sorted(parent.seal_ids),
         "memory_read_only": parent.memory_read_only,
@@ -1055,7 +1075,10 @@ def resolve_worker_spec(
         source_agents=(),
         source_revisions=(),
     )
-    return ResolvedWorkerSpec(resolved, selected, resources, environment, cap, child, digest)
+    source_agent = (spec.ref, spec.revision) if isinstance(spec, Agent) else None
+    return ResolvedWorkerSpec(
+        resolved, selected, resources, environment, cap, child, digest, source_agent
+    )
 
 
 async def audit_worker_action(

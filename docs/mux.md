@@ -2299,7 +2299,10 @@ backend, exact skill version, tool schema, MCP endpoint and credential, resource
 network, budget, deadline and turn-count subsets. A clone requires an authorized
 source reference and independently loaded current revision. Opaque native
 extensions, effort options and environment knobs refuse when their effect has
-no proven attenuation mapping. An implicit execution tool still counts toward
+no proven attenuation mapping. Neutral per-tool confirmation also refuses until
+its compiler maps that control. MCP attenuation requires one resolver-bound
+server and the profile-declared finite tool policy keys; a native compiler that
+drops those keys cannot admit the connection. An implicit execution tool still counts toward
 authority when omitted from the requested tool list.
 
 This is an admission primitive, not a launch operation. The host must reload

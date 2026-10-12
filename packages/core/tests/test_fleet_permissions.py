@@ -300,11 +300,12 @@ def test_resource_identity_and_native_mount_authority_are_not_fabricated():
     ),
 )
 def test_even_matching_parent_url_cannot_delegate_hidden_credentials(url):
-    root = parent()
+    root = parent("openai")
     server = MCPConnection(
         name="server",
         url=url,
-        tool_policy={"allowed_tools": ["read"], "require_approval": "always"},
+        credential_ref="bound-ref",
+        tool_policy={"allowed_tools": ["read"], "required": True},
     )
     root = replace(root, spec=root.spec.model_copy(update={"mcp_servers": (server,)}))
     with pytest.raises(WorkerSpecRefused) as caught:
@@ -312,26 +313,26 @@ def test_even_matching_parent_url_cannot_delegate_hidden_credentials(url):
     assert url not in str(caught.value)
 
 
-def test_mcp_policy_narrows_but_does_not_remove_approval():
-    root = parent()
+def test_mcp_policy_narrows_but_does_not_change_required_controls():
+    root = parent("openai")
     server = MCPConnection(
         name="server",
         url="https://server.invalid",
         credential_ref="bound-ref",
-        tool_policy={"allowed_tools": ["read", "write"], "require_approval": "always"},
+        tool_policy={"allowed_tools": ["read", "write"], "required": True},
     )
     root = replace(root, spec=root.spec.model_copy(update={"mcp_servers": (server,)}))
     narrowed = server.model_copy(
-        update={"tool_policy": {"allowed_tools": ["read"], "require_approval": "always"}}
+        update={"tool_policy": {"allowed_tools": ["read"], "required": True}}
     )
     assert resolve(
         root, root.spec.model_copy(update={"mcp_servers": (narrowed,)})
     ).spec.mcp_servers == (narrowed,)
     for policy in (
-        {"allowed_tools": ["read"], "require_approval": "never"},
+        {"allowed_tools": ["read"], "required": False},
         {
             "allowed_tools": ["read"],
-            "require_approval": "always",
+            "required": True,
             "headers": {"authorization": "hidden"},
         },
     ):
@@ -360,6 +361,7 @@ def test_clone_requires_exact_revision_and_sparse_override_does_not_mutate_sourc
     assert result.spec.tools == ()
     assert result.spec.system == root.base_system + "\n\nWorker role"
     assert source.spec == root.spec
+    assert result.source_agent == (source.ref, source.revision)
     with pytest.raises(WorkerSpecRefused, match="stale"):
         resolve(root, source.model_copy(update={"revision": Revision(local=2)}))
     with pytest.raises(WorkerSpecRefused):
@@ -381,6 +383,132 @@ def test_nested_schema_and_input_are_not_shared_with_result():
     result = resolve(root)
     assert result.spec is not root.spec
     assert result.spec.tools[0].input_schema is not root.spec.tools[0].input_schema
+
+
+def test_identical_specs_cannot_share_worker_identity_between_runs():
+    root = parent()
+    other = replace(root, fleet=replace(root.fleet, run_id=uuid4()))
+    assert resolve(root).digest != resolve(other).digest
+    assert resolve(root).permissions.fleet.scope != resolve(other).permissions.fleet.scope
+
+
+@pytest.mark.parametrize("provider", ("anthropic", "openai", "gemini"))
+def test_neutral_confirmation_is_refused_until_its_compiler_maps_it(provider):
+    root = parent(provider)
+    tool = root.spec.tools[0].model_copy(update={"permission": "ask"})
+    root = replace(root, spec=root.spec.model_copy(update={"tools": (tool,)}))
+    with pytest.raises(WorkerSpecRefused, match="tools: unsupported"):
+        resolve(root)
+
+
+def test_old_profile_rows_default_to_no_implicit_execution_or_mcp_policy():
+    from mux.contracts.profile import Profile
+
+    row = get_profile(parent("openai").backend_grants[0].profile).model_dump()
+    row.pop("implicit_execution")
+    row.pop("mcp_policy_keys")
+    restored = Profile.model_validate(row)
+    assert restored.implicit_execution is False
+    assert restored.mcp_policy_keys == ()
+
+
+def test_native_mcp_policy_that_is_dropped_by_compilation_refuses():
+    root = parent()
+    server = MCPConnection(
+        name="server",
+        url="https://server.invalid",
+        credential_ref="ref",
+        tool_policy={"allowed_tools": ["read"]},
+    )
+    root = replace(root, spec=root.spec.model_copy(update={"mcp_servers": (server,)}))
+    with pytest.raises(WorkerSpecRefused, match="mcp: unsupported"):
+        resolve(root)
+
+
+async def test_openai_attenuated_mcp_allowlist_reaches_actual_sdk_request():
+    from daimon.testing.isolated_sdk import build_async_openai
+    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.drivers.openai._common import Context
+    from mux.drivers.openai.agents import OpenAIAgents
+    from mux.drivers.openai.transport import SDKTransport
+
+    root = parent("openai")
+    server = MCPConnection(
+        name="server",
+        url="https://server.invalid",
+        credential_ref="ref",
+        tool_policy={"allowed_tools": ["read", "write"], "required": True},
+    )
+    root = replace(root, spec=root.spec.model_copy(update={"mcp_servers": (server,)}))
+    narrow = server.model_copy(
+        update={"tool_policy": {"allowed_tools": ["read"], "required": True}}
+    )
+    result = resolve(root, root.spec.model_copy(update={"tools": (), "mcp_servers": (narrow,)}))
+    trace = ScriptedTransport()
+    trace.queue(
+        ScriptedReply(
+            "POST",
+            "/v1/agents",
+            httpx.Response(
+                200,
+                json={
+                    "id": "worker",
+                    "name": "root",
+                    "model": root.spec.model.id,
+                    "created_at": 0,
+                    "tools": [],
+                    "metadata": {"mux_tenant": root.fleet.scope.tenant_id},
+                },
+            ),
+        )
+    )
+    async with build_async_openai(
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+        transport=httpx.MockTransport(trace.dispatch),
+    ) as sdk:
+        context = Context(
+            SDKTransport(sdk),
+            "project",
+            result.backend.profile,
+            lambda scope, kind, id_: scope == result.permissions.fleet.scope,
+        )
+        await OpenAIAgents(context).create(result.permissions.fleet.scope, result.spec, key="spawn")
+    trace.assert_consumed()
+    body = trace.requests[0].json()
+    assert body["tools"] == [
+        {
+            "type": "mcp",
+            "server_label": "server",
+            "transport": {"type": "http", "server_url": "https://server.invalid"},
+            "allowed_tools": ["read"],
+            "required": True,
+        }
+    ]
+    assert body["instructions"] == root.base_system
+
+
+def test_gemini_attenuated_allowlist_is_preserved_by_native_compiler():
+    from mux.drivers.gemini.core import compile_agent
+
+    root = parent("gemini")
+    server = MCPConnection(
+        name="server",
+        url="https://server.invalid",
+        credential_ref="ref",
+        tool_policy={"allowed_tools": ["read", "write"]},
+    )
+    root = replace(root, spec=root.spec.model_copy(update={"mcp_servers": (server,)}))
+    narrow = server.model_copy(update={"tool_policy": {"allowed_tools": ["read"]}})
+    result = resolve(root, root.spec.model_copy(update={"tools": (), "mcp_servers": (narrow,)}))
+    assert compile_agent(result.spec, authenticated_mcp=True)["tools"] == [
+        {
+            "type": "mcp_server",
+            "name": "server",
+            "url": "https://server.invalid",
+            "allowed_tools": [{"mode": "auto", "tools": ["read"]}],
+        }
+    ]
 
 
 async def test_actual_anthropic_clone_refuses_opaque_authority_without_extra_io():
