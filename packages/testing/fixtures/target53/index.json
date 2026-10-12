@@ -35,7 +35,7 @@
     },
     {
       "path": "native/QA-D22-WHO-ANSWERS-HERE.json",
-      "sha256": "a6119eeb3f9786c0a38475b5133d662c642201eb2ae1afeeaa7f8d8c137d0288"
+      "sha256": "311e59a30fe7eb28215a6733936e90834df2237513057cfc9ecc3794a37b9b49"
     },
     {
       "path": "native/QA-D3-TEAMS-ANSWER-NOT-REPLACED.json",
@@ -43,7 +43,7 @@
     },
     {
       "path": "native/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
-      "sha256": "098fb7a9358ebdb0632617891b3ffe083587d551010d2d041ffa845e846481a4"
+      "sha256": "48b31a96c54c686e542865a4caf97716702928bd71c8717528f9495433b524bc"
     },
     {
       "path": "native/QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
@@ -55,7 +55,7 @@
     },
     {
       "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
-      "sha256": "06c3474d0669dbf5e10926fde66d8d8757cf344bf848b476fe7cdea77ee97b5e"
+      "sha256": "da5004de3fbbeb64ce300e4b7105f109d04eb47b25c7b7299b3e59238ccd4bc3"
     },
     {
       "path": "native/QA-D8-GITHUB-SAVED-KEY-SWITCH.json",
@@ -75,7 +75,7 @@
     },
     {
       "path": "native/QA-ISO-TEAM-CHANNEL-ISOLATION.json",
-      "sha256": "69ad1305a8ac89d3352396d26264c50690fd0d9d0d5301b40ed8bbfd60280c64"
+      "sha256": "0d9c85bd81ab729d09fa223e1bdb818a9b267b37439e533a2c5d29c677f3e70a"
     },
     {
       "path": "native/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
@@ -103,11 +103,11 @@
     },
     {
       "path": "native/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
-      "sha256": "d838fb5e0926d96ed64596202d1a58b1263546fd1f57d865845767d61fb103f5"
+      "sha256": "fe1bb936b52fb782bf8498c123edcd4d4c05b403f61b1862fa1ff462df167704"
     },
     {
       "path": "native/QA-NEW18-SKILL-ADD-YES-PLEASE.json",
-      "sha256": "90fd28d0a4d84f86f4ca537218bf17b0bbf48d000a89c8a65eb30724d3ba7ea8"
+      "sha256": "101b42b52c542ac1fe9ebbf408d2f718ea781d527d088a20499566195178fc01"
     },
     {
       "path": "native/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
@@ -119,15 +119,15 @@
     },
     {
       "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
-      "sha256": "4892c4efe0a86a6b46b76916bb58f3ebbf4e71cb8cb6f07a1a9c2e65650aba12"
+      "sha256": "1ea55905b17a53766926784d868c8b49899867ae85d6d36fe91b391385ebfca0"
     },
     {
       "path": "native/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
-      "sha256": "5001efa26ef27fc31d5335e7c3daa8d9b2d7baf1e1866ec2108b81be61c40be6"
+      "sha256": "33f651a04f88b0c7e5b34d13ca3e3567795d6f9bb01236daaab4262bb2c6f39d"
     },
     {
       "path": "native/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
-      "sha256": "93484c512b30efd1f2f85bed9f2f1768b550cbacb3cc6d0e97f27656061f5414"
+      "sha256": "d24147284b8a3d46834a69c26369e8c1fb62287b6b436614dd9f6a3ea73feb3f"
     },
     {
       "path": "native/QA-NEW24-EXPIRED-LINK-HTML-PAGE.json",
@@ -183,7 +183,7 @@
     },
     {
       "path": "native/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
-      "sha256": "34b42a4c8042a9b68dfcaf329e464d9e0647827a7d09ace18ee71437f97fc74a"
+      "sha256": "0d71cdfe7b0a0c4f4a16094784b8da23627c0d2f171a4cc55727f4e9f91009c2"
     },
     {
       "path": "native/QA-NEW36-OVERSIZE-OUTPUT-KEPT.json",

@@ -271,7 +271,7 @@ async def test_direct_mcp_tool_registered_once_when_enabled(seam):
     mcp_agents.register_agent_tools(mcp, seam.runtime)
     names = [tool.name for tool in await mcp.list_tools()]
     assert names.count("set_agent_backend") == 1
-    assert "request_agent_backend_switch" not in names
+    assert names.count("request_agent_backend_switch") == 1
 
 
 @pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini", None])
