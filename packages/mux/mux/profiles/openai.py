@@ -17,7 +17,11 @@ PERSISTENT_WORKSPACE = Profile(
     schema_version="1",
     sdk_pin="openai>=2.54.0,<3",
     core=True,  # Nine mandatory capabilities have actual-driver evidence; see driver README.
+    execution_tool="bash",
+    tool_readback="compiled",
     support={
+        "neutral_catalog": "native",
+        "agent_delete": "native",
         "thread_workspace_persistence": "native",
         "turn_lifecycle": "native",
         "cancel": "native",

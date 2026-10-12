@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from mux.contracts.config import BackendConfig, ResolvedBackend, ThreadMode, resolve_default
 from mux.contracts.errors import InvalidConfig
 from mux.contracts.ids import Provider
-from mux.contracts.profile import Profile
+from mux.contracts.profile import SUPPORTED, Profile
+from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
 from mux.profiles.gemini import INLINE_REUSE
 from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
@@ -45,6 +46,36 @@ def emits_legacy_events_for(provider: Provider) -> bool:
     return declarations.pop()
 
 
+def neutral_catalog_profile_for(provider: str) -> Profile | None:
+    """The declared catalog profile, without assuming all provider profiles support it."""
+    matches = tuple(
+        profile
+        for profile in PROFILES.values()
+        if profile.provider == provider and profile.support_for("neutral_catalog") in SUPPORTED
+    )
+    if len(matches) > 1:
+        raise InvalidConfig("provider has ambiguous neutral catalog profiles")
+    return matches[0] if matches else None
+
+
+def native_agent_tools(profile: Profile, spec: AgentSpec) -> tuple[ToolSpec, ...]:
+    """Compare native readback while retaining the authored tool intent."""
+    if profile.tool_readback == "authored":
+        return tuple(spec.tools or ())
+    return tuple(
+        ToolSpec(
+            name=tool.name,
+            kind=tool.kind,
+            description=(tool.description or None) if tool.kind == "custom" else None,
+            input_schema=dict(tool.input_schema or {}) if tool.kind == "custom" else None,
+            permission=tool.permission,
+        )
+        for tool in spec.tools or ()
+        if tool.kind != "mcp_toolset"
+        and not (tool.kind == "builtin" and tool.name == profile.execution_tool)
+    )
+
+
 __all__ = [
     "CONVERSATION_ONLY",
     "INLINE_REUSE",
@@ -53,6 +84,8 @@ __all__ = [
     "PROFILES",
     "get_profile",
     "emits_legacy_events_for",
+    "native_agent_tools",
+    "neutral_catalog_profile_for",
 ]
 
 

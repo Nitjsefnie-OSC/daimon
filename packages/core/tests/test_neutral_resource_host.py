@@ -36,6 +36,7 @@ from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux import profiles
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec, MCPConnection, ToolSpec
 from mux.drivers.openai import OpenAIDriver
@@ -45,6 +46,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.profiles import PERSISTENT_WORKSPACE
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -1034,4 +1036,44 @@ async def test_product_transport_sdk_copy_refuses_late_ambient_configuration(
         with pytest.raises(AmbientSDKConfigurationError):
             SDKTransport(sdk)
         assert frozenset(os.environ) == before
+    assert not case.trace.requests
+
+
+async def test_read_uses_declared_projection_with_one_actual_sdk_request(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = SDKCase(setup)
+    original = spec()
+    await case.seed_agent(original)
+    altered = PERSISTENT_WORKSPACE.model_copy(update={"tool_readback": "authored"})
+    monkeypatch.setattr(profiles, "PROFILES", {altered.profile_id: altered})
+    case.trace.queue(reply("GET", "/agents/original", raw_agent(original, case.scope)))
+    async with case.sdk() as sdk:
+        with pytest.raises(CatalogConflict, match="native agent differs"):
+            await case.host(sdk).read("source")
+    assert [(call.method, call.path) for call in case.trace.requests] == [
+        ("GET", "/v1/agents/original")
+    ]
+    case.trace.assert_consumed()
+
+
+async def test_disabled_catalog_declaration_refuses_every_edge_before_io(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.channel_skills import NativeSkillDeleteGuard
+
+    case = SDKCase(setup)
+    disabled = PERSISTENT_WORKSPACE.model_copy(
+        update={"support": {**PERSISTENT_WORKSPACE.support, "neutral_catalog": "unsupported"}}
+    )
+    monkeypatch.setattr(profiles, "PROFILES", {disabled.profile_id: disabled})
+    async with case.sdk() as sdk:
+        with pytest.raises(UnsupportedCapability):
+            case.host(sdk)
+    with pytest.raises(ValueError, match="alternate provider"):
+        PostgresNeutralCatalog(case.sessions, provider="openai", account_scope_id="project")
+    with pytest.raises(ScopeViolation):
+        NativeSkillDeleteGuard(
+            scope=case.scope, provider="openai", account_scope_id="project", operator_enabled=True
+        ).require_enabled()
     assert not case.trace.requests

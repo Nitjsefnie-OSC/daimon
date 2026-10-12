@@ -2149,3 +2149,13 @@ the caller's explicit discard threshold applies only to smaller skipped files.
 The port's `all_pages` option defaults to false for workspace-transfer and other
 existing consumers. Delivery opts in; SDK cursors, MA headers and errors are
 preserved across later pages, with authorization checked before the first call.
+
+### Resource profile capabilities
+
+Neutral resource hosts and catalog guards read catalog eligibility from the
+existing mux profile registry. Profiles declare the execution tool, authored
+or compiled tool readback, skill version digest and catalog verification mode.
+Agent retirement requires the profile's declared deletion support. Missing
+catalog support refuses at the same host/store authorization boundary; provider,
+tenant, account and workspace identity checks remain mandatory. This changes
+no default routes, operator grants or native request bodies.

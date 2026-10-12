@@ -51,8 +51,9 @@ from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
-from mux.contracts.ids import Scope
+from mux.contracts.ids import Provider, Scope
 from mux.errors import ScopeViolation
+from mux.profiles import neutral_catalog_profile_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -108,7 +109,7 @@ class NativeSkillDeleteGuard:
     """
 
     scope: Scope
-    provider: Literal["openai", "gemini"]
+    provider: Provider
     account_scope_id: str
     operator_enabled: bool = False
     expected_agent_revisions: tuple[tuple[str, int], ...] = ()
@@ -117,7 +118,7 @@ class NativeSkillDeleteGuard:
         if self.operator_enabled is not True:
             raise NativeSkillDeleteUnavailable("guard_disabled")
         if (
-            self.provider not in ("openai", "gemini")
+            neutral_catalog_profile_for(self.provider) is None
             or not self.account_scope_id.strip()
             or self.scope.is_platform
             or self.scope.is_legacy_host_authorized
