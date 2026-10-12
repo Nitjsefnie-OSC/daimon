@@ -620,3 +620,89 @@ async def test_expire_unclicked_spends_only_posted_past_deadline_rows_on_the_pla
         assert after is not None and after.used_at is None and after.outcome is None
     after_click = await store.peek_credential_request(db_session, token=clicked.token)
     assert after_click is not None and after_click.outcome is None, "a clicked form is not expired"
+
+
+async def test_expiry_sweep_and_submit_never_both_spend_one_form() -> None:
+    """Separate connections, both lock orders, and two sweepers at once.
+
+    A submit holding the row (uncommitted) is skipped by the sweep and keeps
+    its own outcome; a sweep holding the row makes a waiting submit return
+    None; two sweepers claim disjoint rows. Scoped to a fresh platform name
+    so parallel workers' rows are never swept here.
+    """
+    dsn = _concurrency_dsn()
+    engines = [create_async_engine(dsn) for _ in range(2)]
+    a, b = (async_sessionmaker(engine, expire_on_commit=False) for engine in engines)
+    platform = f"race-{uuid.uuid4()}"
+    deadline = datetime.now(tz=UTC) + timedelta(minutes=30)
+    before, after = deadline - timedelta(seconds=1), deadline + timedelta(minutes=1)
+
+    async def posted_form() -> str:
+        async with a.begin() as seed:
+            tenant = await make_tenant(seed)
+            account = await make_account(seed, tenant=tenant)
+            row = await _seed_request(
+                seed,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                expires_at=deadline,
+                platform=platform,
+            )
+            await store.update_credential_request_message(
+                seed, token=row.token, posted_message_id="msg"
+            )
+        return row.token
+
+    try:
+        submitting = await posted_form()
+        async with a.begin() as submit:
+            assert await store.consume_credential_request(submit, token=submitting, now=before)
+            async with b.begin() as sweep:
+                assert (
+                    await store.expire_unclicked_credential_requests(
+                        sweep, platform=platform, now=after
+                    )
+                    == []
+                ), "a form being submitted is skipped, not waited on"
+            await store.set_credential_request_outcome(submit, token=submitting, outcome="applied")
+        async with b.begin() as sweep:
+            assert (
+                await store.expire_unclicked_credential_requests(
+                    sweep, platform=platform, now=after
+                )
+                == []
+            )
+        async with a() as check:
+            submitted = await store.peek_credential_request(check, token=submitting)
+        assert submitted is not None and submitted.outcome == "applied"
+
+        expiring = await posted_form()
+        async with b.begin() as sweep:
+            claimed = await store.expire_unclicked_credential_requests(
+                sweep, platform=platform, now=after
+            )
+            assert [row.token for row in claimed] == [expiring]
+
+            async def late_submit() -> CredentialRequestRow | None:
+                async with a.begin() as submit:
+                    return await store.consume_credential_request(
+                        submit, token=expiring, now=before
+                    )
+
+            waiting = asyncio.create_task(late_submit())
+            await asyncio.sleep(0.2)
+            assert not waiting.done(), "the submit waits on the sweep's row lock"
+        assert await waiting is None, "a submit that loses to the sweep spends nothing"
+
+        first, second = await posted_form(), await posted_form()
+        async with a.begin() as sweep_a, b.begin() as sweep_b:
+            got_a = await store.expire_unclicked_credential_requests(
+                sweep_a, platform=platform, now=after, limit=1
+            )
+            got_b = await store.expire_unclicked_credential_requests(
+                sweep_b, platform=platform, now=after, limit=1
+            )
+        assert {got_a[0].token, got_b[0].token} == {first, second}
+    finally:
+        for engine in engines:
+            await engine.dispose()

@@ -33,6 +33,17 @@ with success or a safe error; only a finished failure restores the form. Confirm
 the request and resume waiting work once; failed attempts do not queue work.
 Browser OAuth flows have their own lifecycle.
 
+On Discord, a form nobody clicks is retired by the bot's request-expiry poller
+(`daimon.core.github_request_expiry`, the same 60-second loop that settles
+GitHub access waits, started where the wake poller runs). Each tick spends at
+most 20 posted, unused, past-deadline requests, newest first, with outcome
+`expired`, then re-renders each card into its expired state: "⌛ This form
+expired." and how to ask again, with no button. The edit is best effort: a
+card that cannot be edited stays spent, and a late click on it still gets the
+expired reply and edits the card again. A backlog, slow GitHub delivery or slow
+card edits can push a card past its first minute. Slack and Teams cards are
+still corrected only by a late click.
+
 ## The shape
 
 ```mermaid
