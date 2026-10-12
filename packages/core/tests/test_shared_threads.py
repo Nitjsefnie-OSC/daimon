@@ -208,6 +208,7 @@ def _admission(
         config=ResolvedConfig(agent_name="daimon", environment_name="default"),
         origin_channel_id="chan-1",
         backend_revision=revision,
+        backend_revision_origin="channel" if revision is not None else None,
         backend_ever_shared=ever_shared
         or (revision is not None and revision.thread_mode == "shared"),
     )

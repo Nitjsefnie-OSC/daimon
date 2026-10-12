@@ -2067,7 +2067,11 @@ available. Channel-origin native deployments keep their existing behavior.
 Disable the feature through the existing flags to stop new preference selection;
 retain stored revisions and audit history. Destructive schema downgrade removes
 agent-origin materializations and preference history and must not be used while
-threads depend on those revisions. Default/channel-origin history survives.
+threads depend on those revisions. Default/channel-origin history survives. Before rolling back to an older image,
+first disable `DAIMON_TURN__CHANNEL_BACKENDS` or set `DAIMON_TURN__PATH=legacy`,
+then roll back the image, and only then optionally downgrade the schema. The
+downgrade removes agent-origin rows but preserves channel-clear markers; older
+readers interpret those markers as explicit default Anthropic overrides.
 
 Backend resolution requires the host-resolved scoped agent identity; names are
 only display snapshots. Recreated agents start without the deleted identity's
@@ -2169,15 +2173,21 @@ list or retrieve. Unbound or archived responses refuse without additional I/O.
 
 Normal channel turn preparation publishes the first session's binding
 through the existing state store before returning it to the caller. That binding pins
-the provider and immutable effective revision; an existing thread keeps them
+the provider and immutable effective revision; publication completes inside the
+preparation owner’s existing deadline, and a delayed store write produces the
+same ceiling refusal as a delayed session preparation. An existing thread keeps them
 after a preference change or revert. Older caller-owned Anthropic session
 mappings also retain the default when backend selection is first enabled.
 
 A missing original profile, unavailable retained revision or provider removed
 from the current tenant allowlist produces `backend_unsupported` before any
 provider request. It does not redirect an existing conversation. Agent
-preferences materialize in the existing channel revision namespace with agent
-origin, and remain excluded from explicit channel overrides. One-step revert
+preferences use the existing channel revision namespace with agent origin,
+and remain excluded from explicit channel overrides. A native agent preference
+that lacks a proven counterpart is refused before materialization, leaving no
+channel revision for an older reader to mistake for an override. Every configured
+admission requires a recognized origin alongside its revision; missing or
+unknown origin refuses, and a retained shared revision carries its stored origin. One-step revert
 uses the settings owner's existing revision and authorization checks and
 affects new threads; it does not rewrite existing bindings.
 

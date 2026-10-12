@@ -202,6 +202,7 @@ def _admission(world: _World, account: uuid.UUID, revision: ConfigRevision | Non
         config=ResolvedConfig(agent_name="host", environment_name="host"),
         origin_channel_id="chan-x",
         backend_revision=revision,
+        backend_revision_origin="channel" if revision is not None else None,
         backend_ever_shared=revision is not None and revision.thread_mode == "shared",
     )
 

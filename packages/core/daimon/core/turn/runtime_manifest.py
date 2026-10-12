@@ -120,7 +120,7 @@ def manifest_configuration_matches(row: Mapping[str, JsonValue], revision: Confi
 
 def fixed_plan_origin_allowed(origin: str | None) -> bool:
     """An operator's fixed native plan is not an agent-counterpart proof."""
-    return origin in (None, "channel")
+    return origin == "channel"
 
 
 class CounterpartPlan(Protocol):

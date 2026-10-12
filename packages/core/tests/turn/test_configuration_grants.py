@@ -2,11 +2,10 @@
 
 import copy
 import os
-from dataclasses import dataclass, fields, replace
+from dataclasses import replace
 
 import pytest
 from daimon.core.channel_backend import check_backend
-from daimon.core.turn.admission import Admission
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_deployment import load_gemini_deployment
 from daimon.core.turn.openai_deployment import load_deployment
@@ -121,19 +120,12 @@ async def test_legacy_digest_and_ambiguous_rows_remain_closed(planned, monkeypat
         loader(selected)
 
 
-@dataclass(frozen=True)
-class AgentOriginAdmission(Admission):
-    backend_revision_origin: str = "agent"
-
-
 async def test_actual_loaders_refuse_unproven_agent_counterpart_before_manifest_or_key_read(
     planned, monkeypatch
 ):
     selected, loader, _row = planned
     # Preserve the actual fixture admission, changing only the trusted selection origin.
-    origin = AgentOriginAdmission(
-        **{field.name: getattr(selected.admission, field.name) for field in fields(Admission)}
-    )
+    origin = replace(selected.admission, backend_revision_origin="agent")
     selected = replace(selected, admission=origin)
     monkeypatch.setattr(
         os.environ,

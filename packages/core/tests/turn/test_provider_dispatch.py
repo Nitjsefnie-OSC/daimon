@@ -110,6 +110,7 @@ def admission() -> Admission:
         environment=ma_environment(),
         config=ResolvedConfig(agent_name="test", environment_name="test"),
         backend_revision=REVISION,
+        backend_revision_origin="channel",
     )
 
 
@@ -319,7 +320,7 @@ async def test_missing_preparation_fails_before_native_binding(
 
 
 @pytest.mark.parametrize(
-    "field", ["tenant", "account", "provider", "native-id", "no-ref", "config", "owner"]
+    "field", ["tenant", "account", "provider", "native-id", "no-ref", "config", "origin", "owner"]
 )
 async def test_foreign_provider_preparation_is_refused(
     field: str,
@@ -344,6 +345,10 @@ async def test_foreign_provider_preparation_is_refused(
                 return prepared(request, ma_session_id="ma-session")
             case "no-ref":
                 return prepared(request, session_ref=None)
+            case "origin":
+                return prepared(
+                    request, admission=replace(request.admission, backend_revision_origin="agent")
+                )
             case "config":
                 return prepared(
                     request, admission=replace(request.admission, backend_revision=None)

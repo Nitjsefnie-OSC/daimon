@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -21,7 +20,6 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import admit_impl
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.openai_deployment import build_openai_runtime
 from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session
@@ -335,66 +333,27 @@ async def test_removed_provider_allowlist_refuses_an_existing_native_binding(sel
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 async def test_agent_preference_and_revert_select_new_threads_without_channel_override(
     selector_host,
-    monkeypatch,
-    tmp_path,
 ):
     host = selector_host
     original = await host.prepare("thread")
     original_binding = await host.store.get_binding(host.slot)
+    async with host.sessions() as db:
+        previous_revision, _ = await mux_state.latest_config_revision_and_sharing(
+            db, REVISION.channel
+        )
     service, agent, actor = preference_for(host)
     changed = await service.set_backend(agent, "openai", 0, actor)
-    selected = await host.admit("new-thread")
-    revision = selected.backend_revision
-    assert revision is not None and revision.profile == PROFILE
-    assert selected.backend_revision_origin == "agent"
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await host.admit("new-thread")
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await host.prepare("new-thread")
-    assert host.wire.requests == []
-    manifest = tmp_path / "provider-runtime.json"
-    manifest.write_text(
-        json.dumps(
-            [
-                {
-                    "profile": PROFILE,
-                    "tenant_id": str(TENANT),
-                    "platform": "slack",
-                    "channel_id": "channel",
-                    "account_id": str(ACCOUNT),
-                    "config_digest": revision.digest,
-                    "project": "project",
-                    "agent_id": "native-agent",
-                    "environment_id": "native-environment",
-                    "api_key_env": "DAIMON_OFFLINE_KEY",
-                }
-            ]
-        )
-    )
-    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
-    request = ProviderPreparationRequest(
-        host.deps,
-        selected,
-        SCOPE,
-        TENANT,
-        "slack",
-        "caller",
-        "new-thread",
-        ACCOUNT,
-        True,
-        DEFAULT_MA_CAPABILITIES,
-        None,
-        datetime.now(UTC) + timedelta(seconds=30),
-        lambda: datetime.now(UTC),
-    )
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        build_openai_runtime(request)
-    # A configuration grant is not a counterpart proof. No native session
-    # is created; the settings and default-thread facts are independently real.
-    assert host.wire.requests == []
-    await host.store.put_config_revision(revision)
     async with host.sessions() as db:
-        assert await channel_backend.current_backend(db, REVISION.channel) is None
-        assert await mux_state.config_origin(db, REVISION.channel, revision.local) == "agent"
-    # An independent store re-put must retain the persisted origin.
+        # The pre-origin image's reader has no origin filter. A refused turn
+        # must leave no row that it could interpret as a channel override.
+        legacy_revision, _ = await mux_state.latest_config_revision_and_sharing(
+            db, REVISION.channel
+        )
+        assert legacy_revision == previous_revision
     old = await host.prepare("thread")
     assert old.ma_session_id == original.ma_session_id and old.admission.backend_revision is None
     assert old.admission.backend_footer_profile == "anthropic.managed_agents"
@@ -403,8 +362,6 @@ async def test_agent_preference_and_revert_select_new_threads_without_channel_ov
     assert restored.backend is None and restored.previous_local == changed.local
     new_default = await host.prepare("after-revert")
     assert new_default.admission.backend_revision is None and new_default.session_ref is None
-    async with host.sessions() as db:
-        assert await mux_state.get_config_revision(db, REVISION.channel, revision.local) == revision
     assert host.wire.requests == []
 
 
@@ -532,22 +489,13 @@ async def test_private_dm_does_not_silently_ignore_an_explicit_native_agent_pref
     host = selector_host
     service, agent, actor = preference_for(host)
     await service.set_backend(agent, target, 0, actor)
-    selected = await host.admit("dm-thread", is_dm=True)
-    assert selected.backend_revision is not None
-    assert selected.backend_revision.backend == target
-    assert selected.backend_revision_origin == "agent"
-    assert selected.private_dm_id == "dm-thread"
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        await bind_session(
-            host.deps,
-            selected,
-            tenant_id=TENANT,
-            platform="slack",
-            external_user_id="caller",
-            thread_id="dm-thread",
-            session_account_id=ACCOUNT,
-            reuse_existing=True,
+        await host.admit("dm-thread", is_dm=True)
+    async with host.sessions() as db:
+        legacy_revision, _ = await mux_state.latest_config_revision_and_sharing(
+            db, REVISION.channel
         )
+        assert legacy_revision is None
     assert host.wire.requests == []
     assert host.created == []
 
@@ -707,25 +655,17 @@ async def test_channel_clear_inherits_the_actual_agent_identity_and_keeps_old_ch
     async with host.sessions.begin() as db:
         cleared = await channel_backend.clear_channel_backend(db, REVISION.channel)
     retained = await host.admit("thread")
-    inherited = await host.admit("new-thread")
     assert retained.backend_revision == explicit
     assert retained.backend_revision_origin == "channel"
     assert retained.backend_footer_profile == "anthropic.managed_agents"
-    assert inherited.backend_revision is not None
-    assert inherited.backend_revision.local > cleared.local
-    assert inherited.backend_revision.backend == "openai"
-    assert inherited.backend_revision_origin == "agent"
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        await bind_session(
-            host.deps,
-            inherited,
-            tenant_id=TENANT,
-            platform="slack",
-            external_user_id="caller",
-            thread_id="new-thread",
-            session_account_id=ACCOUNT,
-            reuse_existing=True,
+        await host.admit("new-thread")
+    async with host.sessions() as db:
+        legacy_revision, _ = await mux_state.latest_config_revision_and_sharing(
+            db, REVISION.channel
         )
+        assert legacy_revision == cleared
+        assert await mux_state.next_config_local(db, REVISION.channel) == cleared.local + 1
     binding = await host.store.get_binding(host.slot)
     assert binding is not None and binding.native_refs["session"] == original.ma_session_id
     assert host.wire.requests == []
@@ -752,10 +692,9 @@ async def test_agent_selection_projects_the_already_authorized_source_without_an
         return resolved
 
     monkeypatch.setattr(channel_backend, "load_backend_agent", capture)
-    selected = await host.admit("new-thread")
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await host.admit("new-thread")
     assert projections == [agent.agent_id]
-    assert selected.backend_revision is not None
-    assert selected.backend_revision_origin == "agent"
     assert host.wire.requests == []
     assert host.created == []
 
@@ -788,3 +727,27 @@ async def test_concrete_handoff_source_uses_its_identity_despite_a_historical_di
     assert selected.backend_revision_origin == "agent"
     assert host.wire.requests == []
     assert host.created == []
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+@pytest.mark.parametrize("target", ["openai", "gemini"])
+async def test_refused_agent_selection_leaves_no_revision_for_a_rollback_reader(
+    selector_host, target
+):
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(agent, target, 0, actor)
+    async with host.sessions() as db:
+        before = await mux_state.latest_config_revision_and_sharing(db, REVISION.channel)
+        next_local = await mux_state.next_config_local(db, REVISION.channel)
+    for thread in ("new-one", "new-two"):
+        with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+            await host.prepare(thread)
+    async with host.sessions() as db:
+        assert await mux_state.latest_config_revision_and_sharing(db, REVISION.channel) == before
+        assert before[0] is None
+        assert await mux_state.next_config_local(db, REVISION.channel) == next_local
+        assert await channel_backend.current_backend(db, REVISION.channel) is None
+    assert host.wire.requests == []
+    assert host.created == []
+    assert not any(req.url.path.endswith("/events") for req in host.calls)

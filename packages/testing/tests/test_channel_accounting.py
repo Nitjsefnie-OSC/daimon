@@ -231,7 +231,11 @@ async def context(request, db_preflight, db_session_factory, db_clean, monkeypat
         )
         await deps.state_store.put_binding(binding, expected_generation=0)
         prepared = replace(
-            prepared, admission=replace(admission, backend_revision=revision), session_ref=ref
+            prepared,
+            admission=replace(
+                admission, backend_revision=revision, backend_revision_origin="channel"
+            ),
+            session_ref=ref,
         )
         if provider == "openai":
             usage = openai_observation(
