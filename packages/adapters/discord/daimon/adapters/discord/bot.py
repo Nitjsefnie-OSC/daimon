@@ -264,6 +264,9 @@ _DRAIN_NOTICES_S: float = 10.0
 # attaching skills the sweep had never created.
 _SWEEP_CONCURRENCY = 2
 _TURN_CARD_RECOVERY_CONCURRENCY = 4
+# A mention repeating one already running or queued, sent this close to it, is
+# a double-send (or an edit plus a resend): the earlier turn answers both.
+_REPEAT_WINDOW = timedelta(seconds=10)
 
 
 THREAD_OPENING_REACTION = "⌛"
@@ -2581,6 +2584,18 @@ class DaimonBot(commands.Bot):
             if isinstance(message.channel, discord.Thread):
                 self._cancel_participation_batch(message.channel.id)
 
+            # A repeat of a mention whose turn is running or queued joins that
+            # turn: no second thread, slot or answer. Its admission row is
+            # finished below like any handled input.
+            if self._repeats_inflight_mention(message):
+                log.info(
+                    "mention.repeat_coalesced",
+                    guild_id=guild_id,
+                    channel_id=str(message.channel.id),
+                    author_id=str(message.author.id),
+                )
+                return
+
             # Per-thread mention queueing. Check before claiming an in-flight slot
             # so that queued mentions never consume a slot they won't use.
             thread_id = message.channel.id
@@ -2662,6 +2677,10 @@ class DaimonBot(commands.Bot):
                 # composite follow-up turn.
                 if not isinstance(message.channel, discord.Thread):
                     created_thread_ids: list[int] = []
+                    # Discord gives the thread this mention opens the mention's
+                    # id, so the turn owns that key from admission on, before
+                    # the thread exists: a repeat sent meanwhile finds it.
+                    self._processing.add(message.id)
                     try:
                         await self._handle_mention(
                             message, guild_id, tenant_id, created_thread_ids=created_thread_ids
@@ -2687,7 +2706,7 @@ class DaimonBot(commands.Bot):
                         # the queue) — this only catches messages that arrive after
                         # the final drain iteration, the same residual window the
                         # thread branch below has.
-                        for created_id in created_thread_ids:
+                        for created_id in {message.id, *created_thread_ids}:
                             await self._release_and_clear(
                                 created_id, tenant_id, clear_reactions=True
                             )
@@ -2727,6 +2746,36 @@ class DaimonBot(commands.Bot):
         async with self.runtime.sessionmaker() as session:
             await finish_messages(session, tenant_id=tenant_id, message_ids=pending)
             await session.commit()
+
+    def _repeats_inflight_mention(self, message: discord.Message) -> bool:
+        """Whether `message` repeats a mention whose turn is running or queued.
+
+        A repeat has the same author, place, text and attachment names, and was
+        sent within `_REPEAT_WINDOW` of it. The earlier mention is read from the
+        gateway's message cache, which holds it with any edit applied, so an
+        edit plus a resend of the edited text counts too. Its turn is in flight
+        while its key is claimed: the thread for an in-thread mention (running,
+        or queued behind the running one), the mention's own id (its future
+        thread's) for a channel mention.
+        """
+        in_thread = isinstance(message.channel, discord.Thread)
+        if in_thread and message.channel.id not in self._processing:
+            return False
+        names = [a.filename for a in message.attachments]
+        for earlier in reversed(self.cached_messages):
+            if earlier.created_at < message.created_at - _REPEAT_WINDOW:
+                break
+            if (
+                earlier.id != message.id
+                and earlier.created_at <= message.created_at + _REPEAT_WINDOW
+                and earlier.author.id == message.author.id
+                and earlier.channel.id == message.channel.id
+                and earlier.content.strip() == message.content.strip()
+                and [a.filename for a in earlier.attachments] == names
+                and (in_thread or earlier.id in self._processing)
+            ):
+                return True
+        return False
 
     async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
         """Queue ``message`` behind the thread's in-flight turn, then mark it ⌛.

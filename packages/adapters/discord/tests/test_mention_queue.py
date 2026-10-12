@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,6 +29,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.discord_message_admissions import claim_message
 from daimon.core.turn.slots import wait_for_slot
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -1384,3 +1386,145 @@ async def test_cancelled_drain_clears_unrun_authors_in_popped_batch(queued_bot):
     for message in messages:
         message.remove_reaction.assert_awaited_with("⌛", queued_bot.user)
     assert not queued_bot._queued_reactions
+
+
+# ---------------------------------------------------------------------------
+# A repeated mention (double-send, or edit plus resend) joins the turn in flight
+# ---------------------------------------------------------------------------
+
+
+def _received(bot: DaimonBot, message: discord.Message, *, msg_id: int, at_s: float) -> None:
+    """Give `message` an id and send time, and put it in the gateway's message cache."""
+    message.id = msg_id
+    message.created_at = datetime(2026, 10, 12, 12, tzinfo=UTC) + timedelta(seconds=at_s)
+    bot._connection._messages.append(message)  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
+
+
+async def _parked_turns(
+    bot: DaimonBot,
+) -> tuple[list[tuple[discord.Message, str | None]], asyncio.Event, asyncio.Event]:
+    calls: list[tuple[discord.Message, str | None]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stub(
+        message: discord.Message, guild_id: str, tenant_id: uuid.UUID, **kwargs: object
+    ) -> None:
+        calls.append((message, kwargs.get("content_override")))  # type: ignore[arg-type]
+        entered.set()
+        await release.wait()
+
+    bot._handle_mention = stub  # type: ignore[method-assign]
+    return calls, entered, release
+
+
+async def _handled(bot: DaimonBot, message: discord.Message) -> bool:
+    """Whether the admission row is finished: its own owner can no longer resume it."""
+    async with bot.runtime.sessionmaker() as session:
+        resumable = await claim_message(
+            session,
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id="123456"),
+            channel_id=str(message.channel.id),
+            message_id=str(message.id),
+            owner_key=bot.runtime.owner_key,
+            resume_owned=True,
+        )
+        await session.rollback()
+    return not resumable
+
+
+async def test_channel_double_send_runs_one_turn_in_one_thread(queued_bot: DaimonBot) -> None:
+    calls, entered, release = await _parked_turns(queued_bot)
+    first = _make_channel_message(content="<@999> reply with only OK")
+    repeat = _make_channel_message(content="<@999> reply with only OK ")
+    _received(queued_bot, first, msg_id=5001, at_s=0)
+    _received(queued_bot, repeat, msg_id=5002, at_s=1)
+
+    task = asyncio.create_task(queued_bot.on_message(first))
+    await entered.wait()  # still before its thread exists: the key is the mention's id
+    await asyncio.wait_for(queued_bot.on_message(repeat), timeout=2.0)
+
+    assert [message for message, _ in calls] == [first]
+    repeat.add_reaction.assert_not_called()  # type: ignore[attr-defined]
+    assert await _handled(queued_bot, repeat) is True, "the repeat must not be replayed later"
+    release.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert [message for message, _ in calls] == [first], "one answer, no drain turn"
+    assert 5001 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_thread_double_send_joins_the_running_turn(queued_bot: DaimonBot) -> None:
+    calls, entered, release = await _parked_turns(queued_bot)
+    first = _make_thread_message(content="<@999> summarize this")
+    repeat = _make_thread_message(content="<@999> summarize this")
+    _received(queued_bot, first, msg_id=6001, at_s=0)
+    _received(queued_bot, repeat, msg_id=6002, at_s=2)
+
+    task = asyncio.create_task(queued_bot.on_message(first))
+    await entered.wait()
+    await asyncio.wait_for(queued_bot.on_message(repeat), timeout=2.0)
+    release.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert [message for message, _ in calls] == [first]
+    assert not queued_bot._pending  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_edit_plus_resend_joins_the_running_turn(queued_bot: DaimonBot) -> None:
+    """The cache holds the first mention with its edit applied, so the resend matches it."""
+    calls, entered, release = await _parked_turns(queued_bot)
+    first = _make_channel_message(content="<@999> waht is the plan")
+    resend = _make_channel_message(content="<@999> what is the plan")
+    _received(queued_bot, first, msg_id=7001, at_s=0)
+    _received(queued_bot, resend, msg_id=7002, at_s=4)
+
+    task = asyncio.create_task(queued_bot.on_message(first))
+    await entered.wait()
+    first.content = "<@999> what is the plan"  # gateway edit, applied to the cached message
+    await asyncio.wait_for(queued_bot.on_message(resend), timeout=2.0)
+    release.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert [message for message, _ in calls] == [first]
+
+
+@pytest.mark.parametrize(
+    ("content", "author_id", "at_s"),
+    [
+        ("<@999> a different question", 111, 1),  # new text
+        ("<@999> reply with only OK", 222, 1),  # someone else
+        ("<@999> reply with only OK", 111, 30),  # long after: asked again on purpose
+    ],
+)
+async def test_mentions_that_are_not_repeats_still_run_their_own_turn(
+    queued_bot: DaimonBot, content: str, author_id: int, at_s: float
+) -> None:
+    calls, entered, release = await _parked_turns(queued_bot)
+    first = _make_channel_message(content="<@999> reply with only OK", author_id=111)
+    second = _make_channel_message(content=content, author_id=author_id)
+    _received(queued_bot, first, msg_id=8001, at_s=0)
+    _received(queued_bot, second, msg_id=8002, at_s=at_s)
+
+    task = asyncio.create_task(queued_bot.on_message(first))
+    await entered.wait()
+    entered.clear()
+    second_task = asyncio.create_task(queued_bot.on_message(second))
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(task, second_task), timeout=2.0)
+
+    assert [message for message, _ in calls] == [first, second]
+
+
+async def test_repeat_after_the_first_turn_ended_gets_its_own_turn(queued_bot: DaimonBot) -> None:
+    calls, _, release = await _parked_turns(queued_bot)
+    release.set()
+    first = _make_channel_message(content="<@999> again")
+    repeat = _make_channel_message(content="<@999> again")
+    _received(queued_bot, first, msg_id=9001, at_s=0)
+    _received(queued_bot, repeat, msg_id=9002, at_s=3)
+
+    await queued_bot.on_message(first)
+    await queued_bot.on_message(repeat)
+
+    assert [message for message, _ in calls] == [first, repeat]
