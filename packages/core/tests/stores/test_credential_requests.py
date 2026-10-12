@@ -35,6 +35,7 @@ async def _seed_request(
     expires_at: datetime | None = None,
     agent_id: uuid.UUID | None = None,
     origin_thread_id: str | None = None,
+    platform: str | None = None,
 ) -> CredentialRequestRow:
     return await store.create_credential_request(
         session,
@@ -53,6 +54,7 @@ async def _seed_request(
         target_name="tester",
         requested_work=None,
         origin_thread_id=origin_thread_id,
+        platform=platform,
     )
 
 
@@ -570,3 +572,51 @@ async def test_supersede_marks_used_with_replaced_outcome_once(
         )
         is None
     ), "a retired request can no longer be consumed by a late click"
+
+
+async def test_expire_unclicked_spends_only_posted_past_deadline_rows_on_the_platform_once(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(tz=UTC)
+    past = now - timedelta(minutes=1)
+
+    async def seed(*, platform: str, expires_at: datetime, posted: bool) -> CredentialRequestRow:
+        row = await _seed_request(
+            db_session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            expires_at=expires_at,
+            origin_thread_id="thread-1",
+            platform=platform,
+        )
+        if posted:
+            await store.update_credential_request_message(
+                db_session, token=row.token, posted_message_id="msg-1"
+            )
+        return row
+
+    due = await seed(platform="discord", expires_at=past, posted=True)
+    live = await seed(platform="discord", expires_at=now + timedelta(minutes=5), posted=True)
+    never_posted = await seed(platform="discord", expires_at=past, posted=False)
+    other_platform = await seed(platform="slack", expires_at=past, posted=True)
+    clicked = await seed(platform="discord", expires_at=now + timedelta(seconds=1), posted=True)
+    assert await store.consume_credential_request(db_session, token=clicked.token, now=now)
+    later = now + timedelta(minutes=1)
+
+    first = await store.expire_unclicked_credential_requests(
+        db_session, platform="discord", now=later
+    )
+    second = await store.expire_unclicked_credential_requests(
+        db_session, platform="discord", now=later
+    )
+
+    assert [row.token for row in first] == [due.token]
+    assert first[0].used_at == later and first[0].outcome == "expired"
+    assert second == [], "a retired form is retired once"
+    for untouched in (live, never_posted, other_platform):
+        after = await store.peek_credential_request(db_session, token=untouched.token)
+        assert after is not None and after.used_at is None and after.outcome is None
+    after_click = await store.peek_credential_request(db_session, token=clicked.token)
+    assert after_click is not None and after_click.outcome is None, "a clicked form is not expired"

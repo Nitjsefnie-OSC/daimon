@@ -207,6 +207,43 @@ async def supersede_credential_request(
     return CredentialRequestRow.model_validate(orm)
 
 
+async def expire_unclicked_credential_requests(
+    session: AsyncSession,
+    *,
+    platform: str,
+    now: datetime,
+    limit: int = 20,
+) -> list[CredentialRequestRow]:
+    """Spend posted requests on `platform` whose deadline passed unclicked.
+
+    The sweep counterpart of `supersede_credential_request`: the same
+    `used_at IS NULL` guard, so a form being submitted right now wins, and the
+    recorded outcome is what lets the caller re-render each returned card as
+    expired exactly once. Newest first, so a backlog never delays the card
+    someone may still be looking at.
+    """
+    due = (
+        select(CredentialRequest.token)
+        .where(
+            CredentialRequest.platform == platform,
+            CredentialRequest.posted_message_id.is_not(None),
+            CredentialRequest.used_at.is_(None),
+            CredentialRequest.expires_at <= now,
+        )
+        .order_by(CredentialRequest.expires_at.desc())
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    stmt = (
+        update(CredentialRequest)
+        .where(CredentialRequest.token.in_(due.scalar_subquery()))
+        .values(used_at=now, outcome="expired")
+        .returning(CredentialRequest)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [CredentialRequestRow.model_validate(orm) for orm in rows]
+
+
 async def set_credential_request_outcome(
     session: AsyncSession,
     *,

@@ -7,6 +7,7 @@ Plan 88-04: per-(thread,account) session keying (flag-gated) + unconditional rol
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from contextlib import suppress
 from dataclasses import replace
@@ -2275,6 +2276,46 @@ class TestDrainLoopDeCoalescing:
 
 class TestCredentialButtonRegistration:
     """setup_hook registers CredentialRequestButton as a dynamic item exactly once."""
+
+    async def test_request_expiry_poller_retires_unclicked_form_cards_as_expired(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import daimon.adapters.discord.bot as bot_module
+
+        pollers: dict[str, dict[str, object]] = {}
+
+        def fake_poller(name: str) -> object:
+            async def poller(*_args: object, **kwargs: object) -> None:
+                pollers[name] = kwargs
+
+            return poller
+
+        for name in (
+            "run_wake_poller",
+            "run_request_expiry_poller",
+            "run_connect_notice_poller",
+            "run_delivery_poller",
+        ):
+            monkeypatch.setattr(bot_module, name, fake_poller(name))
+        edits: list[tuple[object, object, str]] = []
+
+        async def fake_edit(client: object, *, row: object, state: str) -> None:
+            edits.append((client, row, state))
+
+        monkeypatch.setattr(bot_module, "edit_posted_card", fake_edit)
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot.start_orphan_recovery = MagicMock()  # type: ignore[method-assign]  # the boot sweep is not under test
+        bot.wake_poller_enabled = True
+
+        await bot.setup_hook()
+        await asyncio.sleep(0)
+        retire = pollers["run_request_expiry_poller"]["retire_form"]
+        row = object()
+        await retire(row)  # type: ignore[operator]  # captured kwarg is the bot's RetireForm
+
+        assert edits == [(bot, row, "expired")]
 
     async def test_setup_hook_registers_credential_request_button(
         self, db_session_factory: async_sessionmaker[AsyncSession]
