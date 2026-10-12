@@ -1,5 +1,12 @@
 # Discord adapter
 
+Gateway lease tests synchronize with PostgreSQL backend shutdown before a
+successor attempts the advisory lock. The termination helper waits within a
+bounded deadline for the old PID to disappear from activity and lock records;
+the successor's lock attempt and fail-stop assertions remain single attempts.
+The takeover test also gates the old holder's reconnect check until the successor
+has acquired the lock, then calls the real check to prove the old holder stops.
+
 The output-delivery module exposes `deliver_provider_output` for verified neutral
 provider bytes. The caller must validate the admitted tenant, provider session
 and authoritative root before supplying a `DeliverableFile`. This edge does
