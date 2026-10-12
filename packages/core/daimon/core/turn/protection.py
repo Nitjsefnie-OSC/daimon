@@ -19,11 +19,13 @@ from __future__ import annotations
 import enum
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Literal
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.permissions import any_writers_none
+from daimon.core.permissions import any_writers_none, channel_rule
 from daimon.core.stores.access_policy import load_access_policy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -110,3 +112,64 @@ async def turn_target_protected(
         resolve_category=resolve_category,
     )
     return not state.may_post
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmedProtection:
+    """A Who-can-post-Nobody rule that positively matches a place.
+
+    ``scope`` says where the rule sits and ``rule_id`` is that channel or
+    category id. Unlike `ProtectionState.PROTECTED`, this is never a fail-closed
+    guess, so it is safe to tell a user "this place's rule is Nobody".
+    """
+
+    scope: Literal["channel", "category"]
+    rule_id: str
+
+
+def matched_writers_none(
+    policy: TenantAccessPolicy,
+    *,
+    channel_id: str,
+    thread_id: str | None = None,
+    category_id: str | None = None,
+) -> ConfirmedProtection | None:
+    """The writers-none rule that applies here, only if one positively matches.
+
+    ``channel_id`` is the channel (a thread's parent); ``category_id`` must be
+    a resolved category or None. An unresolved category matches nothing here,
+    even though the turn gate counts it as protected.
+    """
+    for candidate in (thread_id, channel_id):
+        if candidate is not None and channel_rule(policy, candidate).writers == "none":
+            return ConfirmedProtection(scope="channel", rule_id=candidate)
+    rule = policy.category_rules.get(category_id) if category_id is not None else None
+    if rule is not None and rule.writers == "none":
+        return ConfirmedProtection(scope="category", rule_id=category_id or "")
+    return None
+
+
+async def confirmed_protection(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    thread_id: str | None = None,
+    category_id: str | None = None,
+) -> ConfirmedProtection | None:
+    """`matched_writers_none` over the tenant's stored policy. Never raises:
+    a failed read confirms nothing."""
+    try:
+        async with sessionmaker() as session:
+            policy = await load_access_policy(session, tenant_id=tenant_id)
+    except Exception as exc:
+        log.warning(
+            "access_policy.confirm_protection_failed",
+            tenant_id=str(tenant_id),
+            channel_id=channel_id,
+            error=type(exc).__name__,
+        )
+        return None
+    return matched_writers_none(
+        policy, channel_id=channel_id, thread_id=thread_id, category_id=category_id
+    )

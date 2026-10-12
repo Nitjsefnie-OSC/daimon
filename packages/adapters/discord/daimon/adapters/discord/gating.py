@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Hashable
 
 from daimon.core.thread_participation import ParticipationMode
 
@@ -115,9 +115,9 @@ class HintCooldown:
 
     def __init__(self, cooldown_s: float) -> None:
         self._cooldown_s = cooldown_s
-        self._last: dict[int, float] = {}
+        self._last: dict[Hashable, float] = {}
 
-    def claim(self, key: int, *, now: float) -> bool:
+    def claim(self, key: Hashable, *, now: float) -> bool:
         last = self._last.get(key)
         if last is not None and now - last < self._cooldown_s:
             return False
@@ -126,6 +126,6 @@ class HintCooldown:
         self._last[key] = now
         return True
 
-    def release(self, key: int) -> None:
+    def release(self, key: Hashable) -> None:
         """Give a claim back when the hint was not shown after all."""
         self._last.pop(key, None)

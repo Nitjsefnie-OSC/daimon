@@ -7,6 +7,7 @@ import contextlib
 import functools
 import io
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -173,7 +174,12 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
-from daimon.core.turn.protection import ProtectionState, protection_state
+from daimon.core.turn.protection import (
+    ConfirmedProtection,
+    ProtectionState,
+    confirmed_protection,
+    protection_state,
+)
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
@@ -552,6 +558,25 @@ _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
 #: The reaction on an unmentioned reply in a thread daimon opened: only a
 #: mention starts a turn. A reaction, not a message, so the hint stays quiet.
 UNMENTIONED_REPLY_HINT_EMOJI: Final[str] = "🔔"
+PROTECTED_CHANNEL_REACTION: Final[str] = "🔒"
+
+
+def protected_channel_notice(protection: ConfirmedProtection, *, channel_id: str) -> str:
+    """The DM telling a mentioner why a Who-can-post-Nobody place stayed quiet.
+
+    Names the rule that actually matched: a channel rule is changed from the
+    Permissions screen by a server admin; a category rule only from the CLI.
+    """
+    if protection.scope == "category":
+        return (
+            f"Daimon can't reply in <#{channel_id}>: the **Who can post** rule on its "
+            "category is **Nobody**. Whoever runs Daimon for this server can change it."
+        )
+    return (
+        f"Daimon can't reply in <#{protection.rule_id}>: its **Who can post** rule is "
+        "**Nobody**. A server admin can change it in `/agent-setup` → "
+        "**Who answers where** → **Permissions**."
+    )
 
 
 async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[Role, list[str]]:
@@ -622,6 +647,16 @@ class DaimonBot(commands.Bot):
             runtime.settings.discord.unmentioned_reply_hint_cooldown_h * 3600
             if runtime.settings.discord is not None
             else 1.0
+        )
+        # Mentions replayed at startup: never told about a protected channel.
+        self._replayed_message_ids: set[int] = set()
+        # Messages already given the 🔒: never a second one (bounded, oldest out).
+        self._protected_reacted_ids: OrderedDict[int, None] = OrderedDict()
+        # Protected-channel notice: (user id, channel id) -> when last shown.
+        self._protected_notice_cooldown = HintCooldown(
+            runtime.settings.discord.protected_channel_notice_cooldown_min * 60
+            if runtime.settings.discord is not None
+            else 600.0
         )
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
@@ -2247,6 +2282,89 @@ class DaimonBot(commands.Bot):
             return
         log.info("unmentioned_reply_hint.shown", thread_id=str(thread_id))
 
+    async def _signal_protected_channel(self, message: discord.Message) -> None:
+        """Tell a mentioner, quietly, why a Who-can-post-Nobody place stays silent.
+
+        Called where the turn was already refused as protected. The protection
+        still holds: no turn runs and no message goes into the channel. The
+        one exception is a 🔒 reaction on the mention itself, so "not allowed
+        here" doesn't look like "Daimon is down"; the reason and who can
+        change it go to the author by direct message.
+
+        Only a rule that positively matches is told. A refusal that came from
+        failing closed (an unresolved category while some category is
+        protected) or an unreadable policy stays silent, as does a mention
+        replayed at startup. At most once per person per channel per
+        ``protected_channel_notice_cooldown_min``. Best effort: a closed DM or
+        a missing reaction permission is logged.
+        """
+        # Policy (root, 10-12): a direct @mention only -- never a plain message
+        # or a reply without one; one reaction per message at most.
+        if self.user is None or not any(u.id == self.user.id for u in message.mentions):
+            return
+        if message.id in self._replayed_message_ids or message.id in self._protected_reacted_ids:
+            return
+        channel = message.channel
+        if isinstance(channel, discord.Thread):
+            channel_id, thread_id = str(channel.parent_id), str(channel.id)
+        else:
+            channel_id, thread_id = str(channel.id), None
+        key = (message.author.id, channel_id)
+        # Claimed before any await, so racing mentions cannot both notify.
+        if not self._protected_notice_cooldown.claim(key, now=asyncio.get_running_loop().time()):
+            return
+        # Cached only: a category that needs a fetch is unresolved, and an
+        # unresolved category confirms nothing.
+        category_id, _ = await _resolve_category(channel, fetch=False)
+        guild_id = message.guild.id if message.guild is not None else None
+        protection = (
+            await confirmed_protection(
+                self.runtime.sessionmaker,
+                tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild_id)),
+                channel_id=channel_id,
+                thread_id=thread_id,
+                category_id=category_id,
+            )
+            if guild_id is not None
+            else None
+        )
+        if protection is None:
+            self._protected_notice_cooldown.release(key)
+            log.info("protected_channel_notice.unconfirmed", channel_id=channel_id)
+            return
+        self._protected_reacted_ids[message.id] = None
+        if len(self._protected_reacted_ids) > 4096:
+            self._protected_reacted_ids.popitem(last=False)
+        reacted = False
+        try:
+            await message.add_reaction(PROTECTED_CHANNEL_REACTION)
+            reacted = True
+        except Exception as exc:  # cosmetic: never fails the (already dropped) turn
+            log.warning(
+                "protected_channel_notice.reaction_failed",
+                channel_id=channel_id,
+                err_type=type(exc).__name__,
+            )
+        dm_sent = False
+        try:
+            await message.author.send(protected_channel_notice(protection, channel_id=channel_id))
+            dm_sent = True
+        except Exception as exc:  # DMs closed, or the author is a bot
+            log.info(
+                "protected_channel_notice.dm_failed",
+                channel_id=channel_id,
+                user_id=str(message.author.id),
+                err_type=type(exc).__name__,
+            )
+        log.info(
+            "protected_channel_notice.shown",
+            channel_id=channel_id,
+            user_id=str(message.author.id),
+            scope=protection.scope,
+            reacted=reacted,
+            dm_sent=dm_sent,
+        )
+
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Remember the clicker's name for /billing; the command tree handles the rest."""
         remember_guild_user(
@@ -2262,6 +2380,9 @@ class DaimonBot(commands.Bot):
     ) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
+        if startup_replay:
+            # Its admission may run later (queued); it must stay as quiet as here.
+            self._replayed_message_ids.add(message.id)
         discord_settings = self.runtime.settings.discord
         # Explicit @-mention only. `mentioned_in` returns True for @everyone/@here
         # (it short-circuits on message.mention_everyone), which would make the bot
@@ -2391,6 +2512,10 @@ class DaimonBot(commands.Bot):
                 user_id=str(message.author.id),
                 state=post_state.value,
             )
+            # Only a rule we could read says "not allowed here"; an unknown
+            # state stays fully silent, and a replayed backlog is not re-told.
+            if post_state is ProtectionState.PROTECTED and not startup_replay:
+                await self._signal_protected_channel(message)
             return
         claimed_message = False
         queued_message = False
@@ -3834,14 +3959,15 @@ class DaimonBot(commands.Bot):
                 return
             target = thread or message.channel
             if err.reason == "writers_none":
-                # Nothing may be posted into a protected channel, a refusal
-                # included; the log is the only trace.
+                # Nothing is posted into a protected channel, a refusal
+                # included; the author gets the quiet signal instead.
                 log.info(
                     "turn.skipped.writers_none",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
                 )
+                await self._signal_protected_channel(message)
             elif err.reason == "invoker_not_allowed":
                 log.info(
                     "turn.skipped.invoker_not_allowed",
