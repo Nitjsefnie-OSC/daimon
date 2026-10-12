@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
 import pytest
-from mux.conformance.budget import BudgetGuard, BudgetRefused, ProbePlan, TokenLimits
+from mux.conformance.budget import BudgetConfig, BudgetGuard, BudgetRefused, ProbePlan, TokenLimits
 from mux.drivers.gemini.round_cases import INPUT_MAX, OUTPUT_MAX
 from mux.drivers.gemini.round_runner import admit, execute
 from pydantic import ValidationError
@@ -111,6 +112,209 @@ async def test_overrun_cannot_be_hidden_by_newer_decreasing_usage_and_blocks_nex
             )
         )
     assert len(native.posts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["acceptance", "intermediate", "final"])
+@pytest.mark.parametrize("fault", ["bad-cached", "bad-thoughts", "missing-candidates"])
+@pytest.mark.parametrize("meter", ["usage", "usageMetadata"])
+async def test_mixed_counter_overrun_retains_valid_floors_and_blocks_next_reserve(
+    tmp_path: Path, phase: str, fault: str, meter: str
+) -> None:
+    """Reviewer reproduction, including both names and all pre-decode boundaries."""
+    native = NativeWire()
+    gets = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal gets
+        response = native.handle(request)
+        if request.method == "GET" and request.url.params.get("stream") != "true":
+            gets += 1
+        selected = (
+            phase == "acceptance"
+            and request.method == "POST"
+            and request.url.path.endswith("/interactions")
+            or phase == "intermediate"
+            and request.method == "GET"
+            and gets == 1
+            or phase == "final"
+            and request.method == "GET"
+            and gets == 2
+        )
+        if not selected or response.headers.get("content-type") != "application/json":
+            return response
+        raw = response.json()
+        counts = raw["usage"]
+        counts["total_input_tokens"] = 2_000_000
+        if fault == "bad-cached":
+            counts["total_cached_tokens"] = False
+        elif fault == "bad-thoughts":
+            counts["total_thought_tokens"] = "invalid"
+        else:
+            del counts["total_output_tokens"]
+        if meter == "usageMetadata":
+            raw["usageMetadata"] = {
+                public: counts[native_name]
+                for public, native_name in (
+                    ("promptTokenCount", "total_input_tokens"),
+                    ("cachedContentTokenCount", "total_cached_tokens"),
+                    ("candidatesTokenCount", "total_output_tokens"),
+                    ("thoughtsTokenCount", "total_thought_tokens"),
+                )
+                if native_name in counts
+            }
+        return httpx.Response(200, json=raw)
+
+    selected = admission(tmp_path, "C06")
+    result = await execute(selected, mock=httpx.MockTransport(handle))
+    assert result["status"] == "fail" and result["actual_usd"] is None
+    guard = BudgetGuard(selected.config, tmp_path / "spend.md")
+    receipt = guard.report()[0]
+    assert receipt.status == "overrun" and receipt.admission_blocked
+    assert receipt.tokens is not None and receipt.tokens.input_tokens == 2_000_000
+    assert receipt.tokens.output_tokens >= (3 if fault == "missing-candidates" else 8)
+    assert receipt.held_usd >= receipt.reserved_usd
+    if phase == "final" and fault == "bad-cached":
+        # The earlier cached zero is a floor, not an exact split for this
+        # newer prompt. Token overrun latches without inventing uncached cost.
+        floor = receipt.actual_evidence.requests[0]
+        assert floor.tokens.input_cache_write_tokens is None
+        price = BudgetConfig.load(selected.config).providers["gemini"].models["gemini-3.8-flash"]
+        assert price.minimum_charge(floor.tokens, floor.observed_at) == Decimal("0.15004125")
+        # BudgetGuard may independently expand the conservative hard hold;
+        # that estimate is not a claim of proven uncached actual charges.
+    facts = result["interactions"]
+    assert facts[0]["max_seen"]["promptTokenCount"] == 2_000_000
+    assert facts[0]["complete"] is False
+    if fault != "missing-candidates":
+        assert facts[0]["tainted_counters"] == [
+            "cachedContentTokenCount" if fault == "bad-cached" else "thoughtsTokenCount"
+        ]
+    with pytest.raises(BudgetRefused):
+        guard.reserve(
+            ProbePlan(
+                provider="gemini",
+                model="gemini-3.8-flash",
+                fixture_id="C06",
+                limits=selected.envelope.limits,
+            )
+        )
+    assert len(native.posts) == 1 and len(native.deletes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("malformed", [False, -1, "invalid", {}])
+async def test_valid_output_overrun_survives_malformed_thoughts_even_sdk_rejection(
+    tmp_path: Path, malformed: object
+) -> None:
+    native = NativeWire()
+    gets = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal gets
+        response = native.handle(request)
+        if request.method == "GET" and request.url.params.get("stream") != "true":
+            gets += 1
+            if gets == 2:
+                raw = response.json()
+                raw["usage"]["total_output_tokens"] = 70_000
+                raw["usage"]["total_thought_tokens"] = malformed
+                return httpx.Response(200, json=raw)
+        return response
+
+    selected = admission(tmp_path, "C06")
+    result = await execute(selected, mock=httpx.MockTransport(handle))
+    receipt = BudgetGuard(selected.config, tmp_path / "spend.md").report()[0]
+    assert result["status"] == "fail" and result["actual_usd"] is None
+    assert receipt.tokens.output_tokens == 70_000
+    assert receipt.status == "overrun" and receipt.admission_blocked
+    assert result["interactions"][0]["tainted_counters"] == ["thoughtsTokenCount"]
+    assert gets == 2 and len(native.posts) == len(native.deletes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "valid,bad,count,public_bad",
+    [
+        ("total_cached_tokens", "total_input_tokens", 2_000_000, "promptTokenCount"),
+        ("total_thought_tokens", "total_output_tokens", 70_000, "candidatesTokenCount"),
+    ],
+)
+async def test_cached_and_thought_overrun_floors_survive_malformed_siblings(
+    tmp_path: Path, valid: str, bad: str, count: int, public_bad: str
+) -> None:
+    native = NativeWire()
+    gets = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal gets
+        response = native.handle(request)
+        if request.method == "GET" and request.url.params.get("stream") != "true":
+            gets += 1
+            if gets == 2:
+                raw = response.json()
+                raw["usage"][valid], raw["usage"][bad] = count, False
+                return httpx.Response(200, json=raw)
+        return response
+
+    selected = admission(tmp_path, "C06")
+    result = await execute(selected, mock=httpx.MockTransport(handle))
+    guard = BudgetGuard(selected.config, tmp_path / "spend.md")
+    receipt = guard.report()[0]
+    assert result["status"] == "fail" and result["actual_usd"] is None
+    assert receipt.status == "overrun" and receipt.admission_blocked
+    assert (
+        receipt.tokens.minimum_input_tokens if "cached" in valid else receipt.tokens.output_tokens
+    ) == count
+    assert result["interactions"][0]["tainted_counters"] == [public_bad]
+    with pytest.raises(BudgetRefused):
+        guard.reserve(
+            ProbePlan(
+                provider="gemini",
+                model="gemini-3.8-flash",
+                fixture_id="C06",
+                limits=selected.envelope.limits,
+            )
+        )
+    assert gets == 2 and len(native.posts) == len(native.deletes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", [64, 2_000_000])
+async def test_sdk_identity_disagreement_keeps_http_facts_but_taints_exactness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: int
+) -> None:
+    from mux.drivers.gemini.transport import SDKTransport
+
+    native = NativeWire()
+    gets = 0
+    original = SDKTransport.get
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal gets
+        response = native.handle(request)
+        if request.method == "GET" and request.url.params.get("stream") != "true":
+            gets += 1
+            if gets == 2:
+                raw = response.json()
+                raw["usage"]["total_input_tokens"] = prompt
+                return httpx.Response(200, json=raw)
+        return response
+
+    async def corrupted_sdk(self, interaction_id):
+        raw = await original(self, interaction_id)
+        return {**raw, "id": "foreign-sdk-id"} if gets == 2 else raw
+
+    monkeypatch.setattr(SDKTransport, "get", corrupted_sdk)
+    selected = admission(tmp_path, "C06")
+    result = await execute(selected, mock=httpx.MockTransport(handle))
+    receipt = BudgetGuard(selected.config, tmp_path / "spend.md").report()[0]
+    assert result["actual_usd"] is None
+    assert receipt.tokens.input_tokens == prompt
+    assert receipt.status == ("overrun" if prompt > INPUT_MAX else "uncertain")
+    assert receipt.admission_blocked == (prompt > INPUT_MAX)
+    assert result["interactions"][0]["complete"] is False
+    assert gets == 2 and len(native.posts) == len(native.deletes) == 1
 
 
 @pytest.mark.asyncio

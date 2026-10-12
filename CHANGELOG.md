@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require the reviewed C03 runner pin and separate GO on every live entry, and reject expired signed envelopes during preparation and admission.
 
 - Validate C03 QA preparation and execution against the signed three-request envelope instead of the legacy 100k cutoff, with separate historical financial test clocks.
+- Preserve independently valid Gemini live-round usage floors when sibling counters are malformed, retaining unknown actual spend while latching observed overruns before SDK decoding.
+
 - Add explicitly invoked Gemini C06/C04 conformance runners with separately pinned financial/GO admission, bounded native sends, private usage audit, terminal reconciliation and offline SDK proofs; backend defaults and live certificates stay unchanged.
 
 - Prove offline that a shared Anthropic thread keeps its provider after an OpenAI channel switch, while new threads run OpenAI and an unavailable original backend refuses explicitly.

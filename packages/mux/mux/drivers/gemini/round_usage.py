@@ -14,7 +14,7 @@ from pydantic import JsonValue
 
 from mux.conformance.budget import ActualSpend, BudgetRefused, MeasuredRequest, TokenUsage
 from mux.contracts.ids import ModelRef, ResourceRef
-from mux.drivers.gemini.live_cert import EvidenceAliases, usage_metadata
+from mux.drivers.gemini.live_cert import EvidenceAliases
 from mux.drivers.gemini.normalize import OUTCOMES
 from mux.drivers.gemini.round_cases import INPUT_MAX, MODEL, OUTPUT_MAX
 from mux.drivers.gemini.transport import Object
@@ -26,6 +26,30 @@ COUNTERS = (
     "candidatesTokenCount",
     "thoughtsTokenCount",
 )
+
+
+def counter_metadata(raw: Object) -> Object:
+    """Retain each whitelisted raw category independently, including malformed ones.
+
+    This is lower-bound evidence, not the shared exact-usage decoder. A malformed
+    sibling must never throw before independently valid facts reach the book.
+    """
+    native = raw.get("usageMetadata")
+    meter = native if native is not None else raw.get("usage")
+    names = (
+        "total_input_tokens",
+        "total_cached_tokens",
+        "total_output_tokens",
+        "total_thought_tokens",
+    )
+    result: Object = {"source": "usageMetadata" if native is not None else "interactions.usage"}
+    for name, interaction_name in zip(COUNTERS, names, strict=True):
+        result[name] = (
+            meter.get(name if native is not None else interaction_name)
+            if isinstance(meter, dict)
+            else (None if meter is None else "invalid-meter")
+        )
+    return result
 
 
 def timestamp(value: JsonValue) -> datetime | None:
@@ -46,6 +70,7 @@ class NativeEvidence:
     updated: datetime | None = None
     latest: Object | None = None
     maxima: dict[str, int] = field(default_factory=dict[str, int])
+    tainted_counters: set[str] = field(default_factory=set[str])
     output_floor: int | None = None
     uncertain: bool = False
     final_get: bool = False
@@ -118,7 +143,7 @@ class UsageBook:
             return
         if not model_proven:
             evidence.uncertain = True  # Keep owned counts independently of model verification.
-        metadata = usage_metadata(raw)
+        metadata = counter_metadata(raw)
         counts: dict[str, int] = {}
         for name in COUNTERS:
             count = metadata.get(name)
@@ -126,6 +151,7 @@ class UsageBook:
                 counts[name] = count
                 evidence.maxima[name] = max(count, evidence.maxima.get(name, 0))
             elif count is not None:
+                evidence.tainted_counters.add(name)
                 evidence.uncertain = True
         candidate, thought = counts.get(COUNTERS[2]), counts.get(COUNTERS[3])
         if candidate is not None or thought is not None:
@@ -141,7 +167,7 @@ class UsageBook:
             evidence.uncertain = True
             return
         if evidence.latest is not None:
-            prior = usage_metadata(evidence.latest)
+            prior = counter_metadata(evidence.latest)
             prior_counts = {name: value for name, value in prior.items() if type(value) is int}
             if (
                 any(
@@ -178,8 +204,8 @@ class UsageBook:
         complete = attempts == len(self.native)
         observed = datetime.now(UTC)
         for native_id, evidence in self.native.items():
-            complete = complete and evidence.final_complete
-            if evidence.final_complete and evidence.latest is not None:
+            complete = complete and evidence.final_complete and not evidence.uncertain
+            if evidence.final_complete and not evidence.uncertain and evidence.latest is not None:
                 observation = observation_from_interaction(
                     evidence.latest,
                     evidence.session,
@@ -211,7 +237,10 @@ class UsageBook:
                         input_tokens=max(prompt or 0, cached or 0) if prompt is not None else None,
                         input_cached_tokens=cached,
                         output_tokens=evidence.output_floor,
-                        input_cache_write_tokens=0,
+                        # Maxima are category floors, not one coherent exact
+                        # cache split. Use the cheapest compatible remainder;
+                        # never price a newer prompt with an older cached zero.
+                        input_cache_write_tokens=None,
                     ),
                     pricing_basis="standard-global",
                 )
@@ -227,7 +256,8 @@ class UsageBook:
 
     def exceeds_interaction_limit(self) -> bool:
         return any(
-            evidence.maxima.get(COUNTERS[0], 0) > INPUT_MAX
+            max(evidence.maxima.get(COUNTERS[0], 0), evidence.maxima.get(COUNTERS[1], 0))
+            > INPUT_MAX
             or (evidence.output_floor or 0) > OUTPUT_MAX
             for evidence in self.native.values()
         )
@@ -257,6 +287,7 @@ class UsageBook:
                     if status in OUTCOMES or status in ("in_progress", "requires_action")
                     else None,
                     "max_seen": dict(evidence.maxima),
+                    "tainted_counters": list[JsonValue](sorted(evidence.tainted_counters)),
                     "max_seen_output": evidence.output_floor,
                     "final_get": evidence.final_get,
                     "complete": evidence.final_complete,

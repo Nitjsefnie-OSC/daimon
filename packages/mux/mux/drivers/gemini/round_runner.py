@@ -35,7 +35,7 @@ from mux.drivers.gemini.core import BASE_AGENT
 from mux.drivers.gemini.deployment import (
     _require_clean_environment,  # pyright: ignore[reportPrivateUsage]
 )
-from mux.drivers.gemini.live_cert import EvidenceAliases, read_key, usage_metadata, write_report
+from mux.drivers.gemini.live_cert import EvidenceAliases, read_key, write_report
 from mux.drivers.gemini.normalize import OUTCOMES
 from mux.drivers.gemini.round_cases import (
     INPUT_MAX,
@@ -46,7 +46,7 @@ from mux.drivers.gemini.round_cases import (
     run_c04,
     run_c06,
 )
-from mux.drivers.gemini.round_usage import COUNTERS, UsageBook, timestamp
+from mux.drivers.gemini.round_usage import COUNTERS, UsageBook, counter_metadata, timestamp
 from mux.drivers.gemini.transport import API_REVISION, Object, SDKTransport, provider_call
 
 type Case = Literal["C06", "C04"]
@@ -331,7 +331,7 @@ class RoundWire:
             TypeAdapter[Object](Object).validate_json(response.content) if response.content else {}
         )
         native_id = raw.get("id")
-        counts = usage_metadata(raw)
+        counts = counter_metadata(raw)
         status = raw.get("status")
         projected_status = (
             status
@@ -391,6 +391,17 @@ class RoundWire:
                     "model": model,
                     "usageMetadata": counts,
                 }
+                native = self.http_snapshots[request.url.path]
+                # Keep independently owned HTTP facts BEFORE the SDK can reject
+                # a malformed sibling field during decoding.
+                if is_create:
+                    if self.session is None or self.request_sha256 is None:
+                        raise BudgetRefused("native acceptance lacks scoped POST provenance")
+                    self.book.accept(
+                        native, self.session, self.request_sha256, request_model=self.request_model
+                    )
+                elif request.method == "GET" and native_id in self.book.native:
+                    self.book.observe(native_id, native, final=self.final)
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         if self.session is None or self.attempts >= self.maximum:
@@ -407,9 +418,9 @@ class RoundWire:
         native = self.http_snapshots.pop("/v1beta/interactions", None)
         if native is None or native.get("id") != raw.get("id"):
             raise BudgetRefused("native acceptance/SDK identity lacks independent HTTP evidence")
-        self.book.accept(
-            native, self.session, self.request_sha256, request_model=self.request_model
-        )
+        native_id = native.get("id")
+        if not isinstance(native_id, str) or native_id not in self.book.native:
+            raise BudgetRefused("native acceptance was not retained before SDK decoding")
         if self.current_input_sha256 is not None and isinstance(raw.get("id"), str):
             native_id = raw["id"]
             if isinstance(native_id, str):
@@ -424,10 +435,9 @@ class RoundWire:
         native = self.http_snapshots.pop(f"/v1beta/interactions/{interaction_id}", None)
         if native is None or native.get("id") != raw.get("id"):
             self.book.native[interaction_id].uncertain = True
-            if self.final:
+            self.book.native[interaction_id].final_complete = False
+            if self.final and not self.book.native[interaction_id].final_get:
                 self.book.failed_final(interaction_id)
-        else:
-            self.book.observe(interaction_id, native, final=self.final)
         return raw
 
     async def cancel(self, interaction_id: str) -> Object:

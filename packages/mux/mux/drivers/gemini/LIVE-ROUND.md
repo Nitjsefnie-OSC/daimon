@@ -97,6 +97,17 @@ summed as new charges. Workflow PASS can retain `actual_usd=null` and a full hol
 financial uncertainty is always reported separately. Cleanup targets only the
 accepted IDs; cleanup failure fails the case.
 
+Each counter is captured independently at the owned HTTP response boundary,
+before SDK decoding. A malformed sibling taints its own exactness and keeps
+actual unknown; independently valid prompt, cached, candidate and thought counts
+still contribute conservative floors. Public facts name only the tainted
+categories, never publish their malformed values. A valid overrun floor latches
+the shared guard even when another counter or the SDK decoding is invalid.
+Category maxima are not an exact cache split: incomplete floor DTOs leave the
+cache-write category unknown so minimum pricing uses the cheapest compatible
+remainder, rather than treating an older cached zero as exact for a newer prompt.
+Complete measured terminal DTOs still retain the reviewed no-cache-write zero.
+
 Offline tests use real SDK MockTransport request bytes, fake native responses,
 disposable ledgers and no key access. Their numeric settlement is synthetic,
 never canonical live spend or a new live PASS. After dual-sign/merge, N8 installs
