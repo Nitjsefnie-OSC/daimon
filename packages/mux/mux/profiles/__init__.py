@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from mux.contracts.config import BackendConfig, ResolvedBackend, ThreadMode, resolve_default
 from mux.contracts.errors import InvalidConfig
 from mux.contracts.ids import Provider
-from mux.contracts.profile import SUPPORTED, Profile
+from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
 from mux.profiles.gemini import INLINE_REUSE, WORKER_MODEL
@@ -76,6 +76,21 @@ def native_agent_tools(profile: Profile, spec: AgentSpec) -> tuple[ToolSpec, ...
     )
 
 
+def accounting_mode_for(provider: Provider) -> AccountingMode:
+    """Read declared accounting policy for a DTO without a profile reference.
+
+    All profiles of that provider must agree. An ambiguous declaration cannot
+    choose an arbitrary default and silently change the observation's billing.
+    No runtime/provider table, database read or SDK discovery is involved.
+    """
+    modes = {
+        profile.accounting_mode for profile in PROFILES.values() if profile.provider == provider
+    }
+    if len(modes) != 1:
+        raise InvalidConfig("usage requires an unambiguous declared profile accounting mode")
+    return modes.pop()
+
+
 __all__ = [
     "CONVERSATION_ONLY",
     "INLINE_REUSE",
@@ -86,6 +101,7 @@ __all__ = [
     "emits_legacy_events_for",
     "native_agent_tools",
     "neutral_catalog_profile_for",
+    "accounting_mode_for",
 ]
 
 

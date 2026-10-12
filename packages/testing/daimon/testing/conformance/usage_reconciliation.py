@@ -18,6 +18,7 @@ from typing import Annotated, Literal
 
 import httpx
 from daimon.testing.conformance.budget import BudgetGuard, Money, Reconciliation
+from mux.profiles import PERSISTENT_WORKSPACE
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -460,7 +461,7 @@ def propose_admin_reconciliation(
     assert result.run_id is not None and result.token_usd is not None
     assert result.container_usd is not None
     receipt = next((row for row in guard.report() if row.run_id == result.run_id), None)
-    if receipt is None or receipt.provider != "openai":
+    if receipt is None or receipt.provider != PERSISTENT_WORKSPACE.provider:
         raise ValueError("held_openai_run_required")
     if not costs.scope.start_time <= receipt.timestamp.timestamp() < costs.scope.end_time:
         raise ValueError("held_run_outside_billed_window")

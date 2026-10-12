@@ -24,6 +24,7 @@ from mux.contracts.ids import ModelRef, ResourceRef, Scope
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
 from mux.errors import ScopeViolation
+from mux.profiles import accounting_mode_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -165,7 +166,10 @@ class RootUsageScope:
             raise ValueError("root usage requires a frozen bounded native inventory")
         if type(self.disjoint) is not bool or type(self.inventory_complete) is not bool:
             raise ValueError("coverage proofs must be explicit verified host decisions")
-        if self.session.kind != "session" or self.session.provider != "openai":
+        if (
+            self.session.kind != "session"
+            or not accounting_mode_for(self.session.provider).supports_root_usage
+        ):
             raise ValueError("root usage requires an OpenAI native session")
         if not self.root_turn_id or not self.session.tenant_id:
             raise ValueError("root usage requires an admitted tenant and native root")

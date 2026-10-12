@@ -9,7 +9,7 @@ it.
 from __future__ import annotations
 
 from mux.contracts.extensions import ExtensionRef
-from mux.contracts.profile import Profile
+from mux.contracts.profile import AccountingMode, Profile
 
 WORKER_MODEL = "gemini-3.5-flash-lite"
 WORKER_MAX_TOTAL_TOKENS = 4096
@@ -19,6 +19,7 @@ INLINE_REUSE = Profile(
     provider="gemini",
     profile_id="gemini.inline_reuse",
     schema_version="1",
+    accounting_mode=AccountingMode.NATIVE_TOTALS,
     sdk_pin="google-genai>=2.7.0,<3",
     core=False,
     extensions=(ExtensionRef(namespace="gemini.session", version=1),),

@@ -1178,3 +1178,12 @@ verbatim in plan and creation digests. Existing ordinary bindings and retained
 creation receipts therefore recover under the same stable identity. A true
 worker echo requirement remains part of policy identity; no digest fallback or
 replacement key is used.
+
+Profile accounting modes select the existing settlement protocol. Request-span
+profiles retain their legacy arithmetic, projections and idempotency keys.
+Native totals require complete attributed usage, verified prices and measured
+infrastructure before settlement; unknown charges stay pending. Native root
+totals additionally permit the existing independently proven disjoint child
+inventory; this does not enable delegation configuration. Usage DTOs carry only
+a provider, so accounting reads the registered profiles' shared mode and refuses
+an ambiguous declaration rather than picking a different billing protocol.
