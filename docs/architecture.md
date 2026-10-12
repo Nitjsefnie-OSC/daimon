@@ -427,7 +427,9 @@ is not refused: it joins its tenant's queue (`DAIMON_TURN_QUEUE__*`), posts the
 ordinary "Working on it…" card with Stop, and waits after the card and before
 `bind_session` (`wait_for_slot` in `packages/core/daimon/core/turn/slots.py`).
 Nothing on the card says it is queued; on Discord the mention gets ⌛ for the
-wait (`wait_for_slot`'s `on_queued`), cleared once the wait ends. A released slot goes, in the same
+live wait (`wait_for_slot`'s `on_queued`), cleared once the wait ends; both
+reaction calls run in the background, so they never delay Stop, the max wait or
+a granted slot. A released slot goes, in the same
 synchronous span, to the first tenant in round-robin order that has a waiting
 turn and a free tenant slot; within a tenant the queue is FIFO. A slot covers
 one turn: it is returned when the turn ends (`release_turn_slot`), and each

@@ -117,8 +117,13 @@ class TurnTicket:
     def overdue(self) -> bool:
         return self._queue.clock() - self.queued_at >= self._queue.max_wait_s
 
-    async def wait(self, cancel: asyncio.Event) -> WaitResult:
+    async def wait(
+        self, cancel: asyncio.Event, *, on_wait: Callable[[], None] | None = None
+    ) -> WaitResult:
         """Wait for a slot; returns at once for a ticket that already holds one.
+
+        `on_wait` is called once, synchronously, only when a live wait begins:
+        never for a ticket already granted, stopped or past its max wait.
 
         "cancelled" when Stop came first, including a Stop that raced the
         grant: the slot is then still held, and `release` returns it.
@@ -129,6 +134,8 @@ class TurnTicket:
             return "started"
         if self.state == "queued":
             remaining = self.queued_at + self._queue.max_wait_s - self._queue.clock()
+            if on_wait is not None and remaining > 0 and not cancel.is_set():
+                on_wait()
             settled = asyncio.ensure_future(self._settled.wait())
             stopped = asyncio.ensure_future(cancel.wait())
             try:

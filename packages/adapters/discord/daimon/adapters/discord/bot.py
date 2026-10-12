@@ -4252,13 +4252,17 @@ class DaimonBot(commands.Bot):
         # same ⌛ a mention queued behind its thread's turn gets (a drained
         # follow-up already carries one). Stop ends the wait like any turn; the
         # max wait is a safeguard that ends the card with the ordinary error.
+        # The ⌛ add and remove are background tasks, never awaited here, so a
+        # slow reaction call cannot hold up Stop, the max wait or a granted slot.
         assert self.runtime.settings.discord is not None
-        waited = False
+        marked: list[asyncio.Task[None]] = []
 
-        async def _mark_queued() -> None:
-            nonlocal waited
-            waited = True
-            await self._add_mention_reaction(message, "⌛")
+        def _mark_queued() -> None:
+            marked.append(self._spawn(self._add_mention_reaction(message, "⌛")))
+
+        async def _unmark_queued(added: asyncio.Task[None]) -> None:
+            await asyncio.wait({added})  # removing before the add lands would leave ⌛ behind
+            await self._remove_mention_reaction(message, "⌛")
 
         try:
             slot = await wait_for_slot(
@@ -4269,8 +4273,8 @@ class DaimonBot(commands.Bot):
                 on_queued=_mark_queued if not unprompted and content_override is None else None,
             )
         finally:
-            if waited:
-                await self._remove_mention_reaction(message, "⌛")
+            for added in marked:
+                self._spawn(_unmark_queued(added))
         if slot != "started":
             ended = {
                 "cancelled": "Stopped.\nSend a message to start again.",

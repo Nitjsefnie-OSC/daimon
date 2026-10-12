@@ -390,13 +390,10 @@ async def test_wait_for_slot_uses_the_held_ticket() -> None:
     assert queue.in_flight() == 0  # holding released the slot
 
 
-async def test_on_queued_runs_only_for_a_turn_that_has_to_wait() -> None:
+async def test_on_queued_runs_once_when_a_live_wait_begins() -> None:
     queue = make_queue(global_cap=None)
     sm = MagicMock()
-    marks: list[str] = []
-
-    async def mark() -> None:
-        marks.append("queued")
+    mark = MagicMock()
 
     with patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=False)):
         running = admit(queue, A, cap=1)
@@ -405,17 +402,53 @@ async def test_on_queued_runs_only_for_a_turn_that_has_to_wait() -> None:
                 asyncio.Event(), sessionmaker=sm, tenant_id=A, on_queued=mark
             )
             assert started == "started"
-            assert marks == [], "a turn with a free slot is not marked"
+            mark.assert_not_called()  # a turn with a free slot is not marked
             waiting = admit(queue, A, cap=1)
             with holding(waiting):
                 task = asyncio.create_task(
                     wait_for_slot(asyncio.Event(), sessionmaker=sm, tenant_id=A, on_queued=mark)
                 )
                 await asyncio.sleep(0)
-                assert marks == ["queued"] and waiting.queued
+                mark.assert_called_once_with()
+                assert waiting.queued
                 running.release()
                 assert await task == "started"
-                assert marks == ["queued"], "marked once"
+                mark.assert_called_once_with()
+
+
+@pytest.mark.parametrize("before_entry", ["no_holder", "granted", "stopped", "expired"])
+async def test_on_queued_is_not_called_without_a_live_wait(before_entry: str) -> None:
+    clock = Clock()
+    queue = make_queue(global_cap=1, clock=clock)
+    cancel = asyncio.Event()
+    mark = MagicMock()
+    expected = {
+        "no_holder": "started",
+        "granted": "started",
+        "stopped": "cancelled",
+        "expired": "timed_out",
+    }[before_entry]
+    with patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=False)):
+        if before_entry == "no_holder":
+            result = await wait_for_slot(
+                cancel, sessionmaker=MagicMock(), tenant_id=A, on_queued=mark
+            )
+        else:
+            running = admit(queue, A)
+            waiting = admit(queue, A)
+            if before_entry == "granted":
+                running.release()
+            elif before_entry == "stopped":
+                cancel.set()
+            else:
+                clock.now += 301
+            with holding(waiting):
+                result = await wait_for_slot(
+                    cancel, sessionmaker=MagicMock(), tenant_id=A, on_queued=mark
+                )
+            running.release()
+    assert result == expected
+    mark.assert_not_called()
 
 
 async def test_a_turn_whose_balance_ran_out_while_queued_does_not_start() -> None:
