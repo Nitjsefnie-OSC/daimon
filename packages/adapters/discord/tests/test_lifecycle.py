@@ -1083,6 +1083,50 @@ class TestCleanReplace:
         assert lc.feedback_message_id is not None
         assert thread.summary_footers()[0][0] == int(lc.feedback_message_id)
 
+    @pytest.mark.parametrize(
+        ("answer", "failing_send"),
+        [("short answer", 2), ("x " * 2500, 2), ("x " * 2500, 3)],
+        ids=["one_chunk_first_send", "split_first_send", "split_later_send"],
+    )
+    async def test_completion_ping_keeps_the_summary_when_the_answer_fails(
+        self, answer: str, failing_send: int
+    ) -> None:
+        """#787: a pinged answer that fails before its summary is up leaves it on the card.
+
+        Send 1 is the card; send 2 is the answer's first chunk. The card stays
+        and is the turn's terminal render, so a repair reasserts the summary too.
+        """
+        thread = _VisibleThread()
+        sends = 0
+
+        async def send(**kwargs: Any) -> _VisibleMessage:
+            nonlocal sends
+            sends += 1
+            if sends == failing_send:
+                raise discord.HTTPException(
+                    types.SimpleNamespace(status=503, reason="unavailable"),  # pyright: ignore[reportArgumentType]
+                    "send failed",
+                )
+            return await thread.send(**kwargs)
+
+        lc = DiscordTurnLifecycle(
+            send=send,  # pyright: ignore[reportArgumentType]
+            edit=thread.edit,  # pyright: ignore[reportArgumentType]
+            delete=thread.delete,  # pyright: ignore[reportArgumentType]
+            agent_name="test-agent",
+            model_id="claude-sonnet-4-6",
+            requester_id=123,
+            notify_on_completion=True,
+        )
+        await lc.post_initial()
+        with pytest.raises(discord.HTTPException):
+            await lc.on_terminal_success(_make_success_state(answer))
+
+        card_id = 1
+        assert [message_id for message_id, _ in thread.summary_footers()] == [card_id]
+        assert lc._card_writes.terminal[card_id]["embeds"] == [lc._terminal_embed]
+        assert lc.feedback_message_id == str(card_id)
+
     async def test_final_answer_with_everyone_disables_all_mention_channels(self) -> None:
         """T-22-01: a final answer containing ``@everyone`` (reachable via prompt
         injection through tool output) must not ping the guild. The clean-replace

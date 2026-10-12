@@ -1143,8 +1143,11 @@ class DiscordTurnLifecycle:
         )
 
         summary = self._terminal_embed
+        # A pinged answer's card shows no summary until the answer carries it.
+        summary_posted = not notify
 
         async def deliver_first(content: str, files: list[discord.File]) -> None:
+            nonlocal summary_posted
             if notify:
                 self._message_ref = await self._send_message(
                     content=content,
@@ -1152,6 +1155,7 @@ class DiscordTurnLifecycle:
                     **({"files": files} if files else {}),
                     **({"embeds": [summary]} if summary and len(chunks) == 1 else {}),
                 )
+                summary_posted = len(chunks) == 1
                 if hasattr(self._message_ref, "id"):
                     self._delivered_answer_chunk_ids.append(str(self._message_ref.id))
             else:
@@ -1168,38 +1172,68 @@ class DiscordTurnLifecycle:
 
         self._delivered_answer_chunk_ids.clear()
         try:
-            await deliver_first(chunks[0], table_files)
-        except discord.HTTPException as exc:
-            if not table_files:
-                raise
-            log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
-            chunks = (
-                _split_with_name_prefix(original_response_text, self._agent_name)
-                if use_name_prefix
-                else split_for_discord_safe(original_response_text)
-            )
-            await deliver_first(chunks[0], [])
-        self._revealed_first_chunk = chunks[0]
-        self._summary_ref = self._message_ref
-        # Overflow: subsequent chunks posted as new messages, the summary under the last.
-        for i, chunk in enumerate(chunks[1:], start=2):
-            last = summary is not None and i == len(chunks)
-            sent = await self._send_message(
-                content=chunk,
-                allowed_mentions=discord.AllowedMentions.none(),
-                **({"embeds": [summary]} if last else {}),
-            )
-            # Discord sends return messages with IDs. Lightweight lifecycle
-            # recorders may return opaque refs when they do not test history.
-            if hasattr(sent, "id"):
-                self._delivered_answer_chunk_ids.append(str(sent.id))
-            if last:
-                self._summary_ref = sent
+            try:
+                await deliver_first(chunks[0], table_files)
+            except discord.HTTPException as exc:
+                if not table_files:
+                    raise
+                log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+                chunks = (
+                    _split_with_name_prefix(original_response_text, self._agent_name)
+                    if use_name_prefix
+                    else split_for_discord_safe(original_response_text)
+                )
+                await deliver_first(chunks[0], [])
+            self._revealed_first_chunk = chunks[0]
+            self._summary_ref = self._message_ref
+            # Overflow: subsequent chunks posted as new messages, the summary under the last.
+            for i, chunk in enumerate(chunks[1:], start=2):
+                last = summary is not None and i == len(chunks)
+                sent = await self._send_message(
+                    content=chunk,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    **({"embeds": [summary]} if last else {}),
+                )
+                # Discord sends return messages with IDs. Lightweight lifecycle
+                # recorders may return opaque refs when they do not test history.
+                if hasattr(sent, "id"):
+                    self._delivered_answer_chunk_ids.append(str(sent.id))
+                if last:
+                    self._summary_ref = sent
+                    summary_posted = True
+        except Exception:
+            if not summary_posted:
+                await self._restore_card_summary()
+            raise
         if notify:
             # The ping posted the answer below the card, so the card goes.
             await self._delete_card()
 
         log.info("turn.terminal_success")
+
+    async def _restore_card_summary(self) -> None:
+        """Put the summary back on the card when the pinged answer could not carry it.
+
+        The card stays: the answer failed before its summary went up, so the
+        card is the one place left to show the turn's time and cost. Best
+        effort; the delivery error is what the caller reports.
+        """
+        card = self._card_message_ref
+        if card is None or self._terminal_embed is None or self._thread_stopped():
+            return
+        try:
+            restored = await self._edit_message(
+                card,
+                terminal_override=True,
+                recover_missing=False,
+                embeds=[self._terminal_embed],
+                view=None,
+            )
+        except Exception:
+            log.warning("turn.card_summary_restore_failed", exc_info=True)
+            return
+        if restored:
+            self._summary_ref = self._card_message_ref
 
     @property
     def feedback_message_id(self) -> str | None:
