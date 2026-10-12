@@ -446,7 +446,7 @@
         ],
         "schemas": {
           "path": "fixtures/mcp-tools.json",
-          "sha256": "5dfa90fab93e1471d8ffa4a4713597f131a112c9256cc63acba60a3b23913c55"
+          "sha256": "9f84c6d15fb7724d0148d99ebc24329a477d1b866f26402a99e35c941d97d50d"
         },
         "auth_commit": "9cf23f6c1eaf1d269ed9cab3f281ddd0cc9a6b82",
         "auth_source": {
@@ -468,7 +468,7 @@
       "sdk_version": "2.7.0",
       "codec_source": {
         "path": "packages/core/daimon/core/turn/gemini.py",
-        "sha256": "f1f2c74600aa819a181cb1c33c54e0386cfa990c4f52de4a6361f9632abd9546"
+        "sha256": "92fb6115745819e64fea170ae0af812e471b2f307637e261980653764ba01fa8"
       },
       "codec_commit": "e8dcf6bda4ea3553c59b8095fc8b416fe3808226",
       "provenance": "authored-sdk-wire",
@@ -647,7 +647,7 @@
         ],
         "schemas": {
           "path": "fixtures/mcp-tools.json",
-          "sha256": "5dfa90fab93e1471d8ffa4a4713597f131a112c9256cc63acba60a3b23913c55"
+          "sha256": "9f84c6d15fb7724d0148d99ebc24329a477d1b866f26402a99e35c941d97d50d"
         },
         "auth_commit": "9cf23f6c1eaf1d269ed9cab3f281ddd0cc9a6b82",
         "auth_source": {

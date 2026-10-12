@@ -15,7 +15,7 @@
   },
   "input_index": {
     "path": "index.json",
-    "sha256": "c2a7831e3061f78e765d54d682410dcd3c7cb5c732a17a4f9be17aaae3794e58"
+    "sha256": "4955f8155f29532e56e72c2a58fc4e43c2c9458610d798ab95eaf2e45086e0cf"
   },
   "entries": [
     {
@@ -26,7 +26,7 @@
       },
       "input": {
         "path": "native/QA-D11-FOOTER-COST-MATCHES-LEDGER.json",
-        "sha256": "a0aebcb91114a3e84c98e829a9360d2ee3e5b4682c3612b3a9c1c52405f38896"
+        "sha256": "3cb584ef4736230b2963442f0a76c7cbb1b50ed2983c0b4cfb46d048be10baac"
       },
       "bindings": [
         {
@@ -47,7 +47,7 @@
       },
       "input": {
         "path": "native/QA-D12-PDF-CLAIM-HAS-PDF.json",
-        "sha256": "a92b233e6b34c29da36dfc5cda9c98c8ea5bbff7a7aa4c76047735ffea200652"
+        "sha256": "f18d600660c0c7f41132286fdba489208b440bf7b5dbdffffcedbb8b5c3d0ab8"
       },
       "bindings": [
         {
@@ -75,7 +75,7 @@
       },
       "input": {
         "path": "native/QA-D13-FILES-NOT-REPOSTED.json",
-        "sha256": "04d1f0c50468906f4a5d1aa6416386155d52020163b3069f2bc3cfcd68bc26e8"
+        "sha256": "2b33d472cda871951cfac1352a2b396f7465e487b1b4b679b5420685f8eed7d1"
       },
       "bindings": [
         {
@@ -116,7 +116,7 @@
       },
       "input": {
         "path": "native/QA-D14-FORK-KEEPS-SKILLS.json",
-        "sha256": "d36284f0e3c0b3a9f1c6a84d5f0d9892321b44f54ad099534fb8c1e3049de2ca"
+        "sha256": "14344b743842902dad7146e41e7ff96316744e64b69f119bb1e67b48f1578d87"
       },
       "bindings": [],
       "gaps": [
@@ -148,7 +148,7 @@
       },
       "input": {
         "path": "native/QA-D1-CANARY-TWO-TURN.json",
-        "sha256": "9524892df943c28d10c738e92d90053d62cf95f4e3a24865d3153f8626f5fd70"
+        "sha256": "71ac07f8b3c8191fbbbdec3f4bde996270f400c104cb352c2621031c3b07aa97"
       },
       "bindings": [
         {
@@ -195,7 +195,7 @@
       },
       "input": {
         "path": "native/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.json",
-        "sha256": "72353dc725df0df7f0274ba2dc04745149c109859f8a7871a0b8406239eae4d0"
+        "sha256": "178068711a841a3e352ce2859c3bc74d67dbf38172dc2a160fe18216d7acd79a"
       },
       "bindings": [
         {
@@ -248,7 +248,7 @@
       },
       "input": {
         "path": "native/QA-D1-SLACK-FOLLOWUP.json",
-        "sha256": "f99d68626f2b4b96393cdc41c9372a89f3ebed511f4abbd6ef0aa7adfd5a4429"
+        "sha256": "7098685f9d4a95035a040a7b07eea79de731e8e2844dcbf0899cb510fb552257"
       },
       "bindings": [],
       "gaps": [
@@ -268,7 +268,7 @@
       },
       "input": {
         "path": "native/QA-D22-WHO-ANSWERS-HERE.json",
-        "sha256": "a6119eeb3f9786c0a38475b5133d662c642201eb2ae1afeeaa7f8d8c137d0288"
+        "sha256": "b97287803e7c832f68f1b800ad2d95b3b0cb6e5d38428e934d21615ce3f55246"
       },
       "bindings": [
         {
@@ -309,7 +309,7 @@
       },
       "input": {
         "path": "native/QA-D3-TEAMS-ANSWER-NOT-REPLACED.json",
-        "sha256": "d39ed1f18649841b402546190f09de99d4dafd48dc95dcb1e4421033986d2f9f"
+        "sha256": "e07d28146b20ce4eb567dd04bab08808f526cb296fcf9e1d9e98fb466dca1765"
       },
       "bindings": [],
       "gaps": [
@@ -329,7 +329,7 @@
       },
       "input": {
         "path": "native/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
-        "sha256": "098fb7a9358ebdb0632617891b3ffe083587d551010d2d041ffa845e846481a4"
+        "sha256": "20f1c30de6691d9e398429f5ae957f12abb53068e2d39dd28aa7e2103dad48e0"
       },
       "bindings": [
         {
@@ -369,7 +369,7 @@
       },
       "input": {
         "path": "native/QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
-        "sha256": "21150828ecdb76383c0517509e27de98556af470ef12d6a8f9a8bb4659c3a459"
+        "sha256": "50f1402e974c32c7f84cdb35f8608b1c1295367bf1a3d6de52e5f6a492eaad7c"
       },
       "bindings": [
         {
@@ -409,7 +409,7 @@
       },
       "input": {
         "path": "native/QA-D7-BIG-WORKSPACE-CHECKPOINT.json",
-        "sha256": "2c316b91c1a14dc228f4da6444b37520c022a2668ed1c86983f88a4a568fb2fe"
+        "sha256": "59896843d83016f8e046d2f2a3f60aa988ee34c27e9e443c32152b1472eccb43"
       },
       "bindings": [
         {
@@ -456,7 +456,7 @@
       },
       "input": {
         "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
-        "sha256": "06c3474d0669dbf5e10926fde66d8d8757cf344bf848b476fe7cdea77ee97b5e"
+        "sha256": "3563044cc1abfb395b5aaa58204273520098f8ab3e3101ec05b9023ec3a67cd3"
       },
       "bindings": [
         {
@@ -496,7 +496,7 @@
       },
       "input": {
         "path": "native/QA-D8-GITHUB-SAVED-KEY-SWITCH.json",
-        "sha256": "c7dc10dd65f076a8db0645be292f13bbe497df26d59d084cfa2d0e300379b859"
+        "sha256": "71f9c2a5449d609402fa92e0c2abaffdf6764c1edf4ddef3d50ca0f04df60af4"
       },
       "bindings": [],
       "gaps": [
@@ -516,7 +516,7 @@
       },
       "input": {
         "path": "native/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.json",
-        "sha256": "0625d11866eaf4320e75c7134486c896579006ac66750e921a541b667491ef97"
+        "sha256": "8bea8ae5da93f1762ad604815d1e4fbbad43c5a5cb37e308f7a16c578077b7da"
       },
       "bindings": [
         {
@@ -544,7 +544,7 @@
       },
       "input": {
         "path": "native/QA-I6-BARE-MENTION-THREAD-TITLE.json",
-        "sha256": "a4abcc9f863ee9b4175a3a8e00c0b2b1da6fc5b9f5189fd6a75f71ec0e4bad07"
+        "sha256": "a5c209d2e2a95b41c584ce8ef524a30b3e4d1b75801e77caae12c3fb1f330e71"
       },
       "bindings": [
         {
@@ -572,7 +572,7 @@
       },
       "input": {
         "path": "native/QA-I7-MCP-OAUTH-DISCOVERY.json",
-        "sha256": "f2a4753df51c357a9c24228be397fabb39a8933b18fe286385ba4722dbf99ee5"
+        "sha256": "12eaeaf0401a440120cd62a99bd1501517bf839ebdafa0763fc6b40caac88ef4"
       },
       "bindings": [],
       "gaps": [
@@ -592,7 +592,7 @@
       },
       "input": {
         "path": "native/QA-ISO-TEAM-CHANNEL-ISOLATION.json",
-        "sha256": "69ad1305a8ac89d3352396d26264c50690fd0d9d0d5301b40ed8bbfd60280c64"
+        "sha256": "074f6285b0469adebcab52d9b723f5ab52f3a2f13e67e7e6a50b0c5875a3ff06"
       },
       "bindings": [
         {
@@ -664,7 +664,7 @@
       },
       "input": {
         "path": "native/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
-        "sha256": "0b74f2813d532f0b2fda07526dacb75a8376b41a7954ec5888a86b71354f0dc9"
+        "sha256": "eb7c41567d68b859e024c5c8878b169f7fd7c65aa5af32514d4e2feab9ec55b8"
       },
       "bindings": [
         {
@@ -692,7 +692,7 @@
       },
       "input": {
         "path": "native/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.json",
-        "sha256": "11a820f417cf1adc5c3be7ea678b7a591e2f84018d6bb9f8b9cd96d5f0bb725e"
+        "sha256": "b062d1b2229f09831d8ae45f2fced39b83cc41848d25906e4f7d4b83d1296fb7"
       },
       "bindings": [
         {
@@ -747,7 +747,7 @@
       },
       "input": {
         "path": "native/QA-NEW13-WRITERS-NONE-NOT-SILENT.json",
-        "sha256": "df8324730566433a363639c74e6d5ed1b5283ffc3768e4b5d4cea97077be6eb6"
+        "sha256": "7cdee29030e29949bd669e9c68dffe178533e0347630f3036e43a21b94a73d40"
       },
       "bindings": [],
       "gaps": [
@@ -785,7 +785,7 @@
       },
       "input": {
         "path": "native/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.json",
-        "sha256": "3354b305dda13e728afc2dfedcfb4c312cb8f7fc2be0f7782315c4f20faa3495"
+        "sha256": "428e2efc3f7d0b7a92d6b112edc6f988cd247705a1722e4f6f5a7248faf3cfde"
       },
       "bindings": [],
       "gaps": [
@@ -817,7 +817,7 @@
       },
       "input": {
         "path": "native/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.json",
-        "sha256": "4afac2b2f341c6ca133f1c80574c3fadc8086f8bf3d239aa2f16153a8210aca9"
+        "sha256": "adde6073a77a14416601440809c8b0c2c9a431c722c506e632a7519767ea0883"
       },
       "bindings": [
         {
@@ -863,7 +863,7 @@
       },
       "input": {
         "path": "native/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.json",
-        "sha256": "c2871be656479874ccbfdc11f5bc2faf9fa6b6cb659a881ce88880dac5aad4ab"
+        "sha256": "95d5090c65b61e085dcc858219c71a011a8974dc58ad3f8a5463570a8d7291c8"
       },
       "bindings": [],
       "gaps": [
@@ -895,7 +895,7 @@
       },
       "input": {
         "path": "native/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
-        "sha256": "d838fb5e0926d96ed64596202d1a58b1263546fd1f57d865845767d61fb103f5"
+        "sha256": "68d2fcc7b9369515301b66f55da5f603cc5f983a31ef2c366b694e5f668f769a"
       },
       "bindings": [
         {
@@ -960,7 +960,7 @@
       },
       "input": {
         "path": "native/QA-NEW18-SKILL-ADD-YES-PLEASE.json",
-        "sha256": "90fd28d0a4d84f86f4ca537218bf17b0bbf48d000a89c8a65eb30724d3ba7ea8"
+        "sha256": "1e5b72c759a3ff47aebd32305d90e690eb3db3614e77fe961a222627120478bb"
       },
       "bindings": [
         {
@@ -1026,7 +1026,7 @@
       },
       "input": {
         "path": "native/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
-        "sha256": "946e673cb103ca7fd0354c824db40d0f67c7d8036ef2f77da49840ccd89cd2eb"
+        "sha256": "9ddca9a6172dfe2e00bce6c7d4f207c85601b34f0157baa086efa144f86c3317"
       },
       "bindings": [
         {
@@ -1072,7 +1072,7 @@
       },
       "input": {
         "path": "native/QA-NEW1-PDF-BARE-MENTION-NO-DROP.json",
-        "sha256": "0eb5dbe59ef831b30dda9b6f47d0fa99e36b669115021882540272d5487353e2"
+        "sha256": "e3b3d6289dbe4285f2d9494c51418f756d82cbc2ed3033d4b1fea1bef63e4026"
       },
       "bindings": [
         {
@@ -1100,7 +1100,7 @@
       },
       "input": {
         "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
-        "sha256": "4892c4efe0a86a6b46b76916bb58f3ebbf4e71cb8cb6f07a1a9c2e65650aba12"
+        "sha256": "ad67104d79455e27cce94cff932c17ec82ee16b10c6291e101269e5daa16c866"
       },
       "bindings": [
         {
@@ -1134,7 +1134,7 @@
       },
       "input": {
         "path": "native/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
-        "sha256": "5001efa26ef27fc31d5335e7c3daa8d9b2d7baf1e1866ec2108b81be61c40be6"
+        "sha256": "0472238dd9490501e5e074796f44ab91839d2d44a4e4cdb8ea42e1616403128a"
       },
       "bindings": [
         {
@@ -1174,7 +1174,7 @@
       },
       "input": {
         "path": "native/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
-        "sha256": "93484c512b30efd1f2f85bed9f2f1768b550cbacb3cc6d0e97f27656061f5414"
+        "sha256": "0c3e5e5ab9afc7349a6d71fa37f8f4c6d83c2d4ff897a8f08e61d9493950e290"
       },
       "bindings": [
         {
@@ -1214,7 +1214,7 @@
       },
       "input": {
         "path": "native/QA-NEW24-EXPIRED-LINK-HTML-PAGE.json",
-        "sha256": "d8888eab27cd117581122c446670310846effe8e157536e7fbd556e0c3328fbb"
+        "sha256": "54f22d0545de921fc1fb30df42ba0d6c250438413a71543aed2bcb9db7943af7"
       },
       "bindings": [],
       "gaps": [
@@ -1234,7 +1234,7 @@
       },
       "input": {
         "path": "native/QA-NEW25-DM-NOT-SILENT.json",
-        "sha256": "eaf585349c58cada5e4be9e9c2fcd7b4bf77bab083de01b227126e388f397b57"
+        "sha256": "22fc0aaebb7d3e97458dd2732e236d11df06b65c3521378fc4efa3fd133d7124"
       },
       "bindings": [],
       "gaps": [
@@ -1254,7 +1254,7 @@
       },
       "input": {
         "path": "native/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.json",
-        "sha256": "d74ffc02441050ff9ac3885aa9fb09a3c9b3a885cf4f2d34624399ff35cf4439"
+        "sha256": "b8f0ce58f9ad756c61903b7bb36bcb519f47c569784c087c040f07cc7affa706"
       },
       "bindings": [],
       "gaps": [
@@ -1274,7 +1274,7 @@
       },
       "input": {
         "path": "native/QA-NEW27-MISTYPED-TOKEN-HEADLESS.json",
-        "sha256": "009c01539ac6021bd4f3ed8050b42bc90778075a02807b0274741a2f0d8d9827"
+        "sha256": "04de0e5a1efc1b4a41da39361ee104804ea1357b3b80d7aac9269f76bf8f38e3"
       },
       "bindings": [],
       "gaps": [
@@ -1300,7 +1300,7 @@
       },
       "input": {
         "path": "native/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.json",
-        "sha256": "68a1c9c3110255a71e20461c652a890e5af6fe9b1ecb9a803c95726743a86675"
+        "sha256": "f85b883dd5327e270373237b1d0700aa9565a8a06a3563de82df7134ca619f7a"
       },
       "bindings": [],
       "gaps": [
@@ -1320,7 +1320,7 @@
       },
       "input": {
         "path": "native/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.json",
-        "sha256": "bbeac7a3574729efac78f8789bf8296876b58569fcd8fbd81b96f8bcf7bf16f2"
+        "sha256": "305900bae334ad72cd3470291b5460ee7adb3336435ce4da4b0d0543e3a0afe6"
       },
       "bindings": [],
       "gaps": [
@@ -1340,7 +1340,7 @@
       },
       "input": {
         "path": "native/QA-NEW29-DM-CONVERSATION-FORM.json",
-        "sha256": "a4524493a1e3d2e19136604e7ac7fa855908f9d23d36c1464a179f14f1cadadd"
+        "sha256": "0769a42d0620b809acf31f305b2d1d4e1a1eeba1ba0e15a6dd67302276a5018a"
       },
       "bindings": [],
       "gaps": [
@@ -1360,7 +1360,7 @@
       },
       "input": {
         "path": "native/QA-NEW2-CSV-ATTACHMENT-READ.json",
-        "sha256": "203d6e85a1bbfd9260f7c1e37fd642c1597e77b9136950b4e8fd24c51673e254"
+        "sha256": "371b868c6bbd39939639f05acc43451f75276358bf4e29d9a7f34e378848a0b4"
       },
       "bindings": [
         {
@@ -1388,7 +1388,7 @@
       },
       "input": {
         "path": "native/QA-NEW30-APPROVE-AFTER-RESTART.json",
-        "sha256": "a78f19bffe7284d360c7edff3f7f478d009b89927c865b787e132525b355f1b7"
+        "sha256": "c55dcfc1fc0ddbbf7a5fc3d4215fedc8c8b080366eb2f5537adabacba0741733"
       },
       "bindings": [],
       "gaps": [
@@ -1408,7 +1408,7 @@
       },
       "input": {
         "path": "native/QA-NEW31-PANELS-AFTER-RESTART.json",
-        "sha256": "34e870a3ab37fe3639721bee42a71f6b3ae71978afbbb69e860c674835a946d7"
+        "sha256": "f361b5067c1909c3a93db263a0f8f5dee1c43cc84c54883bd0e6cd5836241fd2"
       },
       "bindings": [],
       "gaps": [
@@ -1428,7 +1428,7 @@
       },
       "input": {
         "path": "native/QA-NEW32-ADD-SKILL-ON-BUILTIN.json",
-        "sha256": "6d3e5d4a15c9e523270556e5c7e44d83e57cc784b282e1e7c409e0375004a39a"
+        "sha256": "90f09cc8d0f9337563cadfc89dd2ab2f7220177c350a7dcfffe0365232f53f9d"
       },
       "bindings": [],
       "gaps": [
@@ -1448,7 +1448,7 @@
       },
       "input": {
         "path": "native/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.json",
-        "sha256": "934e69ca863517bbfb01bc8edfb1a1ddca7571658d728d858e7036f085be6499"
+        "sha256": "a7668c218dfd602b41c2be29dce170d9c2cc81931fcb3729340ea51a515c5911"
       },
       "bindings": [],
       "gaps": [
@@ -1468,7 +1468,7 @@
       },
       "input": {
         "path": "native/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.json",
-        "sha256": "d2c9497213a4d368804d74186e34433cc72ceee3c649302453ae25c27054a196"
+        "sha256": "24ced583aa44b935fde77dfa587e8c5635f287ebcae9b3383c3b7c4a2f503770"
       },
       "bindings": [],
       "gaps": [
@@ -1488,7 +1488,7 @@
       },
       "input": {
         "path": "native/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
-        "sha256": "34b42a4c8042a9b68dfcaf329e464d9e0647827a7d09ace18ee71437f97fc74a"
+        "sha256": "8f049c83b54fbbf06940a01d7eb69e5eba6a8ce9a4c9d2ed56f858a12cbcf9b9"
       },
       "bindings": [
         {
@@ -1528,7 +1528,7 @@
       },
       "input": {
         "path": "native/QA-NEW36-OVERSIZE-OUTPUT-KEPT.json",
-        "sha256": "b023c5378713071f1a75cea3da7eacfd3f9bd3601d7932a84a2550d9c55bd179"
+        "sha256": "3360281de19ab56c4136698a91da6120948a7894de6163c6f172db2a07b391b1"
       },
       "bindings": [
         {
@@ -1569,7 +1569,7 @@
       },
       "input": {
         "path": "native/QA-NEW37-MARKDOWN-TABLE-READABLE.json",
-        "sha256": "ce6f6b35576ed8665edec7f4c48a371d399a512a3a2558a3231c852710d84f5c"
+        "sha256": "f285a424cffd068683b4238e589982bac86d8e014955f1187851da318a88afbd"
       },
       "bindings": [
         {
@@ -1590,7 +1590,7 @@
       },
       "input": {
         "path": "native/QA-NEW3-BURST-CHANNEL-MENTIONS.json",
-        "sha256": "b5f9a7a8c246ea93a139ecebe2f739bbf87ddba66098b341eb7b8c579560c4eb"
+        "sha256": "650159ef3f99c516aab5c35492fe3c715b8946af3765da4d9ec43c92789cfa4c"
       },
       "bindings": [
         {
@@ -1644,7 +1644,7 @@
       },
       "input": {
         "path": "native/QA-NEW4-DOUBLE-MENTION-DEDUPE.json",
-        "sha256": "d6fc4b0cea9cfd967f5037401b55480cce4c3f9528fa7c3018de416a4fc38c4d"
+        "sha256": "b2098e16e3d828570290cfb8a89e99d644db7dc63f62bb63cae7342847a920ce"
       },
       "bindings": [
         {
@@ -1678,7 +1678,7 @@
       },
       "input": {
         "path": "native/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.json",
-        "sha256": "e2cc10b5adf572e247b3a89031b2f6f67063e8728c3f293163a08db79374aa95"
+        "sha256": "3ebe857509f05e502775cfc239e6cd3f175489573f4e81db97236d30938a3e1c"
       },
       "bindings": [
         {
@@ -1725,7 +1725,7 @@
       },
       "input": {
         "path": "native/QA-NEW6-TENANT-CAP-QUEUE.json",
-        "sha256": "3948a3cfd1cc029e21185724d20d7f9bf8b40df9fec3e29f3a8b52dd0904a5a7"
+        "sha256": "e8aa63cb0251d7edefc8972c54728ef57c51f2c10eba43ece48d7aac652aa92e"
       },
       "bindings": [
         {
@@ -1815,7 +1815,7 @@
       },
       "input": {
         "path": "native/QA-NEW8-LINK-PAGE-THREAD-TITLE.json",
-        "sha256": "1cdfc70183b4e30fc7503dab48efef09adff55a14759247d90951032e6a53804"
+        "sha256": "6e4b605a7c6c489294847984f26f7be291342800608462bd212f2958e4f7422d"
       },
       "bindings": [
         {
@@ -1836,7 +1836,7 @@
       },
       "input": {
         "path": "native/QA-NEW9-NO-INTERNAL-PLUMBING.json",
-        "sha256": "8bbe2b99b563c0092a63cfdccb40066a345508853550c5e645ae484f8e1b635b"
+        "sha256": "3fde225ec343d8f9e6ec0c6b09946daf0a599cebf5c66462ade88bf3a5735fc6"
       },
       "bindings": [
         {

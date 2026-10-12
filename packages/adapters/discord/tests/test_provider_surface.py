@@ -25,7 +25,6 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.adapters.discord import lifecycle as discord_lifecycle
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
-from daimon.adapters.discord.provider_events import ProviderDraft
 from daimon.adapters.discord.tool_confirmation import build_confirmation_view
 from daimon.core.confirmation import ConfirmationPrompt
 from daimon.core.posted_controls.confirmation import (
@@ -35,6 +34,7 @@ from daimon.core.posted_controls.confirmation import (
 from daimon.core.turn import driver
 from daimon.core.turn.io import TurnEvent, TurnStream
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.run import _DeferredFailureLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason

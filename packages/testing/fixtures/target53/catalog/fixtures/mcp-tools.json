@@ -211,7 +211,7 @@
     },
     "source": {
       "path": "packages/adapters/mcp/daimon/adapters/mcp/tools/skill_uploads.py",
-      "sha256": "51cea31e344e3342c95667bb5450f6d8a2ef1a8bbaf8dbf3bb4fff027a4cfc9d"
+      "sha256": "761d35e2985b1b82c473b7edb75b43758d850fbfbf4546a574a76a4ddbf28e57"
     }
   },
   "attach_mcp_server": {
