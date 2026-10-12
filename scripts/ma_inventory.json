@@ -10933,7 +10933,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_provider_surface.py",
-      "line": 15,
+      "line": 16,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -10942,7 +10942,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_provider_surface.py",
-      "line": 16,
+      "line": 17,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsAgentMessageEvent",

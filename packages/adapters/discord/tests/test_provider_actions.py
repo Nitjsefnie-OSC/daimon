@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import discord
+import mux.profiles as profiles
 import pytest
 from daimon.adapters.discord import provider_actions as actions
 from daimon.core.turn.prepare import PreparedTurn
@@ -22,7 +23,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionRequester,
 )
 from mux.contracts.events import Event, NativeProvenance, RequiredAction, RequiresActionPayload
-from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.ids import Provider, ResourceRef, Scope
 
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
 SCOPE = Scope(
@@ -339,6 +340,37 @@ def test_only_foreign_prepared_sessions_attach_action_callback(provider: str | N
     options = actions.provider_action_options(prepared, factory)
     assert called == int(provider in {"openai", "gemini"})
     assert bool(options) == bool(called)
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+@pytest.mark.parametrize("emits_legacy_events", [False, True])
+def test_action_callback_follows_declared_profile_rendering_policy(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, emits_legacy_events: bool
+) -> None:
+    monkeypatch.setattr(
+        profiles,
+        "PROFILES",
+        {
+            key: profile.model_copy(update={"emits_legacy_events": emits_legacy_events})
+            for key, profile in profiles.PROFILES.items()
+        },
+    )
+    prepared = cast(
+        PreparedTurn, SimpleNamespace(session_ref=SESSION.model_copy(update={"provider": provider}))
+    )
+    calls = 0
+
+    async def hook(value: ProviderActionPrompt) -> NativeActionResponse | None:
+        return None
+
+    def factory():
+        nonlocal calls
+        calls += 1
+        return hook
+
+    options = actions.provider_action_options(prepared, factory)
+    assert calls == int(not emits_legacy_events)
+    assert options == ({} if emits_legacy_events else {"provider_action": hook})
 
 
 @pytest.mark.parametrize("choice", ["approve", "deny", "cancel"])
