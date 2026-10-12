@@ -233,7 +233,7 @@ class GeminiCatalogAdapter(GeminiAgents):
         return agent
 
     async def verify(self, scope: Scope, retained: Agent) -> Agent:
-        """N6's host edge compares its separate authored row with native readback."""
+        """The host edge compares its separate authored row with native readback."""
         fresh = await self.retrieve(scope, retained.ref)
         if fresh.revision != retained.revision or fresh.spec != retained.spec:
             raise ProviderError("conflict", retryable=False, native_code="catalog_authored_drift")

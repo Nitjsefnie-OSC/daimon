@@ -22,7 +22,7 @@ def _normalize_owner_repo(url: str) -> str:
 
     Mirrors daimon.core.skill_sync.fetcher._normalize_owner_repo — both sides
     must normalize identically so set_binding and get_bindings_for_repo match
-    (Pitfall 2 / T-56-09).
+    .
     """
     return (
         url.removeprefix("https://github.com/")

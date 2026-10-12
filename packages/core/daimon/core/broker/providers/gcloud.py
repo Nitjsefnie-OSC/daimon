@@ -43,8 +43,8 @@ class GcloudTokenProvider:
                 "gcloud provider requires settings.credentials.google_sa_json"
             )
         if agent_id is None:
-            # Pitfall 7: CLI-minted JWTs may carry no agent_id; per-agent
-            # impersonation needs one. Fail closed (T-19-03-02).
+            # CLI-minted JWTs may carry no agent_id; per-agent
+            # impersonation needs one. Fail closed.
             raise NoBindingError(
                 "gcloud provider requires an agent_id; the calling JWT carried none"
             )
@@ -83,7 +83,7 @@ class GcloudTokenProvider:
             subject=binding.email,
         )
         # Sync HTTP call — wrap in to_thread so the FastMCP event loop
-        # is not blocked while the Google token endpoint round-trips (T-19-03-05).
+        # is not blocked while the Google token endpoint round-trips.
         await asyncio.to_thread(
             creds.refresh,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
             Request(),

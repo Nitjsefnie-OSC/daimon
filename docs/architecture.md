@@ -127,6 +127,12 @@ credential, whatever a future contributor is tempted to do inside it.
 
 ## MCP browser pages
 
+Discord, Slack and Teams share the native message draft reducer in
+`daimon.core.turn.provider_events`; each lifecycle keeps its own draft state.
+Core bundles the Inter faces used by Discord table images and MCP browser
+pages. The MCP static mount searches those packaged assets at the existing
+`/web/Inter-*.ttf` URLs.
+
 The MCP adapter renders its GitHub, Slack, personal link, MCP connection, and
 billing pages through `web_shell.render_page`. The shell owns the Daimon mark,
 local Inter fonts, semantic colours, responsive card, and cache and frame

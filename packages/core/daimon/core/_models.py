@@ -425,7 +425,7 @@ class Routine(Base):
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_result_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # FEAT-085: optional place the result goes, and the outbox that posts it.
+    # optional place the result goes, and the outbox that posts it.
     destination_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     destination_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivery_status: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1557,7 +1557,7 @@ class McpToken(Base):
     Each minted token has one row. `revoked_at` is NULL while the token is
     live; `revoke_mcp_token` sets it atomically via UPDATE…RETURNING.
 
-    `agent_id` is Text, not UUID — it stores the stringified derived UUID (A2)
+    `agent_id` is Text, not UUID — it stores the stringified derived UUID
     so the column matches the JWT claim shape exactly and stays decoupled from
     the UUID type constraint. Only `kind = 'agent'` rows carry one.
 
@@ -2539,7 +2539,7 @@ class TurnOutcome(Base):
     release: Mapped[str] = mapped_column(Text, nullable=False)
     usage_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
 
-    # SYS-066: NULL distinguishes historical outcomes from measured zero usage.
+    # NULL distinguishes historical outcomes from measured zero usage.
     input_tokens: Mapped[int | None] = mapped_column(BigInteger)
     output_tokens: Mapped[int | None] = mapped_column(BigInteger)
     cache_read_input_tokens: Mapped[int | None] = mapped_column(BigInteger)

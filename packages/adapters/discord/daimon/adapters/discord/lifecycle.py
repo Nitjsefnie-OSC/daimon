@@ -6,10 +6,10 @@ debounces Discord API calls, and performs a clean replace on terminal success.
 Design decisions:
 - send/edit callables injected at construction (no discord.py imports required
   for testing)
-- 10s debounce between intermediate embed edits (SPEC-R5)
-- First SSE event causes immediate embed post (SPEC-R1)
-- Terminal success replaces embed with plain text (SPEC-R6)
-- Terminal failure shows red error embed that stays visible (SPEC-R7)
+- 10s debounce between intermediate embed edits
+- First SSE event causes immediate embed post
+- Terminal success replaces embed with plain text
+- Terminal failure shows red error embed that stays visible
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ from daimon.adapters.discord.embed import (
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.adapters.discord.progress_receipt import InitialProgressReceipt
-from daimon.adapters.discord.provider_events import ProviderDraft
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.adapters.discord.thread_gone import ThreadStopped
@@ -53,6 +52,7 @@ from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -308,7 +308,7 @@ class DiscordTurnLifecycle:
     send and edit callables are injected so the class is testable without
     a real discord.py connection.
 
-    D-11: the embed flush (``_maybe_flush``) rides ``on_render``, not
+    The lifecycle protocol: the embed flush (``_maybe_flush``) rides ``on_render``, not
     ``on_sse_event`` -- the pump awaits ``on_sse_event`` inline, so a slow or
     rate-limited Discord edit there would stall the whole consume loop
     (deadening Cancel and blurring the read-timeout clock). Moving it to
@@ -537,7 +537,7 @@ class DiscordTurnLifecycle:
         self._queue_card_shown = False
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
-        # Cheap local tap per the hardened TurnLifecycle contract (D-11):
+        # Cheap local tap per the hardened TurnLifecycle contract (the lifecycle protocol):
         # the pump awaits this hook inline, so it stays a local reducer
         # call only. The embed flush (chat-API I/O) rides the render tick
         # instead, where a slow or rate-limited edit only delays the
@@ -1173,7 +1173,7 @@ class DiscordTurnLifecycle:
                 )
                 # The "Done." card carries the summary, so the turn's files go on it.
                 self._summary_ref = self._message_ref
-                # #79: a tool-only turn has no reply to hang the notice under,
+                # A tool-only turn has no reply to hang the notice under,
                 # so a dropped server is named on its own line.
                 tool_only_notice = render_degraded_notice(state.mcp_failures)
                 if tool_only_notice is not None:
@@ -1195,7 +1195,7 @@ class DiscordTurnLifecycle:
         if self.answer_prefix is not None:
             response_text = f"{self.answer_prefix}\n\n{response_text}"
             self.answer_prefix_applied = True
-        # #79: a server MA dropped this turn is named under the reply, so a
+        # A server MA dropped this turn is named under the reply, so a
         # degraded answer never reads as a complete one.
         degraded_notice = render_degraded_notice(state.mcp_failures)
         if degraded_notice is not None:
@@ -1425,7 +1425,7 @@ class DiscordTurnLifecycle:
         )
 
     async def on_render(self, state: TurnState) -> None:
-        # Sole delivery path (D-11). Sealed answers first, then the embed
+        # Sole delivery path (the lifecycle protocol). Sealed answers first, then the embed
         # flush -- matches on_terminal_success's existing order, so a sealed
         # answer never trails behind an embed that already moved past it.
         if self._terminal or self._thread_stopped():

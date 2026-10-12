@@ -198,7 +198,7 @@ async def run_default_capability(
     *,
     recorder: Recorder | None = None,
 ) -> Result:
-    """Supplementary F1 check; the default C01-C18 matrix is unchanged."""
+    """Supplementary F1 check; the default conformance matrix is unchanged."""
     from mux.conformance.default_capability import scenario
 
     try:

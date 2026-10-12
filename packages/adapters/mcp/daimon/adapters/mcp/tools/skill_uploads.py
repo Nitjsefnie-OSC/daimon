@@ -449,7 +449,7 @@ async def _add_skill_impl(
     if sum(source is not None for source in (skill_md, attachment_url, repo_url)) != 1:
         raise ToolError("Pass exactly one of skill_md, attachment_url or repo_url.")
     origin = await get_chat_origin(runtime, auth, origin_context_id)
-    # Gemini uses a separate default-off operator grant and the A1 catalog.
+    # Gemini uses a separate default-off operator grant and the inline-skill catalog.
     # Otherwise retain the existing OpenAI/Anthropic selection unchanged.
     hosted = await gemini_skill_host(
         runtime, auth, origin, capability=runtime.gemini_skill_capability, operation="skill-add"

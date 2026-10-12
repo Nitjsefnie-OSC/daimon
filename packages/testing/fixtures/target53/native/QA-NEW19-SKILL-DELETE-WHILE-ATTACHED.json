@@ -412,7 +412,7 @@
       "sdk_version": "2.7.0",
       "codec_source": {
         "path": "packages/core/daimon/core/turn/gemini.py",
-        "sha256": "f1f2c74600aa819a181cb1c33c54e0386cfa990c4f52de4a6361f9632abd9546"
+        "sha256": "bc6c7b596aaf3284b0fd28b84f6840445c6e2c2c206b868bb8a66ce2610509bc"
       },
       "codec_commit": "e8dcf6bda4ea3553c59b8095fc8b416fe3808226",
       "provenance": "authored-sdk-wire",

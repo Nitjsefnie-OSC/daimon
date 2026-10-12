@@ -69,7 +69,6 @@ from daimon.adapters.slack.mrkdwn import (
     seal_markdown_block,
 )
 from daimon.adapters.slack.progress_receipt import InitialProgressReceipt
-from daimon.adapters.slack.provider_events import ProviderDraft
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
@@ -86,6 +85,7 @@ from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
+from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn.state import (
     ToolUseBlock,
@@ -672,7 +672,7 @@ class SlackTurnLifecycle:
                 # cancelled." — matches the Discord parity reference.
                 if any(isinstance(block, ToolUseBlock) for block in state.content):
                     await self._flush_terminal(feedback=True)
-                    # #79: no reply to hang the notice under on a tool-only
+                    # no reply to hang the notice under on a tool-only
                     # turn, so a dropped server is named on its own line.
                     tool_only_notice = render_degraded_notice(state.mcp_failures)
                     if tool_only_notice is not None:
@@ -694,7 +694,7 @@ class SlackTurnLifecycle:
             if self.answer_prefix is not None:
                 final_text = f"{self.answer_prefix}\n\n{final_text}"
                 self.answer_prefix_applied = True
-            # #79: same trailer as Discord — a dropped server is named under
+            # same trailer as Discord — a dropped server is named under
             # the reply rather than swallowing the reply.
             degraded_notice = render_degraded_notice(state.mcp_failures)
             if degraded_notice is not None:

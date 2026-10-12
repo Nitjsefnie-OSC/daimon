@@ -3,13 +3,13 @@
 **Operator invocation:** ``daimon mcp sweep-credentials`` (dry-run by default;
 pass ``--apply`` to mutate).
 
-**Defense-in-depth / dormant-cred cleanup — NOT load-bearing for the #162
+**Defense-in-depth / dormant-cred cleanup — NOT load-bearing for the
 escalation.**
 
-The #162 escalation (intra-tenant RBAC bypass via confused-deputy threads) is
-closed at the 88-03 gate: a baked ``is_admin`` claim on a *non-internal* Discord
+Intra-tenant RBAC bypass via confused-deputy threads is
+closed at the trusted-token gate: a baked ``is_admin`` claim on a *non-internal* Discord
 vault token never elevates a non-admin caller at the MCP admin gate, regardless
-of whether or when this sweep runs. The 88-03 gate alone is sufficient.
+of whether or when this sweep runs. The trusted-token gate alone is sufficient.
 
 This module performs a *one-time backfill* to align the existing credential
 fleet with the post-88-03 invariant: ``mint_jwt`` called from

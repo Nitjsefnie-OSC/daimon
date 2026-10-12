@@ -18,7 +18,7 @@ Routines tools require both to be non-None and raise `ToolError` otherwise.
 One optional field is populated from the JWT `agent_id` claim:
   - `agent_id`: the MA agent UUID for the caller's agent-session token, or None.
 The MCP `get_cli_token` tool reads this server-side instead of accepting it as a tool
-parameter (confused-deputy mitigation, T-19-04-01). Path B (most-recent-active-session
+parameter (confused-deputy mitigation). Path B (most-recent-active-session
 walks) and Path C (re-call MA `sessions.retrieve`) are explicitly REJECTED.
 
 The separate ``chat_agent_id`` claim populates ``chat_agent_id`` only. Ordinary

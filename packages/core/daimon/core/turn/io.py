@@ -668,7 +668,7 @@ def default_mux_turn_io(
 ) -> MuxTurnIO:
     """Compose ports around the existing client and its authorized session.
 
-    N5 owns registration of Sessions in the composable factory. No lifecycle
+    The transport owns registration of Sessions in the composable factory. No lifecycle
     implementation, credential lookup or provider I/O belongs here.
     """
     bound = turn_backend(

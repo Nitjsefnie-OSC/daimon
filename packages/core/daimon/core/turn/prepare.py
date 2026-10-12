@@ -1,4 +1,4 @@
-"""Stage two of the two-stage turn chokepoint (D-01): `bind_session()`.
+"""Stage two of the two-stage turn chokepoint (admission): `bind_session()`.
 
 A single core call performs thread-session find-or-create, the full
 `create_session` kwarg assembly, the `thread_sessions` mapping write, and
@@ -655,7 +655,7 @@ async def bind_session(
             if shared is not None:
                 # The thread runs under the revision it was bound with (checked
                 # runnable by `resolve_shared_thread`), so dispatch picks that
-                # provider even after the channel moved to another (C14).
+                # provider even after the channel moved to another.
                 admission = replace(
                     admission, shared_owner=shared.owner, backend_revision=shared.revision
                 )
@@ -894,10 +894,10 @@ async def bind_session_impl(
     current model is only a fallback for a session we cannot read.
 
     `deadline`/`now` bound this whole body against the per-turn ceiling
-    (D-03): the MA `sessions.create` call and the mapping write, and on the
+    (preparation): the MA `sessions.create` call and the mapping write, and on the
     reuse path the compatibility check and whatever it applies. This does NOT
     cover `admit()`, which runs before `bind_session` and is deliberately
-    unbounded (D-04). `deadline=None` is fail-safe, not off -- it computes
+    unbounded (context). `deadline=None` is fail-safe, not off -- it computes
     `turn_deadline(now=now())` so every caller (including one that never
     passes a deadline) is still ceiling-covered.
 

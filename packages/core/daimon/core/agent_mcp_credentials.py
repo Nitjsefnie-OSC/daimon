@@ -214,7 +214,7 @@ async def mirror_credentials_into_vault(
     That matters because this vault is shared across every thread of one
     (account, agent) and this runs on reused sessions: a delete could yank a
     credential out from under a concurrent in-flight turn in another thread —
-    the A3 race that got the per-turn re-stamp limb removed from
+    the cross-thread race that got the per-turn re-stamp limb removed from
     ``ensure_agent_mcp_vault``. An update has no window where the credential is
     absent, so that race does not exist here.
 

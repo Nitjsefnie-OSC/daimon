@@ -1,4 +1,4 @@
-"""Explicit offline C06-C09 SDK boundaries; never a live certificate or factory."""
+"""Explicit offline resource SDK boundaries; never a live certificate or factory."""
 
 import json
 from collections.abc import AsyncIterator, Mapping
@@ -26,7 +26,7 @@ from mux.state.store import StateStore
 class OpenAISDKScript(OpenAIScriptedTransport):
     """Fixed native snapshots/faults, with independent HTTP mutation evidence.
 
-    C07 controls four successive GET observations, not a fabricated batch of
+    The snapshot probe controls four successive GET observations, not a fabricated batch of
     duplicate turns or usage values supplied directly to the ledger. Its
     revision allocator is retained on restart. No price or settlement follows.
     """

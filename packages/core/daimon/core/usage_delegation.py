@@ -174,7 +174,7 @@ async def record_root_usage(
     meter field.
     New measured amounts after settlement require a higher root revision.
     Returns per-observation claim booleans in canonical-ID order; False may be
-    replay or pending, as with record_provider_usage. Caller owns A4 admission.
+    replay or pending, as with record_provider_usage. Caller owns admitted-binding validation.
     """
     if scope.session.tenant_id != str(tenant_id):
         raise ScopeViolation(scope.session.id, "root usage belongs to another tenant")

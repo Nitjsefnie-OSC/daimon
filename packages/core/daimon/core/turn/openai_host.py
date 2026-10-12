@@ -1,7 +1,7 @@
 """Explicit OpenAI host composition; no SDK/key discovery or default selection.
 
 Operators inject an authorized native session plan and private driver transport.
-The host publishes its actual binding before running, then A4 owns the lease,
+The host publishes its actual binding before running, then the journal owns the lease,
 send claims and journal. Unknown container cost remains durable pending usage.
 """
 

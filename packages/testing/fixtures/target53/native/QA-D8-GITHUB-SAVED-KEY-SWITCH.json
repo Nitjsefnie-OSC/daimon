@@ -27,7 +27,7 @@
     "human": [
       {
         "click": "In a QA channel with its own fork, @mention: 'give yourself access to pymc-labs/daimon-qa-fixture-private using my GitHub token' and submit a real fine-grained PAT in the repo card.",
-        "expect": "Card ends in an accepted state, not 'Received. Saving…'."
+        "expect": "Card ends in an accepted state, not 'Received. Saving\u2026'."
       },
       {
         "click": "Run `/github connect` for that agent.",
@@ -39,7 +39,7 @@
       },
       {
         "click": "Before switching (saved PAT that can't read the private repo): @mention 'summarize README of pymc-labs/daimon-qa-fixture-private'.",
-        "expect": "A clear 'can't read <repo> with the saved key' notice within 60 s, not minutes of work ending in 'GitHub refused access… Send your message again' (v2 D12)."
+        "expect": "A clear 'can't read <repo> with the saved key' notice within 60 s, not minutes of work ending in 'GitHub refused access\u2026 Send your message again' (v2 D12)."
       },
       {
         "click": "As a NON-admin member: `/github connect`.",
@@ -105,7 +105,7 @@
       "sdk_version": "2.7.0",
       "codec_source": {
         "path": "packages/core/daimon/core/turn/gemini.py",
-        "sha256": "f1f2c74600aa819a181cb1c33c54e0386cfa990c4f52de4a6361f9632abd9546"
+        "sha256": "bc6c7b596aaf3284b0fd28b84f6840445c6e2c2c206b868bb8a66ce2610509bc"
       },
       "codec_commit": "e8dcf6bda4ea3553c59b8095fc8b416fe3808226",
       "provenance": "authored-sdk-wire",

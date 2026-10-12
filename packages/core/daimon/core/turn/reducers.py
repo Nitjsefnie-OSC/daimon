@@ -280,7 +280,7 @@ def _apply_session_error(
     same error again as `exhausted` or `terminal` once its budget runs out, so
     an early copy must not brand the turn failed while the model is still
     working. An MCP connection or authentication failure that is not
-    `terminal` is the case from #79: MA drops that server and keeps the
+    `terminal` means MA drops that server and keeps the
     session running, the model answers with the rest of its tools, and the
     session idles cleanly — so it lands in `mcp_failures`, newest status per
     server, and never in `error`. Everything else is the turn's error, as

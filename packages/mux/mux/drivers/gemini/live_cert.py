@@ -245,7 +245,7 @@ async def smoke(
     secrets: tuple[str, ...] = (),
     request_metadata: list[RequestMetadata] | None = None,
 ) -> ProbeRun:
-    """C07 is a budget/evidence tag. This narrow smoke does not pass live C07."""
+    """Budget-tagged narrow smoke; it does not certify live conformance."""
     validate_budget(guard.config_path, settings)
     observed_guard = guard if isinstance(guard, ReceiptGuard) else ReceiptGuard(guard)
     bounded = LimitedTransport(source, settings.max_total_tokens)
