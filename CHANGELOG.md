@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Preserve pinned OpenAI GO digests in the existing audited grouped format, and reuse the same receipt audit/write path for retained evidence.
+- Read CLI resource host identities and routing from declared provider profiles while preserving existing scope checks and default behavior.
+
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 - Derive live OpenAI probe authorization from a registered canonical GO pin, matching financial envelope and unused attempt identity instead of fixing one attempt in the runner.
 - Share native credential authorization and MCP resource host binding across explicitly selected providers, enforcing the same scoped caller, account, channel revision and model checks before catalog access.

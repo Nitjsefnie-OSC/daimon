@@ -2015,3 +2015,11 @@ selected providers. A resource host must match the caller's tenant, account, pri
 operator authorization and workspace, and its enabled native catalog must match its
 profile and account scope. Channel skill routes use `check_backend` before allocating
 that host. Unconfigured channels and disabled capabilities retain the existing route.
+### CLI resource profile validation
+
+The CLI validates an operator-provided resource host against the provider and
+profile metadata declared by the mux profiles. A host must still match the
+authorized tenant, account, principal, authorization and provider workspace.
+Gemini catalog readback must also match the same declared profile and configured
+adapter. Default routing, missing grants and mismatch refusals keep their
+existing behavior; the CLI constructs no additional provider clients.
