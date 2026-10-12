@@ -9,6 +9,7 @@ run for real.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import httpx
@@ -132,9 +133,54 @@ def test_fallback_thread_name_uses_default_when_message_says_nothing(text: str) 
     )
 
 
-@pytest.mark.parametrize("title", ["Greeting", "hello", "Help request", "Hi!", "Introduction"])
+# The thread_name assertion of QA-NEW9-NO-INTERNAL-PLUMBING, verbatim.
+_NEW9_FORBIDDEN = re.compile(r"(?i)^(greeting|hello|hi|help request|chat with .*)$")
+_NEW9_OPENING = "hi! what can you do? I'm new here."
+
+
+def test_fallback_thread_name_passes_new9_for_its_opening_message() -> None:
+    title = fallback_thread_name(_NEW9_OPENING, default="Chat with daimon")
+    assert not _NEW9_FORBIDDEN.match(title) and len(title) <= 50, (
+        f"{title!r} must pass NEW9's thread-name assertion"
+    )
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Greeting",
+        "hello",
+        "Help request",
+        "Hi!",
+        "Introduction",
+        "Chat with Daimon",
+        "chat with you",
+        "CHAT WITH qa-haiku-canary-20261010",
+    ],
+)
 def test_is_generic_thread_name_flags_titles_that_name_nothing(title: str) -> None:
     assert is_generic_thread_name(title), f"{title!r} says nothing about the thread"
+
+
+@pytest.mark.parametrize(
+    "title", ["Greeting", "Hello", "Hi", "Help request", "Chat with Daimon", "Chat with you"]
+)
+def test_is_generic_thread_name_covers_everything_new9_forbids(title: str) -> None:
+    assert _NEW9_FORBIDDEN.match(title), "precondition: NEW9 rejects this title"
+    assert is_generic_thread_name(title), f"{title!r} must be replaced before it reaches Discord"
+
+
+def test_cut_keeps_a_word_that_ends_exactly_at_the_cap() -> None:
+    text = "Check " + "x" * 44 + " extra"  # the 50th character ends the x-word
+    assert parse_thread_name(text) == "Check " + "x" * 44, "a whole word at the cap is kept"
+    assert fallback_thread_name(text, default="d") == "Check " + "x" * 44, (
+        "the fallback cuts the same way"
+    )
+
+
+def test_cut_drops_a_word_that_crosses_the_cap() -> None:
+    text = "Check " + "x" * 45 + " extra"  # the x-word runs past character 50
+    assert parse_thread_name(text) == "Check", "a word split by the cap is dropped"
 
 
 @pytest.mark.parametrize("title", ["Greeting card design", "Hi-res chart export", "Fix the model"])

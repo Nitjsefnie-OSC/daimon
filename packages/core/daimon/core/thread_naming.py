@@ -28,7 +28,9 @@ THREAD_NAME_MAX_CHARS = 50
 _MAX_OUTPUT_TOKENS = 60
 _MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")
 # Titles that say nothing about the thread. Haiku answers some greetings with
-# one of these; the opening message itself makes a better title.
+# one of these; the opening message itself makes a better title. The pattern
+# is the one QA-NEW9 asserts against; the set adds near-synonyms.
+_GENERIC_TITLE_RE = re.compile(r"^(?:greeting|hello|hi|help request|chat with .*)$", re.IGNORECASE)
 _GENERIC_TITLES = frozenset(
     {
         "chat",
@@ -127,13 +129,16 @@ def _cut_at_word(title: str) -> str:
     if len(title) <= THREAD_NAME_MAX_CHARS:
         return title
     head = title[:THREAD_NAME_MAX_CHARS]
+    if title[THREAD_NAME_MAX_CHARS] == " ":
+        return head.rstrip()  # the cap falls right after a whole word
     at_word = head.rsplit(" ", 1)[0].rstrip()
     return at_word or head
 
 
 def is_generic_thread_name(title: str) -> bool:
-    """True for a title like "Greeting" or "Help request" that names nothing."""
-    return title.strip(" .!?,:;\"'").casefold() in _GENERIC_TITLES
+    """True for a title like "Greeting", "Help request" or "Chat with Daimon" that names nothing."""
+    bare = title.strip(" .!?,:;\"'")
+    return bare.casefold() in _GENERIC_TITLES or _GENERIC_TITLE_RE.match(bare) is not None
 
 
 def fallback_thread_name(text: str, *, default: str) -> str:
@@ -162,7 +167,7 @@ async def suggest_thread_name(
     ``message_text`` must be non-empty; the caller skips a bare mention with
     no text and no file rather than paying for a call with nothing to title.
     SDK errors propagate: the adapter boundary decides what a failed
-    naming means (fall back to the static title).
+    naming means (fall back to the message-derived title).
     """
     response = await anthropic.messages.create(
         model=THREAD_NAMING_MODEL,

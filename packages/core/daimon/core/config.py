@@ -1236,9 +1236,9 @@ class ThreadNamingSettings(BaseModel):
         gt=0,
         le=60,
         description=(
-            "Seconds to wait for the naming model before the thread opens under the "
-            "static title. The thread is created only after this call, so this is "
-            "the most a mention can wait before anything appears."
+            "Seconds to wait for the naming model before the thread opens under a "
+            "title taken from the opening message. The thread is created only after "
+            "this call, so this is the most a mention can wait before anything appears."
         ),
     )
 

@@ -10,6 +10,7 @@ production one. The ``discord.Thread`` returned by ``create_thread`` is a
 from __future__ import annotations
 
 import asyncio
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -132,12 +133,14 @@ async def test_generate_thread_name_falls_back_but_still_meters_when_model_answe
         timeout_seconds=5.0,
     )
 
-    assert name == _FALLBACK, "a blank answer leaves the static title"
+    assert name == _FALLBACK, "a blank answer leaves the message-derived fallback"
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert len(rows) == 1, "tokens were spent even though no title came back; meter them"
 
 
-@pytest.mark.parametrize("answer", ["Greeting", "Help request", "hi"])
+@pytest.mark.parametrize(
+    "answer", ["Greeting", "Help request", "hi", "Chat with Daimon", "Chat with you"]
+)
 async def test_generate_thread_name_falls_back_but_still_meters_when_model_answers_generic(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -161,6 +164,9 @@ async def test_generate_thread_name_falls_back_but_still_meters_when_model_answe
 
     assert name == "Hi! what can you do? I'm new here.", (
         "a title that names nothing loses to the message-derived fallback"
+    )
+    assert not re.match(r"(?i)^(greeting|hello|hi|help request|chat with .*)$", name), (
+        "the opened title passes QA-NEW9's thread-name assertion"
     )
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert len(rows) == 1, "the generic answer still cost tokens; meter them"
@@ -192,7 +198,7 @@ async def test_generate_thread_name_falls_back_without_metering_on_api_error(
         timeout_seconds=5.0,
     )
 
-    assert name == _FALLBACK, "a failed call leaves the static title"
+    assert name == _FALLBACK, "a failed call leaves the message-derived fallback"
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert rows == [], "a failed call produced no usage and must not be billed"
 
@@ -201,7 +207,7 @@ async def test_generate_thread_name_falls_back_without_metering_when_model_is_to
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The thread waits on this call, so a stalled API yields the static title
+    """The thread waits on this call, so a stalled API yields the message-derived fallback
     instead of a thread that appears minutes late. The cancelled call cannot
     be metered; that is the accepted, bounded cost of the cap."""
     tenant = await make_tenant(db_session)
@@ -231,7 +237,7 @@ async def test_generate_thread_name_falls_back_without_metering_when_model_is_to
         timeout_seconds=0.05,
     )
 
-    assert name == _FALLBACK, "past the timeout the static title wins"
+    assert name == _FALLBACK, "past the timeout the message-derived fallback wins"
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert rows == [], "no answer arrived, so there is nothing to meter"
 
@@ -329,8 +335,16 @@ def _channel_message(*, guild_id: int, content: str) -> Any:
             "Attached: brief.pdf\nshorten this",
             "Shorten this",
         ),
+        (False, "<@999> check this\nprivate second line", [], None, "Check this"),
     ],
-    ids=["enabled", "disabled", "bare_mention", "attachment_only", "text_and_attachment"],
+    ids=[
+        "enabled",
+        "disabled",
+        "bare_mention",
+        "attachment_only",
+        "text_and_attachment",
+        "disabled_multiline",
+    ],
 )
 @patch("daimon.adapters.discord.bot.generate_thread_name", new_callable=AsyncMock)
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)

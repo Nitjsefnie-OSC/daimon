@@ -1157,9 +1157,9 @@ here. Bounds the per-thread naming cost.
 
 `float` · optional · default `5.0`
 
-Seconds to wait for the naming model before the thread opens under the static title. The
-thread is created only after this call, so this is the most a mention can wait before
-anything appears.
+Seconds to wait for the naming model before the thread opens under a title taken from
+the opening message. The thread is created only after this call, so this is the most a
+mention can wait before anything appears.
 
 ## Turn Queue
 

@@ -4055,10 +4055,11 @@ class DaimonBot(commands.Bot):
                 message_text = strip_mentions(message.content)
                 attachment_names = [a.filename for a in message.attachments]
                 opening_text = naming_text(message_text, attachment_names)
-                discord_cfg = self.runtime.settings.discord
-                bot_name = discord_cfg.bot_display_name if discord_cfg else "daimon"
+                bot_name = _resolve_bot_display_name(self.runtime.settings)
+                # Line breaks kept: the fallback takes only the first line,
+                # while the naming model reads the whole collapsed message.
                 thread_name = fallback_thread_name(
-                    message_text,
+                    "\n".join(strip_mentions(line) for line in message.content.splitlines()),
                     default=attachment_names[0][:THREAD_NAME_MAX_CHARS]
                     if attachment_names
                     else f"Chat with {bot_name}",
