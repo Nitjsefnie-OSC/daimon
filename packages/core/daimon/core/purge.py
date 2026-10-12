@@ -71,10 +71,13 @@ Deliberate carve-outs:
 - The user's GitHub-side OAuth grant is not revoked. No GitHub API client enters
   the purge path — we delete only our encrypted credential and oauth-state rows
   from our own DB.
-- Agent memory stores are agent-scoped and shared across all workspace users,
-  so account purge does NOT touch them — archiving one because a single member
-  invoked erasure would destroy the guild's shared agent memory. They may
-  retain information about the purged user.
+- An agent's shared memory store is agent-scoped and shared across all
+  workspace users, so account purge does NOT touch it — archiving it because a
+  single member invoked erasure would destroy the guild's shared agent memory.
+  It may retain information about the purged user. The person's own personal
+  memory stores (one per agent they talked to) ARE deleted upstream, with the
+  sessions, after the DB transaction commits; their bindings carry no FK to
+  `accounts` so they survive the account row as the record of what is left.
 - message_feedback rows cast in a tenant where the person has NO principal are
   out of reach of an erasure run from another tenant. This is the one table
   that records rows for someone with no principal anywhere: the reaction path
@@ -103,6 +106,7 @@ import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
+from daimon.core.memory_resource import delete_personal_memory_stores_for_account
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import agent_posts as agent_posts_store
@@ -665,6 +669,12 @@ async def _retry_account_session_delete_locked(
             continue
         deleted += sub.deleted
         failed += sub.failed
+
+    # The person's own memory stores: deleted upstream, then unbound. A store
+    # that could not be deleted keeps its binding and keeps this work item
+    # open, so the scheduler's retry deletes it later.
+    if not await delete_personal_memory_stores_for_account(anthropic, sm, account_id=account_id):
+        upstream_error = True
 
     if not upstream_error and failed == 0:
         async with sm() as session, session.begin():

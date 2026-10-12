@@ -58,6 +58,10 @@ from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+from daimon.core.stores.agent_memory_stores import (
+    get_memory_store_id,
+    get_personal_memory_store_id,
+)
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.channel_skills import add_channel_skill
 from daimon.core.stores.domain import AccountRow, Role, TenantRow, ThreadSessionRow
@@ -2783,11 +2787,15 @@ async def test_inherited_sealed_transcript_keeps_read_only_memory_after_unseal(
     )
     new = await deps.anthropic.beta.sessions.retrieve(handed.ma_session_id)
     old = await deps.anthropic.beta.sessions.retrieve(first.ma_session_id)
-    assert [r.access for r in old.resources if r.type == "memory_store"] == ["read_only"]
+    # Shared and personal mounts alike: a sealed origin keeps both read-only.
+    assert [r.access for r in old.resources if r.type == "memory_store"] == [
+        "read_only",
+        "read_only",
+    ]
     assert _sealed_stamp(transport, handed.ma_session_id) == "channel-1"
     assert handed.admission.memory_read_only
     new_memory = [r.access for r in new.resources if r.type == "memory_store"]
-    assert new_memory == ["read_only"], (
+    assert new_memory == ["read_only", "read_only"], (
         "sealed content is carried into the new agent with writable shared memory"
     )
 
@@ -2983,7 +2991,7 @@ async def test_unseal_during_preparation_retains_inherited_memory_restriction(
         r.access
         for r in transport.state.sessions[successor.ma_session_id].resources
         if r.type == "memory_store"
-    ] == ["read_only"]
+    ] == ["read_only", "read_only"]
 
 
 async def test_prepared_turn_cannot_resume_retired_session(db_session, db_nullpool_engine):
@@ -3101,7 +3109,7 @@ async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_eng
         r.access
         for r in transport.state.sessions[successor.ma_session_id].resources
         if r.type == "memory_store"
-    ] == ["read_only"]
+    ] == ["read_only", "read_only"]
 
 
 async def test_handoff_waits_for_an_inflight_handle_send(
@@ -3992,3 +4000,77 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
         await deps.anthropic.close()
         await admission_deps.anthropic.close()
         await engine.dispose()
+
+
+async def test_chat_sessions_in_one_thread_each_mount_only_their_callers_personal_store(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    prepared = {}
+    for account in (alice, bob):
+        turn = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+        assert isinstance(turn, PreparedTurn)
+        prepared[account.id] = turn
+
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_agent().id)
+    async with db_session_factory() as session:
+        shared = await get_memory_store_id(session, tenant_id=tenant.id, agent_id=agent_uuid)
+        personal = {
+            account.id: await get_personal_memory_store_id(
+                session, tenant_id=tenant.id, agent_id=agent_uuid, account_id=account.id
+            )
+            for account in (alice, bob)
+        }
+    for account in (alice, bob):
+        session_id = prepared[account.id].ma_session_id
+        mounted = {
+            r.memory_store_id
+            for r in transport.state.sessions[session_id].resources
+            if r.type == "memory_store"
+        }
+        assert mounted == {shared, personal[account.id]}, "own store and the shared one, only"
+        row = await _live_row(db_session_factory, tenant=tenant, account=account)
+        assert row is not None and row.effective_config is not None
+        assert row.effective_config.memory_store_id == shared
+        assert row.effective_config.personal_memory_store_id == personal[account.id]
+
+
+async def test_a_session_from_before_personal_memory_is_reused_not_replaced(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Deploying personal memory must not end live conversations. A session
+    recorded without a personal store keeps running, with no MA call, even once
+    the caller has one; only a new session mounts it."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    admission = _admission(account=account)
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
+    async with db_session_factory() as session, session.begin():
+        # What a row recorded before this change holds: no personal store.
+        await session.execute(
+            text(
+                "UPDATE thread_sessions SET effective_config = "
+                "effective_config - 'personal_memory_store_id' WHERE id = :id"
+            ),
+            {"id": first.mapping_id},
+        )
+    before = len(transport.calls)
+
+    second = await _prepare(deps, admission, tenant=tenant, account=account)
+
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id and second.reused
+    assert second.continuity == ContinuityOutcome()
+    assert transport.calls[before:] == []

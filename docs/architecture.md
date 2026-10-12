@@ -1843,6 +1843,40 @@ Uncommitted workspace files are not transferred on this restricted replacement.
 
 Memory content is managed directly by the MA memory store. This safeguard does not
 add per-memory author/origin records or rollback tooling.
+
+### Shared and personal memory
+
+An agent has two kinds of memory store (`packages/core/daimon/core/memory_resource.py`):
+
+- **Shared**: one per agent (`agent_memory_store`). Every session of the agent mounts
+  it, for every person and channel. Its instructions keep it to team and agent
+  knowledge: conventions, project facts, how tools and skills behave.
+- **Personal**: one per agent and person (`agent_personal_memory_store`, keyed by
+  account). It is created on that person's first new chat session and mounted at
+  `/mnt/memory/personal-<account id>/` beside the shared store. Its instructions keep
+  it to that person's preferences and facts about them, and forbid copying from it
+  into the shared store.
+
+A chat session is already keyed on the caller's account (`thread_sessions`), so only
+that person's own sessions (channel threads, DMs, on every platform) mount their
+personal store. Another person's session never has it mounted and cannot read it;
+the separation does not depend on the agent following its instructions. Only the
+choice of which store a fact is written to depends on the instructions.
+
+The personal mount has the same access as the shared one: read-only in channels with
+limited readers and in DMs under `dm_memory_read_only`. Routines, MCP `start_turn`
+and CLI sessions mount the shared store alone, and its instructions then say that no
+personal memory is mounted and nothing personal is to be recorded. A routine posts
+where other people read it and runs with nobody there, so it never sees its owner's
+personal store.
+
+MA attaches memory stores only when a session is created. A live session recorded
+without a personal store is reused, not replaced, after the caller's store exists
+(`session_compat`); the store is mounted on the caller's next new session. A session
+whose recorded personal store differs from the caller's current one is replaced.
+Existing shared memory is never moved or split. Deleting an agent archives its shared
+store and every personal store. Account deletion deletes the person's personal stores
+at Anthropic, and the scheduler's privacy sweep retries a delete that failed.
 ### Platform table rendering
 
 Enable per tenant with `DAIMON_TABLE_RENDERING`, a JSON map of tenant UUIDs to

@@ -28,6 +28,9 @@ from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_managed_agents_agent_with_overrides_params import (
     BetaManagedAgentsAgentWithOverridesParams,
 )
+from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import (
+    BetaManagedAgentsMemoryStoreResourceParam,
+)
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -67,7 +70,10 @@ from daimon.core.mcp_vault import (
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
 )
-from daimon.core.memory_resource import ensure_memory_store_and_mount
+from daimon.core.memory_resource import (
+    ensure_memory_store_and_mount,
+    ensure_personal_memory_store_and_mount,
+)
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import (
@@ -162,6 +168,7 @@ async def create_session(
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
+    personal_memory: bool = False,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     asks_before_publishing: bool = False,
     slack_turn_context_id: uuid.UUID | None = None,
@@ -240,6 +247,14 @@ async def create_session(
     (``anthropic.APIError`` or ``daimon.core.errors.StoreError``) is logged
     and swallowed rather than propagated — the session is created without
     persistent memory that turn instead of failing outright.
+
+    ``personal_memory`` also mounts the caller's own personal store for this
+    agent (``ensure_personal_memory_store_and_mount``, keyed by ``account_id``),
+    with the same access as the shared one and the same degrade-not-block
+    handling. Only a caller whose session belongs to one person passes it: an
+    interactive chat turn, whose session is already keyed on the caller's
+    account. Routines, MCP and CLI sessions leave it off and mount the shared
+    store alone, with instructions that forbid recording personal facts.
 
     When the agent has a repo binding, the clone credential is resolved via
     ``daimon.core.github_repo_auth.resolve_clone_token``:
@@ -484,9 +499,30 @@ async def create_session(
                 if repo_resource is not None:
                     resources.append(repo_resource)
 
-            # Memory store (agent memory feature): degrade-not-block. A memory
+            # Memory stores (agent memory feature): degrade-not-block. A memory
             # outage must never take down chat — the session just runs without
-            # persistent memory this turn.
+            # persistent memory this turn. The personal store is resolved
+            # first because the shared store's instructions depend on it.
+            personal_mount: BetaManagedAgentsMemoryStoreResourceParam | None = None
+            if personal_memory and account_id is not None:
+                try:
+                    personal_mount = await ensure_personal_memory_store_and_mount(
+                        anthropic,
+                        session_factory,
+                        tenant_id=tenant_id,
+                        agent_id=agent_uuid,
+                        account_id=account_id,
+                        agent_name=agent.name,
+                        read_only=memory_read_only,
+                    )
+                except (anthropic_pkg.APIError, StoreError) as exc:
+                    _log.warning(
+                        "memory_store.personal_mount_failed",
+                        tenant_id=str(tenant_id),
+                        agent_uuid=str(agent_uuid),
+                        agent_name=agent.name,
+                        error=str(exc),
+                    )
             try:
                 memory_mount = await ensure_memory_store_and_mount(
                     anthropic,
@@ -495,6 +531,7 @@ async def create_session(
                     agent_id=agent_uuid,
                     agent_name=agent.name,
                     read_only=memory_read_only,
+                    personal_mounted=personal_mount is not None,
                 )
                 resources.append(memory_mount)
             except (anthropic_pkg.APIError, StoreError) as exc:
@@ -505,6 +542,8 @@ async def create_session(
                     agent_name=agent.name,
                     error=str(exc),
                 )
+            if personal_mount is not None:
+                resources.append(personal_mount)
 
         # A server somebody connected through OAuth authenticates from the
         # connecting person's vault alone, so mounting it on anyone else's session
