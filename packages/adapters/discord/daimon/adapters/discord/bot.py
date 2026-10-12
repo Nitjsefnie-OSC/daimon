@@ -7,6 +7,7 @@ import contextlib
 import functools
 import io
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -649,6 +650,8 @@ class DaimonBot(commands.Bot):
         )
         # Mentions replayed at startup: never told about a protected channel.
         self._replayed_message_ids: set[int] = set()
+        # Messages already given the 🔒: never a second one (bounded, oldest out).
+        self._protected_reacted_ids: OrderedDict[int, None] = OrderedDict()
         # Protected-channel notice: (user id, channel id) -> when last shown.
         self._protected_notice_cooldown = HintCooldown(
             runtime.settings.discord.protected_channel_notice_cooldown_min * 60
@@ -2295,7 +2298,11 @@ class DaimonBot(commands.Bot):
         ``protected_channel_notice_cooldown_min``. Best effort: a closed DM or
         a missing reaction permission is logged.
         """
-        if message.id in self._replayed_message_ids:
+        # Policy (root, 10-12): a direct @mention only -- never a plain message
+        # or a reply without one; one reaction per message at most.
+        if self.user is None or not any(u.id == self.user.id for u in message.mentions):
+            return
+        if message.id in self._replayed_message_ids or message.id in self._protected_reacted_ids:
             return
         channel = message.channel
         if isinstance(channel, discord.Thread):
@@ -2325,6 +2332,9 @@ class DaimonBot(commands.Bot):
             self._protected_notice_cooldown.release(key)
             log.info("protected_channel_notice.unconfirmed", channel_id=channel_id)
             return
+        self._protected_reacted_ids[message.id] = None
+        if len(self._protected_reacted_ids) > 4096:
+            self._protected_reacted_ids.popitem(last=False)
         reacted = False
         try:
             await message.add_reaction(PROTECTED_CHANNEL_REACTION)

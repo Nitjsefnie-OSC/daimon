@@ -1739,6 +1739,55 @@ class TestProtectedChannelNotice:
         message.add_reaction.assert_not_called()
         message.author.send.assert_not_called()
 
+    async def test_a_message_without_a_mention_gets_nothing(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Policy (root, 10-12) (1): plain messages and replies without an
+        @mention never get the lock or the DM, wherever they arrive from."""
+        bot = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        plain = self._protected_message()
+        plain.mentions = []
+        reply = self._protected_message()
+        reply.mentions = []
+        reply.reference = MagicMock(message_id=4321)
+
+        await bot.on_message(plain)
+        with patch(
+            "daimon.adapters.discord.bot.confirmed_protection",
+            new=AsyncMock(return_value=ConfirmedProtection(scope="channel", rule_id="789")),
+        ):
+            # Even if a reply reached a refusal path, the helper itself refuses.
+            await bot._signal_protected_channel(reply)  # pyright: ignore[reportPrivateUsage]
+
+        for message in (plain, reply):
+            message.add_reaction.assert_not_called()
+            message.author.send.assert_not_called()
+            message.channel.send.assert_not_called()
+
+    async def test_the_same_message_is_never_locked_twice(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Policy (root, 10-12) (2): one reaction per message, even after the
+        per-person cooldown has expired."""
+        bot = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        message = self._protected_message()
+
+        await bot.on_message(message)
+        cooldown = bot._protected_notice_cooldown  # pyright: ignore[reportPrivateUsage]
+        cooldown._last[(111, "789")] -= 601  # pyright: ignore[reportPrivateUsage]
+        await bot._signal_protected_channel(message)  # pyright: ignore[reportPrivateUsage]
+
+        message.add_reaction.assert_awaited_once_with("🔒")
+        message.author.send.assert_awaited_once()
+
     async def test_concurrent_mentions_notify_once(
         self,
         db_session: AsyncSession,
