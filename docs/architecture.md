@@ -1461,6 +1461,20 @@ session is actually running (`packages/core/daimon/core/session_snapshot.py`),
 and that snapshot, not the current spec, is what later turns compare and bill
 against.
 
+### Worker fleets
+
+A fleet run is an orchestrator turn's durable fan-out
+(`packages/core/daimon/core/fleet.py`, rows in `fleet_run` and `fleet_worker`).
+Each worker gets a private binding slot of its own in the state store, under the
+orchestrator's channel and account. Its session, fenced lease, idempotent spawn
+operation, journal and usage are the store's existing ones. A worker's result is
+one entry in its own journal; the worker row keeps only a pointer to it, with its
+digest and a short excerpt. Every status change is a compare-and-swap on the
+row's version. Worker turns have a concurrency pool of their own, counted from
+these rows per tenant (`DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`) and
+per process, so a fan-out never takes the chat turns' slots. Fleets are off by
+default (`DAIMON_FLEET__ENABLED`).
+
 ### Same-thread handoff
 
 A thread can move to another agent without a new thread. Two triggers:

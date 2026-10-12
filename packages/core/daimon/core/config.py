@@ -1447,6 +1447,46 @@ class TurnQueueSettings(BaseModel):
     )
 
 
+class FleetSettings(BaseModel):
+    """Orchestrated worker fleets (``DAIMON_FLEET__*``). Off by default.
+
+    An orchestrator turn fans out to worker turns on any enabled backend. Their
+    concurrency is a pool of its own, counted from the durable worker rows, so a
+    fan-out never takes the chat turns' slots.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Allow orchestrator turns to start worker fleets. Off by default.",
+    )
+    max_workers_per_run: int = Field(
+        default=8,
+        ge=1,
+        description="Most workers one fleet run may start.",
+    )
+    max_concurrent_workers_per_tenant: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Most worker turns one tenant may have starting or running at once, across "
+            "all its fleet runs and processes. Separate from the chat turn cap."
+        ),
+    )
+    max_concurrent_workers: int = Field(
+        default=6,
+        ge=1,
+        description="Most worker turns one process runs at once, across all tenants.",
+    )
+    max_attempts: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Most times a worker that was lost before its turn was sent is started "
+            "again. A worker whose turn was sent is reconciled, never resent."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -1536,6 +1576,7 @@ class Settings(BaseSettings):
     turn: TurnSettings = Field(default_factory=TurnSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
+    fleet: FleetSettings = Field(default_factory=FleetSettings)
     tool_safety: ToolSafetyPolicy = Field(
         default_factory=ToolSafetyPolicy,
         description=(

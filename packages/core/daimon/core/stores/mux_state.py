@@ -400,6 +400,12 @@ async def release_lease(session: AsyncSession, lease: Lease) -> None:
     await _save_lease(session, leases.release(state, lease))
 
 
+async def active_lease(session: AsyncSession, slot: Slot) -> Lease | None:
+    """The slot's active lease as stored, expired or not; None if it has none."""
+    state = await _lease_state(session, slot, lock="share")
+    return state.active if state is not None else None
+
+
 # Operations
 
 
