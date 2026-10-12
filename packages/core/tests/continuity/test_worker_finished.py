@@ -1,14 +1,24 @@
-"""Worker completion uses real fleet rows and the existing leased wake ladder."""
+"""Completion writers are closed; future-row fixtures prove reader/lease behavior only."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import sys
+import types
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
-from daimon.core.continuity.continuation import ContinuationDecision, ContinuationRequest
+from daimon.core._models import FleetWorker as FleetWorkerRow
+from daimon.core.continuity.continuation import (
+    ContinuationDecision,
+    ContinuationReasonUnavailable,
+    ContinuationRequest,
+    record_continuation,
+)
 from daimon.core.continuity.dispatch import WorkerFinishedDecision, dispatch_pending_continuations
 from daimon.core.continuity.wakes import (
     WAKE_RETRY_DELAY,
@@ -21,14 +31,16 @@ from daimon.core.continuity.wakes import (
     start_wake,
     worker_finished_key,
 )
-from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker
+from daimon.core.fleet import FleetRun, FleetWorker
 from daimon.core.stores import fleet
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.task_continuations import record_continuation as insert_reader_fixture
 from daimon.testing.db import build_test_engine, isolated_test_schema, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic
-from sqlalchemy.exc import IntegrityError
+from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 10, 12, 18, tzinfo=UTC)
@@ -41,7 +53,12 @@ def pooled(db_engine: AsyncEngine, db_clean: None) -> async_sessionmaker[AsyncSe
     return factory
 
 
-async def _run(sm: async_sessionmaker[AsyncSession], *, quorum: int | None = None) -> FleetRun:
+async def _run(
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    quorum: int | None = None,
+    deadline_at: datetime | None = None,
+) -> FleetRun:
     async with sm.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
@@ -56,7 +73,7 @@ async def _run(sm: async_sessionmaker[AsyncSession], *, quorum: int | None = Non
         thread_id="thread",
         operation_key="spawn",
         total_budget_usd=Decimal(4),
-        deadline_at=_NOW + timedelta(hours=1),
+        deadline_at=deadline_at or _NOW + timedelta(hours=1),
         max_workers=2,
         created_by="authorized-host",
         quorum=quorum,
@@ -97,20 +114,10 @@ def _request(run: FleetRun) -> ContinuationRequest:
     )
 
 
-async def _complete(
-    sm: async_sessionmaker[AsyncSession], run: FleetRun, worker: FleetWorker
-) -> bool:
+async def _seed_reader_fixture(sm: async_sessionmaker[AsyncSession], run: FleetRun) -> None:
+    # Deliberate future-row fixture, never a successful host producer proof.
     async with sm.begin() as session:
-        await fleet.run_status(session, tenant_id=run.tenant_id, run_id=run.id, for_update=True)
-        await fleet.finish(
-            session,
-            tenant_id=run.tenant_id,
-            worker_id=worker.id,
-            expected_version=worker.version,
-            status="cancelled",
-            error_code="cancelled",
-        )
-        return await enqueue_worker_finished(session, _request(run), run_id=run.id, now=_NOW)
+        await insert_reader_fixture(session, **_request(run).model_dump(), available_at=_NOW)
 
 
 async def _read(sm: async_sessionmaker[AsyncSession], run: FleetRun) -> TaskContinuationRow | None:
@@ -118,83 +125,84 @@ async def _read(sm: async_sessionmaker[AsyncSession], run: FleetRun) -> TaskCont
         return await get_continuation(session, idempotency_key=worker_finished_key(run.id))
 
 
-@pytest.mark.parametrize("quorum", [None, 1])
-async def test_actual_all_or_quorum_readiness_queues_once_without_claiming_success(
-    pooled: async_sessionmaker[AsyncSession], quorum: int | None
-) -> None:
-    run = await _run(pooled, quorum=quorum)
-    workers = [await _worker(pooled, run, ordinal) for ordinal in range(2)]
-    assert await _complete(pooled, run, workers[0]) is (quorum == 1)
-    assert await _complete(pooled, run, workers[1]) is (quorum is None)
-    current, finished = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
-    assert current.status == "collecting" and current.version == run.version + 1
-    assert all(worker.status == "cancelled" and worker.result is None for worker in finished)
-    row = await _read(pooled, run)
-    assert row is not None and row.reason == "worker_finished" and row.status == "pending"
-    assert row.available_at == _NOW and row.attempts == 0
-    async with pooled.begin() as session:
-        assert not await enqueue_worker_finished(session, _request(run), run_id=run.id, now=_NOW)
-    assert await _read(pooled, run) == row
+@pytest.mark.parametrize("entrypoint", ["worker", "wake", "continuation"])
+async def test_completion_producers_refuse_before_any_database_access(entrypoint: str) -> None:
+    class ConnectionTrap:
+        def in_transaction(self):
+            return True
+
+        def begin(self):
+            raise AssertionError("Refusal must precede any transaction/connection")
+
+        async def execute(self, *args, **kwargs):
+            raise AssertionError("Refusal must precede any query")
+
+    run_id = uuid.uuid4()
+    request = ContinuationRequest(
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        parent_channel_id="channel",
+        thread_id="thread",
+        requester_account_id=uuid.uuid4(),
+        requester_external_user_id="human",
+        target_ma_agent_id="agent",
+        target_name="orchestrator",
+        reason="worker_finished",
+        idempotency_key=worker_finished_key(run_id),
+        requested_work="Collect the workers.",
+    )
+    trap = ConnectionTrap()
+    if entrypoint == "worker":
+        assert not await enqueue_worker_finished(trap, request, run_id=run_id, now=_NOW)
+    else:
+        with pytest.raises(ContinuationReasonUnavailable, match="compatible-reader release"):
+            if entrypoint == "wake":
+                await enqueue_wake(trap, request, available_at=_NOW)
+            else:
+                await record_continuation(trap, request)
 
 
-async def test_terminal_transition_and_wake_roll_back_together(
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+@pytest.mark.parametrize("terminal", ["cancelled", "timed_out"])
+async def test_readiness_at_deadline_preserves_terminal_transition_without_wake(
     pooled: async_sessionmaker[AsyncSession],
+    offset: int,
+    terminal: str,
 ) -> None:
-    run = await _run(pooled)
+    run = await _run(pooled, deadline_at=datetime.now(UTC) + timedelta(hours=1))
     worker = await _worker(pooled, run, 0)
-    with pytest.raises(RuntimeError, match="crash before commit"):
-        async with pooled.begin() as session:
-            await fleet.run_status(session, tenant_id=run.tenant_id, run_id=run.id, for_update=True)
-            await fleet.finish(
-                session,
-                tenant_id=run.tenant_id,
-                worker_id=worker.id,
-                expected_version=worker.version,
-                status="cancelled",
-                error_code="cancelled",
-            )
-            assert await enqueue_worker_finished(session, _request(run), run_id=run.id, now=_NOW)
-            raise RuntimeError("crash before commit")
+    if terminal == "timed_out":
+        worker = await fleet.claim_worker(pooled, tenant_id=run.tenant_id, run_id=run.id, cap=1)
+        assert worker is not None and worker.status == "starting"
+    async with pooled.begin() as session:
+        await fleet.run_status(session, tenant_id=run.tenant_id, run_id=run.id, for_update=True)
+        finished = await fleet.finish(
+            session,
+            tenant_id=run.tenant_id,
+            worker_id=worker.id,
+            expected_version=worker.version,
+            status=terminal,
+            error_code=terminal,
+        )
+        assert not await enqueue_worker_finished(
+            session,
+            _request(run),
+            run_id=run.id,
+            now=run.deadline_at + timedelta(seconds=offset),
+        )
     current, workers = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
-    assert current == run and workers == (worker,)
+    assert current == run and current.status == "running" and current.version == run.version
+    assert workers == (finished,) and workers[0].status == terminal
+    assert workers[0].version == worker.version + 1 and workers[0].error_code == terminal
+    async with pooled() as session:
+        finished_at = await session.scalar(
+            select(FleetWorkerRow.finished_at).where(FleetWorkerRow.id == worker.id)
+        )
+    assert finished_at is not None
     assert await _read(pooled, run) is None
 
 
-async def test_racing_completions_commit_one_wake(pooled: async_sessionmaker[AsyncSession]) -> None:
-    run = await _run(pooled)
-    workers = [await _worker(pooled, run, ordinal) for ordinal in range(2)]
-    assert sorted(
-        await asyncio.gather(*(_complete(pooled, run, worker) for worker in workers))
-    ) == [False, True]
-    row = await _read(pooled, run)
-    assert row is not None and row.status == "pending"
-
-
-@pytest.mark.parametrize(
-    "field", ["tenant_id", "requester_account_id", "platform", "parent_channel_id", "thread_id"]
-)
-async def test_foreign_run_or_address_cannot_queue_work(
-    pooled: async_sessionmaker[AsyncSession], field: str
-) -> None:
-    run = await _run(pooled)
-    await _worker(pooled, run, 0)
-    data = _request(run).model_dump()
-    data[field] = (
-        uuid.uuid4()
-        if field in ("tenant_id", "requester_account_id")
-        else "slack"
-        if field == "platform"
-        else "foreign"
-    )
-    request = ContinuationRequest.model_validate(data)
-    with pytest.raises(FleetConflict):
-        async with pooled.begin() as session:
-            await enqueue_worker_finished(session, request, run_id=run.id, now=_NOW)
-    current, _ = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
-    assert current == run and await _read(pooled, run) is None
-
-
-async def test_wrong_key_or_inactive_transaction_refuses_before_autobegin(
+async def test_inactive_transaction_still_refuses_without_autobegin(
     pooled: async_sessionmaker[AsyncSession],
 ) -> None:
     run = await _run(pooled)
@@ -211,88 +219,6 @@ async def test_wrong_key_or_inactive_transaction_refuses_before_autobegin(
                     now=_NOW,
                 )
     assert await _read(pooled, run) is None
-
-
-async def test_missing_collecting_wake_is_an_invariant_refusal(
-    pooled: async_sessionmaker[AsyncSession],
-) -> None:
-    run = await _run(pooled)
-    await fleet.set_run_status(
-        pooled,
-        tenant_id=run.tenant_id,
-        run_id=run.id,
-        expected_version=run.version,
-        status="collecting",
-    )
-    with pytest.raises(FleetConflict, match="expected completion wake"):
-        async with pooled.begin() as session:
-            await enqueue_worker_finished(session, _request(run), run_id=run.id, now=_NOW)
-    assert await _read(pooled, run) is None
-
-
-async def test_changed_request_cannot_reuse_a_collecting_wake(
-    pooled: async_sessionmaker[AsyncSession],
-) -> None:
-    run = await _run(pooled)
-    await _complete(pooled, run, await _worker(pooled, run, 0))
-    original = await _read(pooled, run)
-    changed = _request(run).model_copy(update={"requested_work": "Run different billed work."})
-    with pytest.raises(FleetConflict, match="expected completion wake"):
-        async with pooled.begin() as session:
-            await enqueue_worker_finished(session, changed, run_id=run.id, now=_NOW)
-    assert await _read(pooled, run) == original
-
-
-async def test_duplicate_insert_rolls_back_terminal_and_collecting_transitions(
-    pooled: async_sessionmaker[AsyncSession],
-) -> None:
-    run = await _run(pooled)
-    worker = await _worker(pooled, run, 0)
-    other = _request(run).model_copy(update={"reason": "task_handoff"})
-    await enqueue_wake(pooled, other, available_at=_NOW)
-    original = await _read(pooled, run)
-    with pytest.raises(IntegrityError):
-        await _complete(pooled, run, worker)
-    current, workers = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
-    assert current == run and workers == (worker,)
-    assert await _read(pooled, run) == original
-
-
-async def test_readiness_at_deadline_refuses_and_rolls_back_the_terminal_transition(
-    pooled: async_sessionmaker[AsyncSession],
-) -> None:
-    run = await _run(pooled)
-    worker = await _worker(pooled, run, 0)
-    with pytest.raises(FleetConflict, match="deadline"):
-        async with pooled.begin() as session:
-            await fleet.run_status(session, tenant_id=run.tenant_id, run_id=run.id, for_update=True)
-            await fleet.finish(
-                session,
-                tenant_id=run.tenant_id,
-                worker_id=worker.id,
-                expected_version=worker.version,
-                status="cancelled",
-                error_code="cancelled",
-            )
-            await enqueue_worker_finished(
-                session, _request(run), run_id=run.id, now=run.deadline_at
-            )
-    current, workers = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
-    assert current == run and workers == (worker,)
-    assert await _read(pooled, run) is None
-
-
-async def test_collecting_freezes_membership_without_claiming_financial_admission(
-    pooled: async_sessionmaker[AsyncSession],
-) -> None:
-    run = await _run(pooled, quorum=1)
-    worker = await _worker(pooled, run, 0)
-    assert await _complete(pooled, run, worker)
-    with pytest.raises(FleetConflict, match="collecting"):
-        await _worker(pooled, run, 1)
-    current, workers = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
-    assert current.reserved_usd == Decimal(0) and current.observed_usd == Decimal(0)
-    assert len(workers) == 1 and workers[0].reserved_usd == Decimal(0)
 
 
 async def _dispatch(
@@ -335,7 +261,7 @@ async def test_unavailable_or_busy_host_decision_defers_without_native_send(
     pooled: async_sessionmaker[AsyncSession], mode: str
 ) -> None:
     run = await _run(pooled)
-    await _complete(pooled, run, await _worker(pooled, run, 0))
+    await _seed_reader_fixture(pooled, run)
 
     async def decision(_row: TaskContinuationRow, _now: datetime) -> ContinuationDecision | None:
         return ContinuationDecision(action="skip_turn_running") if mode == "busy" else None
@@ -353,7 +279,7 @@ async def test_restart_and_two_dispatchers_resume_at_most_once(
     db_engine: AsyncEngine,
 ) -> None:
     run = await _run(pooled)
-    await _complete(pooled, run, await _worker(pooled, run, 0))
+    await _seed_reader_fixture(pooled, run)
     await db_engine.dispose()
     schema = isolated_test_schema(db_engine)
     assert schema is not None
@@ -386,7 +312,7 @@ async def test_expired_started_worker_wake_never_replays(
     pooled: async_sessionmaker[AsyncSession],
 ) -> None:
     run = await _run(pooled)
-    await _complete(pooled, run, await _worker(pooled, run, 0))
+    await _seed_reader_fixture(pooled, run)
     claim = await claim_wake(pooled, idempotency_key=worker_finished_key(run.id), now=_NOW)
     assert claim is not None and await start_wake(pooled, claim, now=_NOW)
     expired = _NOW + WAKE_RUN_LEASE + timedelta(seconds=1)
@@ -398,3 +324,115 @@ async def test_expired_started_worker_wake_never_replays(
     row = await _read(pooled, run)
     assert row is not None and row.status == "skipped" and row.skip_reason == "interrupted"
     assert turns == []
+
+
+@pytest.fixture(scope="module")
+def prior_queue_reader():
+    path = Path(__file__).parent / "fixtures/continuation_prior.txt"
+    source = path.read_bytes()
+    assert (
+        hashlib.sha256(source).hexdigest()
+        == "cd530c55e21110be5f223a7b82b142307a5a5046bdd8bb7f48a740a33880c89f"
+    )
+    module = types.ModuleType("prior_continuation_queue_reader")
+    sys.modules[module.__name__] = module
+    try:
+        exec(compile(source, str(path), "exec"), module.__dict__)
+        yield module
+    finally:
+        del sys.modules[module.__name__]
+
+
+@pytest.mark.parametrize("entrypoint", ["worker", "wake", "continuation"])
+async def test_previous_reader_can_dispatch_legacy_timer_after_refused_new_write(
+    pooled: async_sessionmaker[AsyncSession],
+    prior_queue_reader,
+    entrypoint: str,
+) -> None:
+    run = await _run(pooled)
+    request = _request(run)
+    timer = request.model_copy(update={"reason": "timer", "idempotency_key": uuid.uuid4()})
+    await enqueue_wake(pooled, timer, available_at=_NOW)
+    if entrypoint == "worker":
+        async with pooled.begin() as session:
+            assert not await enqueue_worker_finished(session, request, run_id=run.id, now=_NOW)
+    else:
+        with pytest.raises(ContinuationReasonUnavailable):
+            if entrypoint == "wake":
+                await enqueue_wake(pooled, request, available_at=_NOW)
+            else:
+                await record_continuation(pooled, request)
+    assert await _read(pooled, run) is None
+    async with pooled.begin() as session:
+        pending = await prior_queue_reader.list_pending_continuations(
+            session,
+            tenant_id=run.tenant_id,
+            platform=run.platform,
+            thread_id=run.thread_id,
+        )
+        dispatchable = await prior_queue_reader.list_dispatchable_continuations(
+            session,
+            tenant_id=run.tenant_id,
+            platform=run.platform,
+            thread_id=run.thread_id,
+            now=_NOW,
+            max_attempts=5,
+        )
+        due = await prior_queue_reader.list_due_wake_rows(
+            session,
+            platform=run.platform,
+            now=_NOW,
+            max_attempts=5,
+            limit=1,
+        )
+        for rows in (pending, dispatchable, due):
+            assert [row.idempotency_key for row in rows] == [timer.idempotency_key]
+            assert rows[0].reason == "timer" and rows[0].attempts == 0
+        claimed = await prior_queue_reader.claim_wake_row(
+            session,
+            idempotency_key=timer.idempotency_key,
+            owner="old-process",
+            now=_NOW,
+            lease=timedelta(minutes=1),
+            max_attempts=5,
+        )
+        assert claimed is not None and claimed.reason == "timer" and claimed.attempts == 1
+        assert await prior_queue_reader.start_wake_row(
+            session,
+            idempotency_key=timer.idempotency_key,
+            owner="old-process",
+            now=_NOW,
+            lease=timedelta(minutes=1),
+        )
+        assert await prior_queue_reader.settle_wake_row(
+            session,
+            idempotency_key=timer.idempotency_key,
+            owner="old-process",
+            status="delivered",
+            now=_NOW,
+        )
+        actual = await get_continuation(session, idempotency_key=timer.idempotency_key)
+        assert actual is not None and actual.status == "delivered"
+        assert actual.started_at == _NOW and actual.delivered_at == _NOW
+    current, workers = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
+    assert current == run and workers == ()
+
+
+async def test_previous_reader_negative_control_still_rejects_injected_future_reason(
+    pooled: async_sessionmaker[AsyncSession],
+    prior_queue_reader,
+) -> None:
+    run = await _run(pooled)
+    await _seed_reader_fixture(pooled, run)
+    timer = _request(run).model_copy(update={"reason": "timer", "idempotency_key": uuid.uuid4()})
+    await enqueue_wake(pooled, timer, available_at=_NOW)
+    async with pooled() as session:
+        with pytest.raises(ValidationError, match="reason"):
+            await prior_queue_reader.list_dispatchable_continuations(
+                session,
+                tenant_id=run.tenant_id,
+                platform=run.platform,
+                thread_id=run.thread_id,
+                now=_NOW,
+                max_attempts=5,
+            )

@@ -36,16 +36,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 import structlog
-from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.fleet import FleetConflict, run_settled
-from daimon.core.stores import fleet
+from daimon.core.continuity.continuation import ContinuationRequest, require_writable_reason
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
     cancel_wake_row,
     claim_wake_row,
     defer_wake_rows,
-    get_continuation,
     list_dispatchable_continuations,
     list_due_wake_rows,
     record_continuation,
@@ -180,6 +177,7 @@ async def enqueue_wake(
     hold a transaction: its owning state transition commits or rolls back both
     that transition and the wake, with no commit inside this function.
     """
+    require_writable_reason(request.reason)
     if isinstance(sessionmaker, AsyncSession):
         if not sessionmaker.in_transaction():
             raise ValueError("Enqueuing with a session requires an active transaction")
@@ -201,17 +199,14 @@ async def enqueue_worker_finished(
     run_id: uuid.UUID,
     now: datetime,
 ) -> bool:
-    """Atomically move a ready run to collecting and enqueue its sole completion wake.
+    """Refuse completion writes until compatible queue readers are deployed.
 
-    The caller owns the active transaction, including its worker transition.
-    Lock the run through the fleet store before transitioning that worker, so
-    all completion producers share the run-then-worker lock order. The run
-    lock freezes membership at the readiness check; collecting forbids later
-    additions. A quorum signals readiness to collect, never successful output.
-
-    The host supplies an authorized orchestrator request and reauthorizes its
-    concrete target/binding when dispatching. This function does not resolve a
-    provider target, rearm a batch, release a monetary hold or commit.
+    The public signature remains available for host integrations, but no run
+    transition or wake is written. False leaves the caller's terminal worker
+    update free to commit, including at or after the deadline. The prior
+    release cannot read this reason; a caller cannot opt past the rolling
+    release boundary. Publication and the readiness transition are deferred
+    together; the run owner remains responsible for ending an expired run.
     """
     if not session.in_transaction():
         raise ValueError("Worker completion requires an active transaction")
@@ -219,36 +214,7 @@ async def enqueue_worker_finished(
         run_id
     ):
         raise ValueError("Worker completion requires the run's stable wake identity")
-    run, workers = await fleet.run_status(
-        session, tenant_id=request.tenant_id, run_id=run_id, for_update=True
-    )
-    if (
-        request.requester_account_id != run.orchestrator_account_id
-        or request.platform != run.platform
-        or request.parent_channel_id != run.channel_id
-        or request.thread_id != run.thread_id
-    ):
-        raise FleetConflict("The completion request does not address this run's orchestrator")
-    if run.status == "collecting":
-        row = await get_continuation(session, idempotency_key=request.idempotency_key)
-        if row is None or any(
-            getattr(row, field) != value for field, value in request.model_dump().items()
-        ):
-            raise FleetConflict("The collecting run does not have its expected completion wake")
-        return False
-    if run.status != "running" or not run_settled(run, workers):
-        return False
-    if now >= run.deadline_at:
-        raise FleetConflict("The fleet deadline does not admit a completion turn")
-    await fleet.set_run_status(
-        session,
-        tenant_id=run.tenant_id,
-        run_id=run.id,
-        expected_version=run.version,
-        status="collecting",
-    )
-    await enqueue_wake(session, request, available_at=now)
-    return True
+    return False
 
 
 async def claim_wake(

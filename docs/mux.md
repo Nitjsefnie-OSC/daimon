@@ -2334,14 +2334,25 @@ A missing or erased actor cannot authorize launch. Existing turn paths do not
 call the resolver and remain unchanged.
 ### Worker completion wakes
 
-`enqueue_worker_finished` uses a caller-owned active transaction to read and
-lock a fleet run, test the store's all-worker or quorum readiness, move it to
-collecting and record one stable `worker_finished` wake. The completion writer
-locks the run before changing the worker, then calls the producer in that same
-transaction. A rollback removes both transitions and the wake. Collecting
-freezes the initial batch; rearming a later review batch is not supported by
-this interface. A quorum notification does not certify successful results or
-release any accounting hold.
+Worker-completion production is closed during the rolling release.
+`enqueue_worker_finished` retains its host signature but returns `False`
+before querying or changing a fleet run. The caller's terminal worker update
+can still commit, including at or after the deadline: the run stays at its
+current version, with no collecting transition and no wake. The run owner
+ends an expired run. Generic wake and continuation enqueue helpers raise
+`ContinuationReasonUnavailable` for the new reason before connecting;
+there is no caller override. Existing timer, handoff and input writes retain
+their behavior. A ready worker batch is not moved to collecting and no
+completion wake is published by these helpers.
+
+The prior release aborts an entire queue scan on the new reason, hiding
+unrelated legacy timers. Before enabling completion writes, deploy a separate
+compatible-reader release whose closed queue readers ignore unsupported
+reasons, and prove every reader and permitted rollback version is at least
+that release. The producer and its atomic all/quorum transition are deferred
+until that boundary is established. Rows must never be relabeled as timers or
+handoffs. Reader tests can inject future rows directly into an isolated test
+schema; those fixtures are not successful host production or fleet execution.
 
 The host supplies the authorized orchestrator address and must revalidate its
 concrete target and binding at dispatch. The existing dispatcher accepts an
