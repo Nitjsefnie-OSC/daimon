@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import json
+import sys
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import (
     AgentBackendRefused,
@@ -25,11 +32,12 @@ from daimon.core.channel_backend import (
     set_channel_backend,
 )
 from daimon.core.config import TurnSettings
-from daimon.core.stores import mux_state, security_audit
+from daimon.core.stores import access_policy, mux_state, security_audit
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ChannelRef
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -354,3 +362,128 @@ async def test_default_revision_reput_does_not_become_override_or_hide_agent_set
         assert await resolve_turn_backend(
             session, channel, agent.name, enabled=True, retained_revision=0
         ) == (None, False, "default")
+
+
+@pytest.fixture(scope="module")
+def prior_reader():
+    # Exact access_policy.py from the shared interface's parent commit.
+    path = Path(__file__).parent / "fixtures/access_policy_prior.py"
+    spec = importlib.util.spec_from_file_location("prior_access_policy_reader", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    yield module.TenantAccessPolicy
+    del sys.modules[spec.name]
+
+
+async def configure_nondefault(owned):
+    service, agent, actor, sessions = owned
+    restrictive = TenantAccessPolicy(
+        invoker_user_ids=("member",),
+        channel_rules={"restricted": ChannelRule(readers="inside", writers="none")},
+        agent_rules={"helper": AgentRule(runs_in=("restricted",))},
+    )
+    async with sessions.begin() as session:
+        await access_policy.set_access_policy(
+            session, tenant_id=agent.tenant_id, policy=restrictive
+        )
+    async with sessions() as session:
+        before = await session.scalar(
+            text("SELECT policy::text FROM tenant_access_policies WHERE tenant_id=:tenant"),
+            {"tenant": agent.tenant_id},
+        )
+    policy = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(
+        agent.tenant_id, ("anthropic", "openai", "gemini"), policy.revision, actor
+    )
+    return restrictive, before
+
+
+async def assert_prior_read(sessions, tenant_id, prior_reader, restrictive, before):
+    async with sessions() as session:
+        payload, encoded = (
+            await session.execute(
+                text(
+                    "SELECT policy, policy::text FROM tenant_access_policies WHERE tenant_id=:tenant"
+                ),
+                {"tenant": tenant_id},
+            )
+        ).one()
+    assert "enabled_backends" not in payload
+    assert encoded == before
+    prior = prior_reader.model_validate(payload)
+    assert prior.invoker_user_ids == restrictive.invoker_user_ids
+    assert prior.channel_rules["restricted"].writers == "none"
+    assert prior.agent_rules["helper"].runs_in == ("restricted",)
+    return payload
+
+
+async def test_rolling_prior_reader_accepts_real_nondefault_allowlist_write(owned, prior_reader):
+    service, agent, _, sessions = owned
+    restrictive, before = await configure_nondefault(owned)
+    await assert_prior_read(sessions, agent.tenant_id, prior_reader, restrictive, before)
+    async with sessions() as session:
+        actual = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
+    assert actual.enabled_backends == ("anthropic", "openai", "gemini")
+    assert actual.channel_rules == restrictive.channel_rules
+    assert (
+        await service.tenant_policy(agent.tenant_id)
+    ).enabled_backends == actual.enabled_backends
+
+
+@pytest.mark.fresh_schema
+async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(owned, prior_reader):
+    _, agent, _, sessions = owned
+    restrictive, before = await configure_nondefault(owned)
+    await assert_prior_read(sessions, agent.tenant_id, prior_reader, restrictive, before)
+    path = Path(__file__).parents[1] / "alembic/versions/0091_agent_backend_settings.py"
+    spec = importlib.util.spec_from_file_location("backend_settings_rollback", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    async with sessions.begin() as session:
+        connection = await session.connection()
+
+        def downgrade(sync):
+            with Operations.context(MigrationContext.configure(sync)):
+                module.downgrade()
+            schema = sync.scalar(text("SELECT current_schema()"))
+            assert "enabled_backends" not in {
+                c["name"]
+                for c in inspect(sync).get_columns("tenant_access_policies", schema=schema)
+            }
+
+        await connection.run_sync(downgrade)
+    try:
+        await assert_prior_read(sessions, agent.tenant_id, prior_reader, restrictive, before)
+    finally:
+        async with sessions.begin() as session:
+            connection = await session.connection()
+
+            def upgrade(sync):
+                with Operations.context(MigrationContext.configure(sync)):
+                    module.upgrade()
+
+            await connection.run_sync(upgrade)
+    async with sessions() as session:
+        restored = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
+    assert restored.enabled_backends == ("anthropic",)
+    assert restored.channel_rules == restrictive.channel_rules
+    assert restored.agent_rules == restrictive.agent_rules
+
+
+@pytest.mark.parametrize(
+    "stored", [[], ["openai"], ["anthropic", "bogus"], ["anthropic", "anthropic"]]
+)
+async def test_invalid_allowlist_column_refuses_without_policy_fallback(owned, stored):
+    _, agent, _, sessions = owned
+    await configure_nondefault(owned)
+    async with sessions.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE tenant_access_policies SET enabled_backends=CAST(:backends AS jsonb) WHERE tenant_id=:tenant"
+            ),
+            {"tenant": agent.tenant_id, "backends": json.dumps(stored)},
+        )
+    async with sessions() as session:
+        with pytest.raises(access_policy.AccessPolicyUnreadable):
+            await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)

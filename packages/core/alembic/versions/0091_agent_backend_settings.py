@@ -43,6 +43,15 @@ def upgrade() -> None:
         ),
     )
     op.add_column(
+        "tenant_access_policies",
+        sa.Column(
+            "enabled_backends",
+            postgresql.JSONB(),
+            nullable=False,
+            server_default=sa.text("'[\"anthropic\"]'::jsonb"),
+        ),
+    )
+    op.add_column(
         "channel_config_revision",
         sa.Column("origin", sa.Text(), nullable=False, server_default="channel"),
     )
@@ -52,3 +61,4 @@ def downgrade() -> None:
     op.execute(sa.text("DELETE FROM channel_config_revision WHERE origin = 'agent'"))
     op.drop_column("channel_config_revision", "origin")
     op.drop_table("agent_backend_revision")
+    op.drop_column("tenant_access_policies", "enabled_backends")

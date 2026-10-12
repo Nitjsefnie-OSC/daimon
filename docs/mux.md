@@ -2035,7 +2035,10 @@ appends a revision with the previous value. Existing threads retain their
 immutable configuration, rather than following a later preference change.
 
 The tenant access policy's `enabled_backends` allowlist defaults to Anthropic.
-Selections must be explicitly enabled before an admin can save them. Compatibility
+Selections must be explicitly enabled before an admin can save them. The existing
+policy store keeps this allowlist in a defaulted column on its existing record,
+leaving the legacy policy JSON readable by older processes and after downgrade.
+Compatibility
 previews list unsupported attachments/capabilities, target thread-mode limits,
 existing model list prices, and an explicitly unknown whole-turn maximum where
 no complete bound is enforced. Preview digests bind the current agent facts,

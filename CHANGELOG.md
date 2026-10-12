@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Share native credential authorization and MCP resource host binding across explicitly selected providers, enforcing the same scoped caller, account, channel revision and model checks before catalog access.
 - Prepare the agent-backend staging QA packet with per-backend switch/turn/revert checks, honest receipt/scoring gates and a separate staging authorization requirement.
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution. Agent-origin native execution refuses until an authorized resource counterpart is available.
+- Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution. Backend eligibility leaves legacy policy JSON readable during rolling upgrades and downgrade. Agent-origin native execution refuses until an authorized resource counterpart is available.
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 

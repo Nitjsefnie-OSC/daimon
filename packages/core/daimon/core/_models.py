@@ -276,6 +276,9 @@ class TenantAccessPolicyRecord(Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    enabled_backends: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[\"anthropic\"]'::jsonb")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
