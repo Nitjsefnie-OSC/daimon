@@ -26,13 +26,16 @@ rules on two channels, a thread, a category and two agents with rules.
 
 On Discord, a mention in a `writers: none` channel is not met with total
 silence, so "not allowed here" doesn't look like "Daimon is down": the mention
-gets a 🔒 reaction and its author a direct message saying the channel's **Who
-can post** rule is **Nobody** and that a server admin can change it in
-`/agent-setup` → **Who answers where** → **Permissions**. No turn runs and no
-message is posted in the channel. It happens at most once per person per
-channel per `DAIMON_DISCORD__PROTECTED_CHANNEL_NOTICE_COOLDOWN_MIN` (10 minutes),
-only when the rule was read (not when it couldn't be), and not for mentions
-replayed at startup.
+gets a 🔒 reaction and its author a direct message naming the rule. For a
+channel rule it says a server admin can change it in `/agent-setup` → **Who
+answers where** → **Permissions**; for a category rule, that whoever runs
+Daimon for the server can. No turn runs and no message is posted in the
+channel. It happens at most once per person per channel per
+`DAIMON_DISCORD__PROTECTED_CHANNEL_NOTICE_COOLDOWN_MIN` (10 minutes), and only
+when a stored rule matches the channel or its resolved category: a refusal
+that comes from failing closed (a category that couldn't be looked up, a
+policy that couldn't be read) stays silent, as do mentions replayed at
+startup.
 
 A channel's **own agents** are those whose agent rule names it alone, while
 its readers are `own`: that channel is their **home**. `own` goes on both
