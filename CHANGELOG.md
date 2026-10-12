@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve oversized output files and main's notice deduplication while following every delivery listing page through the scoped output port.
 - Preserve pinned OpenAI GO digests in the existing audited grouped format, and reuse the same receipt audit/write path for retained evidence.
 - Read CLI resource host identities and routing from declared provider profiles while preserving existing scope checks and default behavior.
+- Route Slack and Teams legacy event rendering and native action callbacks through one declared profile capability, preserving existing adapter behavior.
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 - Derive live OpenAI probe authorization from a registered canonical GO pin, matching financial envelope and unused attempt identity instead of fixing one attempt in the runner.
@@ -23,9 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare the agent-backend staging QA packet with per-backend switch/turn/revert checks, honest receipt/scoring gates and a separate staging authorization requirement.
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution. Agent-origin native execution refuses until an authorized resource counterpart is available.
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution. Backend eligibility leaves legacy policy JSON readable during rolling upgrades and downgrade. Agent-origin native execution refuses until an authorized resource counterpart is available.
+- Add shared scoped OpenAI/Gemini counterpart catalog readback with strict source identity and revision pins, installed operator configuration checks, and native resource drift refusals. Agent-origin execution remains refused until complete source preservation is proven.
+
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution by scoped resource identity. Channel clears restore inheritance, and concurrent reads share the existing policy fence. Backend eligibility leaves legacy policy JSON readable during rolling upgrades and downgrade. Agent-origin native execution refuses until an authorized resource counterpart is available.
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
+- Let workspace admins preview and select an agent's model backend in agent setup, or set and clear it through the CLI and direct MCP tool, when backend selection is explicitly enabled. Previews include compatibility and pricing limits; existing threads keep their backend.
 
 - Preserve OpenAI session occupancy when accepted work has no visible active root yet, allowing observation to continue without retrying creation or admitting a new turn.
 

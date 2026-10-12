@@ -10,7 +10,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Annotated, Literal
+from uuid import UUID
 
+from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.stores.domain import BackendAgent
+from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_host import OpenAIHostRuntime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
@@ -19,7 +23,9 @@ from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
     fixed_plan_origin_allowed,
-    manifest_configuration_matches,
+    read_counterpart,
+    select_runtime_manifest,
+    validate_counterpart_pins,
 )
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
@@ -60,45 +66,59 @@ class OpenAIDeployment(BaseModel):
     api_key_env: ApiKeyEnvironment
     spend_limit_usd_cents: Annotated[int, Field(gt=0, strict=True)] | None = None
     skill_ids: tuple[Nonblank, ...] = ()
+    source_agent_id: UUID | None = None
+    source_agent_version: Annotated[int, Field(gt=0, strict=True)] | None = None
+    counterpart_catalog_id: Nonblank | None = None
+    counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> OpenAIDeployment:
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
+        validate_counterpart_pins(self)
         return self
+
+    async def read_counterpart(
+        self,
+        request: ProviderPreparationRequest,
+        *,
+        source: BackendAgent,
+        resources: NeutralResourceHost,
+    ) -> AgentRevision:
+        """Read the operator-pinned catalog component; complete source proof remains separate."""
+
+        async def verify_native(checked: AgentRevision) -> None:
+            scope = request.scope
+            environment = await resources.backend.environments.retrieve(
+                scope,
+                ResourceRef(
+                    id=self.environment_id,
+                    kind="environment",
+                    provider="openai",
+                    account_scope_id=self.project,
+                    tenant_id=scope.tenant_id,
+                    account_id=scope.account_id,
+                ),
+            )
+            if environment.lifecycle != "active" or environment.spec.execution != "hosted":
+                raise AdmissionDenied(reason="backend_unsupported")
+
+        return await read_counterpart(
+            self, request, source=source, resources=resources, verify_native=verify_native
+        )
 
 
 def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
+    if not fixed_plan_origin_allowed(getattr(request.admission, "backend_revision_origin", None)):
+        raise AdmissionDenied(reason="backend_unsupported")
+    return _manifest_deployment(request)
+
+
+def _manifest_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
     revision = request.admission.backend_revision
     if revision is None or revision.profile != "openai.persistent_workspace":
         raise AdmissionDenied(reason="backend_unsupported")
-    if not fixed_plan_origin_allowed(getattr(request.admission, "backend_revision_origin", None)):
-        raise AdmissionDenied(reason="backend_unsupported")
-    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not manifest_path:
-        raise AdmissionDenied(reason="backend_unsupported")
-    try:
-        with Path(manifest_path).open("rb") as manifest:
-            raw = manifest.read(_MAX_MANIFEST_BYTES + 1)
-        if len(raw) > _MAX_MANIFEST_BYTES:
-            raise AdmissionDenied(reason="backend_unsupported")
-        rows = _MANIFEST.validate_json(raw)
-        selected = [
-            row
-            for row in rows
-            if row.get("profile") == revision.profile
-            and row.get("tenant_id") == request.scope.tenant_id
-            and row.get("platform") == revision.channel.platform
-            and row.get("channel_id") == revision.channel.channel_id
-            and row.get("account_id") == request.scope.account_id
-            and manifest_configuration_matches(row, revision)
-        ]
-        if len(selected) != 1:
-            raise AdmissionDenied(reason="backend_unsupported")
-        return OpenAIDeployment.model_validate(selected[0])
-    except (OSError, ValidationError):
-        # Neither file content nor paths nor credentials enter host notices.
-        raise AdmissionDenied(reason="backend_unsupported") from None
+    return select_runtime_manifest(request, OpenAIDeployment)
 
 
 def authorized_deployments(tenant_id: str) -> tuple[OpenAIDeployment, ...]:

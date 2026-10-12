@@ -31,6 +31,20 @@ def get_profile(profile_id: str) -> Profile:
         raise InvalidConfig(f"unknown profile {profile_id!r}") from None
 
 
+def emits_legacy_events_for(provider: Provider) -> bool:
+    """Read rendering policy for an event or resource without a profile id.
+
+    All registered profiles for its provider must agree, so a missing or
+    ambiguous declaration cannot silently select another rendering path.
+    """
+    declarations = {
+        profile.emits_legacy_events for profile in PROFILES.values() if profile.provider == provider
+    }
+    if len(declarations) != 1:
+        raise InvalidConfig("events require an unambiguous declared profile rendering policy")
+    return declarations.pop()
+
+
 __all__ = [
     "CONVERSATION_ONLY",
     "INLINE_REUSE",
@@ -38,6 +52,7 @@ __all__ = [
     "PERSISTENT_WORKSPACE",
     "PROFILES",
     "get_profile",
+    "emits_legacy_events_for",
 ]
 
 

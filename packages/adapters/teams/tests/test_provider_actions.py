@@ -22,6 +22,7 @@ from daimon.core.turn.provider_actions import (
 )
 from microsoft_teams.api import AdaptiveCardInvokeActivity
 from microsoft_teams.apps import ActivityContext
+from mux import profiles
 from mux.contracts.events import Event, NativeProvenance, RequiredAction, RequiresActionPayload
 from mux.contracts.ids import ResourceRef, Scope
 
@@ -393,3 +394,37 @@ async def test_http_service_registers_provider_action_with_real_sdk_router() -> 
         AdaptiveCardInvokeResponse, await handlers[0](cast(ActivityContext[ActivityBase], ctx))
     )
     assert result.value == "Response recorded." and await waiting is surface.approve
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+def test_callback_registration_follows_declared_capability(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    ref = SESSION.model_copy(update={"provider": provider})
+    prepared = cast(PreparedTurn, SimpleNamespace(session_ref=ref))
+
+    async def hook(value: ProviderActionPrompt) -> NativeActionResponse | None:
+        return None
+
+    called = 0
+
+    def factory():
+        nonlocal called
+        called += 1
+        return hook
+
+    for emits_legacy in (True, False):
+        monkeypatch.setattr(
+            profiles,
+            "PROFILES",
+            {
+                pid: profile.model_copy(update={"emits_legacy_events": emits_legacy})
+                if profile.provider == provider
+                else profile
+                for pid, profile in profiles.PROFILES.items()
+            },
+        )
+        assert actions.provider_action_options(prepared, factory) == (
+            {} if emits_legacy else {"provider_action": hook}
+        )
+    assert called == 1

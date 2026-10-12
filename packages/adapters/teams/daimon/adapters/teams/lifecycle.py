@@ -53,6 +53,7 @@ from daimon.core.usage_totals import ProviderUsageTotals
 from microsoft_teams.api import Account, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, ExecuteAction
 from mux.contracts.events import Event
+from mux.profiles import emits_legacy_events_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -255,7 +256,7 @@ class TeamsTurnLifecycle:
 
     async def on_provider_event(self, event: Event) -> None:
         """Cheap local tap; only on_render may send the provider's draft."""
-        if event.native.provider == "anthropic" or self._terminal:
+        if emits_legacy_events_for(event.native.provider) or self._terminal:
             return
         if self._provider_draft is None:
             self._provider_draft = ProviderDraft()

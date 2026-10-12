@@ -2074,6 +2074,67 @@ readers do not bypass policy isolation. The generic StateStore latest-revision
 API includes all materializations; explicit channel override reads use
 `current_backend`, including immutable clear markers.
 
+Slack and Teams read `Profile.emits_legacy_events` to retain the existing SDK
+rendering path for Managed Agents and normalized drafts and action callbacks
+for native profiles. Events and resource references carry only the provider;
+`mux.profiles.emits_legacy_events_for` reads the registered profiles and refuses
+missing or conflicting declarations. This routing capability does not admit a
+backend or change channel configuration.
+
+### Native counterpart readback
+
+OpenAI and Gemini deployments may explicitly pin `source_agent_id` (the scoped
+source UUID), `source_agent_version`, `counterpart_catalog_id`, and
+`counterpart_catalog_revision`. All four pins are required together. They do not
+replace the deployment's tenant, account, channel, project, or exact/bounded
+configuration authorization. Names and caller-provided digests cannot establish
+a counterpart.
+
+One shared manifest selector, pin validator, and readback helper check the
+admitted source identity/version and retained catalog revision before native
+requests, then use the existing
+resource host and driver to read the native agent. OpenAI also checks its
+provisioned hosted environment; Gemini requires an explicitly enabled named-agent
+catalog and checks the compiled native definition, explicit tools, system
+instructions, and every concrete skill bundle file. Gemini counterpart rows
+require a native `agent_id`; a display name does not identify a resource.
+Unproven environment policy refuses. Missing, foreign, stale, or changed
+resources refuse. A final catalog read detects
+changes during native readback; it does not claim an atomic provider revision
+pin. This component returns the existing retained catalog revision.
+
+Agent-origin execution remains refused. Matching a retained native agent does
+not prove preservation of source files, credentials, repositories, memory,
+vaults, channel skills, or tool and approval policy. Complete authorized source
+context and checked preparation are required before a native session can run.
+Channel-origin deployments and the default Anthropic path retain their existing
+behavior.
+### Agent backend selection surfaces
+
+With `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
+workspace admins can select **Model backend** in an agent's setup Details on
+Discord, Slack or Teams. Only the tenant's enabled backends are offered. Preview
+shows unsupported attachments and capabilities, shared-thread restrictions,
+and the shared service's list-price estimate or explicit unknown values. Confirm
+checks the live admin role and rereads the agent; a changed revision, policy or
+preview requires a fresh preview. **Use default** clears the agent preference.
+Existing threads retain their backend, and explicit channel overrides still
+have precedence.
+
+The CLI exposes `daimon agents backend set NAME BACKEND` and
+`daimon agents backend clear NAME`, using the existing tenant selector and
+confirmation prompt. `--yes` skips that prompt; machine-readable `--json`
+requires `--yes`. These commands use the same shared preview and transactional
+revision/audit service as the panels.
+
+The direct MCP API registers one additional admin tool, `set_agent_backend`,
+only when both settings are enabled. Its required `backend` argument selects
+an enabled backend; explicit `null` clears the preference. An optional
+`expected_revision` refuses stale callers. Agent-scoped keys, external accounts
+and chat-agent callers cannot use the direct write: chat changes go through
+the separate admin-confirmation flow. Disabled settings leave the default tool
+registry and setup controls unchanged.
+
 ### Output delivery pagination
 
 Delivery follows every Files API page through the authorized output port, so
