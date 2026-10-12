@@ -7,12 +7,12 @@ asyncio/tenacity machinery.
 call from inside the pump:**
 
   on_render              — the SOLE content-delivery path. Called on every
-                           non-empty render tick, on a tick at least every
-                           10 s with the unchanged state while nothing
-                           changes (so an elapsed timer keeps moving during
-                           a long tool call; it must be idempotent), and
-                           once synchronously after the terminal event
-                           folds (the guarded final render every finalizer
+                           render tick, whether or not the state changed
+                           (so a card's elapsed time keeps moving during a
+                           long tool call: it must be idempotent and own
+                           its debounce), and once synchronously after the
+                           terminal event folds if that changed anything
+                           (the guarded final render every finalizer
                            performs). Slow
                            implementations are safe here: the render loop
                            runs as a separate task on its own timer and

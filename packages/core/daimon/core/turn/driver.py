@@ -118,12 +118,6 @@ _DEFAULT_TOOL_CONFIRMATION: ToolConfirmation = RequireApproval()
 # again.
 _PENDING_CONFIRMATION_RECONNECTS = 2
 
-# While nothing in the turn changes (a long tool call), the render loop still
-# hands the unchanged state to `on_render` this often, so the time-based parts
-# of a progress card (its elapsed timer) keep moving. Each adapter's own
-# debounce still decides whether that becomes a platform edit.
-_IDLE_RENDER_S = 10.0
-
 T = TypeVar("T")
 
 
@@ -799,13 +793,12 @@ async def _pump(
 
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
-    clock = asyncio.get_running_loop().time
-    rendered_at_cell: list[float] = [clock()]
-
-    async def _render_once(state: TurnState, *, idle_refresh: bool = False) -> None:
-        delta = _diff(prev_cell[0], state)
-        if delta.is_empty() and not idle_refresh:
+    async def _render_once(state: TurnState) -> None:
+        if _diff(prev_cell[0], state).is_empty():
             return
+        await _deliver(state)
+
+    async def _deliver(state: TurnState) -> None:
         # Named boundary (guideline:architecture): rendering is delivery,
         # not correctness, and the adapter exceptions it must survive are
         # open-ended (discord.HTTPException, Slack API errors, whatever a
@@ -815,9 +808,8 @@ async def _pump(
         # BaseException drain site in this module.
         #
         # On failure: log and return WITHOUT advancing `prev_cell[0]`. The
-        # next tick re-diffs from the unchanged anchor and naturally
-        # retries the identical delta -- no retry counter, no backoff, no
-        # extra state. This function always returns `None` either way, and
+        # next tick delivers the state again -- no retry counter, no
+        # backoff, no extra state. This function always returns `None` either way, and
         # every finalizer proceeds to its `on_terminal_*` call regardless,
         # so a render failure can never change the turn's own outcome.
         try:
@@ -832,13 +824,14 @@ async def _pump(
             )
             return
         prev_cell[0] = state
-        rendered_at_cell[0] = clock()
 
     async def _render_loop() -> None:
+        # Every tick delivers, changed or not: a long tool call changes
+        # nothing, yet the card's elapsed time must keep moving. Each
+        # adapter's own debounce decides which calls become platform edits.
         while True:
             await asyncio.sleep(render_interval_s)
-            idle_refresh = clock() - rendered_at_cell[0] >= _IDLE_RENDER_S
-            await _render_once(state_cell[0], idle_refresh=idle_refresh)
+            await _deliver(state_cell[0])
 
     render_task = asyncio.create_task(_render_loop(), name="turn.render_loop")
 

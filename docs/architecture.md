@@ -1068,6 +1068,12 @@ per-hook cost contract:
 `on_render` is the answer-text delivery path and may talk to the network,
 because it runs on its own task and cannot stall the pump; `on_sse_event` is
 awaited inline in the consume loop and must stay a cheap local tap.
+The render loop calls `on_render` on every tick (2 s on the chat paths),
+whether or not the turn state changed, so a card's elapsed time keeps moving
+while a long tool call produces no events. Each adapter's own debounce decides
+which calls become platform edits: 10 s on Discord, 5 s on Slack and Teams. The
+finalizers' render after the terminal event stays guarded, so it runs only if
+that event changed the state.
 
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement
