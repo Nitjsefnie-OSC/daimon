@@ -16,7 +16,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.openai_host import OpenAIHostRuntime
+from daimon.core.turn.openai_host import PROFILE, OpenAIHostRuntime, register_host
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
@@ -217,4 +217,14 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             container_size="small",
             spend_limit_usd_cents=deployment.spend_limit_usd_cents,
         ),
+    )
+
+
+def register_runtime() -> None:
+    """Install the provider's host callbacks without transports or credential access."""
+    from daimon.core.turn.runtimes import register_channel_runtime
+
+    register_host()
+    register_channel_runtime(
+        PROFILE, build_openai_runtime, authorizations=authorized_deployments, fallback=True
     )

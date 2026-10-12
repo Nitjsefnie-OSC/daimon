@@ -143,12 +143,6 @@ def check_backend(
     """Admit `revision`, or raise `BackendUnsupported`."""
     if enabled_backends is not None and not backend_is_enabled(revision.backend, enabled_backends):
         raise BackendUnsupported("This backend is not enabled for this workspace.")
-    if revision.profile == "openai.persistent_workspace":
-        # Lazy owner registration leaves the unconfigured/default path untouched.
-        from daimon.core.turn import openai_host
-
-        openai_host.register_host()
-
     try:
         admission = admit(revision, get_profile(revision.profile))
     except (UnsupportedCapability, InvalidConfig) as err:

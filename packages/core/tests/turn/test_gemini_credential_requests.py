@@ -982,7 +982,7 @@ async def test_skill_routes_reject_invalid_configuration_before_factory(
     from daimon.adapters.mcp.runtime import McpResourceHostFactory, McpRuntime
     from daimon.adapters.mcp.tools import _gemini_resources, _openai_resources
     from daimon.core.stores.domain import TurnOriginRow
-    from daimon.core.turn import openai_deployment
+    from daimon.core.turn import runtimes
 
     revision = await case.adapter.store.get_config_revision(case.origin.binding.thread.channel, 1)
     assert revision is not None
@@ -1046,8 +1046,11 @@ async def test_skill_routes_reject_invalid_configuration_before_factory(
                 account_id=str(auth.account_id),
                 project=factory.account_scope_id,
             )
-            monkeypatch.setattr(
-                openai_deployment, "authorized_deployments", lambda _: (deployment,)
+            monkeypatch.setattr(runtimes, "_RUNTIME_FACTORIES", {})
+            runtimes.register_channel_runtime(
+                module.OPENAI_PROFILE,
+                lambda _: (_ for _ in ()).throw(AssertionError("authorization built a runtime")),
+                authorizations=lambda _: (deployment,),
             )
             await module.openai_skill_host(runtime, auth, origin, operation="proof")
     assert calls == []

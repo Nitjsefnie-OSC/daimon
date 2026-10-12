@@ -68,11 +68,11 @@ async def openai_skill_host(
             "This channel's backend can't change an agent's skills from chat yet. "
             "Nothing was changed. Do not retry."
         )
-    from daimon.core.turn.openai_deployment import authorized_deployments
+    from daimon.core.turn.runtimes import authorized_channel_deployments
 
     authorized = [
         deployment
-        for deployment in authorized_deployments(str(auth.tenant_id))
+        for deployment in authorized_channel_deployments(OPENAI_PROFILE, str(auth.tenant_id))
         if deployment.platform == origin.platform
         and deployment.channel_id == origin.parent_channel_id
         and deployment.config_digest == revision.digest

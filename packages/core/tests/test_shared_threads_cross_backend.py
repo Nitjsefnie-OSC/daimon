@@ -436,7 +436,9 @@ async def test_a_backend_that_does_not_share_never_sees_a_shared_owner(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    openai_host.register_host()
+    from daimon.core.turn.runtimes import ensure_channel_runtime
+
+    assert ensure_channel_runtime(profile)
     assert profile in preparation._PROVIDER_PREPARATIONS  # pyright: ignore[reportPrivateUsage]
     seen: list[ProviderPreparationRequest] = []
 
@@ -533,6 +535,9 @@ async def test_g2_refuses_a_shared_thread_visibly(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    from daimon.core.turn.runtimes import ensure_channel_runtime
+
+    assert ensure_channel_runtime(GEMINI)
     real = preparation._PROVIDER_PREPARATIONS[GEMINI]  # pyright: ignore[reportPrivateUsage]
     reached: list[ProviderPreparationRequest] = []
 

@@ -71,9 +71,11 @@ BackendFactory = Callable[[TurnBackendRequest], TurnBackend]
 _TURN_BACKENDS: dict[str, BackendFactory] = {}
 
 
-def register_turn_backend(profile: str, factory: BackendFactory) -> None:
+def register_turn_backend(profile: str, factory: BackendFactory, *, fallback: bool = False) -> None:
     """Register a host composition at import/startup, without provider discovery."""
     if profile in _TURN_BACKENDS:
+        if fallback:
+            return
         raise ValueError(f"turn backend already registered: {profile}")
     _TURN_BACKENDS[profile] = factory
 
@@ -111,15 +113,6 @@ def _anthropic_turn_backend(request: TurnBackendRequest) -> TurnBackend:
 register_turn_backend("anthropic.managed_agents", _anthropic_turn_backend)
 
 
-def _gemini_turn_backend(request: TurnBackendRequest) -> TurnBackend:
-    from daimon.core.turn.gemini import compose_gemini_backend
-
-    return compose_gemini_backend(request)
-
-
-register_turn_backend("gemini.inline_reuse", _gemini_turn_backend)
-
-
 def turn_backend(request: TurnBackendRequest) -> TurnBackend:
     """Compose exactly the admitted profile, or fail before any provider I/O."""
     if request.config is not None and (
@@ -138,6 +131,11 @@ def turn_backend(request: TurnBackendRequest) -> TurnBackend:
     ):
         raise ScopeViolation(request.session_id, "backend request has a foreign native session")
     factory = _TURN_BACKENDS.get(request.profile)
+    if factory is None:
+        from daimon.core.turn.runtimes import ensure_channel_runtime
+
+        if ensure_channel_runtime(request.profile, ready=lambda: request.profile in _TURN_BACKENDS):
+            factory = _TURN_BACKENDS.get(request.profile)
     if factory is None:
         raise UnsupportedCapability(("host_turn_backend",), request.profile)
     bound = factory(request)

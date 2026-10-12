@@ -411,18 +411,11 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     )
 
 
-_registered = False
-
-
 def register_host() -> None:
-    """Idempotent startup registration with no transport or credential discovery."""
-    global _registered
-    if _registered:
-        return
-    register_turn_backend(PROFILE, _backend)
-    register_turn_codec(PROFILE, _codec)
-    register_turn_preparation(PROFILE, prepare_openai)
-    _registered = True
+    """Fill missing host callbacks while preserving explicit application overrides."""
+    register_turn_backend(PROFILE, _backend, fallback=True)
+    register_turn_codec(PROFILE, _codec, fallback=True)
+    register_turn_preparation(PROFILE, prepare_openai, fallback=True)
 
 
 register_host()

@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve oversized output files and main's notice deduplication while following every delivery listing page through the scoped output port.
 - Read neutral resource catalog, tool, skill digest and deletion behavior from declared profiles while preserving scoped authorization and native requests.
 - Keep CLI help independent of optional backend settings, preserve default policy JSON, and handle unavailable agent-backend previews through the shared selection read; direct backend requests can preview without applying.
+- Register optional provider runtimes through the existing host registry, keeping default turns and CLI channel copies independent of provider-only modules; fill missing native host callbacks while preserving explicit runtime constructors and authorization readers.
 
 - Preserve pinned OpenAI GO digests in the existing audited grouped format, and reuse the same receipt audit/write path for retained evidence.
 - Read CLI resource host identities and routing from declared provider profiles while preserving existing scope checks and default behavior.

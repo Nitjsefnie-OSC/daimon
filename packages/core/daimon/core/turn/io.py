@@ -95,9 +95,11 @@ TurnCodecFactory = Callable[[TurnCodecRequest], TurnIO]
 _TURN_CODECS: dict[str, TurnCodecFactory] = {}
 
 
-def register_turn_codec(profile: str, factory: TurnCodecFactory) -> None:
+def register_turn_codec(profile: str, factory: TurnCodecFactory, *, fallback: bool = False) -> None:
     """Provider modules register their host compatibility codec at startup."""
     if profile in _TURN_CODECS:
+        if fallback:
+            return
         raise ValueError(f"turn codec already registered: {profile}")
     _TURN_CODECS[profile] = factory
 
@@ -693,15 +695,6 @@ def _anthropic_turn_codec(request: TurnCodecRequest) -> TurnIO:
 register_turn_codec("anthropic.managed_agents", _anthropic_turn_codec)
 
 
-def _gemini_turn_codec(request: TurnCodecRequest) -> TurnIO:
-    from daimon.core.turn.gemini import compose_gemini_codec
-
-    return compose_gemini_codec(request)
-
-
-register_turn_codec("gemini.inline_reuse", _gemini_turn_codec)
-
-
 def turn_io(
     client: anthropic.AsyncAnthropic,
     session_id: str,
@@ -730,6 +723,11 @@ def turn_io(
         backend.capabilities().profile_id if backend is not None else "anthropic.managed_agents"
     )
     codec = _TURN_CODECS.get(selected_profile)
+    if codec is None:
+        from daimon.core.turn.runtimes import ensure_channel_runtime
+
+        if ensure_channel_runtime(selected_profile, ready=lambda: selected_profile in _TURN_CODECS):
+            codec = _TURN_CODECS.get(selected_profile)
     if codec is None:
         raise UnsupportedCapability(("host_turn_codec",), selected_profile)
     if backend_request is not None and (

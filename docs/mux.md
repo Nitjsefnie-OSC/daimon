@@ -2217,6 +2217,28 @@ and a recreated namesake does not inherit the old preference. Channel clear
 allows new threads to inherit that identity’s preference or the default;
 retained threads keep their original revision.
 
+
+### Installing provider runtimes
+
+Provider deployment registrars install their existing driver, codec and preparation
+callbacks through the channel runtime registry. The host selects the admitted profile's
+`daimon.turn_runtimes` package entry point only when that profile is needed.
+Registration constructs no SDK client and reads no credential. The default
+Anthropic path does not discover optional packages. An absent or ambiguous
+installation refuses the explicit profile instead of selecting another provider.
+
+An application-supplied runtime constructor does not replace installation of the
+host's preparation, backend or codec edge. The same selected registrar fills any
+missing edge, while provider fallback registrations preserve every explicit
+constructor, authorization reader and host callback. A missing required edge
+refuses preparation before the supplied runtime constructor runs.
+
+Resource consumers use the same registry's read-only deployment authorization
+callback and retain their existing tenant, account, channel, digest and workspace
+filters. The callback re-reads the operator's validated manifest; it constructs
+no turn runtime. Anthropic and unconfigured channel copies return through their
+existing path before this optional lookup.
+
 ### Replay fixture integrity
 
 Offline replay checks recorded scenario inputs, native request and response
