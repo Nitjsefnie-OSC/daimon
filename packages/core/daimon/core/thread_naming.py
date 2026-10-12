@@ -34,6 +34,7 @@ _GENERIC_TITLE_RE = re.compile(r"^(?:greeting|hello|hi|help request|chat with .*
 _GENERIC_TITLES = frozenset(
     {
         "chat",
+        "chat with",
         "conversation",
         "general chat",
         "general question",
@@ -137,8 +138,15 @@ def _cut_at_word(title: str) -> str:
 
 def is_generic_thread_name(title: str) -> bool:
     """True for a title like "Greeting", "Help request" or "Chat with Daimon" that names nothing."""
-    bare = title.strip(" .!?,:;\"'")
-    return bare.casefold() in _GENERIC_TITLES or _GENERIC_TITLE_RE.match(bare) is not None
+    # NEW9's pattern runs on the trimmed title as it would be shown: stripping
+    # punctuation first would turn "Chat with ..." into "Chat with" and miss it.
+    shown = title.strip()
+    bare = shown.strip(" .!?,:;\"'")
+    return (
+        bare.casefold() in _GENERIC_TITLES
+        or _GENERIC_TITLE_RE.match(shown) is not None
+        or _GENERIC_TITLE_RE.match(bare) is not None
+    )
 
 
 def fallback_thread_name(text: str, *, default: str) -> str:

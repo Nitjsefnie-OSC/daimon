@@ -156,6 +156,11 @@ def test_fallback_thread_name_passes_new9_for_its_opening_message() -> None:
         "Chat with Daimon",
         "chat with you",
         "CHAT WITH qa-haiku-canary-20261010",
+        "Chat with ...",
+        "Chat with ?",
+        "CHAT WITH !!!",
+        "chat with",
+        "Chat with:",
     ],
 )
 def test_is_generic_thread_name_flags_titles_that_name_nothing(title: str) -> None:
@@ -163,7 +168,18 @@ def test_is_generic_thread_name_flags_titles_that_name_nothing(title: str) -> No
 
 
 @pytest.mark.parametrize(
-    "title", ["Greeting", "Hello", "Hi", "Help request", "Chat with Daimon", "Chat with you"]
+    "title",
+    [
+        "Greeting",
+        "Hello",
+        "Hi",
+        "Help request",
+        "Chat with Daimon",
+        "Chat with you",
+        "Chat with ...",
+        "Chat with ?",
+        "CHAT WITH !!!",
+    ],
 )
 def test_is_generic_thread_name_covers_everything_new9_forbids(title: str) -> None:
     assert _NEW9_FORBIDDEN.match(title), "precondition: NEW9 rejects this title"

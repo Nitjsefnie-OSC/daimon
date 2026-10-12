@@ -139,7 +139,17 @@ async def test_generate_thread_name_falls_back_but_still_meters_when_model_answe
 
 
 @pytest.mark.parametrize(
-    "answer", ["Greeting", "Help request", "hi", "Chat with Daimon", "Chat with you"]
+    "answer",
+    [
+        "Greeting",
+        "Help request",
+        "hi",
+        "Chat with Daimon",
+        "Chat with you",
+        "Chat with ...",
+        "Chat with ?",
+        "CHAT WITH !!!",
+    ],
 )
 async def test_generate_thread_name_falls_back_but_still_meters_when_model_answers_generic(
     db_session: AsyncSession,
