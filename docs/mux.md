@@ -1975,3 +1975,12 @@ existing normalization. `yes please` still cancels the preview on every
 provider. Consequently the frozen NEW18 scenario remains FAIL; the offline
 canonical-yes workflow proof does not award a full chat/provider cell PASS.
 No SDK, operator credential or environment discovery is added by this route.
+
+The offline C14 regression in
+`packages/core/tests/turn/test_c14_anthropic_to_openai.py` exercises normal
+admission and preparation against owned Postgres with isolated SDK mock
+transports. After an explicit channel switch, the existing shared Anthropic
+thread retains its session and revision, while a new private thread runs
+OpenAI. An unavailable retained backend produces the typed
+`backend_unsupported` refusal before provider I/O, without changing either
+binding. This does not certify live provider behavior or OpenAI shared threads.
