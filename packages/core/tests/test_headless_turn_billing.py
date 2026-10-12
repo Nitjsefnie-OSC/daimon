@@ -13,6 +13,7 @@ import asyncio
 import itertools
 import time
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -120,6 +121,17 @@ def _turn(session: BetaManagedAgentsSession, tenant_id: uuid.UUID) -> Dispatched
     return DispatchedTurn(
         session=session, tenant_id=tenant_id, platform_user_id="user-1", turn_event_id=BOUNDARY
     )
+
+
+@pytest.fixture(autouse=True)
+async def _fresh_process_state() -> AsyncIterator[None]:
+    """Watchers, queued catch-ups and the 429 cooldown are per process."""
+    await headless_turn_billing.shutdown()
+    headless_turn_billing._last_catch_up.clear()  # pyright: ignore[reportPrivateUsage]
+    headless_turn_billing._unsettled.clear()  # pyright: ignore[reportPrivateUsage]
+    yield
+    await headless_turn_billing.shutdown()
+    await drain_outcomes()
 
 
 async def _no_sleep(_s: float) -> None:
@@ -867,3 +879,229 @@ async def test_watched_sessions_and_queued_catch_ups_are_capped(
     gate.set()
     await headless_turn_billing.shutdown()
     await drain_outcomes()
+
+
+# ---------------------------------------------------------------------------
+# Second review (#865): one shared 429 cooldown for every background path,
+# fallback retries, and a bound on the turns one watcher holds.
+# ---------------------------------------------------------------------------
+
+
+def _limited() -> httpx.Response:
+    return httpx.Response(
+        429,
+        headers={"retry-after": "42"},
+        json={"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}},
+    )
+
+
+async def test_a_rate_limited_terminal_pass_waits_out_retry_after(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, _ = _fake(session)
+    _finished_turn(state, "evt_a")
+    inner = make_fake_sessions_handler(state)
+    limited = [True]
+    throttled = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # The catch-up lists oldest first; the outcome walk newest first.
+        if limited[0] and request.url.params.get("order") == "asc":
+            throttled[0] += 1
+            return _limited()
+        return inner(request)
+
+    pauses: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        pauses.append(seconds)
+        limited[0] = False
+
+    await settle_turn(
+        anthropic=build_fake_anthropic(handler).with_options(max_retries=8),
+        sessionmaker=db_session_factory,
+        turn=_turn(session, tenant.id),
+        markup=MARKUP,
+        sleep=pause,
+    )
+
+    assert throttled[0] == 1, "no SDK retries under the background client"
+    assert pauses and pauses[0] >= 42, "the next pass waits for retry-after, not 5 s"
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}
+
+
+async def test_a_poll_during_the_cooldown_queues_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, _ = _fake(session)
+    _finished_turn(state, "evt_a")
+    inner = make_fake_sessions_handler(state)
+    throttled = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("order") == "asc":
+            throttled[0] += 1
+            return _limited()
+        return inner(request)
+
+    client = build_fake_anthropic(handler).with_options(max_retries=8)
+
+    def poll(at: float) -> bool:
+        return headless_turn_billing.catch_up_session(
+            anthropic=client,
+            sessionmaker=db_session_factory,
+            session=session,
+            tenant_id=tenant.id,
+            platform_user_id="user-1",
+            markup=MARKUP,
+            clock=lambda: at,
+        )
+
+    assert poll(1000.0)
+    await headless_turn_billing.drain()
+    assert not poll(1006.0), "an unsettled session's 5 s gap does not bypass the cooldown"
+    await headless_turn_billing.drain()
+    assert throttled[0] == 1
+
+
+async def test_a_new_turn_does_not_cut_a_status_cooldown_short(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id, status="running")
+    reads = [0]
+    first = asyncio.Event()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        reads[0] += 1
+        first.set()
+        return _limited()
+
+    client = build_fake_anthropic(handler).with_options(max_retries=8)
+
+    def dispatch(boundary: str) -> None:
+        headless_turn_billing.watch_turn(
+            anthropic=client,
+            sessionmaker=db_session_factory,
+            turn=DispatchedTurn(
+                session=session,
+                tenant_id=tenant.id,
+                platform_user_id="user-1",
+                turn_event_id=boundary,
+            ),
+            markup=MARKUP,
+        )
+
+    dispatch("evt_turn_a")
+    await asyncio.wait_for(first.wait(), 1)
+    await asyncio.sleep(0.02)
+    dispatch("evt_turn_b")
+    await asyncio.sleep(0.2)
+
+    assert reads[0] == 1, "the second dispatch wakes polling, not the cooldown"
+
+
+async def test_a_failed_fallback_pass_is_retried_in_the_background(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fast_retries: None,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, client = _fake(session)
+    _finished_turn(state, "evt_a")
+    actual = headless_turn_billing.reconcile_unbilled
+    attempts = [0]
+
+    async def fail_once(**kwargs: Any) -> Any:
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise SQLAlchemyError("transient")
+        return await actual(**kwargs)
+
+    monkeypatch.setattr(headless_turn_billing, "reconcile_unbilled", fail_once)
+    assert headless_turn_billing.catch_up_session(
+        anthropic=client,  # type: ignore[arg-type]
+        sessionmaker=db_session_factory,
+        session=session,
+        tenant_id=tenant.id,
+        platform_user_id="user-1",
+        markup=MARKUP,
+    )
+    await headless_turn_billing.drain()
+
+    assert attempts[0] == 2, "retried without another poll"
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}
+
+
+async def test_one_watcher_holds_a_bounded_number_of_turns(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    monkeypatch.setattr(headless_turn_billing, "MAX_PENDING_PER_SESSION", 2)
+    session = _session(tenant.id, status="running")
+    _, client = _fake(session)
+    observations: list[TurnObservation] = []
+    for i in range(3):
+        observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+        observations.append(observation)
+        headless_turn_billing.watch_turn(
+            anthropic=client,  # type: ignore[arg-type]
+            sessionmaker=db_session_factory,
+            turn=DispatchedTurn(
+                session=session,
+                tenant_id=tenant.id,
+                platform_user_id="user-1",
+                turn_event_id=f"evt_turn_{i}",
+            ),
+            markup=MARKUP,
+            observation=observation,
+        )
+
+    finished = [o._finished for o in observations]  # pyright: ignore[reportPrivateUsage]
+    assert finished == [True, False, False], "the oldest turn is written unknown"
+    await headless_turn_billing.shutdown()
+    await drain_outcomes()
+
+
+async def test_each_turn_expires_at_its_own_deadline(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A stream of new sends does not keep an old turn's outcome open forever."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id, status="running")
+    _, client = _fake(session)
+    now = [0.0]
+    watch = headless_turn_billing._Watch(  # pyright: ignore[reportPrivateUsage]
+        session=session, record=None, deadline=0.0
+    )
+    old = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    new = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    watch.add(headless_turn_billing._PendingTurn("evt_old", old, deadline=10.0))  # pyright: ignore[reportPrivateUsage]
+    watch.add(headless_turn_billing._PendingTurn("evt_new", new, deadline=100.0))  # pyright: ignore[reportPrivateUsage]
+    now[0] = 50.0
+    watch.expire(now[0])
+
+    assert list(watch.pending) == ["evt_new"]
+    assert old._finished and not new._finished  # pyright: ignore[reportPrivateUsage]
+    assert watch.deadline == 100.0
+    watch.finalize()
+    await drain_outcomes()
+    del client

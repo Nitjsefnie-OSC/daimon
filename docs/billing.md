@@ -145,13 +145,19 @@ turn-end catch-up instead.
   the oldest boundary it holds, at most 10 pages of 100 per walk.
 - **Bounded reads.** Every status and transcript read runs on a background
   client with no SDK retries, under a 20-second timeout that also ends at the
-  watcher's deadline (the 45-minute turn ceiling after the newest turn it
-  holds). A 429 stretches the next pause to its `retry-after` (at most
-  5 minutes). The watcher stops waiting at the deadline, after five failed
-  status reads in a row, or for a turn whose boundary three idle walks did
-  not reach; it then bills with whatever is listed, unless the session is
-  gone. At most 16 background reads and 4 catch-up passes run at once per
-  process.
+  watcher's deadline. Each turn has its own deadline, the 45-minute turn
+  ceiling after its dispatch, and a watcher holds at most 16 turns (past
+  that the oldest is written `unknown`). The watcher stops waiting for a turn
+  at its deadline, after five failed status reads in a row, or when three
+  idle walks did not reach its boundary; it then bills with whatever is
+  listed, unless the session is gone. At most 16 background reads and 4
+  catch-up passes run at once per process.
+- **Rate limits.** Any 429 from a background status read, transcript read or
+  catch-up pass starts one cooldown shared by the whole MCP process (all its
+  sessions use one Managed Agents workspace), lasting the response's
+  `retry-after` (30 seconds without one, at most 5 minutes). Until it ends no
+  watcher reads, no settlement pass is retried and no poll fallback is
+  queued; a newly dispatched turn does not cut it short.
 - **Settling.** Once its turns have ended the watcher runs catch-up passes
   until one finishes the listing: a pass that runs out of budget mid-listing
   is continued after 1 second, a failed pass is retried after 5 seconds,
@@ -169,7 +175,9 @@ turn-end catch-up instead.
   switched on) or a second pass finds every call already recorded.
 - **Poll fallback.** When `get_my_session` reads the session `idle` or
   `terminated` and no watcher for it is pending in this process, it queues up
-  to three catch-up passes in the background: at most one queue per session,
+  to three catch-up passes in the background (a failed pass is retried after
+  5 seconds, doubling; a rate-limited one waits for the next poll after the
+  cooldown): at most one queue per session,
   32 queued sessions per process, and once per 30 seconds per session (5
   seconds for a session whose last settlement did not finish). This covers a
   turn whose watcher was lost to a restart or gave up, provided the caller

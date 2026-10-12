@@ -15,9 +15,10 @@ share it), which never blocks the caller:
    `session.status_terminated` event listed after the turn's own
    `user.message` and before the next one (a bare `idle` right after a send
    may be the previous turn's state). Each upstream read runs under a
-   20-second timeout that also stops at the watcher's deadline (the turn
-   ceiling after the newest dispatch), on a background client with no SDK
-   retries; a 429 stretches the pause to its `retry-after`.
+   20-second timeout that also stops at the watcher's deadline (each turn's
+   own dispatch plus the turn ceiling), on a background client with no SDK
+   retries. A watcher holds at most 16 turns; past that the oldest is
+   written `unknown`.
 2. **Finish the outcomes.** A turn handed over by its dispatch is written
    with the reason it reached and its own model calls (those between its
    message and its first terminal event). A turn that cannot be resolved
@@ -32,11 +33,18 @@ share it), which never blocks the caller:
    with backoff from 5 s to 5 min), up to 10 passes. A session still not
    settled after that is marked unsettled for the poll fallback.
 
+**Rate limits.** Any 429 from a background read or pass starts one cooldown
+shared by the whole process (one Managed Agents workspace), from its
+`retry-after` (30 s without one, at most 5 min). No watcher reads, settlement
+pass or fallback pass starts before it ends; a newly dispatched turn does not
+cut it short, and a status poll during it queues nothing.
+
 `catch_up_session` is the poll-side fallback: a status read that sees the
 session idle or terminated runs up to three catch-up passes in the
-background, unless a watcher for the session is pending (it settles the
-session itself), a pass for it is already queued, or it was caught up in the
-last 30 s (5 s for a session whose last settlement did not finish).
+background (a failed pass retried after 5 s, doubling), unless a watcher for
+the session is pending (it settles the session itself), a pass for it is
+already queued, a 429 cooldown is running, or it was caught up in the last
+30 s (5 s for a session whose last settlement did not finish).
 
 Bounds per process: 256 watched sessions, 32 queued fallback catch-ups, 16
 concurrent background status/transcript reads, 4 concurrent catch-up passes.
@@ -50,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import math
 import time
 import uuid
 import weakref
@@ -121,6 +130,8 @@ CATCH_UP_INTERVAL_S = 30.0
 CATCH_UP_RETRY_S = 5.0
 CATCH_UP_MAX_PASSES = 3
 MAX_WATCHERS = 256
+# Turns one session's watcher holds; past it the oldest is written `unknown`.
+MAX_PENDING_PER_SESSION = 16
 MAX_CATCH_UPS = 32
 MAX_CONCURRENT_READS = 16
 MAX_CONCURRENT_PASSES = 4
@@ -149,6 +160,8 @@ class DispatchedTurn:
 class _PendingTurn:
     turn_event_id: str
     observation: TurnObservation | None
+    # This turn's own wait deadline: its dispatch plus the turn ceiling.
+    deadline: float
     unresolved_walks: int = 0
 
 
@@ -169,8 +182,37 @@ class _Watch:
                 turn.observation.finish(reason=reason)
         self.pending.clear()
 
+    def add(self, turn: _PendingTurn) -> None:
+        """Hold one more turn, writing the oldest as `unknown` past the per-session cap."""
+        self.pending[turn.turn_event_id] = turn
+        while len(self.pending) > MAX_PENDING_PER_SESSION:
+            oldest = self.pending.pop(next(iter(self.pending)))
+            log.warning(
+                "billing.headless_pending_full",
+                managed_session_id=self.session.id,
+                turn_event_id=oldest.turn_event_id,
+            )
+            if oldest.observation is not None:
+                oldest.observation.finish(reason=TerminationReason.UNKNOWN)
+        self.deadline = max(t.deadline for t in self.pending.values())
+
+    def expire(self, now: float) -> None:
+        """Write every turn past its own deadline as `unknown`."""
+        for turn in [t for t in self.pending.values() if t.deadline <= now]:
+            log.warning(
+                "billing.headless_wait_expired",
+                managed_session_id=self.session.id,
+                turn_event_id=turn.turn_event_id,
+            )
+            del self.pending[turn.turn_event_id]
+            if turn.observation is not None:
+                turn.observation.finish(reason=TerminationReason.UNKNOWN)
+
 
 _watches: dict[str, _Watch] = {}
+# Shared by every background read and pass in this process (one MA workspace):
+# no background request is sent before this `time.monotonic()` reading.
+_cooldown_until = 0.0
 _watch_tasks: dict[str, asyncio.Task[None]] = {}
 _catch_ups: dict[str, asyncio.Task[None]] = {}
 _last_catch_up: OrderedDict[str, float] = OrderedDict()
@@ -276,6 +318,9 @@ async def _reconcile(
                 managed_session_id=session_id,
                 record=record,
             )
+    except _anthropic.RateLimitError as err:
+        _note_rate_limit(err, session_id=session_id)
+        return None
     except _anthropic.NotFoundError:
         # A deleted session: nothing left to list, so nothing left to bill.
         log.info("billing.reconcile_skipped", managed_session_id=session_id)
@@ -291,6 +336,28 @@ async def _reconcile(
     except (_anthropic.APIError, SQLAlchemyError):
         log.exception("billing.reconcile_failed", managed_session_id=session_id)
     return None
+
+
+def _retry_after(err: _anthropic.APIStatusError) -> float | None:
+    raw = err.response.headers.get("retry-after")
+    try:
+        return float(raw) if raw is not None else None
+    except ValueError:
+        return None
+
+
+def _note_rate_limit(err: _anthropic.RateLimitError, *, session_id: str) -> None:
+    """Start (or extend) the shared background cooldown from a 429's `retry-after`."""
+    global _cooldown_until
+    wait = min(_retry_after(err) or POLL_MAX_S, RATE_LIMIT_MAX_PAUSE_S)
+    _cooldown_until = max(_cooldown_until, time.monotonic() + wait)
+    log.warning("billing.headless_rate_limited", managed_session_id=session_id, retry_after_s=wait)
+
+
+def _cooldown_left() -> float:
+    """Whole seconds until background requests may resume (0 when they may now)."""
+    left = _cooldown_until - time.monotonic()
+    return float(math.ceil(left)) if left > 0 else 0.0
 
 
 def _settled(result: ReconcileResult | None) -> bool:
@@ -455,14 +522,6 @@ async def _poll(
     return current
 
 
-def _retry_after(err: _anthropic.APIStatusError) -> float | None:
-    raw = err.response.headers.get("retry-after")
-    try:
-        return float(raw) if raw is not None else None
-    except ValueError:
-        return None
-
-
 async def _run(
     watch: _Watch,
     *,
@@ -470,20 +529,33 @@ async def _run(
     sessionmaker: async_sessionmaker[AsyncSession],
     clock: Callable[[], float],
     sleep: Callable[[float], Awaitable[None]] | None,
-    timeout_s: float,
 ) -> None:
     """Wait for the watch's turns, finish their outcomes, then bill until settled."""
     client = _background(anthropic)
     session_id = watch.session.id
 
-    async def pause(seconds: float) -> None:
+    async def pause(seconds: float, *, interruptible: bool = True) -> None:
         if sleep is not None:
             await sleep(seconds)
+            return
+        if not interruptible:
+            await asyncio.sleep(seconds)
             return
         # A turn dispatched meanwhile cuts the pause short.
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(seconds):
                 await watch.wake.wait()
+
+    honored = 0.0
+
+    async def cool_down() -> None:
+        """Sit out a background 429 cooldown; a new turn does not cut it short."""
+        nonlocal honored
+        if _cooldown_until > honored:
+            left = _cooldown_left()
+            honored = _cooldown_until
+            if left > 0:
+                await pause(left, interruptible=False)
 
     poll_delay = POLL_INITIAL_S
     failures = 0
@@ -491,11 +563,14 @@ async def _run(
     passes = 0
     retry_delay = SETTLE_RETRY_INITIAL_S
     while True:
+        await cool_down()
         if watch.wake.is_set():
             watch.wake.clear()
             poll_delay = POLL_INITIAL_S
         if watch.pending:
-            unbilled = True
+            unbilled = True  # even a turn that expires below has calls to bill
+        watch.expire(clock())
+        if watch.pending:
             delay = poll_delay
             try:
                 await _poll(watch, client, clock)
@@ -508,7 +583,8 @@ async def _run(
                 watch.finalize()
                 unbilled = False
             except _anthropic.RateLimitError as err:
-                delay = min(max(delay, _retry_after(err) or POLL_MAX_S), RATE_LIMIT_MAX_PAUSE_S)
+                _note_rate_limit(err, session_id=session_id)
+                continue  # the loop's top sits out the cooldown
             except (_anthropic.APIError, TimeoutError):
                 failures += 1
                 if failures >= MAX_READ_FAILURES:
@@ -531,6 +607,8 @@ async def _run(
                 _mark_unsettled(session_id)
                 unbilled = False
             else:
+                if _cooldown_until > honored:
+                    continue  # rate limited: the loop's top sits out the cooldown
                 if result is None:
                     await pause(retry_delay)
                     retry_delay = min(retry_delay * 2, SETTLE_RETRY_MAX_S)
@@ -541,7 +619,6 @@ async def _run(
         if not watch.pending:
             return
         # A turn was dispatched on the session while it was being billed.
-        watch.deadline = max(watch.deadline, clock() + timeout_s)
 
 
 async def settle_turn(
@@ -560,6 +637,7 @@ async def settle_turn(
     Bills even when the wait gave up (the session gone excepted): passes debit
     whatever is listed by then and resume from their durable progress.
     """
+    deadline = clock() + timeout_s
     watch = _Watch(
         session=turn.session,
         record=headless_recorder(
@@ -569,9 +647,9 @@ async def settle_turn(
             platform_user_id=turn.platform_user_id,
             markup=markup,
         ),
-        deadline=clock() + timeout_s,
+        deadline=deadline,
     )
-    watch.pending[turn.turn_event_id] = _PendingTurn(turn.turn_event_id, observation)
+    watch.add(_PendingTurn(turn.turn_event_id, observation, deadline=deadline))
     try:
         await _run(
             watch,
@@ -579,7 +657,6 @@ async def settle_turn(
             sessionmaker=sessionmaker,
             clock=clock,
             sleep=sleep,
-            timeout_s=timeout_s,
         )
     finally:
         watch.finalize()
@@ -609,12 +686,11 @@ def watch_turn(
         platform_user_id=turn.platform_user_id,
         markup=markup,
     )
-    pending = _PendingTurn(turn.turn_event_id, observation)
+    pending = _PendingTurn(turn.turn_event_id, observation, deadline=clock() + TURN_CEILING_S)
     existing = _watches.get(session_id)
     if existing is not None:
-        existing.pending[turn.turn_event_id] = pending
+        existing.add(pending)
         existing.record = record
-        existing.deadline = max(existing.deadline, clock() + TURN_CEILING_S)
         existing.wake.set()
         return
     if len(_watches) >= MAX_WATCHERS:
@@ -623,8 +699,8 @@ def watch_turn(
             observation.finish(reason=TerminationReason.UNKNOWN)
         _mark_unsettled(session_id)
         return
-    watch = _Watch(session=turn.session, record=record, deadline=clock() + TURN_CEILING_S)
-    watch.pending[turn.turn_event_id] = pending
+    watch = _Watch(session=turn.session, record=record, deadline=pending.deadline)
+    watch.add(pending)
     _watches[session_id] = watch
 
     async def run() -> None:
@@ -635,7 +711,6 @@ def watch_turn(
                 sessionmaker=sessionmaker,
                 clock=clock,
                 sleep=None,
-                timeout_s=TURN_CEILING_S,
             )
         except Exception:
             # The task boundary: billing in the background must never take the
@@ -682,6 +757,8 @@ def catch_up_session(
         return False
     if session_id in _watches or session_id in _catch_ups or len(_catch_ups) >= MAX_CATCH_UPS:
         return False
+    if _cooldown_left() > 0:
+        return False  # a background 429 cooldown is running
     now = clock()
     last = _last_catch_up.get(session_id)
     gap = CATCH_UP_RETRY_S if session_id in _unsettled else CATCH_UP_INTERVAL_S
@@ -701,13 +778,21 @@ def catch_up_session(
 
     async def run() -> None:
         try:
+            delay = SETTLE_RETRY_INITIAL_S
             for _ in range(CATCH_UP_MAX_PASSES):
                 result = await _reconcile(anthropic, sessionmaker, session_id, record)
                 if _settled(result):
                     _unsettled.pop(session_id, None)
                     return
+                if _cooldown_left() > 0:
+                    break  # rate limited: the next poll after the cooldown retries
                 if result is None:
-                    break
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, SETTLE_RETRY_MAX_S)
+                else:
+                    await asyncio.sleep(SETTLE_CONTINUE_S)
+                if _cooldown_left() > 0:
+                    break  # another background read was rate limited meanwhile
             _mark_unsettled(session_id)
         except Exception:
             log.exception("billing.headless_catch_up_failed", managed_session_id=session_id)
@@ -743,6 +828,7 @@ async def shutdown() -> None:
     cancelled before it started); its calls are billed by the next catch-up
     on the session.
     """
+    global _cooldown_until
     tasks = _all_tasks()
     for task in tasks:
         task.cancel()
@@ -750,3 +836,4 @@ async def shutdown() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
     for watch in list(_watches.values()):
         watch.finalize()
+    _cooldown_until = 0.0
