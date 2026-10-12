@@ -359,3 +359,55 @@ def provider_cost_of(
         return (incoming + Decimal(usage.output_tokens or 0) * price.output) / Decimal(
             1_000_000
         ) + infrastructure_usd
+
+
+def list_price_preview(model: str, rates: ModelRates | ProviderPrice | None) -> str:
+    """Describe supplied list rates without promising an invoice ceiling.
+
+    The profile/service resolves the actual model and existing tariff. Native
+    rates describe the supplied request tier only; no prices are discovered or
+    synthesized here. A context/output limit alone cannot bound a whole turn.
+    """
+    bound = "Worst-case per turn: unknown; request count, tools and hosted runtime are not bounded."
+    exclusions = "Excludes billing markup, hosted runtime, external tools and cache storage."
+    if rates is None:
+        return f"{model}: list price unknown. {bound} {exclusions}"
+    if isinstance(rates, ProviderPrice):
+        if rates.model != model:
+            raise ValueError("preview model and supplied pricing identity differ")
+        if not rates.verified:
+            return (
+                f"{model}: list price unverified (checked {rates.checked_on}). {bound} {exclusions}"
+            )
+        quoted = _list_rate_text(rates)
+        label = f"list price (USD/1M tokens; checked {rates.checked_on}; supplied request tier)"
+    else:
+        quoted = _list_rate_text(rates)
+        label = f"list price (USD/1M tokens; checked {AGENT_PRICING_CHECKED_ON})"
+        if rates.long_context is not None:
+            quoted = (
+                f"prompt <= {LONG_CONTEXT_PROMPT_TOKENS:,}: {quoted}; "
+                f"prompt > {LONG_CONTEXT_PROMPT_TOKENS:,}: {_list_rate_text(rates.long_context)}"
+            )
+        quoted += "; cache-write is the 5-minute rate"
+    return f"{model}: {label}: {quoted}. {bound} {exclusions}"
+
+
+def _list_rate_text(rates: ModelRates | ProviderPrice) -> str:
+    def amount(value: float | Decimal | None) -> str:
+        if value is None:
+            return "inapplicable"
+        number = Decimal(str(value))
+        if not number.is_finite() or number < 0:
+            raise ValueError("preview rates must be finite and nonnegative")
+        # Fixed-point formatting preserves list-price precision independently of
+        # the caller's Decimal context; format_cost rounds actual display costs.
+        rendered = format(number, "f")
+        if "." in rendered:
+            rendered = rendered.rstrip("0").rstrip(".")
+        return f"${rendered}"
+
+    return (
+        f"input {amount(rates.input)}, output {amount(rates.output)}, "
+        f"cache-read {amount(rates.cache_read)}, cache-write {amount(rates.cache_write)}"
+    )
