@@ -1,5 +1,9 @@
 # Recorded transcript judge
 
+The [fleet staging QA packet](SECTION-I-STAGING-QA.md) prepares section I7's
+three-backend task, cross-review and Discord summary. It is offline inventory
+only; execution needs a separate staging GO and signed budget envelopes.
+
 This is a manual quality check, reported separately from C01–C18 conformance.
 `tasks.json` pins 12 task prompts, expected goals and critical dimensions;
 `rubric.json` pins five 0–2 score dimensions. Grades must cite existing recorded
