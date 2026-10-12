@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add read-only attribution of distinct host-worker usage and conservative token floors, preserving original debit identities and explicit pending revisions.
 - Preserve complete root place and category authority when deriving fleet workers, and refuse unknown hosted-network defaults without guessing provider permissions.
+- Share backend preview capability checks with worker derivation, preserve root stamps through metadata patches, and return typed refusals for invalid worker backend selections.
 
 - Add root-bound fleet worker authorization and a single spec attenuation resolver, with scoped transactional audit and explicit refusal of unproven native controls. Fleet execution remains unavailable until its host admission and driver bindings are installed.
 

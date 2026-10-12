@@ -47,6 +47,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_upload
 from daimon.core.skills.service import AddedSkill, StoredSkillUpload, UploadedSkill, add_skill
 from daimon.core.stores import security_audit
+from daimon.core.stores.domain import CompatibilityItem
 from daimon.core.stores.neutral_catalog import (
     AgentRevision,
     CatalogConflict,
@@ -69,7 +70,7 @@ from mux.contracts.resources import (
     SkillUploadFile,
     ToolSpec,
 )
-from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.errors import InvalidConfig, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile, native_agent_tools, neutral_catalog_profile_for
 from pydantic import Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -874,7 +875,7 @@ def resolve_worker_spec(
     Preparation must repeat against fresh host facts and apply the derived port
     and tool grants; a persisted digest is an idempotency key, never authority.
     """
-    from daimon.core.channel_backend import check_backend
+    from daimon.core.channel_backend import check_backend, compatibility_missing
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
     fleet = parent.fleet
@@ -930,14 +931,22 @@ def resolve_worker_spec(
         if overrides.extensions:
             raise WorkerSpecRefused("extensions", "unsupported")
         data.update(overrides.model_dump(mode="json", exclude_unset=True))
+        if "metadata" in overrides.model_fields_set and overrides.metadata is not None:
+            metadata = dict(source.metadata or {})
+            for key, value in overrides.metadata.items():
+                if value is None:
+                    metadata.pop(key, None)
+                else:
+                    metadata[key] = value
+            data["metadata"] = metadata
     try:
         resolved = AgentSpec.model_validate(data)
     except ValueError:
         raise WorkerSpecRefused("spec", "unsupported") from None
-    if any(
-        (parent.spec.metadata or {}).get(key) != value
-        for key, value in (resolved.metadata or {}).items()
-    ):
+    # All root stamps remain immutable; omitted clone keys preserve, null
+    # values delete source-only keys, and an explicit map clear cannot erase
+    # the root's ownership or guidance metadata.
+    if dict(resolved.metadata or {}) != dict(parent.spec.metadata or {}):
         raise WorkerSpecRefused("scope", "not_subset")
     worker_run = authorize(
         policy,
@@ -963,7 +972,7 @@ def resolve_worker_spec(
         raise WorkerSpecRefused("backend", "ambiguous")
     try:
         selected = resolve_default(backend) if backend is not None else choices[0]
-    except ValueError:
+    except (ValueError, InvalidConfig):
         raise WorkerSpecRefused("backend", "unsupported") from None
     if selected not in parent.backend_grants:
         raise WorkerSpecRefused("backend", "not_subset")
@@ -982,6 +991,31 @@ def resolve_worker_spec(
     except DaimonError:
         raise WorkerSpecRefused("backend", "unsupported") from None
     profile = get_profile(selected.profile)
+    for pin in resolved.skills or ():
+        if compatibility_missing(
+            CompatibilityItem(
+                name=pin.id,
+                requires=("skills_bundle",),
+                providers=(parent.spec.model.provider,),
+            ),
+            selected.backend,
+            profile,
+        ):
+            raise WorkerSpecRefused("skills", "unsupported")
+    for connection in resolved.mcp_servers or ():
+        if compatibility_missing(
+            CompatibilityItem(
+                name=connection.name,
+                requires=(
+                    "tool_loop",
+                    "required_actions",
+                    *(("vaults",) if connection.credential_ref else ()),
+                ),
+            ),
+            selected.backend,
+            profile,
+        ):
+            raise WorkerSpecRefused("mcp", "unsupported")
     if profile.implicit_execution and not any(
         tool.kind == "builtin" and tool.name == profile.execution_tool
         for tool in resolved.tools or ()

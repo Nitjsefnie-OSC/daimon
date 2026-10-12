@@ -2310,6 +2310,19 @@ server and the profile-declared finite tool policy keys; a native compiler that
 drops those keys cannot admit the connection. An implicit execution tool still counts toward
 authority when omitted from the requested tool list.
 
+Worker skills and MCP use the same provider and capability predicate as the
+backend compatibility preview. Native skill pins stay on their proved source
+provider; equal names or IDs do not prove cross-provider portability. Unknown
+or unsupported selected-profile capabilities refuse before derivation returns.
+Credential-backed MCP also requires the preview's declared vault capability;
+a native compiler alone does not establish that profile contract.
+
+Clone metadata uses patch semantics: omitted keys stay, an empty patch changes
+nothing, and null values remove individual source-only keys. An explicit null
+map clears metadata only when the root has no stamps. All root metadata is an
+immutable ceiling for fresh specs and clones: removing or changing a root stamp,
+or adding an ungranted stamp, refuses. The clone source is never mutated.
+
 This is an admission primitive, not a launch operation. The host must
 preflight the resolved configuration through the existing native compiler
 before allocation; known generic controls can still be unsupported natively.

@@ -613,7 +613,7 @@ async def test_openai_attenuated_mcp_allowlist_reaches_actual_sdk_request():
     assert body["instructions"] == root.base_system
 
 
-def test_gemini_attenuated_allowlist_is_preserved_by_native_compiler():
+def test_gemini_native_allowlist_compiles_but_profile_refuses_worker_credentials():
     from mux.drivers.gemini.core import compile_agent
 
     root = parent("gemini")
@@ -625,8 +625,10 @@ def test_gemini_attenuated_allowlist_is_preserved_by_native_compiler():
     )
     root = replace(root, spec=root.spec.model_copy(update={"mcp_servers": (server,)}))
     narrow = server.model_copy(update={"tool_policy": {"allowed_tools": ["read"]}})
-    result = resolve(root, root.spec.model_copy(update={"tools": (), "mcp_servers": (narrow,)}))
-    assert compile_agent(result.spec, authenticated_mcp=True)["tools"] == [
+    requested = root.spec.model_copy(update={"tools": (), "mcp_servers": (narrow,)})
+    with pytest.raises(WorkerSpecRefused, match="mcp: unsupported"):
+        resolve(root, requested)
+    assert compile_agent(requested, authenticated_mcp=True)["tools"] == [
         {
             "type": "mcp_server",
             "name": "server",
@@ -634,6 +636,154 @@ def test_gemini_attenuated_allowlist_is_preserved_by_native_compiler():
             "allowed_tools": [{"mode": "auto", "tools": ["read"]}],
         }
     ]
+
+
+def test_inherited_native_skill_cannot_cross_backend_without_provider_proof():
+    root = parent()
+    target = parent("gemini")
+    pin = SkillRef(id="skill_anthropic_custom", source="custom", version="3")
+    root = replace(
+        root,
+        spec=root.spec.model_copy(update={"skills": (pin,)}),
+        backend_grants=(*root.backend_grants, *target.backend_grants),
+        models=(*root.models, *target.models),
+    )
+    assert resolve(root).spec.skills == (pin,)
+    with pytest.raises(WorkerSpecRefused, match="skills: unsupported"):
+        resolve(root, root.spec.model_copy(update={"model": target.spec.model}))
+
+
+@pytest.mark.parametrize("capability", ("skills_bundle", "tool_loop", "required_actions", "vaults"))
+@pytest.mark.parametrize("support", ("unsupported", "unknown"))
+def test_worker_and_preview_share_selected_profile_capability_refusals(
+    monkeypatch, capability, support
+):
+    from daimon.core.channel_backend import compatibility_preview
+    from daimon.core.stores.domain import BackendAgent, CompatibilityItem, TenantBackendPolicy
+    from mux import profiles
+
+    root = parent("openai")
+    profile = get_profile(root.backend_grants[0].profile)
+    limited = profile.model_copy(
+        update={"core": False, "support": {**profile.support, capability: support}}
+    )
+    monkeypatch.setattr(profiles, "PROFILES", {**profiles.PROFILES, profile.profile_id: limited})
+    if capability == "skills_bundle":
+        pin = SkillRef(id="attached", source="custom", version="1")
+        root = replace(root, spec=root.spec.model_copy(update={"skills": (pin,)}))
+        facts = {"skills": (CompatibilityItem(name=pin.id, requires=("skills_bundle",)),)}
+        field = "skills"
+    else:
+        connection = MCPConnection(
+            name="server",
+            url="https://server.invalid",
+            credential_ref="ref",
+            tool_policy={"allowed_tools": ["read"], "required": True},
+        )
+        root = replace(root, spec=root.spec.model_copy(update={"mcp_servers": (connection,)}))
+        facts = {
+            "mcps": (
+                CompatibilityItem(
+                    name="server", requires=("tool_loop", "required_actions", "vaults")
+                ),
+            )
+        }
+        field = "mcp"
+    agent = BackendAgent(
+        tenant_id=UUID(root.fleet.scope.tenant_id),
+        agent_id=uuid4(),
+        name="root",
+        configuration_digest="actual",
+        **facts,
+    )
+    preview = compatibility_preview(
+        agent,
+        "openai",
+        TenantBackendPolicy(
+            tenant_id=agent.tenant_id, revision="policy", enabled_backends=("openai",)
+        ),
+    )
+    assert preview.unsupported_skills if field == "skills" else preview.unsupported_mcps
+    with pytest.raises(WorkerSpecRefused, match=f"{field}: unsupported"):
+        resolve(root)
+
+
+def test_invalid_backend_override_is_a_typed_secret_free_refusal():
+    root = parent("openai")
+    with pytest.raises(WorkerSpecRefused, match="backend: unsupported") as caught:
+        resolve(root, backend=BackendConfig(backend="openai"))
+    assert caught.value.field == "backend" and caught.value.reason == "unsupported"
+
+
+@pytest.mark.parametrize("metadata", ({}, {"source_only": None}))
+def test_clone_metadata_patch_preserves_unmentioned_root_stamps(metadata):
+    root = parent()
+    stamps = {"daimon_isolated": "true", "daimon_tenant": root.fleet.scope.tenant_id}
+    root = replace(root, spec=root.spec.model_copy(update={"metadata": stamps}))
+    ref = ResourceRef(
+        id="source",
+        kind="agent",
+        provider=root.spec.model.provider,
+        account_scope_id="workspace",
+        tenant_id=root.fleet.scope.tenant_id,
+        account_id=root.fleet.scope.account_id,
+    )
+    source_map = stamps if not metadata else {**stamps, "source_only": "remove-me"}
+    source = Agent(
+        ref=ref,
+        revision=Revision(local=1),
+        created_at=NOW,
+        spec=root.spec.model_copy(update={"metadata": source_map}),
+    )
+    root = replace(root, source_agents=(ref,), source_revisions=((ref, source.revision),))
+    result = resolve(root, source, overrides=AgentPatch(metadata=metadata))
+    assert dict(result.spec.metadata) == stamps
+    assert dict(source.spec.metadata) == source_map
+
+
+@pytest.mark.parametrize(
+    "metadata", (None, {"daimon_isolated": None}, {"daimon_isolated": "false"})
+)
+def test_clone_metadata_cannot_clear_delete_or_change_root_stamps(metadata):
+    root = parent()
+    root = replace(
+        root, spec=root.spec.model_copy(update={"metadata": {"daimon_isolated": "true"}})
+    )
+    ref = ResourceRef(
+        id="source",
+        kind="agent",
+        provider=root.spec.model.provider,
+        account_scope_id="workspace",
+        tenant_id=root.fleet.scope.tenant_id,
+        account_id=root.fleet.scope.account_id,
+    )
+    source = Agent(ref=ref, revision=Revision(local=1), spec=root.spec, created_at=NOW)
+    root = replace(root, source_agents=(ref,), source_revisions=((ref, source.revision),))
+    with pytest.raises(WorkerSpecRefused, match="scope: not_subset"):
+        resolve(root, source, overrides=AgentPatch(metadata=metadata))
+    with pytest.raises(WorkerSpecRefused, match="scope: not_subset"):
+        resolve(root, root.spec.model_copy(update={"metadata": None}))
+
+
+def test_clone_metadata_map_clear_is_allowed_when_root_has_no_stamps():
+    root = parent()
+    ref = ResourceRef(
+        id="source",
+        kind="agent",
+        provider=root.spec.model.provider,
+        account_scope_id="workspace",
+        tenant_id=root.fleet.scope.tenant_id,
+        account_id=root.fleet.scope.account_id,
+    )
+    source = Agent(
+        ref=ref,
+        revision=Revision(local=1),
+        created_at=NOW,
+        spec=root.spec.model_copy(update={"metadata": {"source_only": "value"}}),
+    )
+    root = replace(root, source_agents=(ref,), source_revisions=((ref, source.revision),))
+    assert resolve(root, source, overrides=AgentPatch(metadata=None)).spec.metadata is None
+    assert dict(source.spec.metadata) == {"source_only": "value"}
 
 
 async def test_actual_anthropic_clone_refuses_opaque_authority_without_extra_io():
