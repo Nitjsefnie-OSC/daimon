@@ -1904,8 +1904,12 @@ and reads memories; deciding what to do with them is left to the operator.
 `forget-mine` shows what would be deleted and a six-character code, and
 `forget-mine <code>` deletes every memory in that store. The store is always the one of
 the person who typed the command, resolved from their own account; no argument names
-an account. The code is a hash of the store and its current paths, so it only deletes
-what the person was shown, and a store that changed since needs a new code. Deleted
+an account. The code is a hash of the store and each memory's id, path and content
+hash, so a store that changed since the preview needs a new code. The confirmation lists
+the store once, checks the code against that listing and deletes only the memories in it,
+each with its listed content hash as the API's `expected_content_sha256` precondition. A
+memory written or rewritten in between (by a live conversation) is kept, and the reply
+says how many were kept. Deleted
 memories keep their MA version history for MA's retention period (30 days); account
 deletion deletes the whole store.
 

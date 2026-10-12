@@ -93,9 +93,12 @@ def redact_path(path: str) -> str:
         stem, dot, ext = segment.rpartition(".")
         name = stem if dot else segment
         kept = name if _PERSONAL_PATH.fullmatch(name) or name.lower() in _GENERIC else "<redacted>"
-        parts.append(kept + (f".{ext}" if dot and len(ext) <= 5 else ""))
+        parts.append(kept + (f".{ext}" if dot and ext.lower() in _SAFE_EXTENSIONS else ""))
     return "/" + "/".join(parts)
 
+
+# Only conventional extensions survive; any other suffix may be a name or mention.
+_SAFE_EXTENSIONS = {"md", "txt", "json", "yaml", "yml", "csv", "toml", "html", "py"}
 
 _GENERIC = {
     "notes", "prefs", "preferences", "people", "users", "user", "members", "team",

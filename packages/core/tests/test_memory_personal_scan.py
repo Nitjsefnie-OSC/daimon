@@ -50,6 +50,8 @@ def test_redaction_leaves_no_raw_content() -> None:
     assert "prefers" in redacted and "<mention>" in redacted
     assert "[" not in redacted, "no Rich markup brackets"
     assert redact_path("/users/alice-smith.md") == "/users/<redacted>.md"
+    assert redact_path("/users/profile.alice") == "/users/profile"
+    assert redact_path("/users/name.@bob") == "/users/<redacted>"
 
 
 async def test_scan_counts_and_redacts_and_only_reads() -> None:

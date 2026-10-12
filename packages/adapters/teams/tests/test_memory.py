@@ -190,7 +190,7 @@ async def _seed_personal(
 async def test_memory_mine_shows_and_clears_only_the_senders_own_after_confirming(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    from daimon.core.memory_view import forget_code
+    from daimon.core.memory_view import current_forget_code
 
     from .conftest import AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID
 
@@ -204,7 +204,7 @@ async def test_memory_mine_shows_and_clears_only_the_senders_own_after_confirmin
         aad_object_id=OTHER_AAD_OBJECT_ID,
         files={"/secret-pref.md": "someone else's"},
     )
-    code = forget_code(mine, ["/style.md"])
+    code = await current_forget_code(anthropic, mine)
     texts = ["memory mine", "memory forget-mine", f"memory forget-mine {code}", "memory"]
     listing, asked, done, shared = await _replies(
         db_session_factory, teams_api_fake, anthropic, texts

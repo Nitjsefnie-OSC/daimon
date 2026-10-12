@@ -10,8 +10,10 @@ Command grammar, the same on Discord, Slack and Teams (`parse_memory_args`):
 - `memory` / `memory <path>`: the shared store, as before.
 - `memory mine` / `memory mine <path>`: the caller's personal store.
 - `memory forget-mine`: shows what would be deleted and a confirmation code.
-- `memory forget-mine <code>`: deletes it, only when the code still matches
-  the store's current contents, so a stale or guessed code deletes nothing.
+- `memory forget-mine <code>`: deletes exactly the memories that were shown,
+  only when the code still matches the store as listed (ids, paths and
+  content hashes), so a stale or guessed code deletes nothing, and a memory
+  written or changed meanwhile is kept and reported.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
+import anthropic as anthropic_errors
 from anthropic import AsyncAnthropic
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -199,15 +202,41 @@ def is_strict_memory_args(text: str) -> bool:
     return False
 
 
-def forget_code(store_id: str, paths: list[str]) -> str:
-    """A short code naming exactly these contents of this store.
+@dataclass(frozen=True, slots=True)
+class MemoryRecord:
+    """One memory as listed: what a forget confirmation is bound to."""
 
-    Stateless: the same contents give the same code, and any change (a new
-    memory written meanwhile) gives another, so a confirmation only ever
-    deletes what the person was shown.
+    id: str
+    path: str
+    content_sha256: str
+
+
+async def list_memory_records(anthropic: AsyncAnthropic, store_id: str) -> list[MemoryRecord]:
+    """Every memory in the store, sorted by path, with its id and content hash."""
+    page = await anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
+    records = [
+        MemoryRecord(id=item.id, path=item.path, content_sha256=item.content_sha256)
+        async for item in page
+        if item.type == "memory"
+    ]
+    return sorted(records, key=lambda record: record.path)
+
+
+def forget_code(store_id: str, records: list[MemoryRecord]) -> str:
+    """A short code naming exactly these memories of this store, as they are now.
+
+    Bound to each memory's id, path and content hash, so a memory written,
+    renamed or changed after the preview gives another code. Stateless: the
+    same contents give the same code.
     """
-    digest = hashlib.sha256("\n".join([store_id, *sorted(paths)]).encode()).hexdigest()
+    lines = sorted(f"{r.id}\t{r.path}\t{r.content_sha256}" for r in records)
+    digest = hashlib.sha256("\n".join([store_id, *lines]).encode()).hexdigest()
     return digest[:6]
+
+
+async def current_forget_code(anthropic: AsyncAnthropic, store_id: str) -> str:
+    """The code `forget-mine` would show for the store right now."""
+    return forget_code(store_id, await list_memory_records(anthropic, store_id))
 
 
 def _files(count: int) -> str:
@@ -240,7 +269,10 @@ async def personal_memory_reply(
     empty = PersonalMemoryReply(f"You have no personal memory with {agent_name}.")
     if store_id is None:
         return empty
-    paths = await list_memory_paths(anthropic, store_id)
+    # Listed once: a forget confirmation is checked against, and deletes only,
+    # exactly this snapshot.
+    records = await list_memory_records(anthropic, store_id)
+    paths = [record.path for record in records]
     if request.kind == "mine_list":
         if not paths:
             return empty
@@ -258,7 +290,7 @@ async def personal_memory_reply(
                 hint=f"{command} {MINE} lists them.",
             )
         return PersonalMemoryReply(path, content=content)
-    code = forget_code(store_id, paths)
+    code = forget_code(store_id, records)
     if not paths:
         return empty
     if request.kind == "forget_ask":
@@ -275,19 +307,42 @@ async def personal_memory_reply(
             "Nothing was deleted: that code doesn't match your personal memory as it is now.",
             hint=f"Run {command} {FORGET_MINE} to get a new code.",
         )
-    deleted = await clear_memory_store(anthropic, store_id)
-    return PersonalMemoryReply(
-        f"Deleted {_files(deleted)} from your personal memory with {agent_name}."
-    )
+    deleted = await delete_memory_records(anthropic, store_id, records)
+    kept = len(await list_memory_records(anthropic, store_id))
+    title = f"Deleted {_files(deleted)} from your personal memory with {agent_name}."
+    if kept:
+        title += (
+            f" Kept {_files(kept)} written or changed since you were shown the list; "
+            f"run {command} {FORGET_MINE} again to clear them too."
+        )
+    return PersonalMemoryReply(title)
 
 
-async def clear_memory_store(anthropic: AsyncAnthropic, store_id: str) -> int:
-    """Delete every memory in `store_id`; the store and its binding stay. Returns the count."""
-    page = await anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
-    ids = [item.id async for item in page if item.type == "memory"]
-    for memory_id in ids:
-        await anthropic.beta.memory_stores.memories.delete(memory_id, memory_store_id=store_id)
-    return len(ids)
+async def delete_memory_records(
+    anthropic: AsyncAnthropic, store_id: str, records: list[MemoryRecord]
+) -> int:
+    """Delete exactly `records`, each only while its content is still what was listed.
+
+    Never lists again: a memory written after `records` were listed is not in
+    them and stays. One whose content changed since fails the API's
+    `expected_content_sha256` precondition and stays too. The store and its
+    binding stay. Returns how many were deleted.
+    """
+    deleted = 0
+    for record in records:
+        try:
+            await anthropic.beta.memory_stores.memories.delete(
+                record.id,
+                memory_store_id=store_id,
+                expected_content_sha256=record.content_sha256,
+            )
+        except anthropic_errors.APIStatusError as error:
+            # 404: already gone. 409/412: changed since the preview, so kept.
+            if error.status_code not in (404, 409, 412):
+                raise
+            continue
+        deleted += 1
+    return deleted
 
 
 async def list_memory_paths(anthropic: AsyncAnthropic, store_id: str) -> list[str]:

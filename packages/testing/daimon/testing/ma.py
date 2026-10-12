@@ -831,6 +831,16 @@ def make_fake_memory_store_handler(
         m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/memories/(?P<mid>[^/]+)", path)
         if m and method == "DELETE":
             sid, mid = m.group("sid"), m.group("mid")
+            expected = request.url.params.get("expected_content_sha256")
+            current = next((x for x in st.memories.get(sid, []) if x["id"] == mid), None)
+            if (
+                expected is not None
+                and current is not None
+                and current.get("content_sha256") != expected
+            ):
+                return httpx.Response(
+                    409, json={"type": "error", "error": {"type": "conflict_error"}}
+                )
             kept = [x for x in st.memories.get(sid, []) if x["id"] != mid]
             if len(kept) == len(st.memories.get(sid, [])):
                 return not_found_response("no such memory")
