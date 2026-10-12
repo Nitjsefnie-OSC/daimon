@@ -97,7 +97,13 @@ async def test_created_code_is_printed_once_and_redeemable(
 
     tenant = await make_tenant(db_session)
     result = await redeem_promo_code(
-        db_session_factory, tenant_id=tenant.id, account_id=None, code=code, now=datetime.now(UTC)
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=None,
+        code=code,
+        now=datetime.now(UTC),
+        channel=None,
+        is_admin=True,
     )
     assert isinstance(result, PromoRedeemed) and result.promo_code_id == code_id, (
         "the printed code should redeem"

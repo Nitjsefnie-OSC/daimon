@@ -27,7 +27,7 @@ from daimon.adapters.slack.billing_panel.views import build_billing_view, slack_
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.billing_panel import load_billing_snapshot, month_start
+from daimon.core.billing_panel import load_billing_snapshot, month_start, redeemed_text
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
@@ -105,29 +105,12 @@ def redeem_result_text(result: PromoRedeemResult) -> str:
     """What a redemption did, in Slack mrkdwn. Pure."""
     if isinstance(result, PromoRedeemRefused):
         return describe_refusal(result.reason)
-    amount = f"*${result.amount_usd:,.2f}*"
-    if result.channel_id is not None:
-        if result.channel_limit_usd is not None:
-            return (
-                f"🎟️ Added {amount} to <#{result.channel_id}>'s budget.\n\n"
-                f"Its limit is now *${result.channel_limit_usd:,.2f}*."
-            )
-        return (
-            f"🎟️ Added {amount} of credit for <#{result.channel_id}>.\n\n"
-            "This channel has no spending limit, so it uses the workspace's credit: "
-            f"*${result.balance_usd:,.2f}*."
-        )
-    if result.credit_ends_at is None:
-        return f"🎟️ Added {amount} of credit.\n\nBalance: *${result.balance_usd:,.2f}*"
-    if not result.granted and result.credit_starts_at is not None:
-        return (
-            f"🎟️ Credit scheduled: {amount} from {slack_time(result.credit_starts_at)} "
-            f"until {slack_time(result.credit_ends_at)}."
-        )
-    return (
-        f"🎟️ Added {amount} of credit.\n\n"
-        "Used before credit with no expiry. Anything unused expires "
-        f"{slack_time(result.credit_ends_at)}."
+    return redeemed_text(
+        result,
+        bold=lambda text: f"*{text}*",
+        when=slack_time,
+        channel=lambda channel_id: f"<#{channel_id}>",
+        owner="the workspace's",
     )
 
 

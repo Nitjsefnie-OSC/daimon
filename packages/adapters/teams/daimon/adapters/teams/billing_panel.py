@@ -97,6 +97,7 @@ from daimon.core.billing_panel import (
     month_start,
     more_channel_budgets,
     more_spenders,
+    redeemed_text,
     spend_over_cap,
     spender_line,
     stored_name_labels,
@@ -343,30 +344,14 @@ async def _no_roster(_team_id: str, _user_id: str) -> str | None:
     return None
 
 
-def redeemed_text(result: PromoRedeemed) -> str:
-    amount = f"**${result.amount_usd:,.2f}**"
-    if result.channel_id is not None:
-        if result.channel_limit_usd is not None:
-            return (
-                f"🎟️ Added {amount} to this channel's budget.\n\n"
-                f"Its limit is now **${result.channel_limit_usd:,.2f}**."
-            )
-        return (
-            f"🎟️ Added {amount} of credit for this channel.\n\n"
-            "It has no spending limit, so it uses the organization's credit: "
-            f"**${result.balance_usd:,.2f}**."
-        )
-    if result.credit_ends_at is None:
-        return f"🎟️ Added {amount} of credit.\n\nBalance: **${result.balance_usd:,.2f}**"
-    if not result.granted and result.credit_starts_at is not None:
-        return (
-            f"🎟️ Credit scheduled: {amount} from {card_time(result.credit_starts_at)} "
-            f"until {card_time(result.credit_ends_at)}."
-        )
-    return (
-        f"🎟️ Added {amount} of credit.\n\n"
-        "Used before credit with no expiry. Anything unused expires "
-        f"{card_time(result.credit_ends_at)}."
+def redeemed_card_text(result: PromoRedeemed) -> str:
+    """What a redemption did, in card markdown; Teams names no channel by id."""
+    return redeemed_text(
+        result,
+        bold=lambda text: f"**{text}**",
+        when=card_time,
+        channel=lambda _channel_id: "this channel",
+        owner="the organization's",
     )
 
 
@@ -783,7 +768,7 @@ class BillingPanel:
             actor.tenant_id,
             actor.user_id,
             actor.is_admin,
-            notice=redeemed_text(result),
+            notice=redeemed_card_text(result),
             place=place,
         )
         return replace_card(card)

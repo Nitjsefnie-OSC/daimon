@@ -109,14 +109,16 @@ async def redeem_promo_code(
     account_id: uuid.UUID | None,
     code: str,
     now: datetime,
-    channel: PromoChannel | None = None,
-    is_admin: bool = True,
+    channel: PromoChannel | None,
+    is_admin: bool,
 ) -> PromoRedeemResult:
     """Redeem ``code`` for the tenant in one transaction; a refusal is counted for throttling.
 
-    ``is_admin``: the caller checked the redeemer is a server or workspace
-    admin, who alone may redeem a server-wide code. A channel code lands in
-    ``channel`` for anyone, admin or not, and is refused without one.
+    ``is_admin``: whether the caller found the redeemer to be a server or
+    workspace admin, live, at submit; only an admin may redeem a server-wide
+    code. ``channel``: where the redeemer is, a thread's parent channel; a
+    channel code lands there for anyone, admin or not, and is refused without
+    one. Both are required so no caller can grant admin rights by omission.
 
     The redeemer's attempts are serialized first, so concurrent guesses cannot
     all pass the throttle on the same count. Refusals are counted per person

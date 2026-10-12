@@ -25,6 +25,7 @@ from daimon.core.billing_panel import (
     load_billing_snapshot,
     lookup_line,
     panel_tone,
+    redeemed_text,
     spender_line,
     timed_credit_note,
     turns_phrase,
@@ -32,7 +33,7 @@ from daimon.core.billing_panel import (
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.errors import DaimonError
 from daimon.core.promo_codes import build_promo_code_terms
-from daimon.core.promo_credit import ActiveTimedCredit
+from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenants, usage_events
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
@@ -479,3 +480,42 @@ async def test_load_billing_snapshot_lists_channel_budgets_for_admins_only(
     )
     assert [s.percent_used for s in admin.channel_budgets] == [100, 90, 10], "share of the limit"
     assert (await snapshot(False)).channel_budgets == (), "a member sees no other channel"
+
+
+def test_redeemed_text_names_what_each_redemption_did() -> None:
+    """One wording for every surface; the surface supplies only its markup."""
+
+    def text(**kw: object) -> str:
+        base: dict[str, object] = {
+            "promo_code_id": uuid.uuid4(),
+            "kind": "credit",
+            "amount_usd": Decimal("10"),
+            "credit_starts_at": None,
+            "credit_ends_at": None,
+            "granted": True,
+            "balance_usd": Decimal("12.5"),
+        }
+        return redeemed_text(
+            PromoRedeemed(**(base | kw)),  # pyright: ignore[reportArgumentType]  # test builds rows from a dict
+            bold=lambda s: f"*{s}*",
+            when=lambda t: t.strftime("%d %b"),
+            channel=lambda c: f"#{c}",
+            owner="the server's",
+        )
+
+    end = datetime(2026, 5, 20, tzinfo=UTC)
+    assert text() == "🎟️ Added *$10.00* of credit.\n\nBalance: *$12.50*"
+    assert text(channel_id="c1", channel_limit_usd=Decimal("15")) == (
+        "🎟️ Added *$10.00* to #c1's budget.\n\nIts limit is now *$15.00*."
+    )
+    assert text(channel_id="c1") == (
+        "🎟️ Added *$10.00* of credit for #c1.\n\n"
+        "It has no spending limit, so it uses the server's credit: *$12.50*."
+    )
+    assert text(kind="timed", credit_ends_at=end) == (
+        "🎟️ Added *$10.00* of credit.\n\nUsed before credit with no expiry. "
+        "Anything unused expires 20 May."
+    )
+    assert text(kind="timed", credit_starts_at=end, credit_ends_at=end, granted=False) == (
+        "🎟️ Credit scheduled: *$10.00* from 20 May until 20 May."
+    )

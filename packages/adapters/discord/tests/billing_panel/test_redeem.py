@@ -398,7 +398,7 @@ def _submitted(modal: RedeemCodeModal, code: str, *, admin: bool = True) -> Magi
 async def test_cli_issued_code_redeems_once_through_the_panel(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A code issued the way `daimon promo create` issues it redeems once from /billing (#791).
+    """A code issued the way `daimon promo create` issues it redeems once from /billing.
 
     Drives the real panel: the button opens the modal, discord.py reads the
     typed code back from the submit payload, the handler redeems and redraws
@@ -464,7 +464,7 @@ async def test_cli_issued_code_redeems_once_through_the_panel(
 async def test_a_member_redeems_a_channel_code_into_this_channel_through_the_panel(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A member's panel offers a channel code; it raises this channel's budget only (#791)."""
+    """A member's panel offers a channel code; it raises this channel's budget only."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
     tenant = await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
     for channel_id in (CHANNEL_ID, CHANNEL_ID + 1):

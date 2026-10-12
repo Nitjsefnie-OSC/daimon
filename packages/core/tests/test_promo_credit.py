@@ -76,7 +76,13 @@ async def _redeem(
     factory: Factory, tenant: TenantRow, code: str, now: datetime = T0
 ) -> PromoRedeemResult:
     return await redeem_promo_code(
-        factory, tenant_id=tenant.id, account_id=None, code=code, now=now
+        factory,
+        tenant_id=tenant.id,
+        account_id=None,
+        code=code,
+        now=now,
+        channel=None,
+        is_admin=True,
     )
 
 
@@ -121,7 +127,13 @@ async def test_credit_code_grants_once_per_tenant(
     code = await _create(db_session, max_redemptions=5)
 
     result = await redeem_promo_code(
-        db_session_factory, tenant_id=tenant.id, account_id=account.id, code=" spring-2026 ", now=T0
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        code=" spring-2026 ",
+        now=T0,
+        channel=None,
+        is_admin=True,
     )
     assert isinstance(result, PromoRedeemed), "the first redemption should succeed"
     assert (result.granted, result.balance_usd) == (True, Decimal("10")), (
