@@ -118,6 +118,12 @@ _DEFAULT_TOOL_CONFIRMATION: ToolConfirmation = RequireApproval()
 # again.
 _PENDING_CONFIRMATION_RECONNECTS = 2
 
+# While nothing in the turn changes (a long tool call), the render loop still
+# hands the unchanged state to `on_render` this often, so the time-based parts
+# of a progress card (its elapsed timer) keep moving. Each adapter's own
+# debounce still decides whether that becomes a platform edit.
+_IDLE_RENDER_S = 10.0
+
 T = TypeVar("T")
 
 
@@ -793,9 +799,12 @@ async def _pump(
 
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
-    async def _render_once(state: TurnState) -> None:
+    clock = asyncio.get_running_loop().time
+    rendered_at_cell: list[float] = [clock()]
+
+    async def _render_once(state: TurnState, *, idle_refresh: bool = False) -> None:
         delta = _diff(prev_cell[0], state)
-        if delta.is_empty():
+        if delta.is_empty() and not idle_refresh:
             return
         # Named boundary (guideline:architecture): rendering is delivery,
         # not correctness, and the adapter exceptions it must survive are
@@ -823,11 +832,13 @@ async def _pump(
             )
             return
         prev_cell[0] = state
+        rendered_at_cell[0] = clock()
 
     async def _render_loop() -> None:
         while True:
             await asyncio.sleep(render_interval_s)
-            await _render_once(state_cell[0])
+            idle_refresh = clock() - rendered_at_cell[0] >= _IDLE_RENDER_S
+            await _render_once(state_cell[0], idle_refresh=idle_refresh)
 
     render_task = asyncio.create_task(_render_loop(), name="turn.render_loop")
 

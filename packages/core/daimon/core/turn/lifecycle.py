@@ -7,9 +7,13 @@ asyncio/tenacity machinery.
 call from inside the pump:**
 
   on_render              — the SOLE content-delivery path. Called on every
-                           non-empty render tick and once synchronously
-                           after the terminal event folds (the guarded
-                           final render every finalizer performs). Slow
+                           non-empty render tick, on a tick at least every
+                           10 s with the unchanged state while nothing
+                           changes (so an elapsed timer keeps moving during
+                           a long tool call; it must be idempotent), and
+                           once synchronously after the terminal event
+                           folds (the guarded final render every finalizer
+                           performs). Slow
                            implementations are safe here: the render loop
                            runs as a separate task on its own timer and
                            never stalls the consume loop. Adapter

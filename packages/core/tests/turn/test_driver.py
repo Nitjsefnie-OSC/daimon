@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import cast
 
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.errors import TurnError
@@ -25,6 +26,7 @@ from .conftest import (
     make_retries_exhausted,
     make_status_idle,
     make_status_terminated,
+    make_tool_use,
 )
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
@@ -286,6 +288,65 @@ async def test_run_turn_always_fires_final_render_before_terminal_success() -> N
     assert last_render.content == [TextBlock(kind="text", text="final content")]
     assert last_render.stop_reason is not None
     assert len(lc.terminal_success) == 1
+
+
+async def test_render_loop_rerenders_unchanged_state_during_a_long_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running tool call changes nothing for a long time; the render loop
+    must still hand the unchanged state to on_render so the card's elapsed
+    timer moves, instead of leaving the card frozen until the tool returns."""
+    monkeypatch.setattr("daimon.core.turn.driver._IDLE_RENDER_S", 0.02)
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_tool_use(event_id="tool", name="bash")),
+            DelayThenYield(0.3, make_status_idle(event_id="idle", stop_reason=make_end_turn())),
+        ]
+    ]
+    lc = RecordingLifecycle()
+
+    await asyncio.wait_for(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=asyncio.Event(),
+            render_interval_s=0.005,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        2,
+    )
+
+    running = [s for s in lc.renders if s.stop_reason is None]
+    assert len(running) >= 3, "the unchanged running state must keep being rendered"
+    assert all(s.content == running[0].content for s in running)
+
+
+async def test_render_loop_skips_unchanged_state_inside_the_idle_window() -> None:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_tool_use(event_id="tool", name="bash")),
+            DelayThenYield(0.1, make_status_idle(event_id="idle", stop_reason=make_end_turn())),
+        ]
+    ]
+    lc = RecordingLifecycle()
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.005,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert len([s for s in lc.renders if s.stop_reason is None]) == 1
 
 
 async def test_reconnect_refolds_from_empty_and_continues_the_turn() -> None:
