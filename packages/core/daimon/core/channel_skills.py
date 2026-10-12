@@ -44,6 +44,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.permissions import agent_permissions, ruled_agents
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.skills.reference_lock import lock_skills_for_attach
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
 from daimon.core.stores.domain import ChannelSkillRow
@@ -210,6 +211,9 @@ async def add_skill_to_channel(
     )
     if isinstance(choice, str):
         return choice
+    # Held until the caller commits the row, so a concurrent delete either
+    # sees the row or has already deleted the skill (and this raises).
+    await lock_skills_for_attach(session, client, [choice.skill_id])
     return await add_channel_skill(
         session,
         tenant_id=tenant_id,

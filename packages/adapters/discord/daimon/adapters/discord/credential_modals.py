@@ -172,6 +172,7 @@ from daimon.core.posted_controls import (
     card_text,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
@@ -1328,8 +1329,8 @@ class SkillRepoModal(discord.ui.Modal):
                     "That skill overlaps an attached skill. "
                     "Ask an admin to check the skill setup before attaching it."
                 )
-            return await self._runtime.anthropic.beta.agents.update(
-                fresh.id, version=fresh.version, skills=merged
+            return await guarded_agent_update(
+                self._runtime.anthropic, self._runtime.sessionmaker, fresh, skills=merged
             )
 
         try:

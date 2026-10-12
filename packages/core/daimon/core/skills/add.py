@@ -56,6 +56,7 @@ from daimon.core.skills.ingest import (
     bundle_from_upload,
     require_upload_suffix,
 )
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
@@ -342,7 +343,12 @@ async def add_agent_skill(
             added_by_account_id=added_by_account_id,
         )
     newly_attached = await _attach(
-        client, tenant_id=tenant_id, agent_id=agent.id, skill_id=skill_id, recheck=recheck
+        client,
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=agent.id,
+        skill_id=skill_id,
+        recheck=recheck,
     )
     _log.info(
         "skill_upload.added",
@@ -442,6 +448,7 @@ async def _refuse_mount_clash(
 
 async def _attach(
     client: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
     agent_id: str,
@@ -467,14 +474,15 @@ async def _attach(
             raise SkillIngestError(f"Uploaded, but not attached: {collision}")
         attached = True
         if any(tool.type == "agent_toolset_20260401" for tool in fresh.tools):
-            return await client.beta.agents.update(fresh.id, version=fresh.version, skills=merged)
+            return await guarded_agent_update(client, sessionmaker, fresh, skills=merged)
         # A skill needs the base toolset's read tool, or sessions fail to start.
         tools = merge_default_agent_toolset(
             [tool.model_dump(mode="json", exclude_none=True) for tool in fresh.tools]  # type: ignore[arg-type]  # dumped dicts satisfy the Tool TypedDict shape
         )
-        return await client.beta.agents.update(
-            fresh.id,
-            version=fresh.version,
+        return await guarded_agent_update(
+            client,
+            sessionmaker,
+            fresh,
             skills=merged,
             tools=tools,  # type: ignore[arg-type]  # list[dict] satisfies list[Tool] at runtime
         )

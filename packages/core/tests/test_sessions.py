@@ -27,9 +27,10 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_CHANNEL,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.sessions import create_session
+from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import agent_github_binding as github_binding_store
 from daimon.core.stores import agent_repo_binding as repo_binding_store
 from daimon.core.stores import credential_requests as requests_store
@@ -140,6 +141,98 @@ async def test_create_session_propagates_ma_error() -> None:
             client,
             agent=agent,
             environment=env,
+        )
+
+
+def _unresolved_skill_400(skill_id: str, version: str) -> Callable[[httpx.Request], httpx.Response]:
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": (
+                        "Could not resolve one or more skills: "
+                        f'skill "{skill_id}" version "{version}" not found'
+                    ),
+                },
+            },
+        )
+
+    return _handler
+
+
+async def test_create_session_names_a_deleted_agent_skill() -> None:
+    """Finding #11: a deleted skill the agent pins fails with copy naming it, not a bare 400."""
+    agent = ma_agent(
+        id="ag_strand",
+        name="qa-fork",
+        skills=[{"type": "custom", "skill_id": "skill_01PBRj", "version": "latest"}],
+    )
+    client = build_fake_anthropic_http(_unresolved_skill_400("skill_01PBRj", "latest"))
+
+    with pytest.raises(SkillUnavailable) as refused:
+        await create_session(client, agent=agent, environment=_make_env())
+
+    message = str(refused.value)
+    assert isinstance(refused.value, UserFacingError), "every adapter shows this copy as written"
+    assert refused.value.attached_to == "agent"
+    assert '"skill_01PBRj"' in message and "qa-fork" in message
+    assert "remove_skill" in message
+    assert "couldn't accept the request" not in message
+
+
+async def test_create_session_names_a_deleted_channel_skill_from_its_rule(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel's deleted skill is named from the rule that added it."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.stores.channel_skills import add_channel_skill
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        await add_channel_skill(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="555",
+            skill_id="skill_chan",
+            version="17916",
+            name="qa-haiku-canary",
+            owner_agent_name=None,
+            actor_account_id=None,
+        )
+    client = build_fake_anthropic_http(_unresolved_skill_400("skill_chan", "17916"))
+
+    with pytest.raises(SkillUnavailable) as refused:
+        await create_session(
+            client,
+            agent=_make_agent(),
+            environment=_make_env(),
+            tenant_id=tenant.id,
+            session_factory=db_session_factory,
+            channel_skills=(
+                BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_chan", version="17916"),
+            ),
+        )
+
+    assert refused.value.attached_to == "channel"
+    assert '"qa-haiku-canary" (skill_chan)' in str(refused.value)
+    assert "remove_channel_skill" in str(refused.value)
+
+
+async def test_create_session_keeps_other_400s_unchanged() -> None:
+    import anthropic
+
+    def _bad(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400, json={"type": "error", "error": {"type": "invalid_request_error", "message": "x"}}
+        )
+
+    with pytest.raises(anthropic.BadRequestError):
+        await create_session(
+            build_fake_anthropic_http(_bad), agent=_make_agent(), environment=_make_env()
         )
 
 

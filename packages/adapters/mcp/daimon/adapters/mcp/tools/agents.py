@@ -83,6 +83,7 @@ from daimon.core.mcp_attach import (
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.specs import (
     AgentSpec,
     SkillRepo,
@@ -497,6 +498,7 @@ async def _create_agent_impl(
         # sweep-eligible, so the next defaults apply (every boot/deploy)
         # archives them because they aren't in the seeded spec list.
         managed=False,
+        references=runtime.session_factory,
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
@@ -743,7 +745,7 @@ async def _update_agent_impl(
             )
             if not has_base_toolset:
                 patch["tools"] = merge_default_agent_toolset(effective_tools)
-        return await runtime.client.beta.agents.update(fresh.id, version=fresh.version, **patch)
+        return await guarded_agent_update(runtime.client, runtime.session_factory, fresh, **patch)
 
     # An MCP server change is serialized with the token forms' attach-then-
     # publish for this agent; other fields need no lock.

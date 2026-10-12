@@ -34,7 +34,12 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
+from anthropic.types.beta import (
+    BetaEnvironment,
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsSession,
+    SkillRetrieveResponse,
+)
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.testing.ma_models import (
     DEFAULT_MODEL_ID,
@@ -65,6 +70,8 @@ class NotHandled(Exception):
 # ---------------------------------------------------------------------------
 
 Handler = Callable[[httpx.Request, re.Match[str]], httpx.Response]
+_SKILL_RETRIEVE = re.compile(r"/v1/skills/([^/]+)")
+_SKILL_VERSIONS = re.compile(r"/v1/skills/[^/]+/versions")
 
 
 @dataclass
@@ -78,6 +85,8 @@ class MARouter:
     routes: list[tuple[str, re.Pattern[str], Handler]] = field(
         default_factory=list[tuple[str, re.Pattern[str], Handler]]
     )
+    deleted_skills: set[str] = field(default_factory=set[str])
+    """Skill ids the default `GET /v1/skills/{id}` answers 404 for."""
 
     def add(self, method: str, path_re: str, handler: Handler) -> None:
         self.routes.append((method.upper(), re.compile(path_re), handler))
@@ -127,6 +136,16 @@ class MARouter:
             if match is None:
                 continue
             return handler(request, match)
+        if request.method == "GET" and _SKILL_VERSIONS.fullmatch(request.url.path):
+            # A guarded delete lists versions before deleting; none by default.
+            return list_response([])
+        skill = _SKILL_RETRIEVE.fullmatch(request.url.path)
+        if request.method == "GET" and skill is not None:
+            # Attach paths check a skill still exists under its reference lock
+            # (`reference_lock`); unless a test routes it, every skill exists.
+            if skill.group(1) in self.deleted_skills:
+                return not_found_response(f"skill {skill.group(1)} not found")
+            return httpx.Response(200, json=skill_response(skill.group(1)))
         raise AssertionError(
             f"MARouter: no route for {request.method} {request.url.path} "
             f"(registered: {[(m, p.pattern) for m, p, _ in self.routes]})"
@@ -158,6 +177,19 @@ def not_found_response(message: str) -> httpx.Response:
         404,
         json={"type": "error", "error": {"type": "not_found_error", "message": message}},
     )
+
+
+def skill_response(skill_id: str, display_title: str | None = None) -> dict[str, Any]:
+    """A validated `GET /v1/skills/{id}` body for a custom skill."""
+    return SkillRetrieveResponse(
+        id=skill_id,
+        type="skill",
+        source="custom",
+        display_title=display_title or skill_id,
+        latest_version="1",
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+    ).model_dump(mode="json")
 
 
 def sse_response(events: list[dict[str, Any]]) -> httpx.Response:
@@ -524,6 +556,8 @@ class FakeMAState:
     agent_versions: dict[str, dict[int, dict[str, object]]] = field(
         default_factory=dict[str, dict[int, dict[str, object]]]
     )
+    deleted_skills: set[str] = field(default_factory=set[str])
+    """Skill ids `GET /v1/skills/{id}` answers 404 for; every other id exists."""
 
 
 def make_fake_ma_handler(
@@ -557,6 +591,22 @@ def make_fake_ma_handler(
         # create/attach; tests that need real rows layer their own handler on top)
         if method == "GET" and path == "/v1/skills":
             return httpx.Response(200, json={"data": [], "next_page": None})
+
+        # GET /v1/skills/{id}/versions — a guarded delete lists versions first
+        m = re.match(r"^/v1/skills/(?P<id>[^/]+)/versions$", path)
+        if m and method == "GET":
+            if m.group("id") in st.deleted_skills:
+                return not_found_response(f"skill {m.group('id')} not found")
+            return httpx.Response(200, json={"data": [], "has_more": False})
+
+        # GET /v1/skills/{id} — retrieve: every skill exists unless marked deleted
+        # (the attach paths check a skill still exists under its reference lock)
+        m = re.match(r"^/v1/skills/(?P<id>[^/]+)$", path)
+        if m and method == "GET":
+            skill_id = m.group("id")
+            if skill_id in st.deleted_skills:
+                return not_found_response(f"skill {skill_id} not found")
+            return httpx.Response(200, json=skill_response(skill_id))
 
         # POST /v1/agents — create
         if method == "POST" and path == "/v1/agents":

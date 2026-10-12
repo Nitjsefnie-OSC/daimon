@@ -33,10 +33,12 @@ from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant, list_referenced_skill_ids
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
-from daimon.core.ma import delete_skill_and_versions
 from daimon.core.skill_sync.bundler import extract_and_bundle
 from daimon.core.skill_sync.fetcher import GitHubAuthError, GitHubTarballFetcher, GitHubUnreachable
 from daimon.core.skill_zip import build_skill_zip
+from daimon.core.skills.attachments import delete_skill_unless_attached
+from daimon.core.skills.reference_lock import guarded_agent_update
+from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.stores.user_skills import list_user_skills_for_tenant, upsert_user_skill
 from pydantic import BaseModel
@@ -393,11 +395,9 @@ async def _apply_phase(
             # Retrieve fresh version before update (Pitfall 3 / rekey pattern)
             fresh = await client.beta.agents.retrieve(agent.id)
             try:
-                await client.beta.agents.update(
-                    fresh.id,
-                    version=fresh.version,
-                    skills=new_skills,  # type: ignore[arg-type]
-                )
+                # Under the new skill's reference lock: it is discoverable by
+                # title already, so a delete could otherwise land first.
+                await guarded_agent_update(client, sessionmaker, fresh, skills=new_skills)
             except Exception as exc:  # per-agent error; run continues
                 _log.warning(
                     "skills_backfill.repin_failed",
@@ -425,15 +425,26 @@ async def _apply_phase(
     # Recompute the org-wide referenced set AFTER all re-pins
     if legacy_to_new:
         referenced_ids = await list_referenced_skill_ids(client)
+        # A channel rule pins its skill id too; deleting it fails that channel.
+        async with sessionmaker() as session:
+            referenced_ids |= await list_channel_skill_ids(session)
         for legacy_id, new_id in legacy_to_new.items():
+            deleted = False
             if legacy_id not in referenced_ids:
-                await delete_skill_and_versions(client, legacy_id)
+                # Decided again under the reference lock: an attach since the
+                # snapshot keeps the legacy skill.
+                async with sessionmaker() as session, session.begin():
+                    outcome = await delete_skill_unless_attached(
+                        client, session, skill_id=legacy_id, detach=False
+                    )
+                deleted = outcome.deleted
+            if deleted:
                 _log.info("skills_backfill.deleted_legacy", skill_id=legacy_id, new_id=new_id)
             else:
                 _log.info(
                     "skills_backfill.deferred_delete",
                     skill_id=legacy_id,
-                    reason="still referenced by at least one agent",
+                    reason="still referenced by at least one agent or channel",
                 )
                 # Mark the row as DEFERRED in the summary
                 applied = [

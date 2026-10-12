@@ -165,6 +165,7 @@ async def test_create_blank_agent_is_not_marked_managed(
         account_id: uuid.UUID | None = None,
         public_url: str | None = None,
         managed: bool = True,
+        references: object = None,
     ) -> Any:
         captured["managed"] = managed
         captured["account_id"] = account_id

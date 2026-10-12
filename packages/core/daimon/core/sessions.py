@@ -76,11 +76,14 @@ from daimon.core.session_snapshot import (
     session_tools,
     snapshot_from_created_session,
 )
+from daimon.core.skills.unresolved import skill_unavailable, unresolved_skill_id
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from pydantic import SecretStr
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -118,6 +121,23 @@ def _session_metadata(
     if budget_channel_id is not None:
         metadata[MA_METADATA_KEY_BUDGET_CHANNEL] = budget_channel_id
     return metadata
+
+
+async def _channel_skill_name(
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    *,
+    tenant_id: uuid.UUID | None,
+    skill_id: str,
+) -> str | None:
+    """The name a channel rule recorded for `skill_id`, best-effort (error path only)."""
+    if session_factory is None or tenant_id is None:
+        return None
+    try:
+        async with session_factory() as session:
+            rows = await list_skill_channel_rules(session, skill_id=skill_id)
+    except SQLAlchemyError:
+        return None
+    return next((row.name for row in rows if row.tenant_id == tenant_id), None)
 
 
 async def create_session(
@@ -610,19 +630,39 @@ async def create_session(
             if before_create is not None:
                 # The caller's last access decision, after every await above.
                 await before_create()
-            created = await anthropic.beta.sessions.create(
-                agent=agent_argument,
-                environment_id=environment.id,
-                metadata=metadata if metadata else omit,
-                vault_ids=(
-                    [caller_vault_id, vault_id]
-                    if caller_vault_id is not None and vault_id is not None
-                    else [vault_id]
-                    if vault_id is not None
-                    else omit
-                ),
-                resources=resources if resources else omit,
-            )
+            try:
+                created = await anthropic.beta.sessions.create(
+                    agent=agent_argument,
+                    environment_id=environment.id,
+                    metadata=metadata if metadata else omit,
+                    vault_ids=(
+                        [caller_vault_id, vault_id]
+                        if caller_vault_id is not None and vault_id is not None
+                        else [vault_id]
+                        if vault_id is not None
+                        else omit
+                    ),
+                    resources=resources if resources else omit,
+                )
+            except anthropic_pkg.BadRequestError as error:
+                unresolved = unresolved_skill_id(error)
+                if unresolved is None:
+                    raise
+                # Every turn fails this way until the skill is detached: say which.
+                _log.warning(
+                    "session.skill_unresolved",
+                    agent_id=agent.id,
+                    skill_id=unresolved[0],
+                    version=unresolved[1],
+                )
+                raise skill_unavailable(
+                    skill_id=unresolved[0],
+                    agent=agent,
+                    channel_skills=channel_skills,
+                    channel_skill_name=await _channel_skill_name(
+                        session_factory, tenant_id=tenant_id, skill_id=unresolved[0]
+                    ),
+                ) from error
             if app_access is not None:
                 assert (
                     session_factory is not None and tenant_id is not None and vault_id is not None

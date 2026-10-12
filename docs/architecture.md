@@ -931,6 +931,45 @@ same list (`session_snapshot.session_skills`), so adding or removing one
 replaces the conversation's session on its next message. Routines, headless
 runs and MCP chat don't use them.
 
+**Deleting a skill — `packages/core/daimon/core/skills/attachments.py`.** A
+session resolves every skill its agent pins and its channel adds, so a deleted
+skill that something still names fails every turn there. `daimon skills
+delete` and the `delete_skill` MCP tool look for references first (any
+non-archived agent, since skills are workspace-wide, and every `channel_skills`
+row) and refuse while there are any, naming the agents and channels and how to
+detach. The MCP refusal names only the caller's own workspace's agents and
+channels and counts the rest. `daimon skills delete --force` detaches the skill
+from each agent (keeping their other skills at the versions they pin) and each
+channel rule, in every tenant (`--tenant`/`--guild` only picks the skill's
+name), then deletes it; its confirmation gives those counts and how many are
+outside the selected tenant. Chat has no force.
+
+Deleting and attaching are serialized per skill
+(`packages/core/daimon/core/skills/reference_lock.py`): a delete takes a
+Postgres advisory lock on the skill id exclusively and holds it from its final
+reference check through the provider delete (`delete_skill_unless_attached`).
+Every delete goes through it: the CLI, MCP, the defaults sweep, the defaults
+duplicate cleanup (a same-title duplicate still in use is kept), the skill-repo
+sync's orphan cleanup (the synced agent's own pin is retired with the skill;
+any other agent or channel rule keeps the skill and its registry row), and the
+skills backfill. Every write that adds a skill reference takes the same lock
+shared and checks the skill still exists first: a channel rule
+(`add_skill_to_channel`, held until the row commits) and any agent create or
+update that adds a skill (`guarded_agent_update` / `skill_attach_guard`: skill
+add, repo sync attach, the skill-repo credential forms, `update_agent`, fork,
+`reconcile_agent` — defaults, `daimon agents create`/`update`, the panels and
+`create_agent` — the report reader variant, and the backfill re-pin).
+`reconcile_agent` and `ensure_reader_variant` take the lock scope as a
+required argument; the defaults reconcile passes its own lock session. An
+attach that waited for a delete is refused ("was deleted just now"; a reader
+variant is rebuilt once from its source as it is now); a delete that waited for
+an attach sees the new reference. If a session is still
+refused for a missing skill (`Could not resolve one or more skills`),
+`create_session` raises `SkillUnavailable`, a `UserFacingError` that names the
+skill and says to remove it from the agent or channel, instead of the generic
+"AI service couldn't accept the request"; a replacement session re-raises it
+rather than suggesting a retry.
+
 **Skill uploads.** One skill can be added to one agent by hand
 (`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
 it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,

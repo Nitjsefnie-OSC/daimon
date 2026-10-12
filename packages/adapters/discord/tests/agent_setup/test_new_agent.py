@@ -408,6 +408,7 @@ async def test_submit_stamps_the_guild_account_not_the_personal_one(
         account_id: uuid.UUID | None = None,
         public_url: str | None = None,
         managed: bool = True,
+        references: object = None,
     ) -> ResourceOutcome:
         captured["spec"] = spec
         captured["account_id"] = account_id

@@ -302,6 +302,7 @@ async def agents_create(
         account_id=derive_guild_account_uuid(tenant_id),
         public_url=public_url,
         managed=False,
+        references=rt.sessionmaker,
     )
     await ensure_agent_face(
         rt.sessionmaker,
@@ -372,6 +373,7 @@ async def agents_update(
         account_id=derive_guild_account_uuid(tenant_id),
         public_url=public_url,
         managed=False,
+        references=rt.sessionmaker,
     )
     console.print(f"[green]✓ updated agent {spec.name!r}[/green]")
 

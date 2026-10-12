@@ -37,7 +37,6 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.ma import delete_skill_and_versions
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.skill_sync import PATMissingError, SyncReport, sync_agent_skills
 from daimon.core.skills.add import (
@@ -45,6 +44,13 @@ from daimon.core.skills.add import (
     fetch_repo_skill,
     read_local_skill,
     repo_origin,
+)
+from daimon.core.skills.attachments import (
+    SkillAttachments,
+    SkillStillAttached,
+    delete_skill_unless_attached,
+    find_skill_attachments,
+    still_attached_message,
 )
 from daimon.core.skills.ingest import SkillBundle
 from daimon.core.skills.pipeline import run_skill_sync
@@ -398,14 +404,22 @@ def skills_delete_command(
     ctx: typer.Context,
     name: str,
     yes: Annotated[bool, YES_OPTION] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Detach the skill from every agent and channel that uses it, then delete it.",
+        ),
+    ] = False,
 ) -> None:
+    """Delete a skill and all its versions; refused while an agent or channel uses it."""
     settings = load_settings()
     console = Console(highlight=False)
     selector = ctx.obj
 
     async def _with_defaults() -> None:
         async with build_runtime(settings) as rt:
-            await delete_skill(rt, console, name=name, yes=yes, selector=selector)
+            await delete_skill(rt, console, name=name, yes=yes, selector=selector, force=force)
 
     run_cli(_with_defaults(), console=console)
 
@@ -417,21 +431,66 @@ async def delete_skill(
     name: str,
     yes: bool,
     selector: TenantSelector | None = None,
+    force: bool = False,
 ) -> None:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
         tenant_label = await resolve_tenant_display(session, tenant_id)
-        confirm_or_abort(console, f"delete skill {name!r} in {tenant_label}?", yes=yes)
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
-    # Session closed. MA calls below.
     canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=name)
     skill = await find_skill_by_display_title(rt.anthropic, canonical, on_truncation="degrade")
     if skill is None:
         raise StoreError(f"no skill named {name!r} in your account.")
-    await delete_skill_and_versions(rt.anthropic, skill.id)
+
+    def _refusal(attachments: SkillAttachments) -> SkillStillAttached:
+        return SkillStillAttached(
+            still_attached_message(
+                name,
+                attachments,
+                agent_detach="remove it from each agent (the `remove_skill` chat tool)",
+                channel_detach=(
+                    "remove it from each channel with "
+                    f"`daimon channels skills remove <platform> <workspace> <channel> {name}`"
+                ),
+                force_hint=(
+                    "Or rerun with --force to detach it everywhere, in every tenant, and delete it."
+                ),
+            ),
+            attachments=attachments,
+        )
+
+    # A skill an agent pins or a channel rule adds is resolved at every session
+    # creation there; deleting it would fail each of those turns. This first
+    # look only shapes the prompt; the decision is made again under the lock.
+    async with rt.sessionmaker() as session:
+        preview = await find_skill_attachments(rt.anthropic, session, skill_id=skill.id)
+    if preview and not force:
+        raise _refusal(preview)
+    question = f"delete skill {name!r} in {tenant_label}?"
+    if force:
+        agents_out, channels_out = preview.outside(tenant_id)
+        # --tenant/--guild picks the skill's namespace; references are workspace-wide.
+        question = (
+            f"delete skill {name!r} in {tenant_label} and first detach it from "
+            f"{len(preview.agents)} agent(s) and {len(preview.channels)} channel rule(s) "
+            f"across ALL tenants ({agents_out} agent(s) and {channels_out} channel rule(s) "
+            f"outside {tenant_label}), plus any attached before the delete runs?"
+        )
+    confirm_or_abort(console, question, yes=yes)
+    async with rt.sessionmaker() as session, session.begin():
+        outcome = await delete_skill_unless_attached(
+            rt.anthropic, session, skill_id=skill.id, detach=force
+        )
+        if not outcome.deleted:
+            raise _refusal(outcome.attachments)
+    if outcome.attachments:
+        console.print(
+            f"detached {name!r} from {len(outcome.attachments.agents)} agent(s) and "
+            f"{len(outcome.attachments.channels)} channel rule(s)"
+        )
     console.print(f"[green]✓ deleted skill {name!r}[/green]")
 
 

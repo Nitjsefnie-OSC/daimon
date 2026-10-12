@@ -46,9 +46,11 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_repo
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import InstallationLookup, resolve_skill_sync_token
-from daimon.core.ma import delete_skill_and_versions, update_agent_with_version_retry
+from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.skills.attachments import delete_skill_unless_attached, still_attached_message
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.stores.agent_repo_binding import get_bindings_for_repo
 from daimon.core.stores.agent_skill_repo_credentials import (
     list_skill_repo_credentials_for_repo,
@@ -309,8 +311,8 @@ async def _attach_synced_skills(
         )
         if collision is not None:
             raise ToolError(f"Cannot attach: {collision}")
-        return await runtime.client.beta.agents.update(
-            fresh.id, version=fresh.version, skills=merged
+        return await guarded_agent_update(
+            runtime.client, runtime.session_factory, fresh, skills=merged
         )
 
     try:
@@ -516,7 +518,24 @@ async def _delete_impl(
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
     if skill is None or await _hidden(runtime, auth, skill):
         raise ToolError(f"skill '{name}' not found in this server's skills")
-    await delete_skill_and_versions(runtime.client, skill.id)
+    # A skill an agent pins or a channel rule adds is resolved at every session
+    # creation there; deleting it would fail each of those turns. Chat never
+    # detaches in bulk: each removal goes through its own tool and its checks.
+    async with runtime.session_factory() as session, session.begin():
+        outcome = await delete_skill_unless_attached(
+            runtime.client, session, skill_id=skill.id, detach=False
+        )
+    if not outcome.deleted:
+        raise ToolError(
+            still_attached_message(
+                name,
+                outcome.attachments,
+                agent_detach="remove it from each agent with remove_skill",
+                channel_detach="remove it from each channel with remove_channel_skill",
+                force_hint="Then delete it again.",
+                viewer_tenant_id=auth.tenant_id,
+            )
+        )
 
 
 def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -564,6 +583,7 @@ def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def delete_skill(ctx: Context, name: str) -> None:  # pyright: ignore[reportUnusedFunction]
         """Delete a skill such as eda from the workspace, destroying all versions for every agent.
 
-        For detaching one agent's reference, use ``remove_skill`` instead.
-        Deleting the shared skill resource is admin-only."""
+        Refused while any agent or channel still uses the skill; the refusal names them.
+        Detach with ``remove_skill`` and ``remove_channel_skill`` first. For detaching
+        one agent's reference, use ``remove_skill`` instead. Admin-only."""
         await _delete_impl(runtime, await _auth(ctx), name)
