@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Preserve native required-action termination when the backend cannot accept tool-confirmation events.
 - Refuse malformed chat approval requests without failing sibling decisions, and derive confirmation gates for registered tools from the shared safety table.
 - Add opt-in admin confirmation cards for chat-requested agent backend changes, with current compatibility and cost previews, permission rechecks and stale-preview refusal.
 

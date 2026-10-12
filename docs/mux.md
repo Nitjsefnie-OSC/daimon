@@ -2248,3 +2248,7 @@ Chat confirmation currently requires an Anthropic Managed Agents conversation.
 A native conversation without approved-card proof refuses the request. Saving a
 preference does not provision a native counterpart: agent-origin native turns
 remain refused until that separate authorization is available.
+Backend-switch confirmation is included in a turn's approval posture only when
+the admitted profile supports tool confirmation. Unsupported or unknown support
+keeps the existing required-action termination path without sending an
+unsupported confirmation event.
