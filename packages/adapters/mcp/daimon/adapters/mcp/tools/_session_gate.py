@@ -16,6 +16,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
+from daimon.core.confirmation import backend_switch_tools
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.mux_backend import resource_scope
@@ -142,6 +143,7 @@ async def _recorded_as_gated(
             tool_safety=runtime.settings.tool_safety,
             public_url=None if public_url is None else str(public_url),
             asks_before_publishing=asks_before_publishing,
+            confirmed_tools=backend_switch_tools(runtime.settings.turn),
         )
         if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
             [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name

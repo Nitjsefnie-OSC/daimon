@@ -334,6 +334,7 @@ def session_tools(
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
     asks_before_publishing: bool = False,
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> Sequence[MaTool]:
     """The tools a session for this caller runs: the visible ones, tool safety applied,
     and the publish tools asking first when the turn's agent may not publish freely.
@@ -349,6 +350,7 @@ def session_tools(
         [tool.model_dump(mode="json") for tool in visible],
         trusted_servers=trusted_servers_for(public_url),
         asks_before_publishing=asks_before_publishing,
+        confirmed_tools=confirmed_tools,
     )
     return visible if gated is None else _TOOLS.validate_python(gated)
 
@@ -359,11 +361,15 @@ def session_mcp_servers(
     *,
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> Sequence[BetaManagedAgentsMCPServerURLDefinition]:
     """The MCP servers a session for this caller runs, a foreign `daimon-mcp` re-pointed."""
     visible = visible_mcp_servers(agent, hidden_mcp_server_names)
     healed = heal_reserved_server(
-        tool_safety, [server.model_dump(mode="json") for server in visible], public_url=public_url
+        tool_safety,
+        [server.model_dump(mode="json") for server in visible],
+        public_url=public_url,
+        confirmed_tools=confirmed_tools,
     )
     return visible if healed is None else _MCP_SERVERS.validate_python(healed)
 
@@ -384,6 +390,7 @@ def desired_snapshot(
     env_file_id: str | None = None,
     memory_read_only: bool = False,
     asks_before_publishing: bool = False,
+    confirmed_tools: frozenset[str] = frozenset(),
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
@@ -428,11 +435,16 @@ def desired_snapshot(
                 tool_safety=tool_safety,
                 public_url=public_url,
                 asks_before_publishing=asks_before_publishing,
+                confirmed_tools=confirmed_tools,
             )
         ),
         mcp_servers_sha256=hash_mcp_servers(
             session_mcp_servers(
-                agent, hidden_mcp_server_names, tool_safety=tool_safety, public_url=public_url
+                agent,
+                hidden_mcp_server_names,
+                tool_safety=tool_safety,
+                public_url=public_url,
+                confirmed_tools=confirmed_tools,
             )
         ),
         env_sha256=env_sha256,

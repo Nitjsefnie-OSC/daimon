@@ -190,7 +190,10 @@ def _answer_message(call: ToolCall, answer: str) -> str:
 
 
 def unattended_decider(
-    policy: ToolSafetyPolicy, *, trusted_servers: frozenset[str] = frozenset()
+    policy: ToolSafetyPolicy,
+    *,
+    trusted_servers: frozenset[str] = frozenset(),
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
     unless the operator allowed them there."""
@@ -198,7 +201,13 @@ def unattended_decider(
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
             return _unseen_refusal(call)
-        verdict = decide_tool_call(policy, call, attended=False, trusted_servers=trusted_servers)
+        verdict = decide_tool_call(
+            policy,
+            call,
+            attended=False,
+            trusted_servers=trusted_servers,
+            confirmed_tools=confirmed_tools,
+        )
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -220,6 +229,7 @@ def interactive_decider(
     confirm: ConfirmationHook = no_confirmation_surface,
     trusted_servers: frozenset[str] = frozenset(),
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -231,7 +241,13 @@ def interactive_decider(
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
             return _unseen_refusal(call)
-        verdict = decide_tool_call(policy, call, attended=True, trusted_servers=trusted_servers)
+        verdict = decide_tool_call(
+            policy,
+            call,
+            attended=True,
+            trusted_servers=trusted_servers,
+            confirmed_tools=confirmed_tools,
+        )
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -290,6 +306,7 @@ def chat_tool_confirmation(
     attended: bool = True,
     trusted_servers: frozenset[str] = frozenset(),
     asks_before_publishing: bool = False,
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -298,7 +315,7 @@ def chat_tool_confirmation(
     nobody asked for just now (a wake continuing earlier work): it gets the
     unattended rules even though it renders into a thread.
     """
-    if not policy.enabled and not asks_before_publishing:
+    if not policy.enabled and not asks_before_publishing and not confirmed_tools:
         return RequireApproval()
     decide = (
         interactive_decider(
@@ -306,23 +323,39 @@ def chat_tool_confirmation(
             requester_platform_user_id=requester_platform_user_id,
             confirm=confirm if confirm is not None else no_confirmation_surface,
             trusted_servers=trusted_servers,
+            confirmed_tools=confirmed_tools,
         )
         if attended
-        else unattended_decider(policy, trusted_servers=trusted_servers)
+        else unattended_decider(
+            policy, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+        )
     )
     if not policy.enabled:
-        decide = _publish_only(decide, trusted_servers=trusted_servers)
+        decide = _selected_only(
+            decide,
+            trusted_servers=trusted_servers,
+            confirmed_tools=confirmed_tools,
+            asks_before_publishing=asks_before_publishing,
+        )
     return PolicyApproval(decide=decide)
 
 
-def _publish_only(decide: ToolCallDecider, *, trusted_servers: frozenset[str]) -> ToolCallDecider:
-    """Tool safety off: publish calls are decided; any other blocked call is
+def _selected_only(
+    decide: ToolCallDecider,
+    *,
+    trusted_servers: frozenset[str],
+    confirmed_tools: frozenset[str],
+    asks_before_publishing: bool,
+) -> ToolCallDecider:
+    """Tool safety off: only explicitly selected calls are decided; others are
     refused, as `RequireApproval` would have ended the turn before it ran."""
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
             return _unseen_refusal(call)
-        if is_publish_call(call, trusted_servers):
+        if (asks_before_publishing and is_publish_call(call, trusted_servers)) or (
+            call.server_name in trusted_servers and call.tool_name in confirmed_tools
+        ):
             return await decide(call)
         return ToolConfirmationResult(
             allow=False,

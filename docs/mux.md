@@ -2159,3 +2159,24 @@ Agent retirement requires the profile's declared deletion support. Missing
 catalog support refuses at the same host/store authorization boundary; provider,
 tenant, account and workspace identity checks remain mandatory. This changes
 no default routes, operator grants or native request bodies.
+### Confirm an agent backend change from chat
+
+With the neutral turn path and backend selection enabled, a workspace admin can
+ask `@Daimon switch Researcher to openai`. The chat tool first returns the current
+compatibility preview, including unsupported skills, MCPs and capabilities,
+shared-thread limits and the cost line. The confirmation card shows those same
+server-side facts. Only the requesting admin may Confirm; permission is checked
+again on the click.
+
+The card binds the current setting revision and complete preview digest. An
+expired card, a changed agent or policy, or a newer setting requires a fresh
+preview and confirmation. Backends outside the workspace allowlist are refused.
+Existing threads retain their backend. For new threads, a channel override takes
+priority over the agent setting; otherwise the agent setting applies.
+When backend selection is off, the chat tool and its card are absent and existing
+approval cards retain their behavior.
+
+Chat confirmation currently requires an Anthropic Managed Agents conversation.
+A native conversation without approved-card proof refuses the request. Saving a
+preference does not provision a native counterpart: agent-origin native turns
+remain refused until that separate authorization is available.

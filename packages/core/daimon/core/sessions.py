@@ -150,6 +150,7 @@ async def create_session(
     memory_read_only: bool = False,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     asks_before_publishing: bool = False,
+    confirmed_tools: frozenset[str] = frozenset(),
     slack_turn_context_id: uuid.UUID | None = None,
     private_dm_id: str | None = None,
     budget_channel_id: str | None = None,
@@ -543,8 +544,15 @@ async def create_session(
             tool_safety=tool_safety,
             public_url=public_url,
             asks_before_publishing=asks_before_publishing,
+            confirmed_tools=confirmed_tools,
         )
-        servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
+        servers = session_mcp_servers(
+            agent,
+            hidden,
+            tool_safety=tool_safety,
+            public_url=public_url,
+            confirmed_tools=confirmed_tools,
+        )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
         if hidden or gated or healed or channel_skills or model_override is not None:
