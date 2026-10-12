@@ -5,11 +5,16 @@ from collections.abc import Iterator, Mapping
 
 import httpx
 import pytest
-from mux.conformance.default_capability import DefaultManifest
-from mux.conformance.runner import run_fixture
+from daimon.testing.conformance.default_capability import DefaultManifest
+from daimon.testing.conformance.runner import run_fixture
+from daimon.testing.drivers.openai import (
+    conformance,
+    conformance_sdk,
+    default_capability,
+    offline_sdk,
+)
+from daimon.testing.drivers.openai.offline_sdk import OfflineAsyncOpenAI
 from mux.contracts.resources import MCPConnection
-from mux.drivers.openai import conformance, conformance_sdk, default_capability, offline_sdk
-from mux.drivers.openai.offline_sdk import OfflineAsyncOpenAI
 from mux.drivers.openai.transport import SDKTransport
 
 from . import test_interaction_deployment as interaction

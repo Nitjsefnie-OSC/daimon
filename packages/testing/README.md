@@ -867,3 +867,30 @@ skill/model checks because the table omits those fields, despite retained copied
 skill bytes/model. Native archive and D5's authored Claude YAML conversion remain
 explicitly pending; no member edit or native turn is manufactured. All proofs
 are offline actual SDK HTTP requests with owned Postgres readback.
+
+
+## Conformance and manual probe tooling
+
+`daimon.testing.conformance` owns the backend-neutral conformance runner,
+normalized recorder and live-probe BudgetGuard. Provider SDK/script adapters live
+under `daimon.testing.drivers`; platform conformance callbacks live under
+`daimon.testing.adapters`. These are test-only dependencies and are never
+imported by runtime packages. The former `mux.conformance` namespace is removed.
+
+Tests live in `packages/testing/tests/conformance`, outside the wheel package.
+The existing ledger, retention, recorder and optimized-Python refusal checks are
+retained. Native certification receipts and replay tapes live under
+`packages/testing/fixtures`; their stored JSON bytes are unchanged. Provider
+reference/QA docs live under `packages/testing/docs` rather than inside `mux`.
+Product runtime usage/outbox reconciliation continues to use the mux state
+ledger; the manual admin hold-reconciliation tool is test support only.
+
+CI uses the full import-linter contract for the product/test dependency policy
+and `scripts/lint_distribution_boundaries.py` for configured package roots and
+built-wheel file placement. No source import scanner duplicates that policy.
+Product source may not import conformance/testing modules, and no distribution
+may include `test_*.py` or
+`conftest.py` inside its package. Product wheels exclude QA harnesses, receipts,
+probe budget examples and mux package documentation. Testing helpers remain in
+the separate development-only testing distribution; the tests/data/docs are
+outside its package.

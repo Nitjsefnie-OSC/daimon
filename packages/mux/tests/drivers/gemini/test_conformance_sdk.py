@@ -5,12 +5,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from mux.conformance.runner import PendingKind, run_fixture
+from daimon.testing.conformance.runner import PendingKind, run_fixture
+from daimon.testing.drivers.gemini.conformance_sdk import GeminiSDKScript, offline_sdk_adapter
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ResolvedBackend
 from mux.contracts.events import TurnEndedPayload
 from mux.contracts.ids import PageRequest
 from mux.contracts.resources import EnvironmentSpec, ToolSpec, WorkspaceSource
-from mux.drivers.gemini.conformance_sdk import GeminiSDKScript, offline_sdk_adapter
 from mux.errors import ScopeViolation, UnsupportedCapability
 
 

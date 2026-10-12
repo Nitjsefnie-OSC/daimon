@@ -39,6 +39,7 @@ from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_origin import turn_origin
 from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine, require_owned_sessionmaker
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.isolated_sdk import build_gemini_client
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
@@ -48,7 +49,6 @@ from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.gemini.transport import Object
 from mux.state.memory import MemoryStateStore
 from pydantic import TypeAdapter

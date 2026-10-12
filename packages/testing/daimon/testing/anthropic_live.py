@@ -23,8 +23,7 @@ from typing import Literal, Never, cast
 
 import httpx
 from anthropic import AsyncAnthropic, AsyncStream
-from daimon.testing.isolated_sdk import TLS_PROXY_ENV_VARS, build_async_anthropic
-from mux.conformance.budget import (
+from daimon.testing.conformance.budget import (
     ActualSpend,
     BudgetConfig,
     BudgetGuard,
@@ -37,8 +36,12 @@ from mux.conformance.budget import (
     TokenLimits,
     TokenUsage,
 )
-from mux.conformance.recording import Audit, RecordingError
-from mux.conformance.usage_settlement import AnthropicSessionSpend, actual_from_anthropic_sessions
+from daimon.testing.conformance.recording import Audit, RecordingError
+from daimon.testing.conformance.usage_settlement import (
+    AnthropicSessionSpend,
+    actual_from_anthropic_sessions,
+)
+from daimon.testing.isolated_sdk import TLS_PROXY_ENV_VARS, build_async_anthropic
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.usage import UsageObservation
 from mux.drivers.anthropic import AnthropicManagedAgents

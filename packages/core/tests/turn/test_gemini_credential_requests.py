@@ -42,6 +42,7 @@ from daimon.core.turn.gemini_credential_requests import (
 )
 from daimon.testing.db import build_test_engine, require_owned_sessionmaker
 from daimon.testing.discord_surface import DiscordSurfaceHarness
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
 from fastmcp import Context, FastMCP
@@ -52,7 +53,6 @@ from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRe
 from mux.contracts.resources import AgentSpec, ProviderBinding, ToolSpec
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.gemini.transport import Object
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore

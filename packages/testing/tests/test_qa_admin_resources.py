@@ -36,6 +36,7 @@ from daimon.testing.admin_bindings import (
 )
 from daimon.testing.admin_resources import ResourceAdminBindings
 from daimon.testing.db import isolated_test_schema, require_owned_sessionmaker
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.isolated_sdk import (
     AmbientSDKConfigurationError,
     build_async_openai,
@@ -51,7 +52,6 @@ from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import AgentSpec, SessionSpec, ToolSpec
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.transport import SDKTransport as GeminiTransport
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport as OpenAITransport

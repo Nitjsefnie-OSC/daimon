@@ -19,7 +19,6 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.teams import app as platform_module
 from daimon.adapters.teams.app import TeamsApp
-from daimon.adapters.teams.backend_conformance import BackendTurnEnvelope, backend_selection_turn
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.scope import DeploymentDefault
@@ -29,6 +28,10 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.testing import ma_session
+from daimon.testing.adapters.teams.backend_conformance import (
+    BackendTurnEnvelope,
+    backend_selection_turn,
+)
 from daimon.testing.factories import make_tenant
 from daimon.testing.isolated_sdk import (
     SDK_ENV_VARS,

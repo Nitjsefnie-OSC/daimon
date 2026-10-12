@@ -18,10 +18,10 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import TenantLedgerRow, UsageEventRow
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.usage_recording import TurnLedgerReason, record_turn_usage
+from daimon.testing.conformance.fixtures import c12
+from daimon.testing.conformance.reference import create
+from daimon.testing.conformance.runner import ConformanceFailure
 from daimon.testing.factories import make_tenant
-from mux.conformance.fixtures import c12
-from mux.conformance.reference import create
-from mux.conformance.runner import ConformanceFailure
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation

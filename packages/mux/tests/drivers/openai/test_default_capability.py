@@ -8,22 +8,22 @@ from pathlib import Path
 
 import pytest
 import yaml
-from daimon.testing.isolated_sdk import build_async_openai
-from mux.conformance.default_capability import (
+from daimon.testing.conformance.default_capability import (
     BASH_RESULT,
     FINAL_MESSAGE,
     DefaultManifest,
     NamedSkill,
     skill_text,
 )
-from mux.conformance.recording import Audit, Recorder
-from mux.conformance.runner import replay_default_capability, run_default_capability
-from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
-from mux.drivers.openai.default_capability import (
+from daimon.testing.conformance.recording import Audit, Recorder
+from daimon.testing.conformance.runner import replay_default_capability, run_default_capability
+from daimon.testing.drivers.openai.default_capability import (
     BUILTIN_MAPPING,
     MODEL,
     OpenAIDefaultCapabilityFactory,
 )
+from daimon.testing.isolated_sdk import build_async_openai
+from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
 from mux.drivers.openai.normalize import EventNormalizer
 from mux.drivers.openai.transport import Object, object_json
 

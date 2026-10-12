@@ -25,6 +25,7 @@ from daimon.testing.db import (
 from daimon.testing.db import (
     db_schema as db_schema,
 )
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.isolated_sdk import build_gemini_client
 from mux.contracts.extensions import ExtensionConfig
@@ -42,7 +43,6 @@ from mux.contracts.resources import (
 from mux.drivers.gemini import GeminiCatalogAdapter, GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
 from mux.drivers.gemini.core import GeminiAgents
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.gemini.transport import Object
 from mux.errors import OperationConflict, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore

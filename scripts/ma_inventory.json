@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2609,
+  "files_scanned": 2617,
   "parse_errors": [],
   "calls": [
     {
@@ -7624,8 +7624,8 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1495,
-      "end": 1498,
+      "line": 1496,
+      "end": 1499,
       "scope": "invoke",
       "category": "test",
       "resource": "sessions.threads.events.stream",
@@ -12027,15 +12027,6 @@
       "category": "test"
     },
     {
-      "file": "packages/adapters/mcp/tests/tools/test_backend_switch.py",
-      "line": 321,
-      "module": "anthropic.types.beta",
-      "names": [
-        "BetaManagedAgentsAgent"
-      ],
-      "category": "test"
-    },
-    {
       "file": "packages/adapters/mcp/tests/tools/test_channel_own_agents.py",
       "line": 21,
       "module": "anthropic",
@@ -13226,15 +13217,6 @@
       "module": "anthropic.types.beta.skill_list_response",
       "names": [
         "SkillListResponse"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/core/daimon/core/confirmation.py",
-      "line": 37,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
       ],
       "category": "production"
     },
@@ -19714,7 +19696,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1157,
+      "line": 1158,
       "module": "anthropic",
       "names": [
         "AsyncStream"
@@ -19723,7 +19705,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1609,
+      "line": 1610,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -19732,7 +19714,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 2349,
+      "line": 2350,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"

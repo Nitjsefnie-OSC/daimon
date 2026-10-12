@@ -14,9 +14,7 @@ from dataclasses import asdict
 from types import MappingProxyType, TracebackType
 
 import httpx
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
-from mux.conformance.runner import (
+from daimon.testing.conformance.runner import (
     Adapter,
     PendingKind,
     PendingReason,
@@ -25,6 +23,8 @@ from mux.conformance.runner import (
     SendEvidence,
     run,
 )
+from daimon.testing.ma_models import ma_session
+from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import SessionSpec, SkillUpload
 from mux.drivers.anthropic import AnthropicManagedAgents

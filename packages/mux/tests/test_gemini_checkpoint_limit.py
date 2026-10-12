@@ -9,13 +9,13 @@ from datetime import UTC, datetime
 
 import pytest
 from daimon.core.checkpoint_prompt import HANDOFF_MAX_BYTES
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, PageRequest, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, Session, SessionSpec
 from mux.drivers.gemini import GeminiManagedAgents, resources
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.errors import ProviderError, ScopeViolation
 from mux.state.memory import MemoryStateStore
 

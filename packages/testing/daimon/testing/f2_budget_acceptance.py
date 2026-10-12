@@ -33,13 +33,13 @@ from daimon.testing.anthropic_live import (
     refuse_late_usage,
     run_live,
 )
+from daimon.testing.conformance.budget import ContainerAllowance, ProbePlan
 from daimon.testing.f2_native_bounds import (
     install_f2_bounds,
     native_budget,
     native_tools,
     verify_tools,
 )
-from mux.conformance.budget import ContainerAllowance, ProbePlan
 from mux.contracts.resources import SessionSpec
 
 

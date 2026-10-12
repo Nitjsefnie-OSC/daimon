@@ -13,6 +13,7 @@ from typing import Protocol, cast
 
 import httpx
 import pytest
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from daimon.testing.outcome_oracle import RunEvidence, TerminalEvidence, TurnEvidence, evaluate
 from daimon.testing.provider_fixtures import (
@@ -35,7 +36,6 @@ from mux.contracts.events import (
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, SessionSpec
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.transport import SDKTransport as GeminiTransport
 from mux.drivers.gemini.transport import close_iterator
 from mux.drivers.openai import OpenAIDriver

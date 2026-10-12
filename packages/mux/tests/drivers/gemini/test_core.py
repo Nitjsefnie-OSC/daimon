@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.contracts.actions import NativeInput, UserMessage, UserToolResult
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import NativePart, TextPart, ToolResultPayload
@@ -20,7 +21,6 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import compile_agent
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.gemini.transport import Object, close_iterator
 from mux.errors import (
     ContinuityLost,

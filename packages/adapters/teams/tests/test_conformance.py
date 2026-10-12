@@ -14,15 +14,15 @@ import daimon.adapters.teams.app as app_module
 import pytest
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.attachments import InboundFile
-from daimon.adapters.teams.conformance import (
+from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.testing.adapters.teams.conformance import (
     AdmissionBarrier,
     MentionTurn,
     MultiHumanEnvelope,
     ThreadInputs,
     multi_human_evidence,
 )
-from daimon.adapters.teams.identity import TeamsInbound
-from daimon.core.ma_identity import derive_tenant_uuid
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (

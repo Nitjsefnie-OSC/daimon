@@ -9,9 +9,15 @@ from pathlib import Path
 
 import httpx
 import pytest
-from mux.conformance.budget import BudgetConfig, BudgetGuard, BudgetRefused, ProbePlan, TokenLimits
-from mux.drivers.gemini.round_cases import INPUT_MAX, OUTPUT_MAX
-from mux.drivers.gemini.round_runner import admit, execute
+from daimon.testing.conformance.budget import (
+    BudgetConfig,
+    BudgetGuard,
+    BudgetRefused,
+    ProbePlan,
+    TokenLimits,
+)
+from daimon.testing.drivers.gemini.round_cases import INPUT_MAX, OUTPUT_MAX
+from daimon.testing.drivers.gemini.round_runner import admit, execute
 from pydantic import ValidationError
 
 from .test_round_cases import SCOPE, NativeWire, admission
