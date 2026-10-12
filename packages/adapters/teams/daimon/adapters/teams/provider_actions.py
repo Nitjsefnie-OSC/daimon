@@ -30,6 +30,7 @@ from microsoft_teams.api import (
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ActionSet, AdaptiveCard, CardElement, RichTextBlock, TextRun
 from mux.contracts.ids import ResourceRef
+from mux.profiles import emits_legacy_events_for
 
 VERB = "provider_action"
 log = structlog.get_logger(__name__)
@@ -188,6 +189,6 @@ def provider_action_options(
     prepared: PreparedTurn, factory: Callable[[], ProviderActionHook]
 ) -> ProviderActionOptions:
     ref = getattr(prepared, "session_ref", None)
-    if isinstance(ref, ResourceRef) and ref.provider != "anthropic":
+    if isinstance(ref, ResourceRef) and not emits_legacy_events_for(ref.provider):
         return {"provider_action": factory()}
     return {}

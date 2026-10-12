@@ -35,6 +35,7 @@ from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.usage_totals import ProviderUsageTotals
 from daimon.testing.turn_fakes import FakeAnthropic
+from mux import profiles
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef
 from mux.contracts.receipts import StopObservation
@@ -132,6 +133,21 @@ class Posts:
             deregister=self.deregistered.append,
             clock=lambda: self.now,
         )
+
+
+async def test_normalized_legacy_event_does_not_displace_sdk_rendering(
+    fake_slack_web_client: FakeSlackWebClient,
+) -> None:
+    posts = Posts(fake_slack_web_client)
+    lifecycle = posts.lifecycle()
+    before = posts.count
+    await lifecycle.on_provider_event(message("anthropic", "Normalized duplicate"))
+    assert lifecycle._provider_draft is None
+    assert posts.count == before
+    native, _ = native_events()
+    await lifecycle.on_sse_event(cast(RawMessageStreamEvent, native))
+    await lifecycle.post_initial()
+    assert "Actual answer" in str(posts.requests("chat.postMessage"))
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
@@ -362,3 +378,25 @@ async def test_actual_driver_to_slack_surface_finalizes_without_synthetic_meter(
     assert "cancel_turn" not in str(posts.updated[-1])
     assert "Actual answer" in str(posts.updated[-1])
     assert posts.deregistered == ["1000000000.000001"]
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+async def test_rendering_follows_declared_capability_without_network_io(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, fake_slack_web_client: FakeSlackWebClient
+) -> None:
+    posts = Posts(fake_slack_web_client)
+    for emits_legacy in (True, False):
+        monkeypatch.setattr(
+            profiles,
+            "PROFILES",
+            {
+                pid: profile.model_copy(update={"emits_legacy_events": emits_legacy})
+                if profile.provider == provider
+                else profile
+                for pid, profile in profiles.PROFILES.items()
+            },
+        )
+        lifecycle = posts.lifecycle()
+        await lifecycle.on_provider_event(message(provider, "Declared routing"))
+        assert (lifecycle._provider_draft is None) is emits_legacy
+        assert posts.count == 0

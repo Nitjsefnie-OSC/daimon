@@ -11,6 +11,7 @@ MANAGED_AGENTS = Profile(
     schema_version="1",
     sdk_pin="anthropic>=0.117",
     core=True,
+    emits_legacy_events=True,
     support={
         "thread_workspace_persistence": "native",
         "turn_lifecycle": "native",

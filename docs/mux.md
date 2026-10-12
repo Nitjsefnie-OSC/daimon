@@ -2073,3 +2073,10 @@ causes acquisition-only refusal/retry through the existing transaction owner;
 readers do not bypass policy isolation. The generic StateStore latest-revision
 API includes all materializations; explicit channel override reads use
 `current_backend`, including immutable clear markers.
+
+Slack and Teams read `Profile.emits_legacy_events` to retain the existing SDK
+rendering path for Managed Agents and normalized drafts and action callbacks
+for native profiles. Events and resource references carry only the provider;
+`mux.profiles.emits_legacy_events_for` reads the registered profiles and refuses
+missing or conflicting declarations. This routing capability does not admit a
+backend or change channel configuration.
