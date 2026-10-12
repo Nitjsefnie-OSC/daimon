@@ -12,7 +12,7 @@ import datetime
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 import anthropic
 import httpx
@@ -1074,6 +1074,126 @@ async def _set_agent_backend_impl(
     }
 
 
+class AgentBackendSwitchInfo(BaseModel):
+    status: Literal["preview", "changed"]
+    agent_name: str
+    target_backend: Provider
+    expected_revision: int
+    preview_digest: str
+    unsupported_skills: tuple[str, ...]
+    unsupported_mcps: tuple[str, ...]
+    unsupported_capabilities: tuple[str, ...]
+    shared_thread_limits: tuple[str, ...]
+    cost_line: str
+    summary: str
+
+
+async def _request_agent_backend_switch_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    agent_name: str,
+    target_backend: Provider,
+    expected_revision: int | None = None,
+    preview_digest: str | None = None,
+    origin_context_id: str | None = None,
+) -> AgentBackendSwitchInfo:
+    _require_admin(auth)
+    if auth.agent_id is not None or auth.platform_user_id is None:
+        raise ToolError("Request this change from an admin's active chat conversation.")
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    if origin is None:
+        raise ToolError("Request this change from an admin's active chat conversation.")
+
+    from daimon.adapters.mcp.tools._session_gate import session_card_gap
+    from daimon.core.channel_backend import (
+        BackendActor,
+        load_backend_agent,
+        make_backend_service,
+    )
+    from daimon.core.confirmation import BackendSwitchReference
+    from pydantic import ValidationError
+
+    try:
+        service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+        if not service.enabled:
+            raise ToolError("Model backend selection is disabled. Nothing changed.")
+        gap = await session_card_gap(
+            runtime, auth, origin, tool_name="request_agent_backend_switch"
+        )
+        if gap is not None:
+            raise ToolError(
+                "This conversation cannot verify the confirmation card. Nothing changed."
+            )
+        agent = await load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=agent_name,
+        )
+        preview = await service.preview(agent, target_backend)
+        if not preview.allowed:
+            raise ToolError(
+                "That model backend is not enabled for this workspace. Nothing changed."
+            )
+        status: Literal["preview", "changed"] = "preview"
+        summary = (
+            "Show this compatibility and cost preview. If they want to proceed, call "
+            "request_agent_backend_switch again with its expected_revision and preview_digest; "
+            "the requesting admin must Confirm on the card. Nothing has changed yet."
+        )
+        if preview_digest is not None:
+            reference = BackendSwitchReference.model_validate(
+                {
+                    "agent": agent_name,
+                    "target_backend": target_backend,
+                    "expected_revision": expected_revision,
+                    "preview_digest": preview_digest,
+                }
+            )
+            # The card check awaited provider I/O; reread configuration at the write edge.
+            agent = await load_backend_agent(
+                runtime.client,
+                runtime.session_factory,
+                tenant_id=auth.tenant_id,
+                agent_name=agent_name,
+            )
+            actor = BackendActor(
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                subject=mcp_subject(auth, is_admin=auth.is_admin),
+            )
+            await service.set_backend(
+                agent,
+                target_backend,
+                reference.expected_revision,
+                actor,
+                expected_preview_digest=reference.preview_digest,
+            )
+            status = "changed"
+            summary = (
+                "Model backend changed. Existing threads keep their backend; "
+                "channel overrides still take priority in new threads."
+            )
+        return AgentBackendSwitchInfo(
+            status=status,
+            agent_name=agent.name,
+            target_backend=preview.target_backend,
+            expected_revision=preview.setting_revision,
+            preview_digest=preview.digest,
+            unsupported_skills=preview.unsupported_skills,
+            unsupported_mcps=preview.unsupported_mcps,
+            unsupported_capabilities=preview.unsupported_capabilities,
+            shared_thread_limits=preview.shared_thread_limits,
+            cost_line=preview.cost_line,
+            summary=summary,
+        )
+    except (DaimonError, ValidationError) as exc:
+        raise ToolError(
+            "The preview is unavailable or changed. Preview again; nothing changed."
+        ) from exc
+
+
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     if channel_backend.backend_selection_enabled(runtime.settings.turn):
 
@@ -1294,3 +1414,36 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             name,
             expected_ma_agent_id=expected_ma_agent_id,
         )
+
+    # The shared factory owns the enablement decision and validation.
+    from daimon.core.channel_backend import backend_selection_enabled
+
+    if backend_selection_enabled(runtime.settings.turn):
+
+        @mcp.tool(tags={"admin"})
+        async def request_agent_backend_switch(  # pyright: ignore[reportUnusedFunction]
+            ctx: Context,
+            agent_name: str,
+            target_backend: Provider,
+            expected_revision: int | None = None,
+            preview_digest: str | None = None,
+            origin_context_id: str | None = None,
+        ) -> AgentBackendSwitchInfo:
+            """Preview a requested agent backend switch, then Confirm in this chat.
+
+            Use when an admin asks to switch an agent to Anthropic, OpenAI or Gemini.
+            First call without preview_digest and show the returned compatibility,
+            shared-thread limits and cost line. Call again with that preview's
+            expected_revision and preview_digest: the requesting admin must Confirm
+            on the card before anything is changed. A stale preview or expired card
+            changes nothing; preview again. Pass this active turn's origin_context_id.
+            """
+            return await _request_agent_backend_switch_impl(
+                runtime,
+                await _auth(ctx),
+                agent_name=agent_name,
+                target_backend=target_backend,
+                expected_revision=expected_revision,
+                preview_digest=preview_digest,
+                origin_context_id=origin_context_id,
+            )

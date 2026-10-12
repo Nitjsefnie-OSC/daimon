@@ -606,7 +606,7 @@ _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
 UNMENTIONED_REPLY_HINT_EMOJI: Final[str] = "🔔"
 
 
-async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[Role, list[str]]:
+async def requester_role(guild: discord.Guild, external_user_id: str) -> tuple[Role, list[str]]:
     """The requester's live guild role and role ids, for a turn with no message to read.
 
     Same test a mention applies (`is_member_guild_admin`), against the member
@@ -623,6 +623,10 @@ async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[
         return Role.USER, []
     is_admin = is_member_guild_admin(member, guild_owner_id=guild.owner_id)
     return (Role.ADMIN if is_admin else Role.USER), member_role_ids(member)
+
+
+# Existing continuation callers retain the same live member lookup.
+_requester_role = requester_role
 
 
 class DaimonBot(commands.Bot):
@@ -3689,7 +3693,12 @@ class DaimonBot(commands.Bot):
                     recovery_lifecycle=_recovery_lifecycle,
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
-                    confirm_write=discord_confirmation_hook(thread),
+                    confirm_write=discord_confirmation_hook(
+                        thread,
+                        runtime=self.runtime,
+                        tenant_id=tenant_id,
+                        account_id=admission.account_id,
+                    ),
                     active_turn_message_id=marked_message_id,
                     **provider_action_options(
                         prepared,
@@ -4897,7 +4906,12 @@ class DaimonBot(commands.Bot):
                     image_blocks=image_blocks,
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
-                    confirm_write=discord_confirmation_hook(thread),
+                    confirm_write=discord_confirmation_hook(
+                        thread,
+                        runtime=self.runtime,
+                        tenant_id=tenant_id,
+                        account_id=admission.account_id,
+                    ),
                     active_turn_message_id=marked_message_id,
                     **provider_action_options(
                         prepared,

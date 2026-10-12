@@ -2817,6 +2817,9 @@ class SlackApp:
                         deadline=turn_deadline_at,
                         confirm_write=self._confirmations.hook(
                             web_client,
+                            runtime=self.runtime,
+                            tenant_id=tenant_id,
+                            account_id=admission.account_id,
                             channel=channel,
                             thread_ts=thread_id,
                             identity=turn_identity,
@@ -3352,6 +3355,9 @@ class SlackApp:
                     deadline=follow_deadline,
                     confirm_write=self._confirmations.hook(
                         web_client,
+                        runtime=self.runtime,
+                        tenant_id=tenant_id,
+                        account_id=follow_admission.account_id,
                         channel=channel,
                         thread_ts=thread_id,
                         identity=follow_identity,

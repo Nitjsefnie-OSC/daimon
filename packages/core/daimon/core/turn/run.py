@@ -26,7 +26,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.config import load_turn_settings
-from daimon.core.confirmation import ConfirmationHook
+from daimon.core.confirmation import ConfirmationHook, backend_switch_tools_for_turn
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
@@ -88,6 +88,7 @@ from daimon.core.usage_reconcile import reconcile_unbilled
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.contracts.profile import SUPPORTED
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
 from sqlalchemy.exc import SQLAlchemyError
@@ -910,6 +911,14 @@ async def run_prepared_turn_impl(
     breach can never loop into a second wall-clock-priced attempt.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+    confirmed_tools: frozenset[str] = backend_switch_tools_for_turn(deps)
+    if confirmed_tools:
+        revision = prepared.admission.backend_revision
+        if (
+            revision is not None
+            and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
+        ):
+            confirmed_tools = frozenset()
     tool_confirmation = chat_tool_confirmation(
         deps.tool_safety,
         requester_platform_user_id=external_user_id,
@@ -917,6 +926,7 @@ async def run_prepared_turn_impl(
         attended=attended if attended is not None else origin != "routine",
         trusted_servers=trusted_servers_for(deps.public_url),
         asks_before_publishing=prepared.admission.asks_before_publishing,
+        confirmed_tools=confirmed_tools,
     )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the

@@ -1244,6 +1244,9 @@ class TeamsApp:
                 image_blocks=attachments.image_blocks or None,
                 deadline=deadline,
                 confirm_write=self.confirmations.hook(
+                    runtime=self.runtime,
+                    tenant_id=tenant_id,
+                    account_id=admission.account_id,
                     conversation_id=inbound.conversation_id,
                     service_url=inbound.service_url,
                     requester_display_name=inbound.user_name,

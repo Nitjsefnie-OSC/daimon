@@ -1155,6 +1155,14 @@ after Stop never runs anything. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
 
+With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
+an active chat admin can request an agent backend change through that same
+confirmation hook. The card shows the server's current compatibility and cost
+preview. Confirm rechecks the requester and current admin permission, then
+applies the bound revision and preview digest by compare-and-set. Native
+sessions without verified approval remain refused. Invalid prompt inputs are
+denied inside the existing card boundary; sibling decisions continue.
+
 ### How a turn ended
 
 `packages/core/daimon/core/turn/termination.py` defines `TerminationReason`,
