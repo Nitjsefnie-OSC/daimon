@@ -526,7 +526,7 @@ async def _create_checkout(
     The bearer is a plain non-admin account token (mint_jwt): the checkout route
     only authenticates the account and uses the verifier-derived tenant — it never
     checks admin. Minting an is_admin+internal token here would hand an arbitrary
-    platform account a non-revocable admin bearer at the MCP gate (#162 / CR-01).
+    platform account a non-revocable admin bearer at the MCP gate.
     """
     settings = view.runtime.settings
     # The /billing/checkout route is add_route'd at the app root, not under the

@@ -10,7 +10,7 @@ The CLI never calls this tool. (The former ``daimon auth github`` OAuth
 flow and its ``/oauth/github/*`` + ``/cli/auth/status`` routes were removed
 — repo credentials now come from the GitHub App or a bound PAT.)
 
-Audit log invariant (T-19-04-02): the token plaintext NEVER appears in
+Audit log invariant: the token plaintext NEVER appears in
 any log line emitted by this module. The combined-log integration test
 (``tests/test_audit_log_no_token.py``) asserts this across both the
 broker and tool layers using a sentinel token.
@@ -40,8 +40,8 @@ async def _get_cli_token_impl(
 ) -> str:
     """Dispatch to the broker for ``service``; map BrokerError → ToolError.
 
-    Reads identity server-side via ``await ctx.get_state("auth")`` (T-19-04-01:
-    no tool-supplied agent_id; confused-deputy by construction).
+    Reads identity server-side via ``await ctx.get_state("auth")``;
+    no tool-supplied agent_id, avoiding a confused deputy by construction.
     """
     auth = await _auth(ctx)
     agent_id = auth.agent_id or (auth.chat_agent_id if service == "gcloud" else None)

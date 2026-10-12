@@ -1,4 +1,4 @@
-"""Words for a turn that finished without one of its MCP servers (#79).
+"""Words for a turn that finished without one of its MCP servers.
 
 Pure. The adapters append `render_degraded_notice` under the reply so the
 person learns a named server was unavailable instead of getting a blank

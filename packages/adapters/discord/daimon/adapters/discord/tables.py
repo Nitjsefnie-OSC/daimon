@@ -5,16 +5,14 @@ from __future__ import annotations
 import asyncio
 import io
 from functools import cache
-from pathlib import Path
 from typing import cast
 
+from daimon.core.fonts import FONT_DIR as _FONTS
 from daimon.core.tables import MarkdownTable, render_tables
 from fontTools.ttLib import TTFont  # pyright: ignore[reportMissingTypeStubs]
 from PIL import Image, ImageDraw, ImageFont
 
 import discord
-
-_FONTS = Path(__file__).with_name("fonts")
 
 
 @cache

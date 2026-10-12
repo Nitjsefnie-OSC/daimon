@@ -105,7 +105,7 @@ async def reconcile_agent(
     matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
     ma_match = matches[0] if matches else None
     # Dedup: when MA holds multiple agents with the same daimon_name (the
-    # documented R5 multi_match condition), keep the canonical one (max
+    # multi_match condition), keep the canonical one (max
     # created_at, returned first by find_agents_by_daimon_tag) and archive
     # the rest. Without this the duplicates accumulate forever.
     duplicates = matches[1:] if len(matches) > 1 else []
@@ -178,7 +178,7 @@ async def reconcile_agent(
         # survive `defaults apply`. Spec wins on name/skill_id collision.
         # These merges — and the update call itself — live inside `_apply` so
         # a version-conflict retry recomputes them against the freshly-
-        # retrieved agent, never the stale `ma_match` read above (Pitfall 2):
+        # retrieved agent, never the stale `ma_match` read above:
         # a naive retry against `ma_match` would silently drop or duplicate a
         # concurrent writer's skills/MCP-server changes.
         async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:

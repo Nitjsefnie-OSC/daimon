@@ -1,4 +1,4 @@
-"""TurnDeps -- frozen DI bundle for the pre-turn admission sequence (D-04).
+"""TurnDeps -- frozen DI bundle for the pre-turn admission sequence.
 
 Built once per adapter runtime (Discord/Slack `build_runtime`, the scheduler,
 the CLI) and threaded through `admit()` / `run_prepared_turn`. Carries every
@@ -52,9 +52,9 @@ class TurnDeps:
     `fernet` is built ONCE here from `settings.crypto.keys` at adapter runtime
     construction -- this is the mechanism that makes a missing fernet on the
     Slack adapter impossible by construction (a caller can't forget to build
-    it per turn). `resolver_cache` is likewise a single shared instance per
-    adapter process (D-12): Slack stops constructing a fresh cache per turn
-    and adopts Discord's <=300s TTL staleness semantics.
+    it per turn). `resolver_cache` is likewise reused across turns for the
+    lifetime of the adapter process. Its ID mappings and full agent/environment
+    entries retain the shared resolver owner's separate expiration policies.
     """
 
     anthropic: AsyncAnthropic

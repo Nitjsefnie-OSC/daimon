@@ -1,11 +1,11 @@
 """Derive a read-only reader variant of a publisher's agent.
 
-SPEC D-04/§1.7: a published report is answered by a *variant* of whatever
+A published report is answered by a *variant* of whatever
 agent the publisher names, not a fixed generic `report-reader` agent. The
 variant keeps the source's prompt, model and skills (so it answers in the
 voice the client already knows) and loses every MCP server and every
 `mcp_toolset` tool (so a report reader can never reach the source's
-integrations — see threat T-21-03-A).
+integrations).
 
 Split in two, functional-core/imperative-shell:
 
@@ -15,7 +15,7 @@ Split in two, functional-core/imperative-shell:
 - `ensure_reader_variant` is the thin shell: resolve the source agent on MA,
   derive its spec, then find-or-create-or-update the variant, keyed so that
   publishing twice from an unchanged source reuses one variant instead of
-  creating a second (threat T-21-03-D).
+  creating a second.
 """
 
 from __future__ import annotations
@@ -197,7 +197,7 @@ async def ensure_reader_variant(
     )
     # managed=False is load-bearing: a variant stamped managed would be
     # archived by the next `defaults apply` sweep because it is not in the
-    # seeded spec list (threat T-21-03-C).
+    # seeded spec list.
     metadata = build_metadata(
         tenant_id=tenant_id,
         name=reader_spec.name,

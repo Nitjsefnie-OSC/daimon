@@ -42,8 +42,7 @@ class SkillRef(BaseModel):
     skills. `skill_id` is the name used to look up the skill at upload time
     (resolved to a MA skill ID by `resolve_refs`).
 
-    `extra="forbid"` enforces the STRIDE T-07-01 threat mitigation: unknown
-    fields from YAML are rejected at parse time.
+    `extra="forbid"` rejects unknown fields from YAML at parse time.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

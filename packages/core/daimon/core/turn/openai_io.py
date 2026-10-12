@@ -49,7 +49,7 @@ _BUFFER_BOUND = 1000
 
 
 class OpenAIPersistence(Protocol):
-    """Structural bridge to N4's journal and claimed-mutation context."""
+    """Structural bridge to the journal and claimed-mutation context."""
 
     async def record(
         self, session: ResourceRef, event: Event, *, source_key: str | None = None

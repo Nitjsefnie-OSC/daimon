@@ -1,6 +1,6 @@
 """OpenAI snapshot/revision storage within the host's fenced turn journal.
 
-A completed recovery snapshot is appended atomically through A4. The host
+A completed recovery snapshot is appended atomically. The host
 invocation/revision checkpoints never become display records. Usage allocation is
 serialized by that same admitted binding lease, including after process restart.
 """
@@ -77,7 +77,7 @@ class OpenAIRecoveryJournal:
         active = persistence(session)
         if any(e.session_id != session.id or e.native.provider != "openai" for e in events):
             raise ScopeViolation(session.id, "foreign OpenAI recovery snapshot")
-        # A4 publishes all completed pages, projection and cursor in ONE commit.
+        # Publish all completed pages, projection and cursor in ONE commit.
         cursor = events[-1].id if events else ""
         await active.record_many(session, events, cursor=cursor, source_key=journal_source)
 

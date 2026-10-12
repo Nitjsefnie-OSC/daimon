@@ -97,6 +97,12 @@ generator, and which pages are maintained by hand.
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.
 
+### Production comments
+
+Explain invariants and causal reasons in product comments and docstrings. Keep
+ticket numbers, review rounds, lane names and checklist labels in commit or PR
+provenance.
+
 ### Migration downgrade-safety markers
 
 Every file under `packages/core/alembic/versions/` must carry a

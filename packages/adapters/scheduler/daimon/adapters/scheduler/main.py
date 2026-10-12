@@ -275,8 +275,8 @@ async def _build_fire(
             except AccessPolicyUnreadable:
                 policy_error: str | None = "access_policy_unreadable"
             else:
-                # FEAT-085: a destination protected since the routine was made
-                # is never offered to the agent as a place to post (SYS-048's
+                # A destination protected since the routine was made
+                # is never offered to the agent as a place to post (the protection
                 # guard is not on send_message yet). The poster re-checks with
                 # the parent channel and category it resolves.
                 # The scheduler cannot resolve a Discord thread's parent or
@@ -483,7 +483,7 @@ async def _build_fire(
             else None
         )
 
-        # FEAT-085: a routine with a destination opens with host-supplied
+        # A routine with a destination opens with host-supplied
         # controls naming it; one without sends its trigger message as before.
         trigger_message = row.trigger_message
         if row.destination_kind is not None:

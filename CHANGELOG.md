@@ -52,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Move conformance, manual probe and platform QA helpers and saved certification receipts out of runtime wheels into test support, with source and built-wheel CI checks.
 
 - Move the offline Admin billing reconciliation command into the testing package; production usage accounting retains its existing ledger.
+- Share native message preview folding across Discord, Slack and Teams, and bundle the adapters' Inter faces once in core while preserving their rendering and web URLs.
+- Share native message preview folding across Discord, Slack and Teams, and bundle the adapters' Inter faces once in core for rendering, web URLs and the table-image oracle.
+- Keep product comments and docstrings focused on behavior and causal reasons, moving ticket and review references to commit provenance.
 
 - Preserve OpenAI session occupancy when accepted work has no visible active root yet, allowing observation to continue without retrying creation or admitting a new turn.
 

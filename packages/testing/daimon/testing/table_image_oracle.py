@@ -12,10 +12,9 @@ from __future__ import annotations
 import hashlib
 import io
 import re
-from pathlib import Path
 from typing import Literal
 
-from daimon.adapters.discord import tables as discord_tables
+from daimon.core.fonts import FONT_DIR
 from daimon.core.tables import Alignment, MarkdownTable
 from daimon.testing.outcome_oracle import CheckResult
 from PIL import Image, ImageChops, ImageDraw, ImageFont, UnidentifiedImageError
@@ -147,15 +146,14 @@ def _template(table: MarkdownTable) -> Image.Image | None:
     """
     if table.headers != ("Fruit", "Colour", "Price") or len(table.rows) != 4:
         return None
-    fonts = Path(discord_tables.__file__).with_name("fonts")
     try:
         for name, digest in FONT_SHA256.items():
-            if hashlib.sha256((fonts / name).read_bytes()).hexdigest() != digest:
+            if hashlib.sha256((FONT_DIR / name).read_bytes()).hexdigest() != digest:
                 return None
     except OSError:
         return None
-    regular = ImageFont.truetype(str(fonts / "Inter-Regular.ttf"), 18)
-    bold = ImageFont.truetype(str(fonts / "Inter-Bold.ttf"), 18)
+    regular = ImageFont.truetype(str(FONT_DIR / "Inter-Regular.ttf"), 18)
+    bold = ImageFont.truetype(str(FONT_DIR / "Inter-Bold.ttf"), 18)
     reference = Image.new("RGB", (900, 245), "white")
     canvas = ImageDraw.Draw(reference)
     for row_index, row in enumerate((table.headers, *table.rows)):

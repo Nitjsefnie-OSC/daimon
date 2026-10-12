@@ -980,7 +980,7 @@ async def run_mcp_credential_submission(
             token_present=bool(value),
         )
         # Ask the server first, as on Discord: a rejected token must not be
-        # stored, mirrored and attached only to fail every later turn (#79).
+        # stored, mirrored and attached only to fail every later turn.
         rejection = await check_token(
             runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=value
         )

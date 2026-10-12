@@ -70,7 +70,7 @@ async def get_credential_login_by_principal(
 
     Used by /cli/auth/status — never returns the encrypted token. The
     intentionally narrow signature avoids fanning credential plaintext (or
-    even ciphertext) out to the route layer (T-19-05-02).
+    even ciphertext) out to the route layer.
     """
     orm = await session.get(GitHubCredential, principal_id)
     if orm is None:

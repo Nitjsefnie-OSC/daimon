@@ -342,7 +342,7 @@ async def _self_delete_file_impl(
         runtime, auth, ma_agent=lambda: _resolve_ma_agent(runtime, auth), origin=None
     )
     await _require_member_may_remove(runtime, auth, agent_id=agent_id, key=key)
-    # delete_agent_file is silently idempotent at the store layer (Pitfall 2).
+    # delete_agent_file is silently idempotent at the store layer.
     async with runtime.session_factory.begin() as session:
         await delete_agent_file(
             session,

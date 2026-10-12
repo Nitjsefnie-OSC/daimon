@@ -34,7 +34,7 @@ async def prepared_persistence(
 
     The mapping was authorized by preparation. Validate it again rather than
     accepting a session/thread from a driver parameter. Shared bindings are
-    N2's account=None slot, with their pinned configuration and stable id.
+    the account=None slot, with their pinned configuration and stable id.
     """
     scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id)
     observation = current_outcome.get()
@@ -117,7 +117,7 @@ async def prepared_persistence(
     ):
         raise ScopeViolation(session_id, "persisted binding belongs to another provider profile")
     if current is None and admission.shared_owner is not None:
-        # bind_session has already committed N2's shared binding. An append
+        # bind_session has already committed the shared binding. An append
         # or driver call must never create ownership for an unbound shared session.
         raise ScopeViolation(session_id, "shared session has no persisted binding")
     if (

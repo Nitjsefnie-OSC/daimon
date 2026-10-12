@@ -336,7 +336,7 @@ def build_oauth_slack_routes(
         raw_state = request.query_params.get("state", "")
         code = request.query_params.get("code", "")
 
-        # T-79-01: verify HMAC-signed state before any exchange (parse-guard).
+        # Verify HMAC-signed state before any exchange (parse-guard).
         try:
             state_payload = verify_state(
                 token=raw_state,

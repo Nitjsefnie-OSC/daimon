@@ -76,7 +76,7 @@ async def find_agents_by_daimon_tag(
 
     The first element (max `created_at`) is the canonical match the resolver
     and reconcile should adopt; remaining elements are duplicates that
-    reconcile is responsible for archiving (per R5 dedup). Empty list = no
+    reconcile is responsible for archiving. Empty list = no
     match.
 
     `include_archived=True` lifts the archived filter — useful for `daimon
@@ -225,8 +225,8 @@ async def list_referenced_skill_ids(client: AsyncAnthropic) -> set[str]:
     cannot distinguish a defaults-created skill from a user-synced one the way
     the agent/env sweeps use the `daimon_managed` marker. Sparing any skill an
     agent still references is the available proxy for "in use, don't delete"
-    and prevents the sweep from deleting a live agent's skill out from under it
-    (smoke-matrix #19). Not tenant-scoped: skills are org-wide, so a reference
+    and prevents the sweep from deleting a live agent's skill out from under it.
+    Not tenant-scoped: skills are org-wide, so a reference
     from an agent in any tenant counts.
     """
     referenced: set[str] = set()

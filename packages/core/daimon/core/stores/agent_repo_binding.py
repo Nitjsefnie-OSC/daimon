@@ -21,8 +21,7 @@ def _normalize_owner_repo(url: str) -> str:
     'owner/repo', any with a trailing '/' or '.git'.
 
     Mirrors daimon.core.skill_sync.fetcher._normalize_owner_repo — both sides
-    must normalize identically so set_binding and get_bindings_for_repo match
-    (Pitfall 2 / T-56-09).
+    must normalize identically so set_binding and get_bindings_for_repo match.
     """
     return (
         url.removeprefix("https://github.com/")

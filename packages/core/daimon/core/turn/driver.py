@@ -32,7 +32,7 @@ awaits `lifecycle.on_sse_event(event)` synchronously, so per the hook
 contract in `turn/lifecycle.py` that hook must stay a cheap local tap — no
 network I/O. Exactly ONE piece of I/O is permitted inline in the consume
 loop itself, ahead of that hook call: the per-event billing `record()`
-call (D-06). Unlike chat-API flush I/O, billing is a local Postgres write,
+call. Unlike chat-API flush I/O, billing is a local Postgres write,
 it is correctness rather than delivery (an unmetered
 `span.model_request_end` is revenue lost, and the recorder is fail-closed
 by design — exceptions propagate), and it carries no retry-after-style
@@ -573,7 +573,7 @@ async def run_turn(
     `run_prepared_turn`, whose `None` is fail-safe (`turn_deadline(now=now())`
     is computed for them). The reason: `run_prepared_turn` already wraps this
     whole call in `asyncio.wait_for`, and its own `TimeoutError` handler is
-    what performs D-09's `mark_dead` on the thread-session mapping, logs
+    what performs `mark_dead` on the thread-session mapping, logs
     `turn.ceiling_exceeded` with the mapping id, and calls the caller's
     `on_terminal_failure` directly. A driver-level bound that ever won that
     race would silently bypass all of it — so the driver defers to the
@@ -893,7 +893,7 @@ async def _pump(
     # Per-turn dedup for AutoApprove: lives here (not in
     # `_consume_with_reconnect`) so it survives a reconnect -- a
     # re-delivered `requires_action` idle after an eventless-cycle
-    # reconnect must not be double-confirmed (T-19-08-B).
+    # reconnect must not be double-confirmed.
     confirmed_tool_use_ids: set[str] = set()
     # The confirmed ids MA has taken: their `user.tool_confirmation` came
     # back on the stream or in a replay. A `requires_action` idle naming a
@@ -1660,10 +1660,9 @@ async def _consume_with_reconnect(
                     delivered_provider_event_ids.add(normalized.id)
             if event is None:
                 # Usage-only native frames have no display event to decode.
-                # N4's codec edge owns the optional native field declaration.
                 continue
             if event.id not in delivered_event_ids:
-                # D-06: the one inline I/O the consume loop is allowed to do.
+                # The one inline I/O the consume loop is allowed to do.
                 # A local Postgres write, correctness not delivery -- unlike the
                 # chat-API flush I/O this hook contract forbids, an unmetered
                 # event is revenue lost. Exceptions propagate (fail-closed).
@@ -1778,7 +1777,7 @@ async def _consume_with_reconnect(
                             continue
                         # MA took our confirmations and asked again for the
                         # same ids -- stop instead of spinning until the
-                        # ceiling (T-19-08-C).
+                        # ceiling.
                         log.info("turn.tool_confirmation.exhausted", session_id=session_id)
                         return
                     case RequireApproval():
@@ -1841,7 +1840,7 @@ async def _finalize_success_or_error(
         )
         state_cell[0] = final_state
     if final_state.error is None:
-        # #79: an MCP failure the reducer kept out of `error` degrades a turn
+        # An MCP failure the reducer kept out of `error` degrades a turn
         # that still answered. A turn that answered with nothing is dead
         # (MA's `exhausted` means exactly that), so name the server here
         # instead of surfacing a blank success. A `retrying` error that was

@@ -1,4 +1,4 @@
-"""Offline C04 bridge: real native delivery, restartable fenced host intent.
+"""Offline restart bridge: real native delivery, restartable fenced host intent.
 
 This bridge is explicitly injected by the offline adapter. It does not replace
 the production host's Postgres persistence or enable automatic redelivery.
@@ -31,7 +31,7 @@ class OpenAIConformanceEvents(OpenAIEvents):
     A native 202 can durably establish accepted status without an input ID.
     After a restart, saved text/current turn cannot associate it with a key.
     Observe owned native inventory, but never manufacture that association or
-    issue another POST. This is the conservative branch of the shared C04 probe.
+    issue another POST. This is the conservative branch of the shared restart probe.
     """
 
     def __init__(

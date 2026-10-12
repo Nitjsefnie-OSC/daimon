@@ -1,8 +1,8 @@
-"""D-08/D-09/D-10: `run_prepared_turn` owns the driver call and the one-shot
+"""`run_prepared_turn` owns the driver call and the one-shot
 dead-session recovery cycle.
 
 `_is_dead_session` is ported verbatim from
-`daimon.adapters.discord.bot._is_dead_session` (D-10) -- applies uniformly to
+`daimon.adapters.discord.bot._is_dead_session` -- applies uniformly to
 fresh and reused sessions; a fresh-session 404 costs one harmless retry
 rather than adding a reused-only guard (an unnamed behaviour change that was
 considered and rejected).
@@ -330,7 +330,7 @@ class _DeferredFailureLifecycle:
 
 async def _mirror_cancel(cancel: asyncio.Event, fresh_cancel: asyncio.Event) -> None:
     """Forward a LATE cancel on the ORIGINAL event into `fresh_cancel` for the
-    duration of the recovery turn (D-07(b)).
+    duration of the recovery turn.
 
     The adapters' recovery lifecycles rebind their cancel affordance to
     `fresh_cancel`: Discord's new `CancelView` lands with the recovery
@@ -377,7 +377,7 @@ def _is_dead_session(state: TurnState) -> bool:
     message, which is the first to see the archived-session 400 — so the thread
     heals on its own without retrying poison.
 
-    D-10: a `kind == "ceiling"` error must NEVER recover here either -- it is
+    A `kind == "ceiling"` error must NEVER recover here either -- it is
     excluded by construction (this function only ever returns True for
     `kind == "upstream"`), and that exclusion is what stops a 45-minute
     wall-clock timeout from being re-run as a second 45-minute turn.
@@ -895,18 +895,18 @@ async def run_prepared_turn_impl(
     leaves the marker on the session that is actually running.
 
     `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
-    and the recovery re-run -- against the per-turn ceiling (D-08/D-09).
+    and the recovery re-run -- against the per-turn ceiling.
     `deadline=None` is fail-safe, not off: it computes
     `turn_deadline(now=now())` so a caller that never passes a deadline is
     still ceiling-covered. On breach: the mapping id the FINAL attempt was
     running against (tracked as it moves through recovery) is marked dead
-    (D-09, relocated from Discord's `_retire_deadlocked_turn`) so the next
+    by the prepared-turn boundary so the next
     mention does not bind the same wedged session, the caller's own
     `lifecycle.on_terminal_failure` is invoked directly (the driver's
     finalizers never ran, so nothing else would render this), and a
     `RunOutcome` carrying `state.error.kind == "ceiling"` is returned rather
     than raised -- adapters take their existing `state.error is not None`
-    branch with no new code. D-10: this can never be misread as a dead-session
+    branch with no new code. This can never be misread as a dead-session
     signal (`_is_dead_session` gates on `kind == "upstream"`), so a ceiling
     breach can never loop into a second wall-clock-priced attempt.
     """
@@ -1037,7 +1037,7 @@ async def run_prepared_turn_impl(
                 continuity=prepared.continuity,
             )
 
-        # D-07(a): a cancel already signalled by the time we'd start recovery
+        # A cancel already signalled by the time we'd start recovery
         # means the user asked to stop before we ever attempted a second full
         # agentic turn -- running one anyway would bill work nobody wanted.
         # Abort recovery and surface the withheld first-attempt failure as
@@ -1141,7 +1141,7 @@ async def run_prepared_turn_impl(
             reseeded_message = _with_prefix(loss_user_prefix, await reseed_user_message())
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
-            # D-07(b): mirror a LATE cancel on the ORIGINAL event into
+            # Mirror a LATE cancel on the ORIGINAL event into
             # `fresh_cancel` for the duration of the recovery turn -- see
             # `_mirror_cancel`'s docstring for the window this closes.
             mirror_task = asyncio.create_task(

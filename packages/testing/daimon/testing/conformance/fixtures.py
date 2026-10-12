@@ -1,4 +1,4 @@
-"""C01–C18 from the pinned sprint matrix; store/host gaps remain explicit."""
+"""Conformance cases from the pinned matrix; store/host gaps remain explicit."""
 
 from __future__ import annotations
 

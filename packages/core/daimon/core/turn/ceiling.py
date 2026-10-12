@@ -1,5 +1,4 @@
-"""The per-turn wall-clock ceiling (D-08/D-09/D-10): the single home for the
-ceiling value, the deadline arithmetic, and the ceiling error constructor.
+"""One home for the per-turn wall-clock ceiling, deadline arithmetic and error constructor.
 
 Pure module -- no I/O, no clock reads of its own. `turn_deadline` and
 `remaining_s` both take `now` explicitly so this stays clockless per
@@ -61,7 +60,7 @@ def remaining_s(deadline: datetime, *, now: datetime) -> float:
     return max((deadline - now).total_seconds(), _MIN_REMAINING_S)
 
 
-# D-08: rendered through the adapters' existing generic error path, both of
+# Rendered through the adapters' existing generic error path, both of
 # which truncate to `str(err)[:100]`. `TurnError.__str__` is `f"{kind}: {msg}"`,
 # so this message must leave room for the "ceiling: " prefix -- see
 # `ceiling_error` and the length invariant pinned in test_ceiling.py.
