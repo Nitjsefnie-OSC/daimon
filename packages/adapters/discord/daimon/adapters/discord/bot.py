@@ -47,6 +47,7 @@ from daimon.adapters.discord.lifecycle import (
     drain_retained_card_tasks,
     edit_recovered_card,
 )
+from daimon.adapters.discord.mirror_delivery import make_discord_mirror_poster
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
@@ -112,6 +113,7 @@ from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.mirror_delivery import run_mirror_poller
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
@@ -1009,6 +1011,21 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
+            mirrors = self.runtime.settings.mirrors
+            if mirrors.enabled:
+                self._spawn(
+                    run_mirror_poller(
+                        self.runtime.sessionmaker,
+                        platform="discord",
+                        post=make_discord_mirror_poster(
+                            self.runtime.sessionmaker,
+                            fetch_channel=self._channel_by_id,
+                            max_answer_chars=mirrors.max_answer_chars,
+                        ),
+                        settings=mirrors,
+                        should_stop=lambda: self.draining or self.is_closed(),
+                    )
+                )
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
