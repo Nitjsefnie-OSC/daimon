@@ -21,7 +21,7 @@ from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer, result_diges
 from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
-from daimon.core.turn.state import TextBlock, TurnState
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
@@ -272,6 +272,37 @@ async def test_waiting_collect_blocks_real_lifecycle_summary_path():
     assert not lifecycle.was_answered
 
 
+@pytest.mark.parametrize("worker_status", [None, "pending", "failed"])
+async def test_terminal_failure_sealed_answers_obey_fleet_disclosure_policy(worker_status):
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), (worker(status=worker_status or "pending"),))
+    lifecycle = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="root",
+        model_id="fixture-model",
+        fleet_card=card if worker_status is not None else None,
+    )
+    sealed = "An unreviewed pre-tool answer. " * 30
+    state = TurnState(
+        content=[
+            TextBlock(kind="text", text=sealed),
+            ToolUseBlock(
+                kind="tool_use", id="trailing-tool", type="agent.tool_use", name="read", input={}
+            ),
+        ]
+    )
+    await lifecycle.on_terminal_failure(state, RuntimeError("fixture worker failure"))
+    messages = [
+        str(call.kwargs.get("content", "")) for call in send.await_args_list + edit.await_args_list
+    ]
+    assert any(sealed in message for message in messages) is (worker_status is None)
+    assert any("embeds" in call.kwargs for call in send.await_args_list + edit.await_args_list)
+    owner.read_result.assert_not_awaited()
+    owner.wait.assert_not_awaited()
+    assert not lifecycle.was_answered
+
+
 def test_flag_off_never_discovers_or_constructs_service():
     factory = MagicMock(side_effect=AssertionError("must stay cold"))
     assert fleet_card(factory=factory) is None
@@ -305,6 +336,7 @@ async def test_actual_review_barrier_controls_the_existing_summary_delivery(verd
     review = result("review-result", json.dumps({"verdict": verdict, "reviewed_digest": digest}))
     primary = worker(
         status="succeeded",
+        result_contract={"review_required": True},
         result=ResultPointer(output.session_id, 4, digest, "DO_NOT_POST_EXCERPT"),
     )
     reviewer = worker(

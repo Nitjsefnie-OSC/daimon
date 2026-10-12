@@ -59,5 +59,7 @@ settings are explicitly enabled. Missing factories leave ordinary turns
 unchanged. The existing render loop updates the fleet card, and its normal
 final-answer path waits for authoritative collection and required reviews.
 Pending or refused results never become an answer from worker excerpts.
+Intermediate sealed answers stay private on every fleet lifecycle path,
+including terminal failure; only the collected final summary is delivered.
 Native execution, durable atomic control, root loading and usage accounting
 remain their existing owners' ports; absent ports refuse rather than succeed.

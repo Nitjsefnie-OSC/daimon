@@ -1076,6 +1076,10 @@ class DiscordTurnLifecycle:
         as permanent messages, once each. Without this, an answer composed
         before a trailing tool call (e.g. a memory-repo write) is discarded by
         the final-response extraction and only the post-tool recap survives."""
+        # Fleet turns disclose one collected, reviewed terminal summary.
+        # Intermediate sealed text is not that summary, even on failure.
+        if self._fleet_card is not None:
+            return
         for index, text in extract_sealed_responses(
             state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
         ):
@@ -1139,8 +1143,7 @@ class DiscordTurnLifecycle:
 
     async def _deliver_success(self, state: TurnState) -> None:
         self._state = update_activity(self._state, state)
-        if self._fleet_card is None:
-            await self._persist_sealed_responses(state)
+        await self._persist_sealed_responses(state)
         if self._unprompted and not extract_final_response(state.content):
             # No final answer on a turn nobody asked for: leave the thread as
             # it was. A tool trail with nothing to say is noise here, not a
