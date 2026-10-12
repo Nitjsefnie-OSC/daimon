@@ -2774,6 +2774,14 @@ class DaimonBot(commands.Bot):
             isinstance(channel, discord.Thread) and self._thread_stops.get(channel.id) is not None
         )
 
+    async def _add_mention_reaction(self, message: discord.Message, emoji: str) -> None:
+        """A cosmetic marker on the trigger: its failure is logged, never raised."""
+        try:
+            if not self._thread_lost(message):
+                await message.add_reaction(emoji)
+        except Exception as exc:
+            log.warning("mention.reaction_failed", emoji=emoji, err_type=type(exc).__name__)
+
     async def _remove_mention_reaction(self, message: discord.Message, emoji: str) -> None:
         if message.guild is None or self.user is None or self._thread_lost(message):
             return
@@ -2945,11 +2953,7 @@ class DaimonBot(commands.Bot):
             # Before admit(): resolving seeded agents/environments can take tens
             # of seconds. Queued mentions already have their own hourglass.
             if not unprompted and content_override is None:
-                try:
-                    if not self._thread_lost(message):
-                        await message.add_reaction("👀")
-                except Exception as exc:
-                    log.warning("mention.reaction_failed", err_type=type(exc).__name__)
+                await self._add_mention_reaction(message, "👀")
             await self._orchestrate(
                 message,
                 guild_id,
@@ -4244,16 +4248,33 @@ class DaimonBot(commands.Bot):
 
         surface.end_card = _end_card_with_error
 
-        # Over a cap the turn waits here, behind its ordinary card: the queue
-        # is never shown. Stop ends the wait like any turn; the max wait is a
-        # safeguard that ends the card with the ordinary error.
+        # Over a cap the turn waits here, behind its ordinary card, with the
+        # same ⌛ a mention queued behind its thread's turn gets (a drained
+        # follow-up already carries one). Stop ends the wait like any turn; the
+        # max wait is a safeguard that ends the card with the ordinary error.
+        # The ⌛ add and remove are background tasks, never awaited here, so a
+        # slow reaction call cannot hold up Stop, the max wait or a granted slot.
         assert self.runtime.settings.discord is not None
-        slot = await wait_for_slot(
-            cancel,
-            sessionmaker=self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            default_cap=self.runtime.settings.discord.max_concurrent_turns_per_tenant,
-        )
+        marked: list[asyncio.Task[None]] = []
+
+        def _mark_queued() -> None:
+            marked.append(self._spawn(self._add_mention_reaction(message, "⌛")))
+
+        async def _unmark_queued(added: asyncio.Task[None]) -> None:
+            await asyncio.wait({added})  # removing before the add lands would leave ⌛ behind
+            await self._remove_mention_reaction(message, "⌛")
+
+        try:
+            slot = await wait_for_slot(
+                cancel,
+                sessionmaker=self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                default_cap=self.runtime.settings.discord.max_concurrent_turns_per_tenant,
+                on_queued=_mark_queued if not unprompted and content_override is None else None,
+            )
+        finally:
+            for added in marked:
+                self._spawn(_unmark_queued(added))
         if slot != "started":
             ended = {
                 "cancelled": "Stopped.\nSend a message to start again.",
