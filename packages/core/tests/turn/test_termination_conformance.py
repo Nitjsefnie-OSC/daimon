@@ -17,6 +17,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.outcomes import TurnObservation, current_outcome, drain_outcomes
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.core.turn.run import RunOutcome
+from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import require_owned_sessionmaker
@@ -298,7 +299,13 @@ async def test_real_prepared_boundary_owns_once_only_attribution_and_recovery(ho
     # implementation scripted. No native driver/reachability certification.
     from types import SimpleNamespace
 
+    # Main #823 (c2300c7dbf59b12cb10e1975a6f96fe64e2495b3) adds
+    # prepared-wrapper drain tracking. The dependency stub must supply the
+    # actual registry so this scripted attempt is reached, not refused early.
+    running = RunningTurns()
+
     async def attempt(*args, **kwargs):
+        assert running.count() == 1
         return RunOutcome(
             TurnState(termination=TerminationReason.COMPLETED), "recovered-native", None, True
         )
@@ -313,7 +320,7 @@ async def test_real_prepared_boundary_owns_once_only_attribution_and_recovery(ho
 
     async def run():
         return await run_module.run_prepared_turn(
-            SimpleNamespace(sessionmaker=host),
+            SimpleNamespace(sessionmaker=host, running_turns=running),
             prepared,
             tenant_id=TENANT,
             platform="slack",
@@ -341,6 +348,7 @@ async def test_real_prepared_boundary_owns_once_only_attribution_and_recovery(ho
             )
         ],
     )
+    assert running.count() == 0
     row = facts["terminations"][0]
     assert (
         row["expected_session"]
@@ -562,7 +570,13 @@ async def test_collector_joins_actual_host_pump_and_prepared_observation(
 
     from .test_conformance import run_host, terminal
 
+    # Main #823 (c2300c7dbf59b12cb10e1975a6f96fe64e2495b3) adds
+    # prepared-wrapper drain tracking. The dependency stub must supply the
+    # actual registry so this scripted attempt is reached, not refused early.
+    running = RunningTurns()
+
     async def attempt(*args, **kwargs):
+        assert running.count() == 1
         state = await run_host(monkeypatch, terminal(provider, "completed"))
         return RunOutcome(state, "session", None, False)
 
@@ -574,7 +588,7 @@ async def test_collector_joins_actual_host_pump_and_prepared_observation(
 
     async def run():
         return await run_module.run_prepared_turn(
-            SimpleNamespace(sessionmaker=host),
+            SimpleNamespace(sessionmaker=host, running_turns=running),
             prepared,
             tenant_id=TENANT,
             platform="slack",
@@ -598,6 +612,7 @@ async def test_collector_joins_actual_host_pump_and_prepared_observation(
             )
         ],
     )
+    assert running.count() == 0
     row = facts["terminations"][0]
     assert row["actual_reason"] == row["persisted_reason"] == row["expected_reason"] == "completed"
     assert row["persisted_rows"] == 1
