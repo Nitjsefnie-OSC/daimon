@@ -200,7 +200,9 @@ def parse_admin(source: Mapping[str, Any], values: Mapping[str, str]) -> AdminCo
         if words[2] != "--guild":
             raise UnboundAdmin("ADMIN_CLI_OPERATION_UNBOUND")
         args, options = _flags(words[5:], {"--agent", "--yes"})
-        if len(args) != 1 or words[4] not in {"create", "archive", "add", "delete"}:
+        if len(args) != 1 or words[4] not in (
+            {"create", "archive", "get"} if words[1] == "agents" else {"add", "delete"}
+        ):
             raise UnboundAdmin("ADMIN_CLI_OPERATION_UNBOUND")
         return AdminCommand(
             f"{words[1]}_{words[4]}", "discord", words[3], args=args, options=options

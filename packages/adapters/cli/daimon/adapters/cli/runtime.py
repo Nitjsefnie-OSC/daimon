@@ -117,6 +117,72 @@ def request_resource_host(
 
 
 @dataclass(frozen=True)
+class GeminiResourceGrant:
+    """One explicit operator selection, never inferred from an OpenAI manifest."""
+
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    platform: str
+    channel_id: str
+    config_digest: str
+    workspace: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.platform not in ("discord", "slack", "teams")
+            or not self.channel_id.strip()
+            or not self.workspace.strip()
+            or len(self.config_digest) != 64
+            or any(c not in "0123456789abcdef" for c in self.config_digest)
+        ):
+            raise ValueError(
+                "Gemini resource grant requires an exact channel revision and workspace"
+            )
+
+
+def request_gemini_resource_host(rt: CliRuntime, grant: GeminiResourceGrant) -> NeutralResourceHost:
+    """Validate the complete returned native host before catalog/provider access."""
+    from daimon.core.neutral_resources import NativeCatalogReadback, NeutralResourceHost
+
+    factory = rt.gemini_resource_hosts
+    if factory is None or grant not in rt.gemini_resource_grants:
+        raise ResourceHostMismatch("no exact Gemini resource grant is configured")
+    if factory.account_scope_id != grant.workspace:
+        raise ResourceHostMismatch("Gemini resource workspace differs from the grant")
+    principal = cli_principal_id(rt)
+    host = factory(
+        tenant_id=grant.tenant_id,
+        account_id=grant.account_id,
+        principal_id=principal,
+        authorization_id=CLI_AUTHORIZATION_ID,
+        operation_key=f"cli-gemini:{uuid.uuid4()}",
+    )
+    if not isinstance(cast(object, host), NeutralResourceHost):
+        raise ResourceHostMismatch("Gemini factory did not return a neutral resource host")
+    scope, capabilities = host.scope, host.backend.capabilities()
+    adapter = cast(NativeCatalogReadback | None, getattr(host.backend, "catalog_adapter", None))
+    if (
+        scope.tenant_id != str(grant.tenant_id)
+        or scope.account_id != str(grant.account_id)
+        or scope.principal_id != principal
+        or scope.authorization_id != CLI_AUTHORIZATION_ID
+        or scope.is_platform
+        or scope.is_legacy_host_authorized
+        or host.workspace != grant.workspace
+        or capabilities.provider != "gemini"
+        or capabilities.profile_id != "gemini.inline_reuse"
+        or adapter is None
+        or adapter.enabled is not True
+        or adapter.provider != "gemini"
+        or adapter.profile_id != "gemini.inline_reuse"
+        or adapter.account_scope_id != grant.workspace
+        or host.backend.agents is not adapter
+    ):
+        raise ResourceHostMismatch("Gemini resource host differs from the complete scoped grant")
+    return host
+
+
+@dataclass(frozen=True)
 class CliRuntime:
     settings: Settings
     anthropic: AsyncAnthropic
@@ -127,6 +193,8 @@ class CliRuntime:
     # copies. None (the default, and all `build_runtime` provides) keeps every
     # command on its existing Anthropic path.
     resource_hosts: ResourceHostFactory | None = None
+    gemini_resource_hosts: ResourceHostFactory | None = None
+    gemini_resource_grants: tuple[GeminiResourceGrant, ...] = ()
 
 
 @asynccontextmanager

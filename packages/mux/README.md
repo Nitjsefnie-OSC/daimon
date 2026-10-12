@@ -605,7 +605,6 @@ requests. This extraction does not provide missing alternate-provider mutation,
 owned-bundle download or storage itself; the explicit host composition below
 supplies retained bundles and immutable native replacement for OpenAI.
 
-Explicit OpenAI host resource operations now use
 Explicit OpenAI and Gemini host resource operations now use
 `daimon.core.neutral_resources.NeutralResourceHost` over the retained catalog.
 The caller injects an authorized driver, tenant/account Scope, project, database

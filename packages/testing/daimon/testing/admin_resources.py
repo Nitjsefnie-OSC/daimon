@@ -20,7 +20,7 @@ from daimon.core.channel_rules import as_readers, as_writers, set_channel_rule
 from daimon.core.channel_skills import add_skill_to_channel, may_set_channel_skills
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_CHANNEL_COPY
-from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.neutral_resources import NativeCatalogReadback, NeutralResourceHost
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.skills.add import add_agent_skill, add_host_agent_skill
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError
@@ -44,6 +44,8 @@ class ResourceAdminBindings:
 
     binding: AdminBindings
     backend: ManagedAgents | None = None
+    resource_catalog_enabled: bool = False
+    catalog_adapter: NativeCatalogReadback | None = None
     provider_workspace: str = ""
     operation_key: str = ""
     host: NeutralResourceHost | None = field(default=None, init=False)
@@ -60,6 +62,8 @@ class ResourceAdminBindings:
                 scope=self.binding.scope,
                 account_scope_id=self.provider_workspace,
                 operation_key=self.operation_key,
+                resource_catalog_enabled=self.resource_catalog_enabled,
+                catalog_adapter=self.catalog_adapter,
             )
 
     def pending(self, command: AdminCommand, code: str) -> AdminReceipt:
@@ -90,6 +94,8 @@ class ResourceAdminBindings:
             scope=self.binding.scope,
             account_scope_id=self.provider_workspace,
             operation_key=self.operation_key + ":" + digest,
+            resource_catalog_enabled=self.resource_catalog_enabled,
+            catalog_adapter=self.catalog_adapter,
         )
 
     async def __call__(self, command: AdminCommand) -> AdminReceipt:
