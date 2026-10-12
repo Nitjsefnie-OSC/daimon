@@ -19,10 +19,10 @@ Model:
   GitHub Actions CI with a registered process-owned schema. A shared pytest
   preflight refuses other targets before engine fixtures run. Migrations must
   already be applied there. Plain local ``daimon_test`` fixtures skip.
-- Each pytest worker process owns ONE schema, ``test_w<pid>_<8hex>``, built once
-  per session (``CREATE SCHEMA`` + ``Base.metadata.create_all``) and dropped at
-  session end. The pid + nonce keep two worktrees' ``gw0`` workers apart on the
-  shared database.
+- Each resolved worker schema, ``test_w<pid>_<8hex>``, is built once per pytest
+  session (``CREATE SCHEMA`` + ``Base.metadata.create_all``). Fixture aliases
+  share its engine; the last fixture user drops it. The pid + nonce keep two
+  worktrees' ``gw0`` workers apart on the shared database.
 - Every connection the worker engine opens carries ``search_path = <schema>,
   public`` and ``application_name = <schema>`` as asyncpg *server settings*
   (startup-packet defaults, so they survive pool reuse and ``RESET``). Nothing
@@ -97,6 +97,15 @@ class DatabasePreflight:
 
     url: str = field(repr=False)
     schema: str
+
+
+@dataclass
+class _WorkerEngine:
+    engine: AsyncEngine = field(repr=False)
+    users: int = 0
+
+
+_WORKER_ENGINES = pytest.StashKey[dict[tuple[URL, str], _WorkerEngine]]()
 
 
 def _require_owned_database(url: URL, schema: str | None) -> None:
@@ -443,33 +452,49 @@ def db_schema() -> str:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def db_engine(db_preflight: DatabasePreflight, db_schema: str) -> AsyncIterator[AsyncEngine]:
+async def db_engine(
+    db_preflight: DatabasePreflight, db_schema: str, request: pytest.FixtureRequest
+) -> AsyncIterator[AsyncEngine]:
     """Session-scoped pooled engine pinned to the worker schema.
 
     Assumes ``alembic upgrade head`` has already been applied to the test DB
     (CI runs it explicitly; local dev runs it once). Sweeps a few orphaned
-    worker schemas, builds this worker's schema once, drops it at session end.
+    worker schemas, builds each worker schema once, and drops it on final release.
+    Local aliases/re-exports are distinct pytest fixture definitions but share
+    the same engine when their admitted database and schema match.
     """
-    engine = build_test_engine(
-        db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=30
-    )
-    try:
-        require_owned_sessionmaker(engine)
-        async with engine.connect() as conn:
-            await _require_migrated(conn)
-        await sweep_orphan_schemas(engine)
-        await _create_schema_with_tables(engine, db_schema)
-    except BaseException:
-        await engine.dispose()
-        raise
-    try:
-        yield engine
-    finally:
+    engines = request.config.stash.setdefault(_WORKER_ENGINES, {})
+    key = (make_url(db_preflight.url), db_schema)
+    worker = engines.get(key)
+    if worker is None:
+        engine = build_test_engine(
+            db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=30
+        )
         try:
-            await _drain_background_tasks()
-            await _drop_schema(engine, db_schema)
-        finally:
+            require_owned_sessionmaker(engine)
+            async with engine.connect() as conn:
+                await _require_migrated(conn)
+            await sweep_orphan_schemas(engine)
+            await _create_schema_with_tables(engine, db_schema)
+        except BaseException:
             await engine.dispose()
+            raise
+        worker = _WorkerEngine(engine)
+        engines[key] = worker
+    else:
+        require_owned_sessionmaker(worker.engine)
+    worker.users += 1
+    try:
+        yield worker.engine
+    finally:
+        worker.users -= 1
+        if worker.users == 0:
+            del engines[key]
+            try:
+                await _drain_background_tasks()
+                await _drop_schema(worker.engine, db_schema)
+            finally:
+                await worker.engine.dispose()
 
 
 @pytest_asyncio.fixture(scope="session")

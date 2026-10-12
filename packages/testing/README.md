@@ -92,6 +92,12 @@ Install the package/plugin with the usual `uv sync --all-extras --all-packages`;
 when plugin autoload is disabled, pass `-p daimon.testing.pytest_plugin` explicitly.
 Database-free tests do not request the preflight or need a database URL.
 
+Aliased or re-exported `db_engine` fixtures reuse the pooled engine within the
+same pytest session when the admitted database URL and worker schema match.
+The last fixture user drains background work, drops the schema and disposes the
+engine. Different databases or schemas retain separate engines; the NullPool
+fixture retains its own pool on the shared schema.
+
 # Isolated provider SDK clients
 
 `daimon.testing.isolated_sdk` supplies `build_async_openai`,
