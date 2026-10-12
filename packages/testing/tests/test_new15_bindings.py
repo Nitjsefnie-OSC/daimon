@@ -342,6 +342,9 @@ async def setup_join(
         session_id="native-anthropic-session",
         usage_event_id=None if missing_usage else "evt_parity_usage",
     )
+    # Main #824 (0733181847dc775bda444d51c2467016780b8d5d) adds a
+    # post-turn history GET. The shared router replays the actual emitted usage
+    # span, or an empty filtered page when this fixture omits usage.
 
     def create(request: httpx.Request, _match: object) -> httpx.Response:
         body = json_body(request)
@@ -632,6 +635,23 @@ async def capture_run(
             join.effects = second_effects
             run = await join.run(SOURCE, evidence_id=f"new15:{admin.backend}")
         assert not admin.trace.violations and not admin.trace.replies
+        # Main #824: exactly one bounded catch-up on this fresh Anthropic
+        # session; foreign backends must never enter Anthropic billing recovery.
+        catch_up = [
+            r for r in admin.trace.requests if r.method == "GET" and r.path.endswith("/events")
+        ]
+        assert len(catch_up) == (1 if admin.backend == "anthropic" else 0)
+        if catch_up:
+            request = catch_up[0]
+            assert request.path == "/v1/sessions/native-anthropic-session/events"
+            assert request.query == (
+                ("beta", "true"),
+                ("limit", "100"),
+                ("order", "asc"),
+                ("types[]", "span.model_request_end"),
+            )
+            assert request.body == b""
+            assert dict(request.protocol_headers)["anthropic-beta"] == "managed-agents-2026-04-01"
         if wire is not None:
             assert wire.requests
         # Persist only protocol headers and scripted bodies: no SDK credentials.
@@ -695,6 +715,7 @@ async def capture_run(
 async def test_frozen_new15_real_metered_then_budget_denial(
     admin: AdminBindings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Main #824's history rereads the streamed span; the debit must remain once-only.
     run = await capture_run(admin, tmp_path, monkeypatch)
     assert run.metered.metered, run.metered.issues
     assert run.metered.after.net_debit_usd == Decimal("0.015000")
@@ -846,6 +867,7 @@ async def test_actual_sdk_missing_usage_never_invents_exhaustion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Main #824's empty model-request history must not fabricate usage or exhaustion.
     run = await capture_run(admin, tmp_path, monkeypatch, missing_usage=True)
     assert not run.metered.metered
     assert run.readback.debits == ()
