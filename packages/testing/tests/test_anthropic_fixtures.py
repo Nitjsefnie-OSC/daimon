@@ -477,7 +477,7 @@ def test_hostile_native_events_refuse_before_sdk(change: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", ["selection", "source", "codec", "sdk"])
+@pytest.mark.parametrize("bad", ["selection", "source", "sdk"])
 async def test_replay_factory_refuses_wrong_contract_before_requests(
     bad: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -489,10 +489,6 @@ async def test_replay_factory_refuses_wrong_contract_before_requests(
     elif bad == "source":
         tape = tape.model_copy(
             update={"source": SourcePin(path=entry.replay.path, sha256="0" * 64)}
-        )
-    elif bad == "codec":
-        tape = tape.model_copy(
-            update={"codec": SourcePin(path=PACK.index.codec.path, sha256="0" * 64)}
         )
     else:
 
@@ -518,18 +514,24 @@ async def test_unexpected_sdk_request_cannot_fall_back_to_network_or_hide_violat
         assert len(replay.wire.requests) == 1
 
 
-def test_regeneration_refuses_changed_reviewed_codec_before_writing(
+def test_regeneration_accepts_benign_codec_refactor_and_keeps_recorded_payloads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reviewed = tmp_path / generator.CODEC
     reviewed.parent.mkdir(parents=True)
-    reviewed.write_bytes((ROOT / generator.CODEC).read_bytes() + b"\n# changed codec\n")
+    reviewed.write_bytes((ROOT / generator.CODEC).read_bytes() + b"\n# harmless codec comment\n")
+    author = tmp_path / "scripts/qa_provider_fixtures.py"
+    author.parent.mkdir(parents=True)
+    author.write_bytes((ROOT / "scripts/qa_provider_fixtures.py").read_bytes())
     monkeypatch.setattr(generator, "ROOT", tmp_path)
     output = tmp_path / "replay"
-    with pytest.raises(ValueError, match="source pin changed"):
-        generate(DATA, output)
-    assert not output.exists()
+    generated = generate(DATA, output)
+    assert len(generated.entries) == 53
+    for entry in generated.entries:
+        assert (output / entry.replay.path).read_bytes() == (
+            DIRECTORY / entry.replay.path
+        ).read_bytes()
 
 
 def test_replay_regenerates_byte_identically_without_consulting_assertions(
@@ -566,7 +568,14 @@ def test_replay_regenerates_byte_identically_without_consulting_assertions(
     generate(DATA, second)
     for filename in first.iterdir():
         assert filename.read_bytes() == (second / filename.name).read_bytes()
-        assert filename.read_bytes() == (DIRECTORY / filename.name).read_bytes()
+        if filename.name == "index.json":
+            current = AnthropicIndex.model_validate_json(filename.read_bytes())
+            recorded = AnthropicIndex.model_validate_json((DIRECTORY / filename.name).read_bytes())
+            assert current.model_dump(exclude={"codec", "authoring"}) == recorded.model_dump(
+                exclude={"codec", "authoring"}
+            )
+        else:
+            assert filename.read_bytes() == (DIRECTORY / filename.name).read_bytes()
         assert b"DO-NOT-AUTHOR-ME" not in filename.read_bytes()
     assert len(list(first.iterdir())) == 54
 
@@ -758,3 +767,19 @@ async def test_usage_span_preserves_the_actual_tool_start_before_completion_gate
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_codec_provenance_is_inert_but_actual_sdk_payloads_still_match() -> None:
+    entry, row, turn = CASES[0]
+    tape = anthropic_turn_tape(entry, row, turn, codec=PACK.index.codec)
+    tape = tape.model_copy(
+        update={"codec": PACK.index.codec.model_copy(update={"sha256": "0" * 64})}
+    )
+    async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
+        identity = entry.bindings[0].session_id
+        status = await LegacyTurnTransport(replay.client, identity).status()
+        assert status == "idle"
+        assert replay.wire.requests[0].method == "GET"
+        assert replay.wire.requests[0].path == tape.replies[0].path
+        assert not replay.wire.violations

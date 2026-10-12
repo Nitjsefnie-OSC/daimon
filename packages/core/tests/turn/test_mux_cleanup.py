@@ -1,5 +1,6 @@
 """Cleanup uses the authorized session without changing legacy archive calls."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Literal, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -9,11 +10,11 @@ import pytest
 from daimon.core import direct_messages
 from daimon.core.errors import DaimonError
 from daimon.core.stores.direct_messages import DirectMessageRow
-from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.io import MuxTurnIO
 from daimon.core.turn.run import _archive_orphaned_session  # pyright: ignore[reportPrivateUsage]
 from daimon.testing.ma import session_response
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.profiles.anthropic import MANAGED_AGENTS
@@ -79,15 +80,8 @@ async def test_sealed_dm_retirement_uses_conversation_owner_scope_only_on_mux(
     )
     resolver = MagicMock(return_value=SESSION)
     async with transport.client() as client:
-        deps = cast(
-            TurnDeps,
-            SimpleNamespace(
-                sessionmaker=maker,
-                anthropic=client,
-                turn_path=path,
-                backend=backend,
-                backend_session_ref=resolver,
-            ),
+        deps = replace(
+            deps_for(client, maker), turn_path=path, backend=backend, backend_session_ref=resolver
         )
         conversation = cast(DirectMessageRow, SimpleNamespace(tenant_id=TENANT, account_id=ACCOUNT))
         with pytest.raises(DaimonError, match="This DM was started"):

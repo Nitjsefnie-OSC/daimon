@@ -1601,7 +1601,9 @@ async def _run_mcp_submission(
         ),
         mcp_configured=True,
     )
-    runtime.turn_deps.fernet = build_multifernet((fernet_key,))
+    runtime = replace(
+        runtime, turn_deps=replace(runtime.turn_deps, fernet=build_multifernet((fernet_key,)))
+    )
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -1712,7 +1714,9 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
         ),
         mcp_token_probe=probe,
     )
-    runtime.turn_deps.fernet = build_multifernet((fernet_key,))
+    runtime = replace(
+        runtime, turn_deps=replace(runtime.turn_deps, fernet=build_multifernet((fernet_key,)))
+    )
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -2037,7 +2041,9 @@ async def test_mcp_submission_repointing_an_existing_server_on_a_shared_agent_ne
         ),
         deployment_default=DeploymentDefault(agent_name="specialist"),
     )
-    runtime.turn_deps.fernet = build_multifernet((fernet_key,))
+    runtime = replace(
+        runtime, turn_deps=replace(runtime.turn_deps, fernet=build_multifernet((fernet_key,)))
+    )
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -2124,7 +2130,7 @@ async def test_mcp_submission_member_cannot_overwrite_the_shared_token_of_a_conn
         ),
         deployment_default=DeploymentDefault(agent_name="specialist"),
     )
-    runtime.turn_deps.fernet = fernet
+    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, fernet=fernet))
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -2181,7 +2187,7 @@ async def test_mcp_submission_admin_token_written_after_the_members_decision_is_
     runtime = _build_runtime(
         fernet_key, db_session_factory, anthropic_handler=handler, mcp_configured=True
     )
-    runtime.turn_deps.fernet = fernet
+    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, fernet=fernet))
     real_decide = credential_submissions_mod.decide_mcp_connect
 
     async def decide_then_admin_writes(*args: Any, **kwargs: Any) -> Any:

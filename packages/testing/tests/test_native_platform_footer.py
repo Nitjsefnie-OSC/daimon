@@ -331,8 +331,8 @@ async def test_actual_native_sdk_host_footer_joins_complete_controlled_inventory
 ) -> None:
     """Authored caller case: unchanged frozen predicates, real native host/SDK.
 
-    The current reviewed Gemini codec is pinned explicitly in this private case;
-    no frozen fixture or pin is rewritten and no live prices are claimed.
+    Recorded native payloads and actual ledger/footer joins prove behavior;
+    implementation provenance is not an admission gate. No live prices are claimed.
     """
     import uuid
 
@@ -390,17 +390,6 @@ async def test_actual_native_sdk_host_footer_joins_complete_controlled_inventory
     pack = load_provider_fixtures(index, catalog_root=index.parent / "catalog")
     original = next(s for s in pack.scenarios if s.scenario_id == frozen["id"])
     fixture = next(p for p in original.providers if p.backend == backend)
-    if backend == "gemini":
-        # Reviewed merged #838 (e8dcf6bda4ea3553c59b8095fc8b416fe3808226); private case only.
-        fixture = fixture.model_copy(
-            update={
-                "codec_commit": "e8dcf6bda4ea3553c59b8095fc8b416fe3808226",
-                "codec_source": SourcePin(
-                    path="packages/core/daimon/core/turn/gemini.py",
-                    sha256="f1f2c74600aa819a181cb1c33c54e0386cfa990c4f52de4a6361f9632abd9546",
-                ),
-            }
-        )
     pin = SourcePin(path=f"scenarios/{plan.scenario.filename}", sha256=plan.scenario.sha256)
     scenario = original.model_copy(
         update={

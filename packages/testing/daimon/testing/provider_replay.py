@@ -47,15 +47,20 @@ class Record(BaseModel):
 
 
 class SourcePin(Record):
-    """Hash actual source bytes, not a claimed scenario name or rendered verdict."""
+    """Frozen payload integrity and nonbinding implementation provenance."""
 
     path: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
-    def verify(self, root: Path) -> None:
+    def resolve(self, root: Path) -> Path:
+        """Confine a reference without treating implementation bytes as behavior."""
         target = (root / self.path).resolve()
         if not target.is_relative_to(root.resolve()):
             raise ValueError("source pin escapes its root")
+        return target
+
+    def verify(self, root: Path) -> None:
+        target = self.resolve(root)
         if hashlib.sha256(target.read_bytes()).hexdigest() != self.sha256:
             raise ValueError(f"source pin changed: {self.path}")
 

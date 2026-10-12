@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
@@ -24,6 +25,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.protection import ProtectionState
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from structlog.testing import capture_logs
@@ -57,7 +59,7 @@ async def bot(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),
+        turn_deps=replace(deps_for(), turn_path=None),
     )
     client = make_bot(runtime)
     client.wake_poller_enabled = True

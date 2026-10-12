@@ -11,7 +11,6 @@ import asyncio
 import hashlib
 import inspect
 import json
-import subprocess
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Protocol, cast
@@ -395,14 +394,7 @@ def add_calls(turn: NativeTurn, calls: tuple[NativeMCPCall, ...], backend: str) 
 def extend(pack: FixturePack, schema_bytes: bytes) -> FixturePack:
     scenarios: list[ScenarioFixture] = []
     auth_path = "packages/mux/mux/drivers/openai/mcp_auth.py"
-    auth_bytes = subprocess.run(
-        ["git", "show", f"{AUTH_COMMIT}:{auth_path}"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    if (ROOT / auth_path).read_bytes() != auth_bytes:
-        raise ValueError("auth source differs from the approved commit")
+    auth_bytes = (ROOT / auth_path).read_bytes()
     schema_pin = pin("fixtures/mcp-tools.json", schema_bytes)
     schemas = OBJECT.validate_json(schema_bytes)
     for scenario in pack.scenarios:

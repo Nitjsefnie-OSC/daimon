@@ -33,6 +33,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .harness import make_bot
@@ -70,7 +71,7 @@ async def bot(db_engine: AsyncEngine, db_clean: None) -> DaimonBot:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),
+        turn_deps=replace(deps_for(), turn_path=None),
     )
     return make_bot(runtime)
 

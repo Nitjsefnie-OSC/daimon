@@ -23,7 +23,7 @@ from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_conformance import TerminationCase, termination_evidence
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
 from mux.contracts.ids import ResourceRef, Scope
 from mux.errors import ScopeViolation
 from sqlalchemy import event, select
@@ -297,7 +297,6 @@ async def test_unterminated_state_is_missing_truth_not_default_completion(host):
 async def test_real_prepared_boundary_owns_once_only_attribution_and_recovery(host, monkeypatch):
     # Actual public prepared wrapper and outcome writer, with the attempt's
     # implementation scripted. No native driver/reachability certification.
-    from types import SimpleNamespace
 
     # Main #823 (c2300c7dbf59b12cb10e1975a6f96fe64e2495b3) adds
     # prepared-wrapper drain tracking. The dependency stub must supply the
@@ -320,7 +319,7 @@ async def test_real_prepared_boundary_owns_once_only_attribution_and_recovery(ho
 
     async def run():
         return await run_module.run_prepared_turn(
-            SimpleNamespace(sessionmaker=host, running_turns=running),
+            replace(deps_for(None, host), running_turns=running),
             prepared,
             tenant_id=TENANT,
             platform="slack",
@@ -566,7 +565,6 @@ async def test_collector_joins_actual_host_pump_and_prepared_observation(
 ):
     # The actual driver/pump and public prepared observation run together. The
     # scripted TurnIO is a host plumbing control, not native-stream certification.
-    from types import SimpleNamespace
 
     from .test_conformance import run_host, terminal
 
@@ -588,7 +586,7 @@ async def test_collector_joins_actual_host_pump_and_prepared_observation(
 
     async def run():
         return await run_module.run_prepared_turn(
-            SimpleNamespace(sessionmaker=host, running_turns=running),
+            replace(deps_for(None, host), running_turns=running),
             prepared,
             tenant_id=TENANT,
             platform="slack",

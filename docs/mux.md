@@ -2169,3 +2169,14 @@ Agent retirement requires the profile's declared deletion support. Missing
 catalog support refuses at the same host/store authorization boundary; provider,
 tenant, account and workspace identity checks remain mandatory. This changes
 no default routes, operator grants or native request bodies.
+
+
+### Replay fixture integrity
+
+Offline replay checks recorded scenario inputs, native request and response
+payloads, roots, sessions, terminal outcomes, usage, and current registered tool
+schemas. Scenario, asset, native tape, schema and manifest hashes remain data
+integrity checks. Implementation source hashes and commit IDs are historical
+provenance; a source refactor does not require re-recording unchanged payloads.
+Test turn dependencies use the real frozen `TurnDeps` bundle with explicit
+replacements for the dependency under test.

@@ -111,9 +111,11 @@ def load_preparation_index(
     path: Path, *, catalog_root: Path, repository_root: Path
 ) -> PreparationIndex:
     saved = PreparationIndex.model_validate_json(path.read_bytes())
-    for pin in (saved.consumer, saved.publisher, saved.native_index):
-        pin.verify(repository_root)
-    if saved != build_preparation_index(catalog_root=catalog_root, repository_root=repository_root):
+    saved.consumer.resolve(repository_root)
+    saved.publisher.resolve(repository_root)
+    saved.native_index.verify(repository_root)
+    current = build_preparation_index(catalog_root=catalog_root, repository_root=repository_root)
+    if saved.native_index != current.native_index or saved.cells != current.cells:
         raise ValueError("preparation index differs from current pinned source decisions")
     return saved
 

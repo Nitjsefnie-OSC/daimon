@@ -47,6 +47,8 @@ from mux.state.memory import MemoryStateStore
 from openai import AsyncOpenAI
 from pydantic import TypeAdapter, ValidationError
 
+from scripts.qa_provider_mcp_fixtures import registry
+
 ROOT = Path(__file__).resolve().parents[3]
 DATA = ROOT / "packages/testing/fixtures/target53"
 PACK = load_provider_fixtures(DATA / "index.json", catalog_root=DATA / "catalog")
@@ -414,13 +416,14 @@ async def test_registry_authoring_refuses_ambient_sdk_before_http_allocation(
     assert os.environ[name] == "hostile-registry-test"
 
 
-def test_frozen_recipe_sources_schema_pins_and_every_call_are_retained() -> None:
+async def test_recorded_calls_validate_against_current_registry_and_frozen_payloads() -> None:
+    current_registry = await registry()
     assert len(CASES) == 20 and len(PACK.scenarios) == 53
     schema = OBJECT.validate_json((DATA / "catalog/fixtures/mcp-tools.json").read_bytes())
     for _scenario, fixture in CASES:
         assert fixture.mcp_binding is not None
-        fixture.mcp_binding.auth_source.verify(ROOT)
-        fixture.mcp_binding.host_source.verify(ROOT)
+        fixture.mcp_binding.auth_source.resolve(ROOT)
+        fixture.mcp_binding.host_source.resolve(ROOT)
         assert fixture.mcp_binding.auth_commit == "9cf23f6c1eaf1d269ed9cab3f281ddd0cc9a6b82"
         assert not any(g.code == "NATIVE_TOOL_SCHEMA_UNBOUND" for g in fixture.gaps)
         assert any(g.code == "RUNNER_HOOK" and g.location == "mcp" for g in fixture.gaps)
@@ -435,12 +438,16 @@ def test_frozen_recipe_sources_schema_pins_and_every_call_are_retained() -> None
                 CallToolResult.model_validate(call.result)
                 if call.schema_origin == "daimon-registry":
                     document = OBJECT.validate_python(schema[call.name])
-                    SourcePin.model_validate(document["source"]).verify(ROOT)
+                    SourcePin.model_validate(document["source"]).resolve(ROOT)
                     validator = cast(
                         SchemaValidator,
                         Draft202012Validator(OBJECT.validate_python(document["inputSchema"])),
                     )
                     validator.validate(call.arguments)
+                    current = OBJECT.validate_python(current_registry[call.name])
+                    active = Draft202012Validator(OBJECT.validate_python(current["inputSchema"]))
+                    active.validate(call.arguments)
+                    CallToolResult.model_validate(call.result)
                 else:
                     assert any(g.code == "EXTERNAL_TOOL_SCHEMA_UNBOUND" for g in fixture.gaps)
 

@@ -212,8 +212,8 @@ class AnthropicFixtures:
 
 def load_anthropic_fixtures(path: Path, *, source_root: Path) -> AnthropicFixtures:
     index = AnthropicIndex.model_validate_json(path.read_bytes())
-    index.codec.verify(source_root)
-    index.authoring.verify(source_root)
+    index.codec.resolve(source_root)
+    index.authoring.resolve(source_root)
     index.input_index.verify(path.parent.parent)
     pack: FixturePack = load_provider_fixtures(
         path.parent.parent / index.input_index.path,
@@ -464,7 +464,7 @@ async def anthropic_replay(
     if (backend, profile, model) != (tape.backend, tape.profile, tape.model):
         raise ValueError("persisted selection differs from Anthropic replay")
     tape.source.verify(source_root)
-    tape.codec.verify(codec_root)
+    tape.codec.resolve(codec_root)
     if version("anthropic") != tape.sdk_version:
         raise ValueError("Anthropic SDK version differs from the replay pin")
     wire = WireReplay(tape)

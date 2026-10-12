@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from secrets import randbits
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -19,6 +20,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.discord_gateway_lease import GatewayLease
 from daimon.core.stores.worker_ownership import OWNER_LOSS_GRACE_S
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
@@ -275,7 +277,7 @@ def _runtime(lease: GatewayLease) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),
+        turn_deps=replace(deps_for(), turn_path=None),
         gateway_lease=lease,
     )
 
