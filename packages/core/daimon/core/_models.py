@@ -77,6 +77,9 @@ class Tenant(Base):
             "funding_mode IN ('prepaid', 'operator_funded')", name="ck_tenants_funding_mode"
         ),
         CheckConstraint("turn_cap IS NULL OR turn_cap > 0", name="ck_tenants_turn_cap"),
+        # Skill titles name a tenant by the first 8 hex chars of its id, so no
+        # two tenants may share them.
+        Index("uq_tenants_id_prefix", text("left(CAST(id AS TEXT), 8)"), unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
