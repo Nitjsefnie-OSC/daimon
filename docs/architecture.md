@@ -22,6 +22,18 @@ settles. An opening mention gets no reply in the parent channel while its thread
 opens, and its existing acknowledgment covers naming and creation. A thread
 that cannot be opened gets one plain reply under the mention.
 
+A repeated mention is answered once. A mention repeats another when its author,
+reply target and query text (as the turn's `<user_query>` renders it) match and
+it has no new upload, sent within 10 seconds. In a busy thread, a repeat of a
+queued mention is finished as handled on arrival. A repeat of the running turn
+queues behind it, and the drain finishes it as handled against what that turn
+submitted, captured at admission, so an edit made afterwards makes the resend a
+new request. A channel mention claims its future thread's key (its own id) at
+admission. A channel repeat found in the gateway's message cache queues behind
+that key, and one the drain does not match goes back to `on_message` as its own
+mention when the key is released. If the cache does not hold the first mention,
+both run as before.
+
 Credential cards on Discord, Slack and Teams remove their form button while
 saving an MCP or GitHub token. A rejected token or failed save records an
 outcome, updates the card with a short error and restores the same form for a

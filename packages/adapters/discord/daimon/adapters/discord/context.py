@@ -131,6 +131,22 @@ def _reply_target_id(msg: discord.Message) -> int | None:
     return reference.message_id if isinstance(reference.message_id, int) else None
 
 
+def query_identity(
+    msg: discord.Message, bot_user_id: int | None
+) -> tuple[int, int | None, str, tuple[int, ...]]:
+    """What ``msg`` asks as a turn query: author, reply target, query text, uploads.
+
+    The text is the one `_render_user_query` delivers. Uploads count by id, so
+    two posts of a file with the same name are different requests.
+    """
+    return (
+        msg.author.id,
+        _reply_target_id(msg),
+        _strip_bot_mention(msg.content, bot_user_id).strip(),
+        tuple(a.id for a in msg.attachments),
+    )
+
+
 def _embed_text(msg: discord.Message) -> str:
     """Title and description text of ``msg``'s embeds.
 

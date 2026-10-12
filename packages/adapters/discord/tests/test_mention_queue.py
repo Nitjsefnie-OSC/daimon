@@ -1389,7 +1389,7 @@ async def test_cancelled_drain_clears_unrun_authors_in_popped_batch(queued_bot):
 
 
 # ---------------------------------------------------------------------------
-# A repeated mention (double-send, or edit plus resend) joins the turn in flight
+# A repeated mention (a double-send) is answered by the turn it repeats
 # ---------------------------------------------------------------------------
 
 
@@ -1403,6 +1403,7 @@ def _received(bot: DaimonBot, message: discord.Message, *, msg_id: int, at_s: fl
 async def _parked_turns(
     bot: DaimonBot,
 ) -> tuple[list[tuple[discord.Message, str | None]], asyncio.Event, asyncio.Event]:
+    """Stub turns that record what they submit, then wait for `release`."""
     calls: list[tuple[discord.Message, str | None]] = []
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -1410,7 +1411,8 @@ async def _parked_turns(
     async def stub(
         message: discord.Message, guild_id: str, tenant_id: uuid.UUID, **kwargs: object
     ) -> None:
-        calls.append((message, kwargs.get("content_override")))  # type: ignore[arg-type]
+        override = kwargs.get("content_override")
+        calls.append((message, override if isinstance(override, str) else message.content))
         entered.set()
         await release.wait()
 
@@ -1433,7 +1435,14 @@ async def _handled(bot: DaimonBot, message: discord.Message) -> bool:
     return not resumable
 
 
-async def test_channel_double_send_runs_one_turn_in_one_thread(queued_bot: DaimonBot) -> None:
+async def _settled(bot: DaimonBot) -> None:
+    """Wait for mentions handed back to `on_message` in the background."""
+    async with asyncio.timeout(5):
+        while tasks := tuple(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+            await asyncio.gather(*tasks)
+
+
+async def test_channel_double_send_runs_one_turn(queued_bot: DaimonBot) -> None:
     calls, entered, release = await _parked_turns(queued_bot)
     first = _make_channel_message(content="<@999> reply with only OK")
     repeat = _make_channel_message(content="<@999> reply with only OK ")
@@ -1441,22 +1450,23 @@ async def test_channel_double_send_runs_one_turn_in_one_thread(queued_bot: Daimo
     _received(queued_bot, repeat, msg_id=5002, at_s=1)
 
     task = asyncio.create_task(queued_bot.on_message(first))
-    await entered.wait()  # still before its thread exists: the key is the mention's id
+    await entered.wait()  # before its thread exists: the key is the mention's id
     await asyncio.wait_for(queued_bot.on_message(repeat), timeout=2.0)
-
-    assert [message for message, _ in calls] == [first]
-    repeat.add_reaction.assert_not_called()  # type: ignore[attr-defined]
-    assert await _handled(queued_bot, repeat) is True, "the repeat must not be replayed later"
+    assert queued_bot._pending[5001] == [repeat]  # pyright: ignore[reportPrivateUsage]
     release.set()
     await asyncio.wait_for(task, timeout=2.0)
+    await _settled(queued_bot)
+
     assert [message for message, _ in calls] == [first], "one answer, no drain turn"
+    assert await _handled(queued_bot, repeat), "the repeat must not be replayed later"
     assert 5001 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]
+    assert 5001 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_thread_double_send_joins_the_running_turn(queued_bot: DaimonBot) -> None:
+async def test_thread_double_send_is_answered_by_the_running_turn(queued_bot: DaimonBot) -> None:
     calls, entered, release = await _parked_turns(queued_bot)
     first = _make_thread_message(content="<@999> summarize this")
-    repeat = _make_thread_message(content="<@999> summarize this")
+    repeat = _make_thread_message(content="<@!999> summarize this")
     _received(queued_bot, first, msg_id=6001, at_s=0)
     _received(queued_bot, repeat, msg_id=6002, at_s=2)
 
@@ -1467,41 +1477,127 @@ async def test_thread_double_send_joins_the_running_turn(queued_bot: DaimonBot) 
     await asyncio.wait_for(task, timeout=2.0)
 
     assert [message for message, _ in calls] == [first]
-    assert not queued_bot._pending  # pyright: ignore[reportPrivateUsage]
+    assert await _handled(queued_bot, repeat)
+    repeat.remove_reaction.assert_awaited_with("⌛", queued_bot.user)  # type: ignore[attr-defined]
 
 
-async def test_edit_plus_resend_joins_the_running_turn(queued_bot: DaimonBot) -> None:
-    """The cache holds the first mention with its edit applied, so the resend matches it."""
+async def test_repeat_of_a_queued_mention_is_answered_by_it(queued_bot: DaimonBot) -> None:
     calls, entered, release = await _parked_turns(queued_bot)
-    first = _make_channel_message(content="<@999> waht is the plan")
-    resend = _make_channel_message(content="<@999> what is the plan")
-    _received(queued_bot, first, msg_id=7001, at_s=0)
-    _received(queued_bot, resend, msg_id=7002, at_s=4)
-
-    task = asyncio.create_task(queued_bot.on_message(first))
+    active = _make_thread_message(content="<@999> first question")
+    queued = _make_thread_message(content="<@999> second question")
+    repeat = _make_thread_message(content="<@999> second question")
+    _received(queued_bot, active, msg_id=16001, at_s=0)
+    task = asyncio.create_task(queued_bot.on_message(active))
     await entered.wait()
-    first.content = "<@999> what is the plan"  # gateway edit, applied to the cached message
-    await asyncio.wait_for(queued_bot.on_message(resend), timeout=2.0)
+    # Both reach the cache before either admission finishes: neither may
+    # discard the other, and exactly one of them is answered.
+    _received(queued_bot, queued, msg_id=16002, at_s=1)
+    _received(queued_bot, repeat, msg_id=16003, at_s=2)
+    await queued_bot.on_message(queued)
+    await queued_bot.on_message(repeat)
+    assert queued_bot._pending[789] == [queued]  # pyright: ignore[reportPrivateUsage]
+    assert await _handled(queued_bot, repeat)
     release.set()
     await asyncio.wait_for(task, timeout=2.0)
 
-    assert [message for message, _ in calls] == [first]
+    assert [message for message, _ in calls] == [active, queued]
+
+
+async def test_resend_after_its_turn_ended_is_not_answered_by_another_turn(
+    queued_bot: DaimonBot,
+) -> None:
+    calls, entered, release = await _parked_turns(queued_bot)
+    release.set()
+    answered = _make_thread_message(content="<@999> question A")
+    _received(queued_bot, answered, msg_id=11001, at_s=0)
+    await queued_bot.on_message(answered)
+    entered.clear()
+    release.clear()
+    unrelated = _make_thread_message(content="<@999> question B", author_id=222)
+    resend = _make_thread_message(content="<@999> question A")
+    _received(queued_bot, unrelated, msg_id=11002, at_s=2)
+    task = asyncio.create_task(queued_bot.on_message(unrelated))
+    await entered.wait()
+    _received(queued_bot, resend, msg_id=11003, at_s=3)
+    await queued_bot.on_message(resend)
+    release.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert [message for message, _ in calls] == [answered, unrelated, resend]
+
+
+async def test_edit_after_submission_then_resend_gets_its_own_turn(queued_bot: DaimonBot) -> None:
+    """The running turn submitted the text before the edit; the resend asks something new."""
+    calls, entered, release = await _parked_turns(queued_bot)
+    first = _make_thread_message(content="<@999> analyze report A")
+    resend = _make_thread_message(content="<@999> analyze report B")
+    _received(queued_bot, first, msg_id=14001, at_s=0)
+    task = asyncio.create_task(queued_bot.on_message(first))
+    await entered.wait()
+    first.content = "<@999> analyze report B"  # a gateway edit, applied to the cached message
+    _received(queued_bot, resend, msg_id=14002, at_s=2)
+    await queued_bot.on_message(resend)
+    release.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert [submitted for _, submitted in calls] == [
+        "<@999> analyze report A",
+        "<@999> analyze report B",
+    ]
+
+
+async def test_channel_edit_then_resend_gets_its_own_thread_after_the_first(
+    queued_bot: DaimonBot,
+) -> None:
+    calls, entered, release = await _parked_turns(queued_bot)
+    first = _make_channel_message(content="<@999> analyze report A")
+    resend = _make_channel_message(content="<@999> analyze report B")
+    _received(queued_bot, first, msg_id=18001, at_s=0)
+    task = asyncio.create_task(queued_bot.on_message(first))
+    await entered.wait()
+    first.content = "<@999> analyze report B"
+    _received(queued_bot, resend, msg_id=18002, at_s=2)
+    await queued_bot.on_message(resend)  # looks like a repeat now; the drain checks
+    release.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    await _settled(queued_bot)
+
+    assert [(m, submitted) for m, submitted in calls] == [
+        (first, "<@999> analyze report A"),
+        (resend, "<@999> analyze report B"),
+    ]
+    assert calls[1][0].channel is resend.channel, "handed back as a channel mention"
 
 
 @pytest.mark.parametrize(
-    ("content", "author_id", "at_s"),
+    ("second_content", "author_id", "at_s", "reply_to", "upload"),
     [
-        ("<@999> a different question", 111, 1),  # new text
-        ("<@999> reply with only OK", 222, 1),  # someone else
-        ("<@999> reply with only OK", 111, 30),  # long after: asked again on purpose
+        ("<@999> a different question", 111, 1, None, None),  # new text
+        ("<@999> reply with only OK", 222, 1, None, None),  # someone else
+        ("<@999> reply with only OK", 111, 30, None, None),  # asked again on purpose
+        ("<@999> reply with only OK", 111, 1, 202, None),  # about another message
+        ("<@999> reply with only OK", 111, 1, None, 302),  # another upload, same name
     ],
 )
-async def test_mentions_that_are_not_repeats_still_run_their_own_turn(
-    queued_bot: DaimonBot, content: str, author_id: int, at_s: float
+async def test_mentions_that_ask_something_else_still_run_their_own_turn(
+    queued_bot: DaimonBot,
+    second_content: str,
+    author_id: int,
+    at_s: float,
+    reply_to: int | None,
+    upload: int | None,
 ) -> None:
     calls, entered, release = await _parked_turns(queued_bot)
     first = _make_channel_message(content="<@999> reply with only OK", author_id=111)
-    second = _make_channel_message(content=content, author_id=author_id)
+    second = _make_channel_message(content=second_content, author_id=author_id)
+    first.reference = discord.MessageReference(message_id=201, channel_id=789)
+    second.reference = (
+        discord.MessageReference(message_id=reply_to, channel_id=789)
+        if reply_to is not None
+        else first.reference
+    )
+    first.attachments = [SimpleNamespace(id=301, filename="report.pdf", size=100)]
+    second.attachments = [SimpleNamespace(id=upload or 301, filename="report.pdf", size=200)]
     _received(queued_bot, first, msg_id=8001, at_s=0)
     _received(queued_bot, second, msg_id=8002, at_s=at_s)
 
@@ -1509,11 +1605,36 @@ async def test_mentions_that_are_not_repeats_still_run_their_own_turn(
     await entered.wait()
     entered.clear()
     second_task = asyncio.create_task(queued_bot.on_message(second))
-    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    await asyncio.wait_for(entered.wait(), timeout=2.0)  # in parallel, not queued
     release.set()
     await asyncio.wait_for(asyncio.gather(task, second_task), timeout=2.0)
 
     assert [message for message, _ in calls] == [first, second]
+
+
+@pytest.mark.parametrize("cache", ["empty", "disabled"])
+async def test_channel_repeat_missing_from_the_cache_runs_as_before(
+    queued_bot: DaimonBot, cache: str
+) -> None:
+    calls, entered, release = await _parked_turns(queued_bot)
+    first = _make_channel_message()
+    repeat = _make_channel_message()
+    _received(queued_bot, first, msg_id=15001, at_s=0)
+    _received(queued_bot, repeat, msg_id=15002, at_s=1)
+    if cache == "disabled":
+        queued_bot._connection._messages = None  # pyright: ignore[reportPrivateUsage]
+    else:
+        queued_bot._connection._messages.clear()  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
+
+    task = asyncio.create_task(queued_bot.on_message(first))
+    await entered.wait()
+    entered.clear()
+    second = asyncio.create_task(queued_bot.on_message(repeat))
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(task, second), timeout=2.0)
+
+    assert [message for message, _ in calls] == [first, repeat]
 
 
 async def test_repeat_after_the_first_turn_ended_gets_its_own_turn(queued_bot: DaimonBot) -> None:
@@ -1528,3 +1649,123 @@ async def test_repeat_after_the_first_turn_ended_gets_its_own_turn(queued_bot: D
     await queued_bot.on_message(repeat)
 
     assert [message for message, _ in calls] == [first, repeat]
+
+
+# Through real orchestration: thread creation and the prompt the provider gets.
+
+
+@pytest.fixture
+def real_turns(queued_bot: DaimonBot):
+    """A bot whose turns run `_orchestrate` for real, up to a parked provider call."""
+    from daimon.core.turn.state import TurnState
+    from daimon.testing import ma_session
+
+    from .test_orchestration import _make_runtime as make_orchestration_runtime
+    from .test_orchestration import _stub_resolved_config
+
+    bot = make_bot(make_orchestration_runtime(uuid.uuid4(), queued_bot.runtime.sessionmaker))
+    submitted: list[str] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def provider(**kwargs: object) -> TurnState:
+        submitted.append(str(kwargs["user_message"]))
+        entered.set()
+        await release.wait()
+        return TurnState()
+
+    async def context_xml(*args: object, trigger: discord.Message, **kwargs: object):
+        query = kwargs.get("query_text")
+        return f"<user_query>{query if query is not None else trigger.content}</user_query>", []
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_config",
+            new_callable=AsyncMock,
+            return_value=_stub_resolved_config(),
+        ),
+        patch(
+            "daimon.core.turn.admission.resolve_agent",
+            new_callable=AsyncMock,
+            return_value="ag_test",
+        ),
+        patch(
+            "daimon.core.turn.admission.resolve_environment",
+            new_callable=AsyncMock,
+            return_value="env_test",
+        ),
+        patch(
+            "daimon.core.turn.prepare.create_session",
+            new_callable=AsyncMock,
+            return_value=ma_session(id="sess-repeat"),
+        ),
+        patch("daimon.adapters.discord.bot.build_context_xml", side_effect=context_xml),
+        patch("daimon.adapters.discord.bot.build_delta_xml", side_effect=context_xml),
+        patch("daimon.adapters.discord.bot.build_channel_context_xml", side_effect=context_xml),
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock, side_effect=provider),
+    ):
+        yield bot, submitted, entered, release
+
+
+def _opened_thread(thread_id: int) -> MagicMock:
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = thread_id
+    thread.parent_id = 789
+    ids = iter(range(thread_id * 10, thread_id * 10 + 100))
+    thread.send = AsyncMock(
+        side_effect=lambda *a, **k: SimpleNamespace(id=next(ids), edit=AsyncMock())
+    )
+    return thread
+
+
+async def test_channel_double_send_opens_one_thread_and_submits_once(real_turns) -> None:  # type: ignore[no-untyped-def]
+    bot, submitted, entered, release = real_turns
+    first = _make_channel_message(content="<@999> reply with only OK")
+    repeat = _make_channel_message(content="<@999> reply with only OK")
+    for message in (first, repeat):
+        message.remove_reaction = AsyncMock()
+        message.reference = None
+    _received(bot, first, msg_id=19001, at_s=0)
+    _received(bot, repeat, msg_id=19002, at_s=1)
+    first.create_thread.return_value = _opened_thread(19001)  # type: ignore[attr-defined]
+
+    task = asyncio.create_task(bot.on_message(first))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        await asyncio.wait_for(bot.on_message(repeat), timeout=5)
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=10)
+    await _settled(bot)
+
+    first.create_thread.assert_awaited_once()  # type: ignore[attr-defined]
+    repeat.create_thread.assert_not_awaited()  # type: ignore[attr-defined]
+    assert len(submitted) == 1 and "reply with only OK" in submitted[0]
+    assert await _handled(bot, repeat)
+
+
+async def test_resend_of_an_edit_made_after_submission_reaches_the_provider(real_turns) -> None:  # type: ignore[no-untyped-def]
+    bot, submitted, entered, release = real_turns
+    first = _make_thread_message(content="<@999> analyze report A", thread_id=5555)
+    resend = _make_thread_message(content="<@999> analyze report B", thread_id=5555)
+    thread = _opened_thread(5555)
+    for message in (first, resend):
+        message.channel = thread
+        message.remove_reaction = AsyncMock()
+        message.reference = None
+    _received(bot, first, msg_id=17001, at_s=0)
+
+    task = asyncio.create_task(bot.on_message(first))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        entered.clear()
+        first.content = "<@999> analyze report B"
+        _received(bot, resend, msg_id=17002, at_s=2)
+        await asyncio.wait_for(bot.on_message(resend), timeout=5)
+        release.set()
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=10)
+
+    assert len(submitted) == 2
+    assert "report A" in submitted[0] and "report B" in submitted[1]

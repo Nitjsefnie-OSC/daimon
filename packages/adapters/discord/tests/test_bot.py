@@ -2235,6 +2235,7 @@ class TestDrainLoopDeCoalescing:
             thread_id=thread_id,
             author_id=703,  # a third distinct author for the trigger
         )
+        msg_a.channel = msg_b.channel = trigger_msg.channel  # queued in the same thread
 
         with _patch.object(bot, "_handle_mention", side_effect=_spy_handle_mention):
             await bot.on_message(trigger_msg)

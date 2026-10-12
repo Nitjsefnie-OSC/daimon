@@ -8,7 +8,7 @@ import functools
 import io
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
@@ -27,6 +27,7 @@ from daimon.adapters.discord.context import (
     build_channel_context_xml,
     build_context_xml,
     build_delta_xml,
+    query_identity,
 )
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.discord.errors import (
@@ -264,9 +265,18 @@ _DRAIN_NOTICES_S: float = 10.0
 # attaching skills the sweep had never created.
 _SWEEP_CONCURRENCY = 2
 _TURN_CARD_RECOVERY_CONCURRENCY = 4
-# A mention repeating one already running or queued, sent this close to it, is
-# a double-send (or an edit plus a resend): the earlier turn answers both.
+# A mention asking what one already running or queued asks, sent this close to
+# it, is a double-send: the earlier turn answers both.
 _REPEAT_WINDOW = timedelta(seconds=10)
+type _Asked = tuple[tuple[int, int | None, str, tuple[int, ...]], datetime]
+
+
+def _repeats(asked: _Asked, owners: Iterable[_Asked]) -> bool:
+    """Whether `asked` is a query one of `owners` delivers, sent within the window."""
+    query, at = asked
+    return any(
+        query == owner and abs(at - owner_at) <= _REPEAT_WINDOW for owner, owner_at in owners
+    )
 
 
 THREAD_OPENING_REACTION = "⌛"
@@ -2584,24 +2594,23 @@ class DaimonBot(commands.Bot):
             if isinstance(message.channel, discord.Thread):
                 self._cancel_participation_batch(message.channel.id)
 
-            # A repeat of a mention whose turn is running or queued joins that
-            # turn: no second thread, slot or answer. Its admission row is
-            # finished below like any handled input.
-            if self._repeats_inflight_mention(message):
-                log.info(
-                    "mention.repeat_coalesced",
-                    guild_id=guild_id,
-                    channel_id=str(message.channel.id),
-                    author_id=str(message.author.id),
-                )
-                return
-
             # Per-thread mention queueing. Check before claiming an in-flight slot
-            # so that queued mentions never consume a slot they won't use.
+            # so that queued mentions never consume a slot they won't use. A
+            # channel mention repeating one whose thread is still opening or
+            # answering queues behind that turn too (`_repeated_channel_mention`);
+            # the drain then drops it as answered. A repeat of a queued mention
+            # is answered by it, so it is finished here as handled.
             thread_id = message.channel.id
-            if thread_id in self._processing:
+            queue_key = thread_id if thread_id in self._processing else None
+            if queue_key is None and not isinstance(message.channel, discord.Thread):
+                queue_key = self._repeated_channel_mention(message)
+            if queue_key is not None:
+                asked = self._asked(message)
+                if _repeats(asked, map(self._asked, self._pending.get(queue_key, ()))):
+                    log.info("mention.repeat_coalesced", guild_id=guild_id, queued=True)
+                    return
                 queued_message = True
-                await self._queue_behind_inflight_turn(thread_id, message)
+                await self._queue_behind_inflight_turn(queue_key, message)
                 return
 
             # --- Turn slots (SCALE-01 per tenant, optional process-wide cap) ---
@@ -2661,14 +2670,12 @@ class DaimonBot(commands.Bot):
                 # upstream overload backoff with no SSE events for minutes).
                 #
                 # Channel mentions still parallelize per-mention (each opens its own
-                # thread + MA session up front). But the bot-created thread is
-                # registered in self._processing at creation time (inside
-                # _orchestrate, immediately after create_thread), so an in-thread
-                # follow-up mention that arrives during the *same* originating turn
-                # queues instead of racing a second turn onto that thread's session —
-                # this is the actual fix for the in-thread queue race. The earlier closure of
-                # #163 was documentation-only; its regression test covered parallel
-                # channel mentions, not the channel→in-thread sequence this closes.
+                # thread + MA session up front). Discord gives that thread the
+                # mention's id, and the turn claims that key in self._processing
+                # at admission, before the thread exists. An in-thread follow-up
+                # during the originating turn therefore queues instead of racing
+                # a second turn onto the thread's session, and so does a repeat
+                # of the mention sent while the thread is still opening.
                 #
                 # Only follow-up mentions *within an existing thread* are queued and
                 # coalesced: a thread is one conversation on one MA session, and
@@ -2677,9 +2684,8 @@ class DaimonBot(commands.Bot):
                 # composite follow-up turn.
                 if not isinstance(message.channel, discord.Thread):
                     created_thread_ids: list[int] = []
-                    # Discord gives the thread this mention opens the mention's
-                    # id, so the turn owns that key from admission on, before
-                    # the thread exists: a repeat sent meanwhile finds it.
+                    # What this turn submits, taken before an edit can change it.
+                    asked = self._asked(message)
                     self._processing.add(message.id)
                     try:
                         await self._handle_mention(
@@ -2689,23 +2695,25 @@ class DaimonBot(commands.Bot):
                         # boundary, so this runs on both success and turn failure —
                         # a follow-up queued behind a failing originating turn still
                         # gets its drain turn instead of being silently discarded.
-                        if created_thread_ids:
-                            try:
-                                await self._drain_pending_mentions(
-                                    created_thread_ids[0], guild_id, tenant_id
-                                )
-                            except Exception:
-                                # Once the thread exists nothing for it is posted in the
-                                # parent channel, so a drain failing on a lost thread ends
-                                # here instead of reaching the prologue error post (#809).
-                                if self._thread_stops.get(created_thread_ids[0]) is None:
-                                    raise
-                                log.warning("thread_gone.drain_failed", exc_info=True)
+                        # With no thread, only repeats of this mention can be queued.
+                        drain_key = created_thread_ids[0] if created_thread_ids else message.id
+                        try:
+                            await self._drain_pending_mentions(
+                                drain_key, guild_id, tenant_id, ran=asked
+                            )
+                        except Exception:
+                            # Once the thread exists nothing for it is posted in the
+                            # parent channel, so a drain failing on a lost thread ends
+                            # here instead of reaching the prologue error post.
+                            if self._thread_stops.get(drain_key) is None:
+                                raise
+                            log.warning("thread_gone.drain_failed", exc_info=True)
                     finally:
                         # No-op in the normal case (the drain above already emptied
                         # the queue) — this only catches messages that arrive after
                         # the final drain iteration, the same residual window the
-                        # thread branch below has.
+                        # thread branch below has. The mention's own key is released
+                        # even when no thread was opened.
                         for created_id in {message.id, *created_thread_ids}:
                             await self._release_and_clear(
                                 created_id, tenant_id, clear_reactions=True
@@ -2716,9 +2724,10 @@ class DaimonBot(commands.Bot):
                 self._processing.add(thread_id)
                 self._thread_stops.claim(thread_id)
                 self._track_processing_task(thread_id)
+                asked = self._asked(message)
                 try:
                     await self._handle_mention(message, guild_id, tenant_id)
-                    await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
+                    await self._drain_pending_mentions(thread_id, guild_id, tenant_id, ran=asked)
                 finally:
                     await self._release_and_clear(thread_id, tenant_id, clear_reactions=True)
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
@@ -2747,35 +2756,30 @@ class DaimonBot(commands.Bot):
             await finish_messages(session, tenant_id=tenant_id, message_ids=pending)
             await session.commit()
 
-    def _repeats_inflight_mention(self, message: discord.Message) -> bool:
-        """Whether `message` repeats a mention whose turn is running or queued.
+    def _asked(self, message: discord.Message) -> _Asked:
+        """`message`'s query as a turn delivers it now, and when it was sent."""
+        return query_identity(message, self.user.id if self.user else None), message.created_at
 
-        A repeat has the same author, place, text and attachment names, and was
-        sent within `_REPEAT_WINDOW` of it. The earlier mention is read from the
-        gateway's message cache, which holds it with any edit applied, so an
-        edit plus a resend of the edited text counts too. Its turn is in flight
-        while its key is claimed: the thread for an in-thread mention (running,
-        or queued behind the running one), the mention's own id (its future
-        thread's) for a channel mention.
+    def _repeated_channel_mention(self, message: discord.Message) -> int | None:
+        """The key of the in-flight channel mention `message` seems to repeat.
+
+        Only a mention holding its own key (its future thread's id) is a
+        candidate, so the turn that owns it is the one that opened for it. The
+        gateway cache only finds that mention; the drain decides against what
+        its turn submitted, and hands back anything that differs.
         """
-        in_thread = isinstance(message.channel, discord.Thread)
-        if in_thread and message.channel.id not in self._processing:
-            return False
-        names = [a.filename for a in message.attachments]
+        asked = self._asked(message)
         for earlier in reversed(self.cached_messages):
             if earlier.created_at < message.created_at - _REPEAT_WINDOW:
-                break
+                return None
             if (
-                earlier.id != message.id
-                and earlier.created_at <= message.created_at + _REPEAT_WINDOW
-                and earlier.author.id == message.author.id
+                earlier.id in self._processing
+                and earlier.id != message.id
                 and earlier.channel.id == message.channel.id
-                and earlier.content.strip() == message.content.strip()
-                and [a.filename for a in earlier.attachments] == names
-                and (in_thread or earlier.id in self._processing)
+                and _repeats(asked, (self._asked(earlier),))
             ):
-                return True
-        return False
+                return earlier.id
+        return None
 
     async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
         """Queue ``message`` behind the thread's in-flight turn, then mark it ⌛.
@@ -2860,14 +2864,24 @@ class DaimonBot(commands.Bot):
 
         A stopped thread's leftover queue is dropped (admissions finished);
         otherwise the callers' own cleanup stands. The stop is read before the
-        release, which forgets it.
+        release, which forgets it. A queued channel mention its drain did not
+        answer goes back to `on_message`, which now finds the key free.
         """
         stopped = self._thread_stops.get(thread_id) is not None
         self._release_thread(thread_id)
+        queued = self._pending.pop(thread_id, [])
+        handed_back = [m for m in queued if m.channel.id != thread_id]
+        queued = [m for m in queued if m.channel.id == thread_id]
+        if queued and not stopped and not clear_reactions:
+            self._pending[thread_id] = queued
+        # Cleared before the hand-back, which may queue them again elsewhere.
+        await self._clear_queued_reactions(handed_back)
+        for message in handed_back:
+            self._spawn(self.on_message(message, resume_admitted=True))
         if stopped:
-            await self._drop_queued(self._pending.pop(thread_id, []), tenant_id)
+            await self._drop_queued(queued, tenant_id)
         elif clear_reactions:
-            await self._clear_queued_reactions(self._pending.pop(thread_id, []))
+            await self._clear_queued_reactions(queued)
 
     async def _handle_prologue_failure(
         self,
@@ -2901,14 +2915,41 @@ class DaimonBot(commands.Bot):
         return ThreadQueue(self._processing, self._pending)
 
     async def _drain_pending_mentions(
-        self, thread_id: int, guild_id: str, tenant_id: uuid.UUID
+        self,
+        thread_id: int,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        ran: _Asked | None = None,
     ) -> None:
+        """Run the mentions queued behind the turn that submitted `ran`, in batches.
+
+        A queued mention repeating a query of the turn or batch it waited behind
+        is answered there: it is finished as handled and not run. A queued
+        channel mention that is not such a repeat goes back to the queue, and
+        the release hands it back to `on_message` for its own thread.
+        """
         draining: dict[int, discord.Message] = {}
+        owners: list[_Asked] = [ran] if ran is not None else []
+        answered: list[discord.Message] = []
+        elsewhere: list[discord.Message] = []
 
         def compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
             draining.update((id(message), message) for message in queued)
+            batch: list[_Asked] = []
+            runs: list[discord.Message] = []
+            for message in queued:
+                asked = self._asked(message) if ran is not None else None
+                if asked is not None and _repeats(asked, owners):
+                    answered.append(message)
+                elif message.channel.id != thread_id:
+                    elsewhere.append(message)  # a channel mention, not this thread's
+                else:
+                    batch.extend((asked,) if asked is not None else ())
+                    runs.append(message)
+            owners[:] = batch
             groups: list[list[discord.Message]] = []
-            for author_messages in group_by_author(queued, lambda m: m.author.id):
+            for author_messages in group_by_author(runs, lambda m: m.author.id):
                 pending: list[discord.Message] = []
                 for queued_message in author_messages:
                     if is_affirmative(queued_message.content):
@@ -2947,9 +2988,14 @@ class DaimonBot(commands.Bot):
         try:
             await self._thread_queue.drain(thread_id, compose=compose, run=run)
         finally:
+            if elsewhere:
+                self._pending.setdefault(thread_id, []).extend(elsewhere)
             # A cancelled/escaping author turn can leave the rest of its popped
             # batch unrun. Those messages must not retain a queue marker either.
             await self._clear_queued_reactions(list(draining.values()))
+            if answered:
+                log.info("mention.repeat_coalesced", thread_id=str(thread_id), queued=False)
+                await self._finish_admitted_messages(tenant_id, tuple(str(m.id) for m in answered))
 
     async def _handle_mention(
         self,
