@@ -135,14 +135,29 @@ driver streams the session, so nothing meters the turn live.
 `packages/core/daimon/core/headless_turn_billing.py` bills them through the
 turn-end catch-up instead.
 
-- **When.** After the message is sent, the tool spawns one background watcher
-  for the turn and returns at once. The watcher polls the session's status
-  (2 s, backing off to 30 s) until it is `terminated`, or `idle` with a
-  `session.status_idle` event listed after the turn's own `user.message` (a
-  bare `idle` right after a send can be the previous turn's). It then runs
-  one catch-up pass on the session. A watcher gives up after the 45-minute
-  turn ceiling or five failed status reads in a row; it still runs the pass
-  with whatever is listed by then, unless the session is gone.
+- **When.** After the message is sent, the tool hands the turn to the
+  session's background watcher (one per session, shared by its turns) and
+  returns at once. The watcher polls the session's status (2 s, backing off
+  to 30 s) until every turn it holds has ended: a `session.status_idle` or
+  `session.status_terminated` event listed after the turn's own
+  `user.message` and before the next one (a bare `idle` right after a send
+  can be the previous turn's). It reads the transcript newest first, down to
+  the oldest boundary it holds, at most 10 pages of 100 per walk.
+- **Bounded reads.** Every status and transcript read runs on a background
+  client with no SDK retries, under a 20-second timeout that also ends at the
+  watcher's deadline (the 45-minute turn ceiling after the newest turn it
+  holds). A 429 stretches the next pause to its `retry-after` (at most
+  5 minutes). The watcher stops waiting at the deadline, after five failed
+  status reads in a row, or for a turn whose boundary three idle walks did
+  not reach; it then bills with whatever is listed, unless the session is
+  gone. At most 16 background reads and 4 catch-up passes run at once per
+  process.
+- **Settling.** Once its turns have ended the watcher runs catch-up passes
+  until one finishes the listing: a pass that runs out of budget mid-listing
+  is continued after 1 second, a failed pass is retried after 5 seconds,
+  doubling to 5 minutes, up to 10 passes. A session still unsettled after
+  that is logged as `billing.headless_settle_abandoned` and left to the poll
+  fallback.
 - **Same charge as a chat turn.** The pass's recorder is the chat path's:
   `record_turn_usage` at the model frozen in the session's agent snapshot,
   the deployment markup, the session's `daimon_budget_channel` stamp, the
@@ -153,22 +168,27 @@ turn-end catch-up instead.
   calls an earlier turn on the session left unbilled, and the sweep (if
   switched on) or a second pass finds every call already recorded.
 - **Poll fallback.** When `get_my_session` reads the session `idle` or
-  `terminated` and no watcher for it is pending in this process, it runs one
-  catch-up pass in the background, at most once per 30 seconds per session.
-  This covers a turn whose watcher was lost to a restart, provided the
-  caller polls the session again; a later `continue_turn` on the session
-  covers it too.
+  `terminated` and no watcher for it is pending in this process, it queues up
+  to three catch-up passes in the background: at most one queue per session,
+  32 queued sessions per process, and once per 30 seconds per session (5
+  seconds for a session whose last settlement did not finish). This covers a
+  turn whose watcher was lost to a restart or gave up, provided the caller
+  polls the session again; a later `continue_turn` on the session covers it
+  too.
 - **Outcome.** `start_turn` and `continue_turn` hand their
   [turn outcome](#turn-outcomes) to the watcher, which writes it when the turn
   ends: reason `completed`, `requires_action`, `upstream` (retries exhausted)
-  or `session_terminated`, with the model calls listed after the turn's own
-  message, their tokens and their pre-markup cost. A watcher that gives up,
-  or is cancelled when the MCP server shuts down, writes `unknown` with no
-  usage. `ask` still writes its own outcome without usage.
-- **Bounds.** At most 256 watchers are pending per process; past that a turn
-  is not watched, its outcome is written as `unknown`, and the next catch-up
-  on the session bills it. Watchers live in the MCP server process; a deploy
-  cancels them.
+  or `session_terminated`, from the turn's first terminal event, with the
+  model calls between its own message and that event, their tokens and their
+  pre-markup cost. A later turn's calls are never counted in an earlier
+  turn's outcome. A turn the watcher could not resolve, or that was pending
+  when the MCP server shut down (even before its watcher started), is written
+  as `unknown` with no usage. `ask` still writes its own outcome without
+  usage.
+- **Bounds.** At most 256 sessions are watched per process; past that a turn
+  is not watched, its outcome is written as `unknown`, and the session is
+  left to the poll fallback. Watchers live in the MCP server process; a
+  deploy cancels them.
 - **Before this.** Headless turns dispatched before this change were billed
   only by the sweep. Their unbilled calls are debited the next time a
   catch-up runs on the same session (a new turn on it, or a status poll that

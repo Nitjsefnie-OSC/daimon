@@ -9,11 +9,17 @@ catch-up, and writes the outcome with the real reason and usage.
 
 from __future__ import annotations
 
+import asyncio
+import itertools
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import (
@@ -36,14 +42,16 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.outcomes import TurnObservation, drain_outcomes
+from daimon.core.turn.outcomes import TurnObservation, drain_outcomes, observe_turn
 from daimon.core.turn.prepare import bind_recorder
+from daimon.core.usage_reconcile import ReconcileResult
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic
 from daimon.testing.ma_models import ma_model_usage, ma_session
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 10, 12, 9, 0, 0, tzinfo=UTC)
@@ -352,7 +360,7 @@ async def test_a_wait_that_runs_out_still_bills_and_records_unknown(
     ]
     observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
     observation.usage_available = False
-    ticks = iter([0.0, 10.0])
+    ticks = itertools.chain([0.0], itertools.repeat(10.0))
 
     await settle_turn(
         anthropic=client,  # type: ignore[arg-type]
@@ -395,8 +403,10 @@ async def test_a_poll_catch_up_is_throttled_and_skips_running_sessions(
             clock=lambda: next(clock),
         )
 
-    spawned = [poll(), poll(), poll()]
-    await headless_turn_billing.drain()
+    spawned: list[bool] = []
+    for _ in range(3):
+        spawned.append(poll())
+        await headless_turn_billing.drain()
 
     if status == "running":
         assert spawned == [False, False, False]
@@ -404,3 +414,456 @@ async def test_a_poll_catch_up_is_throttled_and_skips_running_sessions(
     else:
         assert spawned == [True, False, True], "at most one pass per interval"
         assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}
+
+
+# ---------------------------------------------------------------------------
+# Review regressions (#865): settlement retries, turn intervals, deadlines,
+# shutdown, and background read pacing.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fast_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(headless_turn_billing, "SETTLE_RETRY_INITIAL_S", 0.01)
+    monkeypatch.setattr(headless_turn_billing, "SETTLE_CONTINUE_S", 0.0)
+
+
+async def test_a_failed_terminal_pass_is_retried_even_after_the_final_poll(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fast_retries: None,
+) -> None:
+    """One transient DB failure while settling must not leave a finished turn unbilled,
+    though the host's last poll was suppressed by the pending watcher."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, client = _fake(session)
+    _finished_turn(state, "evt_a")
+    actual = headless_turn_billing.reconcile_unbilled
+    attempts = 0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fail_once(**kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            entered.set()
+            await release.wait()
+            raise SQLAlchemyError("injected transient failure")
+        return await actual(**kwargs)
+
+    monkeypatch.setattr(headless_turn_billing, "reconcile_unbilled", fail_once)
+    observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    observation.usage_available = False
+    headless_turn_billing.watch_turn(
+        anthropic=client,  # type: ignore[arg-type]
+        sessionmaker=db_session_factory,
+        turn=_turn(session, tenant.id),
+        markup=MARKUP,
+        observation=observation,
+    )
+    await entered.wait()
+    final_poll = headless_turn_billing.catch_up_session(
+        anthropic=client,  # type: ignore[arg-type]
+        sessionmaker=db_session_factory,
+        session=session,
+        tenant_id=tenant.id,
+        platform_user_id="user-1",
+        markup=MARKUP,
+    )
+    release.set()
+    await headless_turn_billing.drain()
+    await drain_outcomes()
+
+    assert final_poll is False, "the pending watcher owns the session"
+    assert attempts == 2, "the failed pass is retried"
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}
+    row = (await db_session.execute(select(TurnOutcome))).scalar_one()
+    assert (row.reason, row.billing_posture) == ("completed", "metered")
+
+
+async def test_a_truncated_terminal_pass_is_continued(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fast_retries: None,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, client = _fake(session)
+    _finished_turn(state, "evt_a", "evt_b")
+    actual = headless_turn_billing.reconcile_unbilled
+    truncated: list[bool] = []
+
+    async def one_call_per_pass(**kwargs: Any) -> Any:
+        result = await actual(**kwargs, page_size=1, max_pages=1)
+        truncated.append(result.truncated)
+        return result
+
+    monkeypatch.setattr(headless_turn_billing, "reconcile_unbilled", one_call_per_pass)
+    headless_turn_billing.watch_turn(
+        anthropic=client,  # type: ignore[arg-type]
+        sessionmaker=db_session_factory,
+        turn=_turn(session, tenant.id),
+        markup=MARKUP,
+    )
+    await headless_turn_billing.drain()
+
+    assert truncated[0] is True and truncated[-1] is False
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a", f"turn:{SESSION}:evt_b"}
+
+
+async def test_an_abandoned_settlement_is_left_to_the_poll_fallback(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fast_retries: None,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, client = _fake(session)
+    _finished_turn(state, "evt_a")
+    actual = headless_turn_billing.reconcile_unbilled
+    down = [True]
+
+    async def database_down(**kwargs: Any) -> Any:
+        if down[0]:
+            raise SQLAlchemyError("down")
+        return await actual(**kwargs)
+
+    monkeypatch.setattr(headless_turn_billing, "SETTLE_MAX_PASSES", 2)
+    monkeypatch.setattr(headless_turn_billing, "reconcile_unbilled", database_down)
+    headless_turn_billing.watch_turn(
+        anthropic=client,  # type: ignore[arg-type]
+        sessionmaker=db_session_factory,
+        turn=_turn(session, tenant.id),
+        markup=MARKUP,
+    )
+    await headless_turn_billing.drain()
+    assert await _ledger(db_session) == {}
+
+    down[0] = False
+    # Inside the normal 30 s throttle: an unsettled session is retried sooner.
+    ticks = iter([1000.0, 1000.0 + headless_turn_billing.CATCH_UP_RETRY_S + 1])
+    for _ in range(2):
+        headless_turn_billing.catch_up_session(
+            anthropic=client,  # type: ignore[arg-type]
+            sessionmaker=db_session_factory,
+            session=session,
+            tenant_id=tenant.id,
+            platform_user_id="user-1",
+            markup=MARKUP,
+            clock=lambda: next(ticks),
+        )
+        await headless_turn_billing.drain()
+
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}
+
+
+async def test_a_delayed_watcher_counts_only_its_own_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Turn B was sent and finished before A's watcher looked: A's outcome is A's."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, client = _fake(session)
+    _finished_turn(state, "evt_a")
+    state.events[SESSION].extend(
+        [
+            _user_message("evt_boundary_b", at=NOW + timedelta(seconds=3)),
+            _request_end("evt_b", at=NOW + timedelta(seconds=4)),
+            _idle("evt_idle_b", at=NOW + timedelta(seconds=5)),
+        ]
+    )
+    observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    observation.usage_available = False
+
+    await settle_turn(
+        anthropic=client,  # type: ignore[arg-type]
+        sessionmaker=db_session_factory,
+        turn=_turn(session, tenant.id),
+        markup=MARKUP,
+        observation=observation,
+        sleep=_no_sleep,
+    )
+    await drain_outcomes()
+
+    row = (await db_session.execute(select(TurnOutcome))).scalar_one()
+    assert row.model_calls == 1, "turn B's call is not turn A's cost"
+    assert [ref["event_id"] for ref in row.usage_refs] == ["evt_a"]
+    assert len(await _ledger(db_session)) == 2, "the session is still billed in full"
+
+
+async def test_turns_sharing_a_session_get_their_own_outcomes(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, client = _fake(session)
+    _finished_turn(state, "evt_a")
+    state.events[SESSION].extend(
+        [
+            _user_message("evt_boundary_b", at=NOW + timedelta(seconds=3)),
+            _request_end("evt_b1", at=NOW + timedelta(seconds=4)),
+            _request_end("evt_b2", at=NOW + timedelta(seconds=5)),
+            _idle("evt_idle_b", at=NOW + timedelta(seconds=6)),
+        ]
+    )
+    observations = []
+    for boundary in (BOUNDARY, "evt_boundary_b"):
+        observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+        observation.usage_available = False
+        observations.append(observation)
+        headless_turn_billing.watch_turn(
+            anthropic=client,  # type: ignore[arg-type]
+            sessionmaker=db_session_factory,
+            turn=DispatchedTurn(
+                session=session,
+                tenant_id=tenant.id,
+                platform_user_id="user-1",
+                turn_event_id=boundary,
+            ),
+            markup=MARKUP,
+            observation=observation,
+        )
+    await headless_turn_billing.drain()
+    await drain_outcomes()
+
+    rows = (await db_session.execute(select(TurnOutcome))).scalars().all()
+    by_id = {r.id: r.model_calls for r in rows}
+    assert by_id == {observations[0].id: 1, observations[1].id: 2}
+    assert len(await _ledger(db_session)) == 3
+
+
+def _slow_client(session: BetaManagedAgentsSession, delay_s: float) -> Any:
+    """Every MA read takes `delay_s`: a wedged upstream."""
+    state = FakeSessionsState(ma=FakeMAState())
+    state.sessions[session.id] = session
+    inner = make_fake_sessions_handler(state)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(delay_s)
+        return inner(request)
+
+    return build_fake_anthropic(handler)  # type: ignore[arg-type]
+
+
+async def test_the_watcher_deadline_bounds_an_in_flight_read(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id, status="running")
+    client = _slow_client(session, delay_s=5.0)
+    observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    observation.usage_available = False
+    # Billing afterwards is separately bounded; make it instant here.
+    started = time.monotonic()
+    with patch.object(
+        headless_turn_billing, "_reconcile", AsyncMock(return_value=_settled_result())
+    ):
+        await asyncio.wait_for(
+            settle_turn(
+                anthropic=client,
+                sessionmaker=db_session_factory,
+                turn=_turn(session, tenant.id),
+                markup=MARKUP,
+                observation=observation,
+                timeout_s=0.05,
+            ),
+            timeout=2.0,
+        )
+    await drain_outcomes()
+
+    assert time.monotonic() - started < 1.0, "the 50 ms deadline cut the 5 s read short"
+    row = (await db_session.execute(select(TurnOutcome))).scalar_one()
+    assert row.reason == "unknown"
+
+
+def _settled_result() -> ReconcileResult:
+    return ReconcileResult(
+        scanned=0,
+        missing=0,
+        repaired=0,
+        debited=0,
+        debit_usd=Decimal(0),
+        truncated=False,
+        repair_skipped=False,
+    )
+
+
+async def test_background_reads_use_their_own_timeout_and_retry_budget() -> None:
+    client = build_fake_anthropic(lambda _r: httpx.Response(500))
+    background = headless_turn_billing._background(client)  # pyright: ignore[reportPrivateUsage]
+    assert background.max_retries == headless_turn_billing.BACKGROUND_MAX_RETRIES
+    assert background.timeout == headless_turn_billing.REQUEST_TIMEOUT_S
+
+
+async def test_a_rate_limited_status_read_backs_off_to_retry_after(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state = FakeSessionsState(ma=FakeMAState())
+    state.sessions[session.id] = session
+    _finished_turn(state, "evt_a")
+    inner = make_fake_sessions_handler(state)
+    limited = [True]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if limited[0] and request.url.path == f"/v1/sessions/{SESSION}":
+            return httpx.Response(
+                429,
+                headers={"retry-after": "42"},
+                json={"type": "error", "error": {"type": "rate_limit_error", "message": "slow"}},
+            )
+        return inner(request)
+
+    client = build_fake_anthropic(handler)
+    sleeps: list[float] = []
+
+    async def record_sleep(s: float) -> None:
+        sleeps.append(s)
+        limited[0] = False
+
+    await settle_turn(
+        anthropic=client,
+        sessionmaker=db_session_factory,
+        turn=_turn(session, tenant.id),
+        markup=MARKUP,
+        sleep=record_sleep,
+    )
+
+    assert sleeps == [42.0], "the pause honours retry-after"
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}
+
+
+async def test_an_unreachable_boundary_stops_being_walked(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    state, client = _fake(session)
+    state.events[SESSION] = [_idle("evt_idle", at=NOW)]  # the boundary is never listed
+    sleeps: list[float] = []
+
+    async def count(s: float) -> None:
+        sleeps.append(s)
+
+    observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=SESSION)
+    observation.usage_available = False
+    await settle_turn(
+        anthropic=client,  # type: ignore[arg-type]
+        sessionmaker=db_session_factory,
+        turn=_turn(session, tenant.id),
+        markup=MARKUP,
+        observation=observation,
+        sleep=count,
+    )
+    await drain_outcomes()
+
+    assert len(sleeps) == headless_turn_billing.MAX_UNRESOLVED_WALKS - 1
+    row = (await db_session.execute(select(TurnOutcome))).scalar_one()
+    assert (row.reason, row.model_calls) == ("unknown", None)
+
+
+async def test_shutdown_before_the_watcher_starts_still_writes_its_outcome(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id, status="running")
+    _, client = _fake(session)
+    with observe_turn(db_session_factory, tenant_id=tenant.id, platform="mcp") as observation:
+        observation.usage_available = False
+        observation.session_id = SESSION
+        observation.hand_off()
+        headless_turn_billing.watch_turn(
+            anthropic=client,  # type: ignore[arg-type]
+            sessionmaker=db_session_factory,
+            turn=_turn(session, tenant.id),
+            markup=MARKUP,
+            observation=observation,
+        )
+    await headless_turn_billing.shutdown()  # no yield: the task never took a step
+    await drain_outcomes()
+
+    rows = (await db_session.execute(select(TurnOutcome))).scalars().all()
+    assert [r.reason for r in rows] == ["unknown"]
+
+
+async def test_watched_sessions_and_queued_catch_ups_are_capped(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    monkeypatch.setattr(headless_turn_billing, "MAX_WATCHERS", 1)
+    monkeypatch.setattr(headless_turn_billing, "MAX_CATCH_UPS", 1)
+    gate = asyncio.Event()
+
+    async def held(**_kwargs: Any) -> Any:
+        await gate.wait()
+        return _settled_result()
+
+    monkeypatch.setattr(headless_turn_billing, "reconcile_unbilled", held)
+    sessions = [
+        ma_session(
+            id=f"sesn_cap_{i}",
+            model=MODEL,
+            status="running" if i < 2 else "idle",
+            metadata={MA_METADATA_KEY_TENANT: str(tenant.id)},
+        )
+        for i in range(4)
+    ]
+    state = FakeSessionsState(ma=FakeMAState())
+    for s in sessions:
+        state.sessions[s.id] = s
+    client = build_fake_anthropic(make_fake_sessions_handler(state))
+    outcomes = []
+    for s in sessions[:2]:
+        observation = TurnObservation(db_session_factory, tenant.id, "mcp", session_id=s.id)
+        outcomes.append(observation)
+        headless_turn_billing.watch_turn(
+            anthropic=client,
+            sessionmaker=db_session_factory,
+            turn=DispatchedTurn(
+                session=s, tenant_id=tenant.id, platform_user_id=None, turn_event_id="b"
+            ),
+            markup=MARKUP,
+            observation=observation,
+        )
+    queued = [
+        headless_turn_billing.catch_up_session(
+            anthropic=client,
+            sessionmaker=db_session_factory,
+            session=s,
+            tenant_id=tenant.id,
+            platform_user_id=None,
+            markup=MARKUP,
+        )
+        for s in sessions[2:]
+    ]
+
+    assert outcomes[1].handed_off is False
+    assert outcomes[1]._finished is True, "over the cap: written as unknown at once"  # pyright: ignore[reportPrivateUsage]
+    assert queued == [True, False], "one queued catch-up at most"
+    gate.set()
+    await headless_turn_billing.shutdown()
+    await drain_outcomes()

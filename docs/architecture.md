@@ -1902,11 +1902,13 @@ reply is `completed`, an observed terminated session is `session_terminated`, an
 the bounded polling deadline is `ceiling`. Shared admission gates record balance,
 cap and access-policy refusals. `start_turn` and `continue_turn` return before
 model execution ends; their outcome is handed to a background watcher
-(`daimon.core.headless_turn_billing`) that writes it when the session reaches
-idle after the turn's own message, with the terminal reason and the turn's
-model-span usage, and bills the session through the turn-end catch-up. A
-watcher that gives up after the turn ceiling, or is cancelled at shutdown,
-writes reason `unknown` with null usage. `ask` keeps null usage fields rather
+(`daimon.core.headless_turn_billing`) that writes it when the turn's first
+terminal event after its own message is listed, with that reason and the
+model-span usage between the message and that event (never a later turn's),
+and bills the session through the turn-end catch-up until a pass completes.
+A turn the watcher cannot resolve (turn ceiling, repeated read failures, an
+unreachable boundary) or that is pending at shutdown, even before its watcher
+starts, is written with reason `unknown` and null usage. `ask` keeps null usage fields rather
 than implying zero model calls or cost. Channel/thread identifiers are unavailable on these calls.
 Identity resolution failures before tenant attribution and adapter readiness /
 draining gates before the turn boundary are outside this coverage. Library-only
