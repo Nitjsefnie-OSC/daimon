@@ -81,6 +81,7 @@ def request_resource_host(
     selection. A mismatch refuses; callers never fall back past it.
     """
     from daimon.core.neutral_resources import NeutralResourceHost
+    from mux.profiles import PERSISTENT_WORKSPACE
 
     factory = rt.resource_hosts
     if factory is None:
@@ -106,8 +107,8 @@ def request_resource_host(
         or scope.is_platform
         or scope.is_legacy_host_authorized
         or host.workspace != workspace
-        or capabilities.provider != "openai"
-        or capabilities.profile_id != "openai.persistent_workspace"
+        or capabilities.provider != PERSISTENT_WORKSPACE.provider
+        or capabilities.profile_id != PERSISTENT_WORKSPACE.profile_id
     ):
         raise ResourceHostMismatch(
             "the operator's resource host is for a different tenant, account or workspace; "
@@ -143,6 +144,7 @@ class GeminiResourceGrant:
 def request_gemini_resource_host(rt: CliRuntime, grant: GeminiResourceGrant) -> NeutralResourceHost:
     """Validate the complete returned native host before catalog/provider access."""
     from daimon.core.neutral_resources import NativeCatalogReadback, NeutralResourceHost
+    from mux.profiles import INLINE_REUSE
 
     factory = rt.gemini_resource_hosts
     if factory is None or grant not in rt.gemini_resource_grants:
@@ -169,12 +171,12 @@ def request_gemini_resource_host(rt: CliRuntime, grant: GeminiResourceGrant) -> 
         or scope.is_platform
         or scope.is_legacy_host_authorized
         or host.workspace != grant.workspace
-        or capabilities.provider != "gemini"
-        or capabilities.profile_id != "gemini.inline_reuse"
+        or capabilities.provider != INLINE_REUSE.provider
+        or capabilities.profile_id != INLINE_REUSE.profile_id
         or adapter is None
         or adapter.enabled is not True
-        or adapter.provider != "gemini"
-        or adapter.profile_id != "gemini.inline_reuse"
+        or adapter.provider != INLINE_REUSE.provider
+        or adapter.profile_id != INLINE_REUSE.profile_id
         or adapter.account_scope_id != grant.workspace
         or host.backend.agents is not adapter
     ):
