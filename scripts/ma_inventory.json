@@ -7574,6 +7574,31 @@
       ]
     },
     {
+      "file": "packages/testing/tests/test_anthropic_fixtures.py",
+      "line": 87,
+      "end": 89,
+      "scope": "test_main_824_catchup_reads_recorded_usage_after_the_real_sdk_turn",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "replay.client.beta.sessions.events.list(identity, limit=100, order='asc', types=['span.model_request_end'])",
+      "request_keys": [],
+      "response_access": [
+        "page.data",
+        "page.next_page"
+      ]
+    },
+    {
+      "file": "packages/testing/tests/test_anthropic_fixtures.py",
+      "line": 97,
+      "end": 99,
+      "scope": "test_main_824_catchup_reads_recorded_usage_after_the_real_sdk_turn",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "replay.client.beta.sessions.events.list(identity, limit=100, order='asc', types=['span.model_request_end'])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/testing/tests/test_anthropic_live.py",
       "line": 1495,
       "end": 1498,

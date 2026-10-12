@@ -57,7 +57,8 @@ def apply(patch: pytest.MonkeyPatch, mutation: str) -> None:
             transformer = LedgerDate()
         elif mutation == "dm_delivery":
             module = importlib.import_module("daimon.adapters.discord.commands.direct_messages")
-            function = cast(FunctionType, module.DirectMessageCog.on_message)
+            # Main #823 moved the unchanged answer slicing into the drain-tracked helper.
+            function = cast(FunctionType, module.DirectMessageCog._reply)
             transformer = DmDelivery()
         else:
             raise AssertionError(f"Unknown oracle mutation: {mutation}")

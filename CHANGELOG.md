@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add an exact opt-in Anthropic first-turn usage catch-up tape for main #824 and retarget the DM delivery sensitivity probe after main #823's helper move.
+
 - Serve recorded turn events in the offline scripted router for main #824's post-turn billing catch-up; preserve scoped routes, usage identities and full dual-path golden comparisons.
 
 - Prove offline that a shared Anthropic thread keeps its provider after an OpenAI channel switch, while new threads run OpenAI and an unavailable original backend refuses explicitly.
