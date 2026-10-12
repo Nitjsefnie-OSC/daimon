@@ -1,0 +1,212 @@
+"""The mirror outbox: queueing once, claiming per session, settling, pausing and purge."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime, timedelta
+
+from daimon.core._models import MirrorDelivery
+from daimon.core.config import MirrorsSettings
+from daimon.core.mirror_delivery import (
+    MirrorJob,
+    MirrorOutcome,
+    poll_mirror_deliveries_once,
+    record_conversation_event,
+)
+from daimon.core.mirror_events import ActorRef, ConversationEventV1, SourceRef
+from daimon.core.privacy import collect_purge_preview
+from daimon.core.purge import purge_account
+from daimon.core.stores import mirrors as store
+from daimon.core.stores.domain import MirrorDeliveryRow, MirrorRow
+from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
+_LEASE = timedelta(minutes=2)
+_MAX_AGE = timedelta(minutes=30)
+
+
+async def _mirror(session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> MirrorRow:
+    return await store.upsert_mirror(
+        session,
+        tenant_id=tenant_id,
+        name="qa",
+        source_agent_id=agent_id,
+        source_agent_name="helper",
+        source_agent_names=("helper",),
+        dest_platform="discord",
+        dest_kind="channel",
+        dest_id="300",
+        consent_note="askers agreed in the kickoff call",
+        max_answer_chars=None,
+        account_id=None,
+        now=_NOW,
+    )
+
+
+def _event(
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    *,
+    session_key: str = "sesn_1",
+    account_id: uuid.UUID | None = None,
+) -> ConversationEventV1:
+    return ConversationEventV1(
+        id=uuid.uuid4(),
+        surface="hub",
+        occurred_at=_NOW,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        source=SourceRef(channel_id=None, session_key=session_key),
+        actor=ActorRef(account_id=account_id, display_name="Ada"),
+        question="q",
+        answer="a",
+    )
+
+
+async def _claim(
+    session: AsyncSession, *, now: datetime = _NOW, owner: str = "w1"
+) -> list[MirrorDeliveryRow]:
+    return await store.claim_mirror_deliveries(
+        session, platform="discord", owner=owner, now=now, lease=_LEASE, max_pending_age=_MAX_AGE
+    )
+
+
+async def test_an_event_is_queued_once_and_only_for_its_tenants_mirrors(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agent = uuid.uuid4()
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session, workspace_id="other-guild")
+    mirror = await _mirror(db_session, tenant.id, agent)
+    await _mirror(db_session, other.id, agent)
+    await db_session.commit()
+    event = _event(tenant.id, agent)
+
+    first = await record_conversation_event(db_session_factory, event, now=_NOW)
+    await record_conversation_event(db_session_factory, event, now=_NOW)
+
+    assert [m.id for m in first] == [mirror.id], "another tenant's mirror never matches"
+    claimed = await _claim(db_session)
+    assert [row.event_id for row in claimed] == [event.id], "a repeated event is queued once"
+
+
+async def test_one_claim_per_session_at_a_time_and_settling_drops_the_payload(
+    db_session: AsyncSession,
+) -> None:
+    agent = uuid.uuid4()
+    tenant = await make_tenant(db_session)
+    mirror = await _mirror(db_session, tenant.id, agent)
+    first, second = _event(tenant.id, agent), _event(tenant.id, agent)
+    for offset, event in enumerate((first, second)):
+        await store.insert_deliveries(
+            db_session, event=event, mirror_ids=[mirror.id], now=_NOW + timedelta(seconds=offset)
+        )
+
+    claimed = await _claim(db_session, now=_NOW + timedelta(seconds=5))
+    assert [row.event_id for row in claimed] == [first.id], "a session's oldest post goes first"
+    assert await _claim(db_session, now=_NOW + timedelta(seconds=6)) == [], (
+        "nothing more is claimed for a session while one post is in flight"
+    )
+    assert await store.settle_mirror_delivery(
+        db_session,
+        claimed[0].id,
+        owner="w1",
+        status="delivered",
+        dest_thread_id="900",
+        now=_NOW,
+    )
+    payload = select(MirrorDelivery.payload).where(MirrorDelivery.id == claimed[0].id)
+    assert await db_session.scalar(payload) is None, "a settled post keeps no question or answer"
+    later = await _claim(db_session, now=_NOW + timedelta(seconds=7))
+    assert [row.event_id for row in later] == [second.id], "the next post follows the settle"
+    thread = await store.get_session_thread(db_session, mirror_id=mirror.id, session_key="sesn_1")
+    assert thread == "900", "the session's thread is reused"
+
+
+async def test_expired_leases_stale_posts_and_paused_mirrors_never_post(
+    db_session: AsyncSession,
+) -> None:
+    agent = uuid.uuid4()
+    tenant = await make_tenant(db_session)
+    mirror = await _mirror(db_session, tenant.id, agent)
+    await store.insert_deliveries(
+        db_session, event=_event(tenant.id, agent), mirror_ids=[mirror.id], now=_NOW
+    )
+    await _claim(db_session)
+
+    later = _NOW + _LEASE + timedelta(seconds=1)
+    assert await _claim(db_session, now=later, owner="w2") == [], (
+        "an expired lease is settled, not retried: the first owner may have posted"
+    )
+    await store.insert_deliveries(
+        db_session,
+        event=_event(tenant.id, agent, session_key="s2"),
+        mirror_ids=[mirror.id],
+        now=_NOW,
+    )
+    assert await _claim(db_session, now=_NOW + _MAX_AGE + timedelta(seconds=1)) == [], (
+        "a post older than the pending limit is dropped"
+    )
+    await store.insert_deliveries(
+        db_session,
+        event=_event(tenant.id, agent, session_key="s3"),
+        mirror_ids=[mirror.id],
+        now=_NOW,
+    )
+    await store.mark_paused(db_session, mirror.id, reason="destination_unavailable", now=_NOW)
+    assert await _claim(db_session) == [], "a paused mirror's posts are skipped"
+    notes = await db_session.scalars(
+        select(MirrorDelivery.note).where(MirrorDelivery.status == "skipped")
+    )
+    assert sorted(map(str, notes)) == ["interrupted", "paused", "stale"], (
+        "each settles with its reason"
+    )
+
+
+async def test_a_poster_pause_pauses_the_mirror(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agent = uuid.uuid4()
+    tenant = await make_tenant(db_session)
+    mirror = await _mirror(db_session, tenant.id, agent)
+    await db_session.commit()
+    await record_conversation_event(db_session_factory, _event(tenant.id, agent), now=_NOW)
+    jobs: list[MirrorJob] = []
+
+    async def post(job: MirrorJob) -> MirrorOutcome:
+        jobs.append(job)
+        return MirrorOutcome(status="skipped", note="refused", pause_reason="writers_none")
+
+    count = await poll_mirror_deliveries_once(
+        db_session_factory, platform="discord", post=post, settings=MirrorsSettings(), now=_NOW
+    )
+
+    assert count == 1 and jobs[0].event.question == "q", "the poster gets the stored event"
+    paused = await store.get_mirror(db_session, mirror.id)
+    assert paused is not None and paused.status == "paused", "the mirror is paused"
+    assert paused.paused_reason == "writers_none", paused
+
+
+async def test_purge_deletes_the_persons_queued_questions(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agent = uuid.uuid4()
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    mirror = await _mirror(db_session, tenant.id, agent)
+    await store.insert_deliveries(
+        db_session,
+        event=_event(tenant.id, agent, account_id=account.id),
+        mirror_ids=[mirror.id],
+        now=_NOW,
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+
+    assert preview.mirror_deliveries.count == 1, "the preview counts the queued question"
+    assert report.db.mirror_deliveries == 1, "purge deletes it"
+    assert await store.count_for_account(db_session, account_id=account.id) == 0
