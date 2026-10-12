@@ -1,4 +1,4 @@
-"""Stage two of the two-stage turn chokepoint (admission): `bind_session()`.
+"""Stage two of the two-stage turn chokepoint: `bind_session()`.
 
 A single core call performs thread-session find-or-create, the full
 `create_session` kwarg assembly, the `thread_sessions` mapping write, and
@@ -893,11 +893,11 @@ async def bind_session_impl(
     MA for a row written before snapshots existed). The responder agent's
     current model is only a fallback for a session we cannot read.
 
-    `deadline`/`now` bound this whole body against the per-turn ceiling
-    (preparation): the MA `sessions.create` call and the mapping write, and on the
+    `deadline`/`now` bound this whole body against the per-turn ceiling:
+    the MA `sessions.create` call and the mapping write, and on the
     reuse path the compatibility check and whatever it applies. This does NOT
     cover `admit()`, which runs before `bind_session` and is deliberately
-    unbounded (context). `deadline=None` is fail-safe, not off -- it computes
+    unbounded. `deadline=None` is fail-safe, not off -- it computes
     `turn_deadline(now=now())` so every caller (including one that never
     passes a deadline) is still ceiling-covered.
 

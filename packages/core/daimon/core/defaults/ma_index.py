@@ -76,7 +76,7 @@ async def find_agents_by_daimon_tag(
 
     The first element (max `created_at`) is the canonical match the resolver
     and reconcile should adopt; remaining elements are duplicates that
-    reconcile is responsible for archiving . Empty list = no
+    reconcile is responsible for archiving. Empty list = no
     match.
 
     `include_archived=True` lifts the archived filter — useful for `daimon

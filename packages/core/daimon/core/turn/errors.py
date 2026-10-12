@@ -1,4 +1,4 @@
-"""Typed errors raised by the turn admission chokepoint (admission stage one).
+"""Typed errors raised by the turn admission chokepoint (stage one).
 
 Split out of `admission.py` to keep that module under the 200-line target.
 Both subclass `DaimonError` so the adapters' existing

@@ -308,7 +308,7 @@ class DiscordTurnLifecycle:
     send and edit callables are injected so the class is testable without
     a real discord.py connection.
 
-    The lifecycle protocol: the embed flush (``_maybe_flush``) rides ``on_render``, not
+    The embed flush (``_maybe_flush``) rides ``on_render``, not
     ``on_sse_event`` -- the pump awaits ``on_sse_event`` inline, so a slow or
     rate-limited Discord edit there would stall the whole consume loop
     (deadening Cancel and blurring the read-timeout clock). Moving it to
@@ -537,7 +537,7 @@ class DiscordTurnLifecycle:
         self._queue_card_shown = False
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
-        # Cheap local tap per the hardened TurnLifecycle contract (the lifecycle protocol):
+        # Cheap local tap per the hardened TurnLifecycle contract:
         # the pump awaits this hook inline, so it stays a local reducer
         # call only. The embed flush (chat-API I/O) rides the render tick
         # instead, where a slow or rate-limited edit only delays the
@@ -1425,7 +1425,7 @@ class DiscordTurnLifecycle:
         )
 
     async def on_render(self, state: TurnState) -> None:
-        # Sole delivery path (the lifecycle protocol). Sealed answers first, then the embed
+        # Sole delivery path. Sealed answers first, then the embed
         # flush -- matches on_terminal_success's existing order, so a sealed
         # answer never trails behind an embed that already moved past it.
         if self._terminal or self._thread_stopped():

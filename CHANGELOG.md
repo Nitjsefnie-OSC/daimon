@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 - Let workspace admins preview and select an agent's model backend in agent setup, or set and clear it through the CLI and direct MCP tool, when backend selection is explicitly enabled. Previews include compatibility and pricing limits; existing threads keep their backend.
 - Share native message preview folding across Discord, Slack and Teams, and bundle the adapters' Inter faces once in core while preserving their rendering and web URLs.
+- Share native message preview folding across Discord, Slack and Teams, and bundle the adapters' Inter faces once in core for rendering, web URLs and the table-image oracle.
 - Keep product comments and docstrings focused on behavior and causal reasons, moving ticket and review references to commit provenance.
 
 - Preserve OpenAI session occupancy when accepted work has no visible active root yet, allowing observation to continue without retrying creation or admitting a new turn.

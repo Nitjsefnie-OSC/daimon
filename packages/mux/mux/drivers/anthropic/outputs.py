@@ -45,7 +45,7 @@ class Outputs(Protocol):
 class AnthropicOutputs(AnthropicArtifacts):
     """One listing page by default; delivery can request all SDK pages.
 
-    Inherit the resource layer's reference construction and shared upload request. Bundle
+    Inherit reference construction and the shared upload request. Bundle
     rehosting consumes only its returned ID. The three session-output requests
     differ from the standalone Files API port; they explicitly opt into the MA beta.
     """

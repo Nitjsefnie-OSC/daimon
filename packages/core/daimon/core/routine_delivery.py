@@ -1,4 +1,4 @@
-"""Where a routine's result goes: optional destination, fallback post .
+"""Where a routine's result goes: optional destination, fallback post.
 
 A routine may name a destination — a channel, or a thread — on its row. Three
 things follow from it, and nothing changes for a routine without one:
@@ -12,7 +12,7 @@ things follow from it, and nothing changes for a routine without one:
    result tail is posted for it. The first failed fire in a row queues a
    short failure notice the same way (`record_failure`).
 3. The post happens in the chat adapter for the tenant's platform — the
-   scheduler has no platform client . Each adapter runs
+   scheduler has no platform client. Each adapter runs
    `run_delivery_poller` with its own `RoutinePoster`; an adapter that runs
    none leaves rows `pending`, which is the safe default for a platform that
    cannot post yet. Before posting, `delivery_refusal` applies the tenant's

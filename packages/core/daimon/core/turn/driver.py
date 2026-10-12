@@ -1660,7 +1660,6 @@ async def _consume_with_reconnect(
                     delivered_provider_event_ids.add(normalized.id)
             if event is None:
                 # Usage-only native frames have no display event to decode.
-                # The host codec edge owns the optional native field declaration.
                 continue
             if event.id not in delivered_event_ids:
                 # The one inline I/O the consume loop is allowed to do.

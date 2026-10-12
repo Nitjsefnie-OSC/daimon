@@ -12,7 +12,7 @@ vault token never elevates a non-admin caller at the MCP admin gate, regardless
 of whether or when this sweep runs. The trusted-token gate alone is sufficient.
 
 This module performs a *one-time backfill* to align the existing credential
-fleet with the post-88-03 invariant: ``mint_jwt`` called from
+fleet with the credential invariant: ``mint_jwt`` called from
 ``ensure_agent_mcp_vault`` now omits ``is_admin`` from long-lived credentials,
 but credentials minted before the 88-03 fix may still carry a frozen
 ``is_admin=True`` claim with no expiry. While these stale claims are already
