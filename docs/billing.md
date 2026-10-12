@@ -1059,3 +1059,28 @@ signed customer ledger debits including markup, and pending revisions. The
 floor and debit amounts overlap and must not be added. The orchestrator rollup
 creates no second debit. Token floors omit unknown infrastructure and rates. A zero floor or settled latest observation
 is not proof of complete final usage and never releases an admitted bound.
+
+
+Fleet financial admission uses `channel_budget.reserve_fleet_worker` in the
+same transaction as canonical worker creation. Each admitted worker reserves
+its entire immutable budget. The product `produce_fleet_budget` reads original
+usage and debits, then retains the greater of that reservation, a verified
+marked-up token floor, existing debit, and previous held exposure. Unknown or
+terminal usage never refunds a reservation. Run exposure sums the worker
+exposures; remaining prepaid funds subtract only holds not already debited.
+New spawns refuse after an overrun, when their run exceeds authenticated parent
+authority or available prepaid/channel funds, or when pricing is unavailable.
+Operator-funded admission and replacement attempts remain unavailable without
+their authoritative funding and accepted-attempt inventory proofs.
+
+A pool claim allocates concurrency only. Before any native preparation the
+host uses `require_fleet_worker_admission`, commits its fresh monetary readback,
+and stops on a refusal. Spec and resource permissions still come from the
+existing resolver and driver. `watch_fleet_budget` reads this same product
+producer and requests existing driver cancellation on a spent worker limit or
+overrun. Equal total reservations alone do not cancel unspent workers. Read
+failures log a reason and exception class, cancel defensively, and retain
+holds; the read timeout is explicit or eight polling intervals. Worker deadline
+enforcement belongs solely to `run_prepared_turn`. These monetary interfaces
+create no tenant-ledger charge, assert no final native actual, and impose no
+provider-native hard cap. The ordinary turn path starts no budget watcher.

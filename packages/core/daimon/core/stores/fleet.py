@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
+from daimon.core._models import Account, Tenant
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
 from daimon.core.fleet import (
@@ -649,3 +650,120 @@ class WorkerPool:
 
     def release(self) -> None:
         self._slots.release()
+
+
+async def lock_budget(
+    session: AsyncSession, *, tenant_id: uuid.UUID, actor_id: uuid.UUID
+) -> tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...]:
+    """Join the caller's financial transaction before any fleet row transition.
+
+    Same tenant lock as pool claims, then ledger writers, runs, workers. Ledger
+    SHARE prevents concurrent credits/debits changing sampled available funds;
+    existing ledger writers need no new read or lock on the ordinary path.
+    """
+    if not session.in_transaction():
+        raise FleetConflict("fleet budget requires an active transaction")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"fleet:{tenant_id}"},
+    )
+    # Same tenant/account order as audit and erasure, before ledger writers.
+    tenant = await session.scalar(
+        select(Tenant.id).where(Tenant.id == tenant_id).with_for_update(read=True, key_share=True)
+    )
+    actor = await session.scalar(
+        select(Account.id)
+        .where(Account.id == actor_id, Account.tenant_id == tenant_id)
+        .with_for_update(read=True, key_share=True)
+    )
+    if tenant is None or actor is None:
+        raise FleetConflict("financial admission requires a live tenant actor")
+    await session.execute(text("LOCK TABLE tenant_ledger IN SHARE MODE"))
+    runs = tuple(
+        await session.scalars(
+            select(FleetRunRow)
+            .where(FleetRunRow.tenant_id == tenant_id)
+            .order_by(FleetRunRow.id)
+            .with_for_update()
+        )
+    )
+    workers = tuple(
+        await session.scalars(
+            select(FleetWorkerRow)
+            .where(FleetWorkerRow.tenant_id == tenant_id)
+            .order_by(FleetWorkerRow.id)
+            .with_for_update()
+        )
+    )
+    return tuple(
+        (_run(run), tuple(_worker(w) for w in workers if w.run_id == run.id)) for run in runs
+    )
+
+
+async def save_budget(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    graph: tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...],
+    exposures: Mapping[uuid.UUID, Decimal],
+    debits: Mapping[uuid.UUID, Decimal],
+) -> tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...]:
+    """Persist the producer's held exposure; never decrease a worker's hold.
+
+    Caller has lock_budget's transaction/graph. Run sums are derived in SQL,
+    with the same exact Numeric basis as the rows, never ambient Decimal math.
+    No status, result, usage outbox or tenant debit is changed here.
+    """
+    if not session.in_transaction():
+        raise FleetConflict("fleet budget requires an active transaction")
+    for run, workers in graph:
+        for worker in workers:
+            amount = _amount(exposures[worker.id])
+            if amount < worker.reserved_usd:
+                raise FleetConflict("unknown worker exposure cannot be released")
+            if amount == worker.reserved_usd:
+                continue
+            changed = await session.scalar(
+                update(FleetWorkerRow)
+                .where(
+                    FleetWorkerRow.tenant_id == tenant_id,
+                    FleetWorkerRow.id == worker.id,
+                    FleetWorkerRow.version == worker.version,
+                )
+                .values(
+                    reserved_usd=amount, version=FleetWorkerRow.version + 1, updated_at=func.now()
+                )
+                .returning(FleetWorkerRow.id)
+            )
+            if changed is None:
+                raise FleetConflict("worker changed during monetary update")
+        total = await session.scalar(
+            select(func.coalesce(func.sum(FleetWorkerRow.reserved_usd), 0)).where(
+                FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.run_id == run.id
+            )
+        )
+        observed = _amount(debits[run.id])
+        if total == run.reserved_usd and observed == run.observed_usd:
+            continue
+        changed = await session.scalar(
+            update(FleetRunRow)
+            .where(
+                FleetRunRow.tenant_id == tenant_id,
+                FleetRunRow.id == run.id,
+                FleetRunRow.version == run.version,
+            )
+            .values(
+                reserved_usd=total,
+                observed_usd=observed,
+                version=FleetRunRow.version + 1,
+                updated_at=func.now(),
+            )
+            .returning(FleetRunRow.id)
+        )
+        if changed is None:
+            raise FleetConflict("run changed during monetary update")
+    # Already-held locks are retained; do not acquire the ledger lock twice.
+    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
+    for run, _ in graph:
+        result.append(await run_status(session, tenant_id=tenant_id, run_id=run.id))
+    return tuple(result)
