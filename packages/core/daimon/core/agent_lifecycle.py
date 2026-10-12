@@ -18,14 +18,26 @@ import uuid
 import anthropic as anthropic_errors
 import structlog
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import AgentNameCollision, DaimonError
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.permissions import without_agent_rules
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_mcp_credentials as mcp_credentials_store
+from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
+    PolicyBusyError,
+    load_access_policy,
+    lock_access_policy,
+    policy_write_transaction,
+    set_access_policy,
+)
+from daimon.core.stores.scoped_config_write import clear_agent_references
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -157,3 +169,49 @@ async def archive_memory_store_best_effort(
         # strand it in a failed state — mirrors the mount-side policy in
         # memory_resource.py.
         _log.warning("agent_lifecycle.memory_store_archive_failed", **log_context)
+
+
+async def forget_archived_agent(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    agent: BetaManagedAgentsAgent,
+) -> tuple[str, ...]:
+    """Drop an archived agent's rules and clear every scope row naming it, by its own names.
+
+    Called after the MA archive by the CLI, MCP and Slack archive actions.
+    The rule goes on each of its own names (the one asked for, its MA name
+    and its config name), never the source names a report reader also
+    answers to, which are another agent's. A rule left behind outlives the
+    agent, and a later agent taking the name (a channel copy,
+    `channel_rules.copy_name`) inherits it. One transaction under the policy
+    lock. When the policy can't be read or its lock can't be
+    had, the scope rows are still cleared and the rule is left for
+    `daimon agents rule set <name> --anywhere`; any other failure raises.
+    Returns the names whose rule was dropped.
+    """
+    own = (name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
+    names = tuple(dict.fromkeys(n for n in own if n))
+    log_fields = {"tenant_id": str(tenant_id), "agent_name": name, "ma_agent_id": agent.id}
+    try:
+        async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
+            await lock_access_policy(session, tenant_id=tenant_id)
+            policy = await load_access_policy(session, tenant_id=tenant_id)
+            updated = without_agent_rules(policy, names)
+            if updated != policy:
+                await set_access_policy(session, tenant_id=tenant_id, policy=updated)
+            await _clear_references(session, tenant_id=tenant_id, names=names)
+        return tuple(n for n in names if n in policy.agent_rules)
+    except (AccessPolicyUnreadable, PolicyBusyError):
+        _log.warning("agent_lifecycle.agent_rule_kept", exc_info=True, **log_fields)
+    async with sessionmaker.begin() as session:
+        await _clear_references(session, tenant_id=tenant_id, names=names)
+    return ()
+
+
+async def _clear_references(
+    session: AsyncSession, *, tenant_id: uuid.UUID, names: tuple[str, ...]
+) -> None:
+    for each in names:
+        await clear_agent_references(session, tenant_id=tenant_id, agent_name=each)

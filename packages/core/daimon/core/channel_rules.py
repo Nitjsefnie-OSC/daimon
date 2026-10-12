@@ -27,7 +27,7 @@ from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
 from daimon.core.agent_fork import fork_agent
-from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.agent_reach import load_agent_reach
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.channel_environments import limited_readers_network_warning
@@ -287,15 +287,26 @@ def resolve_rule(
         raise ChannelRuleRefused("own_on_both") from None
 
 
-def copy_name(channel_label: str | None, channel_id: str, *, taken: Collection[str]) -> str:
-    """A new agent name from the channel's name, unique among `taken`. Pure."""
+def copy_name(
+    channel_label: str | None,
+    channel_id: str,
+    *,
+    taken: Collection[str],
+    ruled: Collection[str] = (),
+) -> str:
+    """A new agent name from the channel's name, unique among `taken` and `ruled`. Pure.
+
+    `taken` are live agents' names; `ruled` are names with an agent rule, which
+    may outlive their agent (one archived before its rule was dropped with it)
+    and would otherwise be inherited by the copy.
+    """
     slug = re.sub(r"[^a-z0-9]+", "-", (channel_label or "").lower()).strip("-")[:40].strip("-")
     # A Teams id (`19:<id>@thread.tacv2`) ends in its domain and holds ":", so
     # the tail comes from its id part, letters and digits only.
     tail = re.sub(r"[^a-z0-9]", "", channel_id.partition("@")[0].lower())[-6:]
     base = slug or f"channel-{tail}"
     name, suffix = base, 2
-    while name in taken:
+    while name in taken or name in ruled:
         name, suffix = f"{base}-{suffix}", suffix + 1
     return name
 
@@ -606,11 +617,17 @@ async def set_channel_rule(
     source = copy_from or found.answering
     if not copy or source is None:
         raise ChannelRuleRefused(found.refusal, agent_name=found.name or source)
-    taken = {
-        agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
-        for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-    }
-    new_name = copy_name(channel_label, channel_id, taken=taken)
+    async with sessionmaker() as session:
+        ruled = (await load_access_policy(session, tenant_id=tenant_id)).agent_rules.keys()
+    new_name = copy_name(
+        channel_label,
+        channel_id,
+        taken={
+            agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
+            for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        },
+        ruled=ruled,
+    )
     made = await fork_agent(
         anthropic,
         sessionmaker,
@@ -701,7 +718,7 @@ class AgentRuleChange:
     @property
     def notes(self) -> tuple[str, ...]:
         if self.runs_in is None:
-            notes = [f"{self.agent_name} runs wherever it is set to answer."]
+            notes = [f"{self.agent_name}'s rule is cleared: it runs wherever it is set to answer."]
         elif not self.runs_in:
             notes = [f"{self.agent_name} runs nowhere."]
         else:
@@ -730,8 +747,12 @@ async def set_agent_rule(
     The rule replaces any on the agent's other names. A channel's own agent
     keeps its rule until that channel's readers change; a rule naming a
     channel only its own agents read names it alone, and makes the agent one
-    of its own only if it could be (`_own_agent_refusal`). Raise
-    `ChannelRuleRefused` if refused.
+    of its own only if it could be (`_own_agent_refusal`). None also clears
+    the rule an archived agent left behind, but only when no live agent
+    answers to `agent_name` under any name a rule applies to (`agent_aliases`:
+    its MA name, its config name, a report reader's source names), so a live
+    agent's rule is never dropped by another name. Raise `ChannelRuleRefused`
+    if refused.
     """
     # Checked first too, so whether an agent exists is no one else's to learn.
     async with sessionmaker() as session:
@@ -739,9 +760,13 @@ async def set_agent_rule(
     if not authorize(policy, subject=subject, action=Action.SET_AGENT_RULE):
         raise ChannelRuleRefused("admin_required")
     agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
-    if agent is None:
+    if agent is None and (
+        runs_in is not None
+        or agent_name in agent_aliases(await list_agents_by_tenant(anthropic, tenant_id=tenant_id))
+    ):
         raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
-    names = tuple(n for n in (agent_name, *agent_pin_names(agent.name, agent.metadata)) if n)
+    pins = agent_pin_names(agent.name, agent.metadata) if agent is not None else ()
+    names = tuple(n for n in (agent_name, *pins) if n)
     target = tuple(dict.fromkeys(runs_in)) if runs_in is not None else None
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
@@ -749,13 +774,16 @@ async def set_agent_rule(
         policy = await load_access_policy(session, tenant_id=tenant_id)
         if not authorize(policy, subject=subject, action=Action.SET_AGENT_RULE):
             raise ChannelRuleRefused("admin_required")
-        home = agent_permissions(policy, names).home
+        if agent is None and agent_name not in policy.agent_rules:
+            raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
+        # A missing agent has no channel of its own left to keep.
+        home = agent_permissions(policy, names).home if agent is not None else None
         if home is not None and target != (home,):
             raise ChannelRuleRefused("agent_has_home", agent_name=agent_name, channel_id=home)
         own = [c for c in target or () if channel_rule(policy, c).readers == "own"]
         if own and len(target or ()) > 1:
             raise ChannelRuleRefused("own_channel_alone", channel_id=own[0])
-        if own and home is None:
+        if own and home is None and agent is not None:
             refusal = await _own_agent_refusal(
                 session,
                 tenant_id=tenant_id,
@@ -776,7 +804,7 @@ async def set_agent_rule(
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)
         answers_outside = False
-        if target is not None:
+        if target is not None and agent is not None:
             reach = await load_agent_reach(
                 session,
                 tenant_id=tenant_id,

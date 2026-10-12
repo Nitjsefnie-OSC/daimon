@@ -672,7 +672,10 @@ answering nowhere else); a channel's own agent keeps its rule until that
 channel's readers change. An agent without a rule runs anywhere, so dropping
 one is explicit (`--anywhere`, `runs_in: null`). `access-policy set --clear`
 needs `--drop-agent-rules` while agent rules exist. Rule names must match an
-agent of the tenant. Every supplied id is validated before writing: Discord
+agent of the tenant. Archiving an agent drops its rule in the same step as
+clearing the channel defaults naming it, and a channel copy never takes a
+name that still has a rule; a rule left by an agent archived some other way is
+dropped with `--anywhere`, the only change allowed once no agent has the name. Every supplied id is validated before writing: Discord
 ids are 15–21 decimal digits; Slack user ids start with `U` or `W`, channel
 ids with `C` or `G`, followed by uppercase letters or digits (a Slack thread
 rule is keyed `channel_id:thread_ts` and only takes `readers: inside`). A

@@ -636,6 +636,32 @@ async def test_agents_rule_set_limits_where_an_agent_runs(
         assert (await load_access_policy(s, tenant_id=tenant_id)).agent_rules == {}
 
 
+async def test_agents_rule_set_anywhere_drops_an_archived_agents_leftover_rule(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The operator's way out of a rule an archived agent left behind."""
+    tenant_id = await _isolatable(db_session_factory, "discord", GUILD)
+    async with db_session_factory() as s, s.begin():
+        await set_access_policy(
+            s,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_rules={"ghost": AgentRule(runs_in=(CHANNEL,))}),
+        )
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    args = {"rt": rt, "platform": "discord", "workspace_id": GUILD, "agent_name": "ghost"}
+    console = _console()
+    with pytest.raises(typer.Exit):
+        await agents_rule_set(**args, console=console, nowhere=True)
+    assert "There is no agent named ghost" in _out(console), _out(console)
+    console = _console()
+    await agents_rule_set(**args, console=console, anywhere=True)
+    assert "ghost's rule is cleared" in _out(console), _out(console)
+    async with db_session_factory() as s:
+        assert (await load_access_policy(s, tenant_id=tenant_id)).agent_rules == {}
+
+
 async def test_list_shows_the_balance_and_each_configured_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
