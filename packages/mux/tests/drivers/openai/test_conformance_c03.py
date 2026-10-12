@@ -230,11 +230,8 @@ def test_missing_go_refuses_without_accessing_any_file(monkeypatch):
         gate.validate(SimpleNamespace())
 
 
-@pytest.mark.parametrize(
-    "change",
-    [None, "model", "config_sha256", "integration_sha", "output", "binding_sha256", "expires_at"],
-)
-def test_go_scopes_source_config_binding_and_expiry_before_runner(tmp_path, monkeypatch, change):
+@pytest.fixture
+def go_case(tmp_path, monkeypatch):
     import importlib.util
     from datetime import UTC, datetime, timedelta
     from pathlib import Path
@@ -245,15 +242,79 @@ def test_go_scopes_source_config_binding_and_expiry_before_runner(tmp_path, monk
     assert spec is not None and spec.loader is not None
     gate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gate)
+    monkeypatch.setattr(gate, "LANE", tmp_path)
+    notes = tmp_path / "LEAD-NOTES.md"
+    monkeypatch.setattr(gate, "LEAD_NOTES", notes)
     config = tmp_path / "config.json"
-    config.write_text("{}")
+    config.write_text(
+        json.dumps(
+            {
+                "ledger_path": str(tmp_path / "spend.md"),
+                "providers": {
+                    "openai": {
+                        "cap_usd": "50",
+                        "models": {
+                            "gpt-6-luna": {
+                                "input": "0.20",
+                                "cached_input": "0.02",
+                                "cache_write_input": "0.25",
+                                "output": "0.75",
+                            }
+                        },
+                    }
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(gate, "CONFIG_SHA256", gate.digest(config))
     pin = tmp_path / "runner.pin.json"
     pin.write_text("{}")
     expiry = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    identity = "independently-authorized-attempt"
+    credential = "/home/clsandoval/.config/daimon-nc/openai.env"
+    approval = {
+        "attempt_identity": identity,
+        "expires_at": expiry,
+        "credential_file": credential,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "profile": "openai.conversation_only",
+        "attempts_per_case": 1,
+        "sessions_authorized": 1,
+        "sdk_max_retries": 0,
+        "case_deadline_seconds": 300,
+        "cleanup_deadline_seconds_total": 60,
+        "minimum_hold_usd": "1.0755",
+        "maximum_hold_usd": "1.0755",
+        "maximum_model_requests": 3,
+        "initial_create_turns": 1,
+        "distinct_C03_user_input_POSTs_authorized": 2,
+        "container_allowance": None,
+        "native_session_configuration_required": {
+            "environment": {"type": "none"},
+            "agent": {
+                "model": "gpt-6-luna",
+                "tools": [],
+                "service_tier": "default",
+                "multi_agent": {"enabled": False},
+            },
+        },
+        "probe_plan": {
+            "fixture_id": "C03",
+            "provider": "openai",
+            "model": "gpt-6-luna",
+            "limits": {"input_tokens": 3150000, "output_tokens": 384000},
+            "container_allowance": None,
+        },
+        "guard_policy": {
+            "expected_config_sha256": gate.CONFIG_SHA256,
+            "expected_ledger_id": gate.LEDGER_ID,
+            "minimum_hold_usd": "1.0755",
+            "maximum_hold_usd": "1.0755",
+        },
+    }
     envelope = tmp_path / "envelope.json"
-    envelope.write_text(json.dumps({"expires_at": expiry, "credential_file": "/key/not/read.env"}))
-    monkeypatch.setattr(gate, "CONFIG_SHA256", gate.digest(config))
-    monkeypatch.setattr(gate, "ENVELOPE_SHA256", gate.digest(envelope))
+    envelope.write_text(json.dumps(approval))
     binding = tmp_path / "binding.json"
     binding.write_text(
         json.dumps(
@@ -266,18 +327,19 @@ def test_go_scopes_source_config_binding_and_expiry_before_runner(tmp_path, monk
                 "authorization_id": "lead-go",
                 "generation": 1,
                 "config_revision": 1,
-                "credential_file": "/key/not/read.env",
-                "attempt_identity": gate.ATTEMPT,
+                "credential_file": credential,
+                "attempt_identity": identity,
                 "invocation": "n11:cert:offline",
             }
         )
     )
+    binding.chmod(0o600)
     go = {
         "fixture_id": "C03",
         "model": "gpt-6-luna",
         "profile": "openai.conversation_only",
         "integration_sha": "a" * 40,
-        "attempt_identity": gate.ATTEMPT,
+        "attempt_identity": identity,
         "output": str((tmp_path / "output").resolve()),
         "ledger_id": gate.LEDGER_ID,
         "envelope_sha256": gate.digest(envelope),
@@ -288,25 +350,125 @@ def test_go_scopes_source_config_binding_and_expiry_before_runner(tmp_path, monk
         "binding_path": str(binding),
         "binding_sha256": gate.digest(binding),
     }
-    if change is not None:
-        go[change] = "2000-01-01T00:00:00+00:00" if change == "expires_at" else "different"
     path = tmp_path / "GO.json"
-    path.write_text(json.dumps(go))
     args = SimpleNamespace(
         go_file=path,
-        go_sha256=gate.digest(path),
         integration_sha="a" * 40,
         output=tmp_path / "output",
         budget_config=config,
         runner_pin=pin,
     )
-    if change is None:
-        assert gate.validate(args)["profile"] == "openai.conversation_only"
-        assert not args.output.exists()
-    else:
+
+    def pin_go():
+        path.write_text(json.dumps(go, indent=2))
+        _, args.go_sha256 = gate.read_go(path)
+        notes.write_text("LEAD PIN canonical sha256 " + args.go_sha256 + "\n")
+
+    pin_go()
+    return gate, args, go, approval, pin_go
+
+
+@pytest.mark.parametrize(
+    "change",
+    [None, "model", "config_sha256", "integration_sha", "output", "binding_sha256", "expires_at"],
+)
+def test_go_scopes_source_config_binding_and_expiry_before_runner(go_case, change):
+    gate, args, go, _, pin_go = go_case
+    if change is not None:
+        go[change] = "2000-01-01T00:00:00+00:00" if change == "expires_at" else "different"
+        pin_go()
         with pytest.raises(ValueError):
             gate.validate(args)
         assert not hasattr(args, "c03_binding")
+    else:
+        assert gate.validate(args)["profile"] == "openai.conversation_only"
+        assert args.c03_go["attempt_identity"] == go["attempt_identity"]
+        assert not args.output.exists()
+
+
+@pytest.mark.parametrize("prefix", ["", "LEAD SIGN ", "NOT LEAD PIN ", "> LEAD PIN "])
+def test_canonical_go_without_a_lead_pin_refuses_before_financial_reads(
+    go_case, monkeypatch, prefix
+):
+    gate, args, _, _, _ = go_case
+    gate.LEAD_NOTES.write_text(prefix + args.go_sha256 + "\n")
+    monkeypatch.setattr(gate, "envelope_from_go", lambda *args: pytest.fail("financial read"))
+    with pytest.raises(ValueError, match="no LEAD PIN"):
+        gate.validate(args)
+
+
+def test_lead_pin_uses_canonical_go_bytes_not_pretty_file_hash(go_case):
+    gate, args, go, _, _ = go_case
+    assert gate.digest(args.go_file) != args.go_sha256
+    args.go_file.write_text(json.dumps(dict(reversed(list(go.items()))), indent=4))
+    assert gate.validate(args)["attempt_identity"] == go["attempt_identity"]
+
+
+def test_pinned_go_cannot_hide_envelope_hash_mismatch(go_case):
+    from pathlib import Path
+
+    gate, args, go, _, _ = go_case
+    Path(go["envelope_path"]).write_text("{}")
+    with pytest.raises(ValueError, match="financial envelope differs"):
+        gate.validate(args)
+
+
+@pytest.mark.parametrize("kind", ["marker", "receipt"])
+def test_consumed_identity_refuses_even_with_another_output(go_case, tmp_path, kind):
+    gate, args, go, _, _ = go_case
+    other = tmp_path / "different-output"
+    other.mkdir()
+    evidence = other / ("C03.attempt" if kind == "marker" else "C03.receipt.json")
+    evidence.write_text(json.dumps({"attempt_identity": go["attempt_identity"]}))
+    with pytest.raises(ValueError, match="identity already consumed"):
+        gate.validate(args)
+    assert not args.output.exists()
+
+
+def test_old_consumed_identity_joins_legacy_source_marker_to_retained_go(go_case, tmp_path):
+    from pathlib import Path
+
+    gate, args, go, approval, pin_go = go_case
+    old = "C03-OPENAI-OPTION-A-20261012T053523Z"
+    go["attempt_identity"] = old
+    approval["attempt_identity"] = old
+    envelope = Path(go["envelope_path"])
+    envelope.write_text(json.dumps(approval))
+    go["envelope_sha256"] = gate.digest(envelope)
+    consumed = tmp_path / "old-output"
+    consumed.mkdir()
+    (consumed / "C03.attempt").write_text("b" * 40 + "\n")
+    (tmp_path / "old-GO.json").write_text(
+        json.dumps({"attempt_identity": old, "output": str(consumed)})
+    )
+    pin_go()
+    with pytest.raises(ValueError, match="identity already consumed"):
+        gate.validate(args)
+
+
+def test_pinned_go_attempt_must_equal_envelope_and_binding(go_case):
+    gate, args, go, _, pin_go = go_case
+    go["attempt_identity"] = "a-different-new-identity"
+    pin_go()
+    with pytest.raises(ValueError, match="envelope attempt differs"):
+        gate.validate(args)
+
+
+def test_attempt_marker_is_shared_by_identity_across_output_directories(go_case):
+    import os
+
+    gate, args, go, _, pin_go = go_case
+    gate.validate(args)
+    marker = gate.attempt_marker(go)
+    marker.parent.mkdir()
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(json.dumps({"attempt_identity": go["attempt_identity"]}))
+    go["output"] = str(args.output / "another-output")
+    args.output = args.output / "another-output"
+    pin_go()
+    with pytest.raises(ValueError, match="identity already consumed"):
+        gate.validate(args)
 
 
 def test_changed_lane_recipe_refuses_even_with_a_valid_go(tmp_path):
@@ -354,3 +516,9 @@ def test_signed_envelope_expiry_is_independent_of_go_expiry():
         with pytest.raises(ValueError, match="financial envelope expired"):
             gate.require_envelope_unexpired({"expires_at": expiry}, now=now)
     gate.require_envelope_unexpired({"expires_at": "2026-10-13T00:00:01+00:00"}, now=now)
+
+
+def test_legacy_cleanup_uuid_marker_does_not_consume_an_unrelated_identity(go_case, tmp_path):
+    gate, args, go, _, _ = go_case
+    (tmp_path / "cleanup.attempt").write_text("b" * 32)
+    assert gate.validate(args)["attempt_identity"] == go["attempt_identity"]

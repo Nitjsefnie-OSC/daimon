@@ -696,3 +696,15 @@ Every C03 live entry requires its reviewed runner pin and separate pinned GO,
 including direct one-case invocation. The legacy/default-pin runner refuses
 C03 before file, budget, key or database access. Financial preparation also
 checks the signed envelope's own aware expiry; a newer GO cannot extend it.
+
+
+C03 QA admission lives in `scripts/qa_openai_c03_gate.py`, outside the provider
+wheel. The attempt identity and financial envelope path/hash come from the GO.
+Execution requires its canonical sorted JSON hash on a `LEAD PIN` line in the
+QA lane's operator notes, plus matching envelope identity, unchanged financial
+terms, source/config/recipe scope, binding and expiry. The existing exclusive
+attempt marker is keyed by identity across output directories; receipts also
+carry that identity. Legacy source-only markers are joined to their retained GO
+before admission, so moving output or reformatting a consumed GO cannot retry it.
+Read-only preparation takes `--go-draft` to validate financial terms and create
+source/recipe pins; it does not grant execution authority.
