@@ -529,16 +529,33 @@ async def sweep_headless_usage(
 
 
 class BacklogTotal(BaseModel):
-    """One tenant's backlog: debited (an internal tenant) or waived (any other)."""
+    """One tenant's backlog: debited (an internal tenant) or waived (any other).
+
+    `would_debit_usd` is what the calls cost with markup. `debited_usd` is set
+    for an internal tenant when applied (the ledger rows written);
+    `waived_usd` for any other tenant, dry run or applied.
+    """
 
     model_config = {"frozen": True}
 
     tenant_id: uuid.UUID
-    action: Literal["debit", "waive"]
+    kind: Literal["internal", "external"]
     sessions: int = 0
     calls: int = 0
     cost_usd: Decimal = Decimal(0)
-    debit_usd: Decimal = Decimal(0)
+    would_debit_usd: Decimal = Decimal(0)
+    debited_usd: Decimal | None = None
+    waived_usd: Decimal | None = None
+
+
+class BacklogReceipt(BaseModel):
+    """What one backlog settle covered: the cutoff, the mode, and each tenant."""
+
+    model_config = {"frozen": True}
+
+    cutoff: datetime | None
+    mode: Literal["dry_run", "apply"]
+    tenants: list[BacklogTotal]
 
 
 async def settle_backlog(
@@ -549,7 +566,7 @@ async def settle_backlog(
     markup: Decimal,
     session_ids: Sequence[str] = (),
     apply: bool = False,
-) -> list[BacklogTotal]:
+) -> BacklogReceipt:
     """Settle the backlog: calls made before the cutoff that no ledger row covers.
 
     Reads the sessions named in `session_ids`, or else every MCP agent-chat
@@ -561,10 +578,11 @@ async def settle_backlog(
     (`billing.backlog_waived`) and nothing is debited. A re-run reports waived
     calls again, still charging nothing. Exempt sessions are skipped. Without
     `apply` nothing is written; the totals say what applying would debit and
-    waive, per tenant.
+    waive, per tenant. Returns the receipt the operator keeps as evidence.
     """
-    if not session_ids:
-        async with sessionmaker() as s:
+    async with sessionmaker() as s:
+        cutoff = await session_settle_state.backlog_cutoff(s)
+        if not session_ids:
             session_ids = await turn_outcomes.session_ids_for_platform(s, "mcp")
     totals: dict[uuid.UUID, BacklogTotal] = {}
     for session_id in session_ids:
@@ -588,26 +606,37 @@ async def settle_backlog(
         if not backlog:
             continue
         cost, would_debit = price(backlog, pricing=billing.pricing, markup=markup)
-        action = "debit" if billing.tenant_id in internal else "waive"
+        kind = "internal" if billing.tenant_id in internal else "external"
         total = totals.get(billing.tenant_id) or BacklogTotal(
-            tenant_id=billing.tenant_id, action=action
+            tenant_id=billing.tenant_id,
+            kind=kind,
+            debited_usd=Decimal(0) if debit else None,
+            waived_usd=Decimal(0) if kind == "external" else None,
         )
         totals[billing.tenant_id] = total.model_copy(
             update={
                 "sessions": total.sessions + 1,
                 "calls": total.calls + len(backlog),
                 "cost_usd": total.cost_usd + cost,
-                "debit_usd": total.debit_usd + would_debit,
+                "would_debit_usd": total.would_debit_usd + would_debit,
+                "debited_usd": None
+                if total.debited_usd is None
+                else total.debited_usd + result.debit_usd,
+                "waived_usd": None if total.waived_usd is None else total.waived_usd + would_debit,
             }
         )
     if apply:
         for total in totals.values():
-            if total.action == "waive":
+            if total.kind == "external":
                 log.info(
                     "billing.backlog_waived",
                     tenant_id=str(total.tenant_id),
                     sessions=total.sessions,
                     calls=total.calls,
-                    would_be_debit_usd=str(total.debit_usd),
+                    would_be_debit_usd=str(total.waived_usd),
                 )
-    return sorted(totals.values(), key=lambda t: (t.action, str(t.tenant_id)))
+    return BacklogReceipt(
+        cutoff=cutoff,
+        mode="apply" if apply else "dry_run",
+        tenants=sorted(totals.values(), key=lambda t: (t.kind, str(t.tenant_id))),
+    )

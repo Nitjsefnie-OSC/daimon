@@ -124,9 +124,11 @@ def usage_settle_backlog_command(
     """Settle the calls made before the settle path was deployed.
 
     An internal tenant's backlog is debited; every other tenant's is waived
-    (marked settled, its would-be debit logged, nothing charged). A dry run
-    by default: it prints, per tenant, the sessions, calls, raw cost and
-    would-be debit, and writes nothing.
+    (its would-be debit logged, nothing charged). A dry run by default, which
+    writes nothing. Prints a receipt: the cutoff, the mode, and per tenant the
+    sessions, calls, raw cost, would-be debit, and what was debited (internal,
+    applied) or waived (external). `--json` prints it as one JSON object to
+    keep as evidence; the command writes no files.
     """
     settings = load_settings()
     console = Console(highlight=False)
@@ -144,7 +146,7 @@ def usage_settle_backlog_command(
                 base_url=str(settings.anthropic.base_url),
                 max_retries=MA_MAX_RETRIES,
             ) as client:
-                totals = await settle_backlog(
+                receipt = await settle_backlog(
                     client,
                     build_session_factory(engine),
                     internal=frozenset(internal or ()),
@@ -154,11 +156,24 @@ def usage_settle_backlog_command(
                 )
         finally:
             await engine.dispose()
+        if as_json:
+            console.print(receipt.model_dump_json(), soft_wrap=True, highlight=False, markup=False)
+            return
+        console.print(f"cutoff: {receipt.cutoff}  mode: {receipt.mode}", markup=False)
         emit_rows(
             console,
-            totals,
-            columns=("tenant_id", "action", "sessions", "calls", "cost_usd", "debit_usd"),
-            as_json=as_json,
+            receipt.tenants,
+            columns=(
+                "tenant_id",
+                "kind",
+                "sessions",
+                "calls",
+                "cost_usd",
+                "would_debit_usd",
+                "debited_usd",
+                "waived_usd",
+            ),
+            as_json=False,
         )
 
     asyncio.run(run())

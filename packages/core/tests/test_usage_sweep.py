@@ -675,12 +675,30 @@ async def test_the_backlog_is_debited_for_internal_tenants_and_waived_for_the_re
             ma.client, db_session_factory, internal=allow, markup=MARKUP, apply=True
         )
 
-    summary = {(t.tenant_id, t.action, t.sessions, t.calls) for t in dry}
-    assert summary == {(internal.id, "debit", 1, 2), (customer.id, "waive", 1, 1)}
-    assert {(t.tenant_id, t.action, t.sessions, t.calls) for t in applied} == summary
-    by_action = {t.action: t for t in dry}
-    assert by_action["debit"].debit_usd == -(_expected_debit(1) + _expected_debit(2))
-    assert by_action["waive"].debit_usd == -_expected_debit(1)
+    summary = {(t.tenant_id, t.kind, t.sessions, t.calls) for t in dry.tenants}
+    assert summary == {(internal.id, "internal", 1, 2), (customer.id, "external", 1, 1)}
+    assert {(t.tenant_id, t.kind, t.sessions, t.calls) for t in applied.tenants} == summary
+    assert (dry.mode, applied.mode) == ("dry_run", "apply")
+    assert dry.cutoff == applied.cutoff == NOW - timedelta(hours=1)
+    internal_dry, external_dry = (
+        next(t for t in dry.tenants if t.kind == k) for k in ("internal", "external")
+    )
+    internal_applied, external_applied = (
+        next(t for t in applied.tenants if t.kind == k) for k in ("internal", "external")
+    )
+    internal_usd = -(_expected_debit(1) + _expected_debit(2))
+    assert (internal_dry.would_debit_usd, internal_dry.debited_usd) == (internal_usd, None)
+    assert (
+        internal_applied.would_debit_usd,
+        internal_applied.debited_usd,
+        internal_applied.waived_usd,
+    ) == (
+        internal_usd,
+        internal_usd,
+        None,
+    ), "applied: what the ledger was actually debited"
+    assert external_dry.waived_usd == external_applied.waived_usd == -_expected_debit(1)
+    assert external_applied.debited_usd is None
     assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a", f"turn:{SESSION}:evt_b"}
     assert not [e for e in dry_logs if e["event"] == "billing.backlog_waived"]
     (waived,) = [e for e in logs if e["event"] == "billing.backlog_waived"]
@@ -738,8 +756,10 @@ async def test_backlog_apply_debits_exactly_the_calls_the_dry_run_reported(
 
     ledger = await _ledger(db_session)
     assert set(ledger) == {f"turn:{SESSION}:old"}, "the post-cutoff call is ordinary billing"
-    assert [(t.calls, t.debit_usd) for t in dry] == [(1, -ledger[f"turn:{SESSION}:old"].delta_usd)]
-    assert [(t.calls, t.debit_usd) for t in applied] == [(t.calls, t.debit_usd) for t in dry]
+    (dry_total,), (applied_total,) = dry.tenants, applied.tenants
+    old_usd = -ledger[f"turn:{SESSION}:old"].delta_usd
+    assert (dry_total.calls, dry_total.would_debit_usd) == (1, old_usd)
+    assert (applied_total.calls, applied_total.debited_usd) == (1, old_usd)
 
 
 @pytest.mark.parametrize("previous_idle", [False, True], ids=["nothing-listed", "previous-idle"])
@@ -813,7 +833,10 @@ async def test_the_drain_completes_what_a_bounded_read_could_not(
     ma.events[SESSION].append(_idle("evt_idle", at=NOW + timedelta(hours=1)))
     await _request(db_session_factory)
 
-    read = await settle_finished_turn(ma.client, db_session_factory, session, markup=MARKUP)
+    # A read's page bound, without its time budget, so a loaded runner can't flake it.
+    read = await settle_finished_turn(
+        ma.client, db_session_factory, session, markup=MARKUP, budget_s=None
+    )
     assert read is not None and not read.complete
     assert await _pending(db_session_factory) == BOUNDARY
     if shape == "late-call":

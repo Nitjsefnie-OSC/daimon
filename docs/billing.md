@@ -634,8 +634,12 @@ calls are ordinary billing. An internal tenant's unbilled calls are debited;
 every other tenant's are waived: no automatic settle ever reads them, and
 `billing.backlog_waived` logs the tenant's would-be debit, but nothing is
 charged. A re-run reports the waived calls again and still charges nothing. Exempt sessions are skipped. It is a dry run unless `--apply` is
-given, and prints per tenant whether its backlog is debited or waived, the
-sessions and calls it covers, their raw cost and the would-be debit.
+given. It prints a receipt: the cutoff, the mode (`dry_run` or `apply`), and
+per tenant `internal` or `external`, the sessions and calls it covers, their
+raw cost, the would-be debit, `debited_usd` (an internal tenant, applied: the
+ledger rows written) and `waived_usd` (an external tenant). With `--json` the
+receipt is one JSON object; the command writes no files, so keep the output
+of the dry run and of the applied run as the record.
 Recording is idempotent, so applying twice debits once.
 
 ### Seeing absorbed spend
