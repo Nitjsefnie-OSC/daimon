@@ -677,3 +677,9 @@ inventory, rates, infrastructure or settlement remains pending in accounting;
 a complete posted capture without the frozen required dollar field is an
 executed failure. Other unavailable opt-in declarations still refuse the full
 product profile; a D11 component control does not certify those other factories.
+
+Tests replaying signed financial envelopes or dated rate fixtures must pin the
+clock to the fixture's validity window. The Anthropic live-entry tests use a
+fixture-scoped 2026-10-11 clock; admission expiry and stale-price negative cases
+advance that clock or pass an explicit expired timestamp. Monotonic deadlines,
+immutable signed JSON and the runtime expiry checks remain unchanged.

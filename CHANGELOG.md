@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Pin historical Anthropic financial fixtures to fixed offline test clocks while preserving expired-envelope and stale-price refusals.
+
 - Pin the separately signed F2-R2 workload and zero-message acceptance envelopes; reject rewritten financial approvals and retain merged A7 claim/output evidence.
 - Document the optional native footer-cost context in the prepared-turn public contract and verify its unset default.
 
