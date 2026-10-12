@@ -1,11 +1,13 @@
-"""Redeem a promo code from the Slack /billing modal. Admin only.
+"""Redeem a promo code from the Slack /billing modal.
 
 ``billing_redeem_open`` pushes a one-field modal over the panel. Its
 ``view_submission`` is evaluated purely before the ack (an empty code is a field
 error; anything else acks with a "Redeeming…" update), then the background
-side re-checks admin, redeems through ``daimon.core.promo_credit`` and either
-shows the result and refreshes the panel underneath, or reopens the form with
-the refusal so the admin can retry.
+side reads admin rights live and redeems through ``daimon.core.promo_credit``:
+a server-wide code needs a workspace admin, a channel code credits the channel
+/billing ran in for anyone (never a DM). It either shows the result and
+refreshes the panel underneath, or reopens the form with the refusal so the
+person can retry.
 """
 
 from __future__ import annotations
@@ -29,7 +31,12 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.panel_audit import record_panel_write
 from daimon.core.promo_codes import describe_refusal
-from daimon.core.promo_credit import PromoRedeemRefused, PromoRedeemResult, redeem_promo_code
+from daimon.core.promo_credit import (
+    PromoChannel,
+    PromoRedeemRefused,
+    PromoRedeemResult,
+    redeem_promo_code,
+)
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -41,7 +48,6 @@ REDEEM_CALLBACK_ID = "billing_redeem"
 _CODE_BLOCK_ID = "billing_redeem_code"
 _CODE_INPUT_ID = "code"
 _TITLE = {"type": "plain_text", "text": "Redeem a promo code"}
-_ADMIN_ONLY = "Only workspace admins can redeem promo codes."
 
 
 def _text_view(text: str) -> dict[str, Any]:
@@ -98,6 +104,17 @@ def redeem_result_text(result: PromoRedeemResult) -> str:
     if isinstance(result, PromoRedeemRefused):
         return describe_refusal(result.reason)
     amount = f"*${result.amount_usd:,.2f}*"
+    if result.channel_id is not None:
+        if result.channel_limit_usd is not None:
+            return (
+                f"🎟️ Added {amount} to <#{result.channel_id}>'s budget.\n\n"
+                f"Its limit is now *${result.channel_limit_usd:,.2f}*."
+            )
+        return (
+            f"🎟️ Added {amount} of credit for <#{result.channel_id}>.\n\n"
+            "This channel has no spending limit, so it uses the workspace's credit: "
+            f"*${result.balance_usd:,.2f}*."
+        )
     if result.credit_ends_at is None:
         return f"🎟️ Added {amount} of credit.\n\nBalance: *${result.balance_usd:,.2f}*"
     if not result.granted and result.credit_starts_at is not None:
@@ -158,13 +175,18 @@ def evaluate_redeem_submission(payload: dict[str, Any]) -> RedeemDecision:
     )
 
 
+def promo_channel(channel_id: str) -> PromoChannel | None:
+    """The channel a member's channel code credits; None for a DM or no channel."""
+    if not channel_id or channel_id.startswith("D"):
+        return None
+    return PromoChannel(platform="slack", channel_id=channel_id)
+
+
 async def handle_redeem_open(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """``billing_redeem_open`` click: push the code form for a live admin."""
+    """``billing_redeem_open`` click: push the code form; the submit decides what a code may do."""
     team: dict[str, Any] = payload.get("team") or {}
-    user: dict[str, Any] = payload.get("user") or {}
     view: dict[str, Any] = payload.get("view") or {}
     team_id = str(team.get("id") or "")
-    user_id = str(user.get("id") or "")
     trigger_id = str(payload.get("trigger_id") or "")
     root_view_id = str(view.get("id") or "")
     client = await resolve_web_client(runtime, team_id=team_id)
@@ -172,15 +194,12 @@ async def handle_redeem_open(runtime: SlackRuntime, payload: dict[str, Any]) -> 
         log.warning("slack.billing_redeem.no_token", team_id=team_id)
         return
     try:
-        is_admin = await resolve_is_admin(client, user_id=user_id)
         # views.push, not views.open: the button lives in the open /billing modal.
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs
             trigger_id=trigger_id,
             view=build_redeem_modal(
                 root_view_id=root_view_id, channel_id=str(_metadata(view).get("channel_id") or "")
-            )
-            if is_admin
-            else _text_view(_ADMIN_ONLY),
+            ),
         )
     except SlackApiError as exc:
         log.error("slack.billing_redeem_open_failed", team_id=team_id, exc_info=exc)
@@ -196,6 +215,7 @@ async def _refresh_panel(
     root_view_id: str,
     channel_id: str,
     now: datetime,
+    is_admin: bool,
 ) -> None:
     """Redraw the /billing panel under the form. A failure leaves the success reply alone."""
     since = month_start(now)
@@ -206,7 +226,7 @@ async def _refresh_panel(
                 session,
                 tenant_id=tenant_id,
                 platform_user_id=user_id,
-                is_admin=True,
+                is_admin=is_admin,
                 since=since,
                 now=now,
                 platform="slack",
@@ -241,15 +261,11 @@ async def run_redeem_submission(
         platform="slack",
         platform_user_id=user_id,
         op="promo_redeem",
+        target_channel_id=decision.channel_id or None,
     )
     audited = False
     try:
-        if not await resolve_is_admin(client, user_id=user_id):
-            await audit(outcome="denied", reason="needs_admin")
-            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-                view_id=decision.view_id, view=_text_view(_ADMIN_ONLY)
-            )
-            return
+        is_admin = await resolve_is_admin(client, user_id=user_id)
         async with runtime.sessionmaker() as session, session.begin():
             principal = await get_or_create_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
@@ -261,6 +277,8 @@ async def run_redeem_submission(
             account_id=principal.account_id,
             code=decision.code,
             now=now,
+            channel=promo_channel(decision.channel_id),
+            is_admin=is_admin,
         )
         if isinstance(result, PromoRedeemRefused):
             audited = True
@@ -288,6 +306,7 @@ async def run_redeem_submission(
                 root_view_id=decision.root_view_id,
                 channel_id=decision.channel_id,
                 now=now,
+                is_admin=is_admin,
             )
     except (DaimonError, SlackApiError, SQLAlchemyError) as exc:
         request_id = generate_request_id()

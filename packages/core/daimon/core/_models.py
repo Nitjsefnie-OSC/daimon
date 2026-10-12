@@ -999,7 +999,8 @@ class TenantLedger(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # Set on debits only: the parent channel whose budget the spend counts against.
+    # On a debit: the parent channel whose budget the spend counts against. On a
+    # channel promo credit: the channel it was redeemed for (budgets read debits only).
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -1157,6 +1158,10 @@ class PromoCode(Base):
             " AND (max_redemptions IS NULL OR redeemed_count <= max_redemptions)",
             name="ck_promo_codes_redeemed_count",
         ),
+        CheckConstraint(
+            "channel_cap_usd IS NULL OR (kind = 'credit' AND channel_cap_usd >= amount_usd)",
+            name="ck_promo_codes_channel_cap",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1180,6 +1185,9 @@ class PromoCode(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set on a channel code: any member may redeem it into their own channel's
+    # budget, and one channel takes at most this much from it.
+    channel_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
 
 class PromoRedemption(Base):
@@ -1191,11 +1199,29 @@ class PromoRedemption(Base):
     and `reconciled_at` when late-recorded spend inside the window was
     credited back out of that remainder.
     The redeeming account is attribution only, severed by account erasure.
+    A server-wide redemption has no `channel_id` and happens once per tenant;
+    a channel code's redemption names the channel it credited and happens
+    once per person per channel.
     """
 
     __tablename__ = "promo_redemptions"
     __table_args__ = (
-        UniqueConstraint("promo_code_id", "tenant_id", name="uq_promo_redemptions_code_tenant"),
+        Index(
+            "uq_promo_redemptions_code_tenant",
+            "promo_code_id",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("channel_id IS NULL"),
+        ),
+        Index(
+            "uq_promo_redemptions_code_channel_account",
+            "promo_code_id",
+            "tenant_id",
+            "channel_id",
+            "redeemed_by_account_id",
+            unique=True,
+            postgresql_where=text("channel_id IS NOT NULL"),
+        ),
         Index("promo_redemptions_tenant_idx", "tenant_id"),
         CheckConstraint(
             "expired_usd IS NULL OR expired_usd >= 0", name="ck_promo_redemptions_expired_usd"
@@ -1219,6 +1245,7 @@ class PromoRedemption(Base):
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expired_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PromoRedeemFailure(Base):

@@ -101,7 +101,8 @@ class BillingPanelState:
     over_cap_count: int  # spending members beyond MEMBER_CAP
     # Live timed promo credit (both views), soonest-ending first; empty without promo codes
     timed_credit: tuple[ActiveTimedCredit, ...] = ()
-    # Some promo code is redeemable now (admin view only); gates the redeem button
+    # Some code this viewer may redeem is redeemable now: any code for an admin,
+    # a channel code for a member. Gates the redeem button.
     has_redeemable_promo_code: bool = False
     # The invoking channel's budget (both views); None when it has none.
     channel_budget: ChannelBudgetStatus | None = None
@@ -109,7 +110,9 @@ class BillingPanelState:
     channel_budgets: tuple[ChannelBudgetStatus, ...] = ()
 
 
-async def _has_redeemable_promo_code_or_false(session: AsyncSession, *, now: datetime) -> bool:
+async def _has_redeemable_promo_code_or_false(
+    session: AsyncSession, *, now: datetime, channel_codes_only: bool = False
+) -> bool:
     """Whether a promo code is redeemable now; False when the lookup fails.
 
     Named boundary: a failed lookup only hides the redeem button. It runs in a
@@ -117,7 +120,9 @@ async def _has_redeemable_promo_code_or_false(session: AsyncSession, *, now: dat
     """
     try:
         async with session.begin_nested():
-            return await has_redeemable_promo_code(session, now=now)
+            return await has_redeemable_promo_code(
+                session, now=now, channel_codes_only=channel_codes_only
+            )
     except SQLAlchemyError as exc:
         log.warning("billing_panel.promo_code_lookup_failed", error=str(exc))
         return False
@@ -168,7 +173,12 @@ async def load_billing_snapshot(
         ),
     )
     if not is_admin:
-        return state
+        return dataclasses.replace(
+            state,
+            has_redeemable_promo_code=await _has_redeemable_promo_code_or_false(
+                session, now=now, channel_codes_only=True
+            ),
+        )
     costs = await costs_by_user_in_tenant_since(session, tenant_id=tenant_id, since=since)
     turns = await turns_by_user_in_tenant_since(session, tenant_id=tenant_id, since=since)
     user_ids = set(costs) | set(turns)

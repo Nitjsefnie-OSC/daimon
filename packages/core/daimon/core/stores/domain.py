@@ -581,6 +581,8 @@ class PromoCodeRow(BaseModel):
     redeemed_count: int
     created_at: datetime
     revoked_at: datetime | None
+    channel_cap_usd: Decimal | None = None
+    """Set on a channel code: members redeem it into their channel, up to this much each."""
 
 
 class PromoRedemptionRow(BaseModel):
@@ -598,6 +600,8 @@ class PromoRedemptionRow(BaseModel):
     granted_at: datetime | None
     expired_at: datetime | None
     expired_usd: Decimal | None
+    channel_id: str | None = None
+    """The channel a channel code credited; None for a server-wide redemption."""
 
 
 class TimedPromoGrantRow(BaseModel):

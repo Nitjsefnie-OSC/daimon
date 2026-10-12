@@ -19,6 +19,7 @@ from daimon.core.promo_credit import (
     REDEEM_FAILURE_LIMIT,
     REDEEM_FAILURE_WINDOW,
     ActiveTimedCredit,
+    PromoChannel,
     PromoRedeemed,
     PromoRedeemRefused,
     PromoRedeemResult,
@@ -26,10 +27,11 @@ from daimon.core.promo_credit import (
     redeem_promo_code,
 )
 from daimon.core.promo_settlement import LATE_SPEND_GRACE, PromoSettlement, settle_promo_credit
+from daimon.core.stores import channel_budgets as budget_store
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import PromoCodeRow, TenantRow
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_channel_budget, make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -612,3 +614,172 @@ async def test_a_rejected_row_in_a_full_batch_is_passed_over_by_the_next(
     assert await tenant_ledger.get_balance(db_session, tenant_id=second.id) == 0, (
         "the rejected grant should credit nothing"
     )
+
+
+def _in(channel_id: str) -> PromoChannel:
+    return PromoChannel(platform="discord", channel_id=channel_id)
+
+
+async def _channel_redeem(
+    factory: Factory,
+    tenant: TenantRow,
+    account_id: uuid.UUID,
+    code: str,
+    channel: PromoChannel | None,
+    *,
+    is_admin: bool = False,
+) -> PromoRedeemResult:
+    return await redeem_promo_code(
+        factory,
+        tenant_id=tenant.id,
+        account_id=account_id,
+        code=code,
+        now=T0,
+        channel=channel,
+        is_admin=is_admin,
+    )
+
+
+async def _limit(session: AsyncSession, tenant: TenantRow, channel_id: str) -> Decimal | None:
+    session.expire_all()
+    budget = await budget_store.get_channel_budget(
+        session, tenant_id=tenant.id, platform="discord", channel_id=channel_id
+    )
+    return None if budget is None else budget.limit_usd
+
+
+async def test_a_member_redeems_a_channel_code_into_their_own_channel_only(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """The credit lands in the ledger for that channel, and only its budget limit rises."""
+    tenant = await make_tenant(db_session, platform="discord")
+    member = await make_account(db_session, tenant=tenant)
+    for channel_id in ("team-a", "team-b"):
+        await make_channel_budget(db_session, tenant=tenant, channel_id=channel_id)
+    await _create(
+        db_session, "TEAM-ROOM-2026", amount_usd=Decimal("5"), channel_cap_usd=Decimal("10")
+    )
+
+    result = await _channel_redeem(
+        db_session_factory, tenant, member.id, "team-room-2026", _in("team-a")
+    )
+
+    assert isinstance(result, PromoRedeemed), result
+    assert (result.channel_id, result.channel_limit_usd) == ("team-a", Decimal("10"))
+    assert (
+        await _limit(db_session, tenant, "team-a"),
+        await _limit(db_session, tenant, "team-b"),
+    ) == (
+        Decimal("10"),
+        Decimal("5"),
+    ), "only the redeeming member's channel is raised"
+    [row] = (
+        await db_session.execute(
+            text("SELECT delta_usd, reason, channel_id FROM tenant_ledger WHERE tenant_id = :t"),
+            {"t": tenant.id},
+        )
+    ).all()
+    assert tuple(row) == (Decimal("5"), "promo_credit", "team-a"), "a ledger row for the channel"
+    [redemption] = await promo_store.list_redemptions(
+        db_session, promo_code_id=result.promo_code_id
+    )
+    assert (redemption.channel_id, redemption.redeemed_by_account_id) == ("team-a", member.id)
+
+
+async def test_a_channel_code_is_once_per_person_and_capped_per_channel(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """A repeat is refused, and the channel cap stops more people adding to one channel."""
+    tenant = await make_tenant(db_session, platform="discord")
+    people = [await make_account(db_session, tenant=tenant) for _ in range(3)]
+    await make_channel_budget(db_session, tenant=tenant, channel_id="team-a")
+    await _create(
+        db_session, "TEAM-ROOM-2026", amount_usd=Decimal("5"), channel_cap_usd=Decimal("12")
+    )
+
+    async def redeem(person: int, channel_id: str) -> PromoRedeemResult:
+        return await _channel_redeem(
+            db_session_factory, tenant, people[person].id, "TEAM-ROOM-2026", _in(channel_id)
+        )
+
+    first = await redeem(0, "team-a")
+    again = await redeem(0, "team-a")
+    second = await redeem(1, "team-a")
+    capped = await redeem(2, "team-a")
+    elsewhere = await redeem(2, "team-b")
+
+    assert isinstance(first, PromoRedeemed) and isinstance(second, PromoRedeemed)
+    assert again == PromoRedeemRefused("already_redeemed_in_channel")
+    assert capped == PromoRedeemRefused("channel_cap_reached"), "$15 would pass the $12 cap"
+    assert isinstance(elsewhere, PromoRedeemed), "the cap is per channel"
+    assert elsewhere.channel_limit_usd is None, "a channel without a budget has no limit to raise"
+    assert await _limit(db_session, tenant, "team-a") == Decimal("15")
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("15")
+
+
+async def test_who_may_redeem_what_and_where(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Members can't redeem server codes; channel codes need a channel; admins keep server top-ups."""
+    tenant = await make_tenant(db_session, platform="discord")
+    person = await make_account(db_session, tenant=tenant)
+    await _create(db_session, "SERVER-WIDE-2026")
+    await _create(
+        db_session, "TEAM-ROOM-2026", amount_usd=Decimal("5"), channel_cap_usd=Decimal("5")
+    )
+
+    member_server = await _channel_redeem(
+        db_session_factory, tenant, person.id, "SERVER-WIDE-2026", _in("team-a")
+    )
+    in_dm = await _channel_redeem(db_session_factory, tenant, person.id, "TEAM-ROOM-2026", None)
+    invalid = await _channel_redeem(
+        db_session_factory, tenant, person.id, "NOT-A-REAL-CODE", _in("team-a")
+    )
+    admin_server = await _channel_redeem(
+        db_session_factory, tenant, person.id, "SERVER-WIDE-2026", _in("team-a"), is_admin=True
+    )
+    admin_again = await _channel_redeem(
+        db_session_factory, tenant, person.id, "SERVER-WIDE-2026", None, is_admin=True
+    )
+
+    assert member_server == PromoRedeemRefused("admin_only")
+    assert in_dm == PromoRedeemRefused("needs_channel")
+    assert invalid == PromoRedeemRefused("invalid")
+    assert isinstance(admin_server, PromoRedeemed) and admin_server.channel_id is None, (
+        "an admin's server-wide code credits the whole server"
+    )
+    assert admin_again == PromoRedeemRefused("already_redeemed")
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("10")
+
+
+async def test_a_channel_code_honours_expiry_and_its_overall_limit(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """--max-redemptions counts every channel's redemptions; an expired code is refused."""
+    tenant = await make_tenant(db_session, platform="discord")
+    a = await make_account(db_session, tenant=tenant)
+    b = await make_account(db_session, tenant=tenant)
+    await _create(
+        db_session,
+        "ONE-TEAM-ONLY-2026",
+        amount_usd=Decimal("5"),
+        channel_cap_usd=Decimal("50"),
+        max_redemptions=1,
+    )
+    await _create(
+        db_session,
+        "LAST-WEEK-2026",
+        amount_usd=Decimal("5"),
+        channel_cap_usd=Decimal("50"),
+        redeem_ends_at=T0,
+    )
+
+    taken = await _channel_redeem(db_session_factory, tenant, a.id, "ONE-TEAM-ONLY-2026", _in("x"))
+    exhausted = await _channel_redeem(
+        db_session_factory, tenant, b.id, "ONE-TEAM-ONLY-2026", _in("y")
+    )
+    expired = await _channel_redeem(db_session_factory, tenant, a.id, "LAST-WEEK-2026", _in("x"))
+
+    assert isinstance(taken, PromoRedeemed)
+    assert exhausted == PromoRedeemRefused("exhausted")
+    assert expired == PromoRedeemRefused("expired")

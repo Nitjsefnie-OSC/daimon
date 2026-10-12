@@ -38,6 +38,7 @@ async def insert_promo_code(
             redeem_starts_at=terms.redeem_starts_at,
             redeem_ends_at=terms.redeem_ends_at,
             max_redemptions=terms.max_redemptions,
+            channel_cap_usd=terms.channel_cap_usd,
         )
         .on_conflict_do_nothing(index_elements=["code_hash"])
         .returning(PromoCode)
@@ -56,11 +57,18 @@ async def get_promo_code(session: AsyncSession, promo_code_id: uuid.UUID) -> Pro
     return None if orm is None else PromoCodeRow.model_validate(orm)
 
 
-async def has_redeemable_promo_code(session: AsyncSession, *, now: datetime) -> bool:
-    """Whether any code could be redeemed at ``now``; mirrors ``redeem_refusal``."""
+async def has_redeemable_promo_code(
+    session: AsyncSession, *, now: datetime, channel_codes_only: bool = False
+) -> bool:
+    """Whether any code could be redeemed at ``now``; mirrors ``redeem_refusal``.
+
+    ``channel_codes_only``: only codes a member may redeem into a channel.
+    """
+    channel_only = [PromoCode.channel_cap_usd.is_not(None)] if channel_codes_only else []
     redeemable = (
         select(PromoCode.id)
         .where(
+            *channel_only,
             PromoCode.revoked_at.is_(None),
             or_(PromoCode.redeem_starts_at.is_(None), PromoCode.redeem_starts_at <= now),
             or_(PromoCode.redeem_ends_at.is_(None), PromoCode.redeem_ends_at > now),
@@ -99,11 +107,45 @@ async def revoke_promo_code(
 async def has_redemption(
     session: AsyncSession, *, promo_code_id: uuid.UUID, tenant_id: uuid.UUID
 ) -> bool:
+    """Whether the tenant redeemed the code server-wide."""
     stmt = select(
         exists().where(
             PromoRedemption.promo_code_id == promo_code_id,
             PromoRedemption.tenant_id == tenant_id,
+            PromoRedemption.channel_id.is_(None),
         )
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def has_channel_redemption(
+    session: AsyncSession,
+    *,
+    promo_code_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    account_id: uuid.UUID,
+) -> bool:
+    """Whether this person already redeemed the code into this channel."""
+    stmt = select(
+        exists().where(
+            PromoRedemption.promo_code_id == promo_code_id,
+            PromoRedemption.tenant_id == tenant_id,
+            PromoRedemption.channel_id == channel_id,
+            PromoRedemption.redeemed_by_account_id == account_id,
+        )
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def count_channel_redemptions(
+    session: AsyncSession, *, promo_code_id: uuid.UUID, tenant_id: uuid.UUID, channel_id: str
+) -> int:
+    """How many times the code was redeemed into this channel, by anyone."""
+    stmt = select(func.count()).where(
+        PromoRedemption.promo_code_id == promo_code_id,
+        PromoRedemption.tenant_id == tenant_id,
+        PromoRedemption.channel_id == channel_id,
     )
     return (await session.execute(stmt)).scalar_one()
 
@@ -116,19 +158,31 @@ async def insert_redemption(
     account_id: uuid.UUID | None,
     now: datetime,
     granted: bool,
+    channel_id: str | None = None,
 ) -> bool:
-    """Record the tenant's redemption and count it. False when it already redeemed."""
-    stmt = (
-        pg_insert(PromoRedemption)
-        .values(
-            promo_code_id=promo_code_id,
-            tenant_id=tenant_id,
-            redeemed_by_account_id=account_id,
-            redeemed_at=now,
-            granted_at=now if granted else None,
-        )
-        .on_conflict_do_nothing(index_elements=["promo_code_id", "tenant_id"])
+    """Record the redemption and count it. False when it already exists.
+
+    Without ``channel_id`` it is the tenant's one server-wide redemption; with
+    it, one person's redemption into that channel.
+    """
+    insert = pg_insert(PromoRedemption).values(
+        promo_code_id=promo_code_id,
+        tenant_id=tenant_id,
+        redeemed_by_account_id=account_id,
+        redeemed_at=now,
+        granted_at=now if granted else None,
+        channel_id=channel_id,
     )
+    if channel_id is None:
+        stmt = insert.on_conflict_do_nothing(
+            index_elements=["promo_code_id", "tenant_id"],
+            index_where=PromoRedemption.channel_id.is_(None),
+        )
+    else:
+        stmt = insert.on_conflict_do_nothing(
+            index_elements=["promo_code_id", "tenant_id", "channel_id", "redeemed_by_account_id"],
+            index_where=PromoRedemption.channel_id.is_not(None),
+        )
     result = cast(CursorResult[Any], await session.execute(stmt))
     if result.rowcount == 0:
         return False
@@ -155,6 +209,7 @@ async def list_redemptions(
             PromoRedemption.granted_at,
             PromoRedemption.expired_at,
             PromoRedemption.expired_usd,
+            PromoRedemption.channel_id,
         )
         .join(Tenant, Tenant.id == PromoRedemption.tenant_id)
         .where(PromoRedemption.promo_code_id == promo_code_id)

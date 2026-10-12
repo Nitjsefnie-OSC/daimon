@@ -498,7 +498,7 @@ def _build_ready_embed(*, promo_codes: bool = False) -> discord.Embed:
     """
     description = "Mention me anywhere, or run `/agent-setup`."
     if promo_codes:
-        description += "\nHave a promo code? Admins can redeem it in `/billing`."
+        description += "\nHave a promo code? Redeem it in `/billing`."
     return discord.Embed(title="✅ Ready", description=description, color=theme.COLOR_GREEN)
 
 

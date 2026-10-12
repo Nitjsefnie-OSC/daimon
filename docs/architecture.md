@@ -1691,10 +1691,12 @@ balance admission emits a warning instead of a refusal for operator-funded
 tenants; usage recording and configured caps continue through the same path.
 
 `daimon promo create|list|revoke|redemptions` manages deployment-wide promo
-codes. Admins redeem them from `/billing` on Discord and Slack (a Redeem code
-button, shown only while a code is redeemable, and a modal), the Teams
-`billing` card (a Redeem code action opening a code field, shown the same way) or with the MCP
-tool `redeem_promo_code`; each surface calls
+codes. Admins redeem server-wide codes, and any member a channel code
+(`--channel-cap`) into the channel they are in, from `/billing` on Discord and
+Slack (a Redeem code button, shown only while a code the viewer may redeem is
+redeemable, and a modal), the Teams `billing` card (a Redeem code action
+opening a code field, shown the same way) or, server-wide codes only, with the
+MCP tool `redeem_promo_code`; each surface calls
 `daimon.core.promo_credit.redeem_promo_code`. Scheduler housekeeping settles
 timed credit windows through `daimon.core.promo_settlement`. See
 [billing.md](billing.md#promo-codes).

@@ -23,6 +23,7 @@ from daimon.adapters.slack.billing_panel.views import build_billing_container
 from daimon.core.billing_panel import BillingPanelState
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRedeemRefused
+from daimon.core.stores import channel_budgets as budget_store
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.testing.factories import make_channel_budget, make_tenant
@@ -93,18 +94,20 @@ def _bodies(fake: Any, method: str) -> list[dict[str, Any]]:
     return bodies
 
 
-def test_only_admins_get_the_redeem_button_while_a_code_is_redeemable() -> None:
-    """Only the admin panel carries the redeem-code button, and only while a code is redeemable."""
+def test_the_redeem_button_shows_while_a_code_the_viewer_may_redeem_is_redeemable() -> None:
+    """Both views carry the redeem button while the snapshot found a code the viewer may redeem."""
     admin = build_billing_container(_state(has_redeemable_promo_code=True), now=_NOW, since=_SINCE)
     no_code = build_billing_container(_state(), now=_NOW, since=_SINCE)
     member = build_billing_container(
         _state(is_admin=False, has_redeemable_promo_code=True), now=_NOW, since=_SINCE
     )
+    member_no_code = build_billing_container(_state(is_admin=False), now=_NOW, since=_SINCE)
     assert "billing_redeem_open" in _action_ids(admin), "admins should get the redeem button"
     assert _action_ids(no_code) == ["billing_topup", "billing_lookup"], (
         "no redeemable code should hide the button"
     )
-    assert "billing_redeem_open" not in _action_ids(member), "members should not get it"
+    assert _action_ids(member) == ["billing_redeem_open"], "a member gets it for a channel code"
+    assert "billing_redeem_open" not in _action_ids(member_no_code), "and not without one"
 
 
 def test_timed_credit_shows_under_the_total_in_both_views() -> None:
@@ -164,26 +167,22 @@ def test_redeem_result_text() -> None:
     )
 
 
-async def test_open_pushes_the_form_for_admins_only(fake_slack_web_client: Any) -> None:
-    """The redeem button pushes the form for admins and a notice for everyone else."""
+async def test_open_pushes_the_form_for_anyone(fake_slack_web_client: Any) -> None:
+    """The redeem button pushes the form; what the code may do is decided on submit."""
     payload = {
         "team": {"id": _TEAM},
-        "user": {"id": _USER},
+        "user": {"id": "U_MEMBER"},
         "trigger_id": "TR",
         "view": {"id": "V", "private_metadata": json.dumps({"channel_id": "C1"})},
     }
     with _slack(fake_slack_web_client, admin=False):
         await handle_redeem_open(MagicMock(), payload)
-    with _slack(fake_slack_web_client, admin=True):
-        await handle_redeem_open(MagicMock(), payload)
-    first, second = (b["view"] for b in _bodies(fake_slack_web_client, "views.push"))
-    assert "callback_id" not in first and "admins" in _texts(first["blocks"]), (
-        "a non-admin should get a notice, not the form"
-    )
-    assert second["callback_id"] == "billing_redeem", "an admin should get the redeem form"
-    assert json.loads(second["private_metadata"]) == {"root_view_id": "V", "channel_id": "C1"}, (
-        "the form should remember the panel and the channel it came from"
-    )
+    [body] = _bodies(fake_slack_web_client, "views.push")
+    assert body["view"]["callback_id"] == "billing_redeem", "a member should get the form"
+    assert json.loads(body["view"]["private_metadata"]) == {
+        "root_view_id": "V",
+        "channel_id": "C1",
+    }, "the form should remember the panel and the channel it came from"
 
 
 async def test_submission_redeems_and_refreshes_the_panel(
@@ -272,26 +271,63 @@ async def test_submission_keeps_the_success_reply_when_the_panel_refresh_fails(
     )
 
 
-async def test_submission_from_a_non_admin_redeems_nothing(fake_slack_web_client: Any) -> None:
-    """A non-admin submission is refused, and audited, before any database lookup."""
+async def test_a_member_redeems_a_channel_code_into_their_channel_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A member's channel code raises their channel's budget; a server code and a DM are refused."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
+    await make_channel_budget(db_session, tenant=tenant, platform="slack", channel_id="C1")
+    await make_channel_budget(db_session, tenant=tenant, platform="slack", channel_id="C2")
+    for code, cap in (("TEAM-ROOM-2026", Decimal("20")), ("WELCOME-2026", None)):
+        terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False, channel_cap_usd=cap)
+        await promo_store.insert_promo_code(
+            db_session, code_hash=hash_promo_code(normalize_promo_code(code)), terms=terms
+        )
     runtime = MagicMock()
-    runtime.sessionmaker = MagicMock(side_effect=AssertionError("must not open a session"))
+    runtime.sessionmaker = db_session_factory
     audit = AsyncMock()
+
+    def submission(code: str, channel_id: str) -> Any:
+        payload = _submission(code)
+        payload["view"]["private_metadata"] = json.dumps(
+            {"root_view_id": "", "channel_id": channel_id}
+        )
+        return evaluate_redeem_submission(payload)
+
     with (
         _slack(fake_slack_web_client, admin=False),
         patch.object(redeem, "record_panel_write", audit),
     ):
-        await run_redeem_submission(
-            runtime,
-            fake_slack_web_client.client,
-            team_id=_TEAM,
-            user_id="U_MEMBER",
-            decision=evaluate_redeem_submission(_submission("WELCOME-2026")),
+        for code, channel_id in (
+            ("team-room-2026", "C1"),
+            ("WELCOME-2026", "C1"),
+            ("TEAM-ROOM-2026", "D1"),
+        ):
+            await run_redeem_submission(
+                runtime,
+                fake_slack_web_client.client,
+                team_id=_TEAM,
+                user_id="U_MEMBER",
+                decision=submission(code, channel_id),
+            )
+
+    added, server_code, in_dm = _bodies(fake_slack_web_client, "views.update")
+    assert "Added *$10.00* to <#C1>'s budget" in _texts(added["view"]["blocks"])
+    assert "*$15.00*" in _texts(added["view"]["blocks"]), "the new limit is named"
+    assert "Only an admin can redeem that code" in _texts(server_code["view"]["blocks"])
+    assert "not a DM" in _texts(in_dm["view"]["blocks"]), "a DM has no channel to credit"
+    db_session.expire_all()
+    limits = {
+        channel_id: (
+            await budget_store.get_channel_budget(
+                db_session, tenant_id=tenant.id, platform="slack", channel_id=channel_id
+            )
         )
-    [body] = _bodies(fake_slack_web_client, "views.update")
-    assert "admins" in _texts(body["view"]["blocks"]), "a non-admin should be told who can redeem"
-    assert audit.await_args is not None
-    assert (audit.await_args.kwargs["op"], audit.await_args.kwargs["outcome"]) == (
-        "promo_redeem",
-        "denied",
-    ), "the refusal is audited"
+        for channel_id in ("C1", "C2")
+    }
+    assert limits["C1"] is not None and limits["C1"].limit_usd == Decimal("15")
+    assert limits["C2"] is not None and limits["C2"].limit_usd == Decimal("5"), "only C1"
+    assert [c.kwargs["outcome"] for c in audit.await_args_list] == ["allowed", "denied", "denied"]
+    assert audit.await_args_list[0].kwargs["target_channel_id"] == "C1", "audited to the channel"
