@@ -16,8 +16,10 @@ import httpx
 import pytest
 from daimon.core import channel_backend, mux_backend
 from daimon.core._models import AgentGitHubMode
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.shared_threads import shared_slot
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import AdmissionDecision, admit
 from daimon.core.turn.errors import AdmissionDenied
@@ -71,6 +73,11 @@ async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_re
             db, tenant=tenant, agent_name="test-agent", environment_name="test-env"
         )
         await make_ledger_entry(db, tenant=tenant, delta_usd=Decimal(100))
+        await set_access_policy(
+            db,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai")),
+        )
         db.add(
             AgentGitHubMode(
                 tenant_id=TENANT,

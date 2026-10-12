@@ -792,6 +792,11 @@ async def run_prepared_turn(
     observation.agent_id = prepared.admission.agent.id
     observation.session_id = prepared.ma_session_id
     observation.origin = origin
+    observation.backend_profile = (
+        prepared.admission.backend_footer_profile
+        if prepared.admission.backend_footer_profile is not None and deps.backend_selection_enabled
+        else None
+    )
     try:
         with observation.activate(), deps.running_turns.track():
             result = await run_prepared_turn_impl(

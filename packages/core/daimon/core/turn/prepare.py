@@ -655,7 +655,7 @@ async def bind_session(
             if shared is not None:
                 # The thread runs under the revision it was bound with (checked
                 # runnable by `resolve_shared_thread`), so dispatch picks that
-                # provider even after the channel moved to another (C14).
+                # provider even after the channel moves to another.
                 admission = replace(
                     admission, shared_owner=shared.owner, backend_revision=shared.revision
                 )
@@ -678,6 +678,27 @@ async def bind_session(
                 async with deps.sessionmaker() as session:
                     await record_shared_binding(session, shared, ma_session_id=result.ma_session_id)
                     await session.commit()
+            if (
+                deps.backend_selection_enabled
+                and admission.private_dm_id is None
+                and not (admission.grant is not None and admission.grant.is_dm)
+                and admission.config.thread_binding_kind != "setup"
+            ):
+                # Publish through the same binding owner used by execution,
+                # before returning a prepared session to an awaiting caller.
+                from daimon.core.turn.binding import prepared_persistence
+
+                await prepared_persistence(
+                    deps,
+                    result.admission,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=thread_id,
+                    session_id=result.ma_session_id,
+                    mapping_id=result.mapping_id,
+                    session_ref=result.session_ref,
+                    operation_key="preparation",
+                )
     except BaseException as exc:
         observation.finish(error=exc)
         raise
@@ -919,6 +940,10 @@ async def bind_session_impl(
     if profile != "anthropic.managed_agents":
         prepare = _PROVIDER_PREPARATIONS.get(profile)
         if prepare is None or (deps.turn_path or load_turn_settings().path) != "mux":
+            raise AdmissionDenied(reason="backend_unsupported")
+        from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
+
+        if not fixed_plan_origin_allowed(admission.backend_revision_origin):
             raise AdmissionDenied(reason="backend_unsupported")
         scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
         request = ProviderPreparationRequest(
