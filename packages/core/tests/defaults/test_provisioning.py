@@ -45,6 +45,7 @@ from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _CREATED_AT = datetime(2026, 4, 21, 0, 0, 0, tzinfo=UTC)
@@ -1185,3 +1186,17 @@ async def test_a_tenant_whose_id_shares_an_existing_tenants_first_8_chars_is_ref
         ids = set((await session.execute(select(Tenant.id))).scalars())
     assert earlier in ids and tenant_id not in ids, "the earlier tenant is untouched"
     await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-other")
+
+
+async def test_another_integrity_error_naming_the_prefix_index_in_its_values_is_re_raised(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only a violation of the prefix index itself becomes the prefix refusal."""
+    workspace = "ws-uq_tenants_id_prefix"
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=workspace)
+    other = uuid.UUID(f"{'0' if str(tenant_id)[0] != '0' else '1'}{str(tenant_id)[1:]}")
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, id=other, workspace_id=workspace)
+
+    with pytest.raises(IntegrityError, match="uq_tenants_platform_external_id"):
+        await provision_tenant(db_session_factory, platform="discord", workspace_id=workspace)

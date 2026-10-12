@@ -17,7 +17,7 @@ from pathlib import Path
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core._models import Account, Tenant
+from daimon.core._models import TENANT_ID_PREFIX_INDEX, Account, Tenant
 from daimon.core.defaults._reconcile import _reconcile_core  # pyright: ignore[reportPrivateUsage]
 from daimon.core.defaults.report import ApplyReport
 from daimon.core.errors import StoreError
@@ -106,7 +106,9 @@ async def provision_tenant(
                 .on_conflict_do_nothing(index_elements=[Tenant.id])
             )
         except IntegrityError as exc:
-            if "uq_tenants_id_prefix" not in str(exc.orig):
+            # asyncpg's error, under the DB-API wrapper, names the violated index.
+            violated = getattr(getattr(exc.orig, "__cause__", None), "constraint_name", None)
+            if violated != TENANT_ID_PREFIX_INDEX:
                 raise
             raise StoreError(
                 f"cannot register {platform} workspace {workspace_id}: its tenant id {tenant_id} "
