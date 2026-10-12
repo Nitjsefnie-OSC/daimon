@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME
 from daimon.core.tool_safety import (
@@ -19,6 +21,7 @@ from daimon.core.tool_safety import (
     toolset_permission_policy,
     trusted_servers_for,
 )
+from daimon.core.turn.approvals import interactive_decider, unattended_decider
 
 _ON = ToolSafetyPolicy(enabled=True)
 
@@ -42,6 +45,13 @@ def test_daimon_server_name_matches_the_defaults_constant() -> None:
         ("fetch-page", "read"),
         ("getContact", "read"),
         ("find_user", "read"),
+        # Question-and-answer and checking tools carded as writes on 2026-10-09.
+        ("ask_wiki_question", "read"),
+        ("eap_briefing", "read"),
+        ("eap_verify_answer", "read"),
+        ("verifyAnswer", "read"),
+        ("ask_question", "read"),
+        ("askQuestion", "read"),
         # Plain writes and unknowns.
         ("create_issue", "write"),
         ("update_deal", "write"),
@@ -65,6 +75,19 @@ def test_daimon_server_name_matches_the_defaults_constant() -> None:
         ("sql_query", "write"),
         ("getOrCreateContact", "write"),
         ("call_get_page", "write"),
+        ("ask_and_post", "write"),
+        ("verify_and_send", "write"),
+        ("run_verify", "write"),
+        ("briefing_publish", "write"),
+        # "ask" and "verify" read only in a question-and-answer shape: a bare
+        # "ask" is an action (agent_chat's `ask` starts a turn in another agent).
+        ("ask", "write"),
+        ("ask_agent", "write"),
+        ("other_ask", "write"),
+        ("ask_question_and_post", "write"),
+        ("verify", "write"),
+        ("verify_email", "write"),
+        ("verifyPhone", "write"),
     ],
 )
 def test_the_tool_name_decides_when_nothing_else_does(tool: str, effect: str) -> None:
@@ -90,6 +113,15 @@ def test_annotations_win_over_the_name() -> None:
         )
         == "write"
     )
+    assert (
+        classify_tool(
+            _ON,
+            server_name="s",
+            tool_name="ask_wiki_question",
+            annotations=ToolAnnotations(read_only_hint=False),
+        )
+        == "write"
+    ), "a server that says its tool is not read-only is believed over a read-sounding name"
 
 
 def test_an_operator_override_wins_and_a_tool_key_beats_its_server_key() -> None:
@@ -351,3 +383,50 @@ def test_the_approval_card_timeout_defaults_to_ten_minutes_and_is_bounded() -> N
     for bad in (0, 29, 3601):
         with pytest.raises(ValidationError):
             ToolSafetyPolicy(confirmation_timeout_s=bad)
+
+
+_READ_TOOLS = [
+    ("deepwiki", "ask_wiki_question"),
+    ("eap", "eap_briefing"),
+    ("eap", "eap_verify_answer"),
+]
+
+
+@pytest.mark.parametrize(("server", "tool"), _READ_TOOLS)
+@pytest.mark.parametrize("attended", [True, False])
+async def test_question_and_answer_tools_run_without_a_card(
+    server: str, tool: str, attended: bool
+) -> None:
+    card = AsyncMock(return_value="denied")
+    decider = (
+        interactive_decider(_ON, requester_platform_user_id="u1", confirm=card)
+        if attended
+        else unattended_decider(_ON)
+    )
+    result = await decider(ToolCall(tool_use_id="tu_1", server_name=server, tool_name=tool))
+    assert result.allow
+    card.assert_not_awaited()
+
+
+@pytest.mark.parametrize("attended", [True, False])
+async def test_another_daimons_agent_ask_still_needs_approval(attended: bool) -> None:
+    """agent_chat's `ask` starts or continues a turn in another agent: an action.
+    Attached from another Daimon endpoint, it must wait for the card in chat
+    and be refused in a routine."""
+    card = AsyncMock(return_value="denied")
+    decider = (
+        interactive_decider(_ON, requester_platform_user_id="u1", confirm=card)
+        if attended
+        else unattended_decider(_ON)
+    )
+    call = ToolCall(
+        tool_use_id="tu_1",
+        server_name="other-daimon",
+        tool_name="ask",
+        input={"message": "do the next task"},
+    )
+    assert decide_tool_call(_ON, call, attended=attended).effect == "write"
+    result = await decider(call)
+    assert not result.allow
+    if attended:
+        card.assert_awaited_once()

@@ -49,6 +49,7 @@ that they stay in sync except this README's own test.
 | `max_open_threads_per_recipient` | `DAIMON_REPORT__MAX_OPEN_THREADS_PER_RECIPIENT` | `3` | Cap on concurrently open threads a single recipient may hold. |
 | `max_running_turns_per_report` | `DAIMON_REPORT__MAX_RUNNING_TURNS_PER_REPORT` | `4` | Cap on concurrently running turns across one report's threads. |
 | `recipient_link_ttl_days` | `DAIMON_REPORT__RECIPIENT_LINK_TTL_DAYS` | `90` | How long a per-recipient link remains valid before expiring. |
+| `html_link_errors` | `DAIMON_REPORT__HTML_LINK_ERRORS` | `false` | Browsers (`Accept: text/html`) always get a static “Link unavailable” HTML page for refused `GET /r/{slug}` links; `true` gives every client the page. Status 403 and the recipient checks stay the same. API, file and admin responses stay unchanged. |
 | `thread_idle_archive_hours` | `DAIMON_REPORT__THREAD_IDLE_ARCHIVE_HOURS` | `24` | A thread idle longer than this is archived, upstream then locally, by the host's background sweep. |
 
 ## Routes

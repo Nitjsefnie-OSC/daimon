@@ -1103,7 +1103,16 @@ model in `packages/core/daimon/core/tool_safety.py`. With
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
-the requester to press Approve on a confirmation card. The card is a platform
+the requester to press Approve on a confirmation card. Read or write comes
+from an operator `DAIMON_TOOL_SAFETY__EFFECTS` pin, then the tool's MCP
+annotations, then its name: a plainly-read leading verb (`get_`, `search_`,
+`list_` and the like, or the report noun `briefing`) with no write or chaining
+word anywhere is a read, and everything else is a write. `ask` and `verify`
+read only in a question-and-answer shape (`ask_wiki_question`,
+`eap_verify_answer`); a bare `ask`, such as another Daimon's agent_chat `ask`,
+which starts a turn in that agent, stays a write. Managed Agents does not
+forward third-party annotations, so for attached servers the name and the
+operator pins are what decide; a misnamed write needs a pin. The card is a platform
 hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 (`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
@@ -1628,6 +1637,13 @@ host admits uploads only from the tenants the operator lists in
 `DAIMON_NOTEBOOK__TENANTS`, matched against the tenant named in the bot's
 signed upload token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
+A browser (`Accept: text/html`) opening an unavailable document link gets a
+static “Link unavailable” HTML page instead of a JSON error: unresolved
+`GET /n/{slug}/` requests (404) and refused `GET /r/{slug}` requests (403).
+Other clients keep the JSON error unless `DAIMON_NOTEBOOK__HTML_LINK_ERRORS`
+or `DAIMON_REPORT__HTML_LINK_ERRORS` is `true`, which gives every client the
+page. Token and expiry checks, successful pages, and API/file/admin
+responses retain their existing behavior.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach Daimon over HTTP with capability tokens, and the
 `must not import daimon` contracts keep it that way.
