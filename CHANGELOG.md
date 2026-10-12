@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the fleet budget watcher active across worker cohorts until the run owner signals completion.
 - Refresh fleet budgets once per run and fan out worker cancellations, allowing same-tenant ordinary writes during passive refresh while retaining fenced financial admission.
 
+- Require the orchestrator principal or a trusted tenant admin for shared fleet kill, resume and collect operations, in addition to current scope and session policy.
+
 - Add opt-in fleet orchestration tools over the shared host service, with current root authorization, immutable clone derivation, original-limit resume checks and a journal-backed cross-review barrier declared in each primary's result contract. Reviewers use ordinary worker capacity. Missing owner bindings refuse; ordinary agent-chat restrictions are unchanged.
 
 - Preserve native required-action termination when the backend cannot accept tool-confirmation events.

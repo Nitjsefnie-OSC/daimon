@@ -99,6 +99,8 @@ class FleetParentLoader(Protocol):
     binding, root grants and selected run. It must not pick a latest session or
     manufacture depth zero from an ordinary chat-agent ID. Missing projection
     is unavailable. Both platform and MCP callers use the shared core service.
+    Scope principal_id retains the original run's authenticated orchestrator;
+    the current interaction supplies Subject and cannot replace that principal.
     """
 
     async def __call__(

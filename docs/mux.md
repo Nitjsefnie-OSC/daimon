@@ -2380,6 +2380,11 @@ ports must be installed; absent bindings refuse before worker effects. A chat
 agent ID, run handle, role or matching agent name does not supply those grants.
 Every root and session decision reuses the host-loaded complete `Place`, including
 category and unresolved-category facts, against current tenant policy.
+Kill, resume and collect additionally require the original orchestrator principal
+or a trusted tenant admin; an agent key cannot supply the admin exemption. The
+loader retains the run's original scope principal independently of the current
+interaction's subject. The shared service owns this check for every adapter;
+open channel policy alone does not grant control of another person's run.
 
 Workers reuse `AgentSpec`, `BackendConfig` and a pinned `Agent` revision with
 sparse `AgentPatch` overrides. The single worker resolver derives their tools,

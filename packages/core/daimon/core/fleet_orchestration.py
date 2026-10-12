@@ -208,6 +208,13 @@ class FleetOrchestrator:
         if not decision:
             raise FleetRefused(decision.reason or "permission_refused")
 
+    @staticmethod
+    def _controller_authorize(parent: WorkerPermissions) -> None:
+        if parent.subject.platform_user_id != parent.fleet.scope.principal_id and (
+            not parent.subject.is_admin or parent.subject.via_agent_key
+        ):
+            raise FleetRefused("controller_required")
+
     async def read_snapshot(
         self, parent: WorkerPermissions, policy: TenantAccessPolicy, run_id: uuid.UUID
     ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:
@@ -378,6 +385,7 @@ class FleetOrchestrator:
             raise FleetRefused("deadline_timezone_required")
         run, workers = await self.read_snapshot(parent, policy, run_id)
         self._session_authorize(parent, policy, continuing=True)
+        self._controller_authorize(parent)
         worker = next((row for row in workers if row.id == worker_id), None)
         if worker_id is not None and worker is None:
             raise FleetRefused("foreign_worker")
@@ -530,6 +538,7 @@ class FleetOrchestrator:
         unfinished/failed worker, a refused review or an invalid result contract.
         """
         run, workers = await self.read_snapshot(parent, policy, run_id)
+        self._controller_authorize(parent)
         if run.status in ("cancelled", "failed"):
             return {"run_id": str(run.id), "status": "blocked", "reason": "run_stopped"}
         if not workers:

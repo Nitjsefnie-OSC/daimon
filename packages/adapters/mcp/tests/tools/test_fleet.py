@@ -455,6 +455,34 @@ async def test_host_bridge_reloads_authority_on_each_call_and_refuses_revocation
     owner.read_run.assert_awaited_once()
 
 
+@pytest.mark.parametrize("tool", ("fleet_kill", "fleet_resume", "fleet_collect"))
+async def test_mcp_current_caller_cannot_control_another_principals_fleet(tool: str) -> None:
+    root = host_parent()
+    root = replace(
+        root,
+        fleet=replace(
+            root.fleet,
+            scope=root.fleet.scope.model_copy(update={"principal_id": "original-orchestrator"}),
+        ),
+    )
+
+    async def load(caller: AuthIdentity) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+        assert caller is AUTH
+        return root, TenantAccessPolicy(enabled_backends=("anthropic",))
+
+    owner = host_owner()
+    bridge = HostFleetToolService(FleetOrchestrator(owner), load)
+    async with Client(registered(bridge)) as client:
+        with pytest.raises(ToolError, match="controller_required"):
+            await client.call_tool(tool, arguments(tool))
+    owner.read_run.assert_awaited_once()
+    owner.retained_control.assert_not_awaited()
+    owner.control.assert_not_awaited()
+    owner.wait.assert_not_awaited()
+    owner.read_result.assert_not_awaited()
+    owner.validate_contract.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "field",
     (

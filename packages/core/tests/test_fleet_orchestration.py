@@ -505,6 +505,123 @@ def reviewed_ports(verdict="approved"):
     return owner, target, reviewer
 
 
+@pytest.mark.parametrize("operation", ("kill", "resume", "collect"))
+@pytest.mark.parametrize(
+    "subject,allowed",
+    (
+        (Subject(platform_user_id="person"), True),
+        (Subject(platform_user_id="unrelated-person"), False),
+        (Subject(platform_user_id="unrelated-person", is_admin=True), True),
+        (Subject(platform_user_id="unrelated-person", is_admin=True, via_agent_key=True), False),
+        (
+            Subject(
+                platform_user_id="unrelated-person",
+                administered_channel_ids=frozenset({"channel"}),
+            ),
+            False,
+        ),
+        (Subject(), False),
+    ),
+)
+async def test_shared_fleet_control_requires_the_original_principal_or_tenant_admin(
+    operation, subject, allowed
+):
+    parent = replace(permissions(), subject=subject)
+    assert parent.fleet.scope.principal_id == "person"
+    owner = reviewed_ports()[0] if operation == "collect" else ports(worker(status="pending"))
+    service = FleetOrchestrator(owner)
+
+    async def act():
+        if operation == "collect":
+            return await service.collect(parent, POLICY, run_id=RUN)
+        return await service.control(
+            parent,
+            POLICY,
+            run_id=RUN,
+            worker_id=WORKER,
+            action=operation,
+            expected_version=3,
+            operation_key="fixture-control",
+            now=NOW,
+        )
+
+    if allowed:
+        result = await act()
+        if operation == "collect":
+            assert result["status"] == "ready"
+            owner.validate_contract.assert_called_once()
+        else:
+            assert result["accepted"] is True
+            owner.control.assert_awaited_once()
+    else:
+        with pytest.raises(FleetRefused, match="controller_required"):
+            await act()
+        owner.retained_control.assert_not_awaited()
+        owner.control.assert_not_awaited()
+        owner.wait.assert_not_awaited()
+        owner.read_result.assert_not_awaited()
+        owner.validate_contract.assert_not_called()
+
+
+async def test_nonowner_cannot_install_a_collection_wake():
+    parent = replace(permissions(), subject=Subject(platform_user_id="unrelated-person"))
+    owner = ports(worker(status="running", result=None))
+    with pytest.raises(FleetRefused, match="controller_required"):
+        await FleetOrchestrator(owner).collect(parent, POLICY, run_id=RUN)
+    owner.wait.assert_not_awaited()
+
+
+async def test_nonowner_cannot_replay_a_retained_control_acknowledgement():
+    parent = replace(permissions(), subject=Subject(platform_user_id="unrelated-person"))
+    owner = ports(worker(status="cancelled", version=4))
+    owner.retained_control.return_value = {
+        "run_id": str(RUN),
+        "worker_id": str(WORKER),
+        "accepted": True,
+        "version": 4,
+        "action": "kill",
+        "operation_key": "fixture-control",
+        "expected_version": 3,
+    }
+    with pytest.raises(FleetRefused, match="controller_required"):
+        await FleetOrchestrator(owner).control(
+            parent,
+            POLICY,
+            run_id=RUN,
+            worker_id=WORKER,
+            action="kill",
+            expected_version=3,
+            operation_key="fixture-control",
+            now=NOW,
+        )
+    owner.retained_control.assert_not_awaited()
+    owner.control.assert_not_awaited()
+
+
+@pytest.mark.parametrize("operation", ("kill", "resume", "collect"))
+async def test_controller_admin_role_does_not_bypass_run_scope(operation):
+    parent = replace(permissions(), subject=Subject(platform_user_id="admin", is_admin=True))
+    owner = ports(worker(status="pending"), fleet=replace(run(), tenant_id=UUID(int=999)))
+    service = FleetOrchestrator(owner)
+    with pytest.raises(FleetRefused, match="foreign_run"):
+        if operation == "collect":
+            await service.collect(parent, POLICY, run_id=RUN)
+        else:
+            await service.control(
+                parent,
+                POLICY,
+                run_id=RUN,
+                worker_id=WORKER,
+                action=operation,
+                expected_version=3,
+                operation_key="fixture-control",
+                now=NOW,
+            )
+    owner.control.assert_not_awaited()
+    owner.wait.assert_not_awaited()
+    owner.read_result.assert_not_awaited()
+
+
 async def test_cross_review_inputs_are_the_verified_target_event_and_digest():
     owner = ports(worker())
     actual = event()
