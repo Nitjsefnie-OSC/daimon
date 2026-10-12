@@ -245,6 +245,7 @@ async def test_prepared_turn_activates_only_its_admitted_footer(
     from daimon.core.turn.outcomes import TurnObservation, current_outcome
     from daimon.core.turn.prepare import PreparedTurn
     from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.running import RunningTurns
     from daimon.core.turn.state import TurnState
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -275,7 +276,11 @@ async def test_prepared_turn_activates_only_its_admitted_footer(
         raise AssertionError("no recovery in a context proof")
 
     await run_module.run_prepared_turn(
-        SimpleNamespace(sessionmaker=async_sessionmaker(), backend_selection_enabled=enabled),
+        SimpleNamespace(
+            sessionmaker=async_sessionmaker(),
+            backend_selection_enabled=enabled,
+            running_turns=RunningTurns(),
+        ),
         prepared,
         tenant_id=TENANT,
         platform="slack",
