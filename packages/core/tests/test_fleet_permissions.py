@@ -249,6 +249,8 @@ def test_hosted_implicit_shell_is_not_removed_by_tools_empty():
         resolve(replace(root, spec=root.spec.model_copy(update={"tools": ()})))
     with pytest.raises(WorkerSpecRefused, match="sandbox"):
         resolve(replace(root, environment=None))
+    with pytest.raises(WorkerSpecRefused, match="sandbox"):
+        resolve(replace(root, environment=EnvironmentSpec(name="no-execution", execution="none")))
 
 
 def test_environment_network_never_widens():

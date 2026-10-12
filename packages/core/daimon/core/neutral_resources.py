@@ -1017,7 +1017,7 @@ def resolve_worker_spec(
             raise WorkerSpecRefused("files", "unsupported")
     environment = environment if environment is not None else parent.environment
     _worker_environment(environment, parent.environment)
-    if environment is None and any(
+    if (environment is None or environment.execution == "none") and any(
         tool.kind == "builtin" and tool.name == profile.execution_tool
         for tool in resolved.tools or ()
     ):
