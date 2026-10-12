@@ -133,9 +133,9 @@ async def multi_human_evidence(envelope: MultiHumanEnvelope) -> Mapping[str, obj
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         admitted_message_ids: tuple[str, ...] = (),
-        # Main #813 (f84699cf6ac7ad467ef59beaa44b65488005c60d) passes the
-        # authored messages to query rendering. This offline callback observes
-        # queue selection only; mirror the exact keyword without rendering.
+        # The drain passes the authored messages for query rendering. This
+        # offline callback observes queue selection only; mirror the exact
+        # keyword without rendering.
         query_messages: tuple[discord.Message, ...] = (),
     ) -> None:
         del created_thread_ids, admitted_message_ids, query_messages

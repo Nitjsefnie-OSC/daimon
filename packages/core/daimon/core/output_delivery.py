@@ -168,7 +168,7 @@ async def _poll_until_settled(
             await sleep(delay)
         elapsed += delay
         polls += 1
-        # Main #833: retained oversize entries must not hide later pages.
+        # Retained oversize entries must not hide later pages.
         records = await list_output_records(
             anthropic_client,
             session_id,
