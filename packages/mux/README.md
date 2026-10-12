@@ -30,7 +30,7 @@ The full description is [docs/mux.md](../../docs/mux.md). Tests:
 `uv run pytest packages/mux`.
 
 OpenAI probe holds can be proposed for reconciliation by the host's offline
-`daimon.core.usage_reconciliation` command using captured Admin Usage/Costs
+`daimon.testing.conformance.usage_reconciliation` command using captured Admin Usage/Costs
 exports. Only an externally audited isolated project/day window with one run and
 finalized billing qualifies. Unknown or mixed attribution keeps the hold. The
 captured effective requests must cover the full project, and billed line-item

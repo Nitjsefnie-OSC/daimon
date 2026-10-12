@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 - Let workspace admins preview and select an agent's model backend in agent setup, or set and clear it through the CLI and direct MCP tool, when backend selection is explicitly enabled. Previews include compatibility and pricing limits; existing threads keep their backend.
+- Move the offline Admin billing reconciliation command into the testing package; production usage accounting retains its existing ledger.
 
 - Preserve OpenAI session occupancy when accepted work has no visible active root yet, allowing observation to continue without retrying creation or admitting a new turn.
 

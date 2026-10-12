@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from daimon.core.usage_reconciliation import (
+from daimon.testing.conformance.usage_reconciliation import (
     AdminRequestEvidence,
     AdminScope,
     AdminSnapshot,
@@ -556,7 +556,7 @@ async def test_review_filtered_two_mill_bill_cannot_release_thirty_two_mill_hold
         [
             sys.executable,
             "-m",
-            "daimon.core.usage_reconciliation",
+            "daimon.testing.conformance.usage_reconciliation",
             "--costs",
             str(tmp_path / "costs.json"),
             "--usage",
@@ -811,7 +811,7 @@ def test_readonly_cli_and_proposal_then_explicit_approved_append_releases_hold(
         [
             sys.executable,
             "-m",
-            "daimon.core.usage_reconciliation",
+            "daimon.testing.conformance.usage_reconciliation",
             "--costs",
             str(tmp_path / "costs.json"),
             "--usage",
