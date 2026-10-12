@@ -21,8 +21,8 @@ from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.usage_recording import record_turn_usage
+from daimon.testing.conformance.runner import PendingKind, PendingReason, require
 from daimon.testing.db import WORKER_SCHEMA_PATTERN, isolated_test_schema
-from mux.conformance.runner import PendingKind, PendingReason, require
 from mux.contracts.ids import ModelRef, ResourceRef, Scope
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation

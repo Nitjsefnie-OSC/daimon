@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import httpx
-from mux.conformance.budget import BudgetGuard, Money, Reconciliation
+from daimon.testing.conformance.budget import BudgetGuard, Money, Reconciliation
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]

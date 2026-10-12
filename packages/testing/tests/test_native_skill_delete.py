@@ -41,6 +41,7 @@ from daimon.core.stores.neutral_catalog import (
 )
 from daimon.testing.admin_bindings import AdminBindings, AdminCommand
 from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.isolated_sdk import build_async_openai
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_transport import ScriptedTransport
@@ -49,7 +50,6 @@ from mux.contracts.ids import ModelRef, Scope, SkillRef
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import AgentSpec
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal

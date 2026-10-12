@@ -15,7 +15,7 @@ import daimon.adapters.slack.app as app_module
 import pytest
 from aioresponses import aioresponses
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.conformance import (
+from daimon.testing.adapters.slack.conformance import (
     AdmissionBarrier,
     MentionTurn,
     MultiHumanEnvelope,

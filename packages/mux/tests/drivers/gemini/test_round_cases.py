@@ -12,17 +12,17 @@ from typing import cast
 
 import httpx
 import pytest
+from daimon.testing.conformance.budget import BudgetConfig, BudgetGuard, BudgetRefused
+from daimon.testing.conformance.runner import ConformanceFailure
+from daimon.testing.drivers.gemini.round_cases import INTERACTION_CEILING_USD, run_c04, run_c06
+from daimon.testing.drivers.gemini.round_runner import Admission, Case, Envelope, execute
 from daimon.testing.isolated_sdk import build_gemini_client
-from mux.conformance.budget import BudgetConfig, BudgetGuard, BudgetRefused
-from mux.conformance.runner import ConformanceFailure
 from mux.contracts.actions import InputEvent, UserMessage
 from mux.contracts.events import Event, TextPart
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import SendReceipt
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import GeminiEvents
-from mux.drivers.gemini.round_cases import INTERACTION_CEILING_USD, run_c04, run_c06
-from mux.drivers.gemini.round_runner import Admission, Case, Envelope, execute
 from mux.drivers.gemini.transport import Object, SDKTransport
 from pydantic import JsonValue
 
@@ -307,7 +307,7 @@ async def test_unsealed_live_admission_refuses_before_key_or_transport(
     def forbidden() -> str:
         raise AssertionError("key must not be touched")
 
-    monkeypatch.setattr("mux.drivers.gemini.round_runner.read_key", forbidden)
+    monkeypatch.setattr("daimon.testing.drivers.gemini.round_runner.read_key", forbidden)
     with pytest.raises(BudgetRefused, match="separately pinned"):
         await execute(selected, live=True)
     assert not selected.output.exists()

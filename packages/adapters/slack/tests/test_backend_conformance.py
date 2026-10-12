@@ -20,7 +20,6 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.slack import app as platform_module
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.backend_conformance import BackendTurnEnvelope, backend_selection_turn
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import (
     AnthropicSettings,
@@ -41,6 +40,10 @@ from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.testing import ma_session
+from daimon.testing.adapters.slack.backend_conformance import (
+    BackendTurnEnvelope,
+    backend_selection_turn,
+)
 from daimon.testing.factories import make_tenant
 from daimon.testing.isolated_sdk import (
     SDK_ENV_VARS,

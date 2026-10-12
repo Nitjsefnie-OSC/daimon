@@ -40,12 +40,15 @@ from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import pytest_plugin as database_plugin
+from daimon.testing.conformance.gemini import adapter
+from daimon.testing.conformance.runner import PendingKind, run_fixture
 from daimon.testing.db import (
     DatabasePreflight,
     build_test_engine,
     preflight_test_database,
     require_owned_sessionmaker,
 )
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_tenant
 from daimon.testing.gemini_termination import (
     REQUIRED_REASONS,
@@ -63,11 +66,8 @@ from daimon.testing.turn_conformance import (
     TerminationSnapshot,
 )
 from daimon.testing.turn_fakes import RecordingLifecycle
-from mux.conformance.gemini import adapter
-from mux.conformance.runner import PendingKind, run_fixture
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.drivers.gemini.transport import Object, SDKTransport
 from mux.errors import ScopeViolation

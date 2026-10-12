@@ -11,6 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from daimon.testing.conformance.budget import BudgetLedgerError, BudgetRefused
 from daimon.testing.conformance.usage_reconciliation import (
     AdminRequestEvidence,
     AdminScope,
@@ -22,9 +23,9 @@ from daimon.testing.conformance.usage_reconciliation import (
     fetch_admin_snapshot,
     propose_admin_reconciliation,
 )
-from mux.conformance.budget import BudgetLedgerError, BudgetRefused
-from mux.conformance.test_budget import plan, setup_guard
 from pydantic import SecretStr, ValidationError
+
+from packages.testing.tests.conformance.test_budget import plan, setup_guard
 
 DAY = datetime(2026, 10, 9, tzinfo=UTC)
 START = int(DAY.timestamp())

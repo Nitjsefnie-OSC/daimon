@@ -28,6 +28,7 @@ from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.testing.admin_bindings import AdminBindings, provision_admin_run
 from daimon.testing.admin_resources import ResourceAdminBindings
 from daimon.testing.cli_resources import cli_check_holds
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.gemini_cli_resources import (
     GEMINI_OPERATOR_PROFILE as OPT_IN_OPERATOR_PROFILE,
 )
@@ -44,7 +45,6 @@ from mux.contracts.ids import ModelRef
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.state.memory import MemoryStateStore
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

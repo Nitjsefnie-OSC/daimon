@@ -49,6 +49,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
+from daimon.testing.conformance.default_capability import MCP_TOOLS
 from daimon.testing.db import (
     _create_schema_with_tables,  # pyright: ignore[reportPrivateUsage]
     _drop_schema,  # pyright: ignore[reportPrivateUsage]
@@ -57,7 +58,6 @@ from daimon.testing.db import (
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from mux.conformance.default_capability import MCP_TOOLS
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError

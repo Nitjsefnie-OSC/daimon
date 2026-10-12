@@ -4,14 +4,14 @@ from collections.abc import AsyncIterator
 
 import httpx
 import pytest
+from daimon.testing.conformance.fixtures import FIXTURES
+from daimon.testing.conformance.runner import ConformanceFailure
+from daimon.testing.drivers.openai.conformance import REF, SCOPE, OpenAIScriptedTransport
 from daimon.testing.isolated_sdk import build_async_openai
-from mux.conformance.fixtures import FIXTURES
-from mux.conformance.runner import ConformanceFailure
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import DeletionReceipt
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.artifacts import OpenAIArtifacts
-from mux.drivers.openai.conformance import REF, SCOPE, OpenAIScriptedTransport
 from mux.drivers.openai.sessions import OpenAISessions
 from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal

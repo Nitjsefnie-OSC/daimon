@@ -15,15 +15,16 @@ from unittest.mock import Mock
 import httpx
 import pytest
 from daimon.testing import anthropic_live as live
+from daimon.testing.conformance.budget import BudgetConfig
 from daimon.testing.isolated_sdk import TLS_PROXY_ENV_VARS
 from daimon.testing.ma import send_events_response
 from daimon.testing.ma_models import ma_session
-from mux.conformance.budget import BudgetConfig
-from mux.conformance.test_budget import receipts
-from mux.conformance.test_exact_spend import anthropic_session_guard
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import SessionSpec
 from mux.errors import ProviderError
+
+from packages.testing.tests.conformance.test_budget import receipts
+from packages.testing.tests.conformance.test_exact_spend import anthropic_session_guard
 
 SCOPE = Scope(
     tenant_id="test-tenant",
@@ -1092,7 +1093,7 @@ async def test_cancellation_resistant_callback_cannot_grow_inventory_or_mutate_a
 
 async def test_stream_and_final_walk_merge_each_native_request_once(tmp_path, monkeypatch):
     from daimon.testing.anthropic_live import merged_usage
-    from mux.conformance.usage_settlement import AnthropicSessionSpend
+    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
 
     args, _, _ = admission(tmp_path, monkeypatch)
@@ -1186,7 +1187,7 @@ async def test_sdk_decoded_fragmentation_never_bypasses_the_signed_stop(case, si
 async def test_fragmented_stream_conflicting_walk_and_failed_fetch_keep_verified_floor(
     tmp_path, monkeypatch, case
 ):
-    from mux.conformance.usage_settlement import AnthropicSessionSpend
+    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
 
     args, guard, _ = admission(tmp_path, monkeypatch)
@@ -1321,7 +1322,7 @@ async def test_late_inflight_create_ack_is_quarantined_and_retired_without_anoth
 async def test_conflicting_more_expensive_walk_cannot_erase_stream_input_limit_latch(
     tmp_path, monkeypatch
 ):
-    from mux.conformance.usage_settlement import AnthropicSessionSpend
+    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
 
     args, guard, _ = admission(tmp_path, monkeypatch)
@@ -1366,8 +1367,8 @@ async def test_conflicting_more_expensive_walk_cannot_erase_stream_input_limit_l
 async def test_cross_session_native_id_collision_quarantines_provenance_and_keeps_floor_and_latch(
     tmp_path, monkeypatch, collision_source
 ):
+    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from daimon.testing.ma import sse_response
-    from mux.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
 
     args, guard, _ = admission(tmp_path, monkeypatch)
@@ -1789,7 +1790,7 @@ async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_ent
 async def test_unknown_cache_ttl_original_keeps_the_pinned_guard_monetary_floor(
     tmp_path, monkeypatch
 ):
-    from mux.conformance.usage_settlement import AnthropicSessionSpend
+    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
 
     args, guard, _ = admission(tmp_path, monkeypatch)
@@ -1987,7 +1988,7 @@ def test_real_a7_cache_write_counts_keep_unknown_ttl_and_use_conservative_monito
 ):
     from pathlib import Path
 
-    from mux.conformance.budget import TokenUsage
+    from daimon.testing.conformance.budget import TokenUsage
     from mux.drivers.anthropic.usage import observation_from_event
 
     config = BudgetConfig.load(Path(__file__).parent / "fixtures/anthropic-live/host-config.json")
@@ -2023,7 +2024,7 @@ def test_real_a7_cache_write_counts_keep_unknown_ttl_and_use_conservative_monito
 def test_complete_ttl_split_keeps_exact_pricing_and_stale_price_stays_unknown():
     from pathlib import Path
 
-    from mux.conformance.budget import TokenUsage
+    from daimon.testing.conformance.budget import TokenUsage
 
     price = (
         BudgetConfig.load(Path(__file__).parent / "fixtures/anthropic-live/host-config.json")
@@ -2089,7 +2090,7 @@ def test_unknown_ttl_does_not_accept_invalid_splits(invalid, tmp_path, monkeypat
     "suffix,method", [("events/stream", "GET"), ("events", "POST"), ("archive", "POST")]
 )
 def test_real_length_session_paths_have_audited_typed_receipt_metadata(suffix, method):
-    from mux.conformance.recording import Audit, RecordingError
+    from daimon.testing.conformance.recording import Audit, RecordingError
 
     id_ = "sesn_" + "A" * 26
     path = f"/v1/sessions/{id_}/{suffix}"
@@ -2109,7 +2110,7 @@ def test_real_length_session_paths_have_audited_typed_receipt_metadata(suffix, m
 
 @pytest.mark.parametrize("id_", ["Bearer " + "synthetic-only-secret", "sk-" + "x" * 40])
 def test_typed_receipt_resource_identity_never_exempts_credentials(id_):
-    from mux.conformance.recording import Audit, RecordingError
+    from daimon.testing.conformance.recording import Audit, RecordingError
 
     projected = live.request_metadata(
         [("GET", f"/v1/sessions/{id_}/events/stream")], frozenset({("session", id_)})
@@ -2119,7 +2120,7 @@ def test_typed_receipt_resource_identity_never_exempts_credentials(id_):
 
 
 def test_thread_stream_receipt_audits_identity_and_requires_accepted_parent():
-    from mux.conformance.recording import Audit, RecordingError
+    from daimon.testing.conformance.recording import Audit, RecordingError
 
     id_ = "sesn_" + "A" * 26
     thread_id = "thread_" + "B" * 26
@@ -2150,7 +2151,7 @@ def test_thread_stream_receipt_audits_identity_and_requires_accepted_parent():
     ],
 )
 def test_receipt_metadata_refuses_unknown_routes_and_foreign_identities(method, path, resources):
-    from mux.conformance.recording import RecordingError
+    from daimon.testing.conformance.recording import RecordingError
 
     if path == "/v1/sessions":
         assert live.request_metadata([(method, path)], resources)[0]["resource_id"] is None

@@ -8,6 +8,7 @@ from typing import cast
 
 import httpx
 import pytest
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.provider_fixtures import (
     BackendFixture,
     FixturePack,
@@ -39,7 +40,6 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.transport import SDKTransport as GeminiTransport
 from mux.drivers.gemini.transport import close_iterator
 from mux.drivers.openai import OpenAIDriver

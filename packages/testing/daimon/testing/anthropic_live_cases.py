@@ -19,19 +19,19 @@ from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.anthropic_live import MODEL, LiveContext, LiveRefused, explicit_secret
-from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.f2_native_bounds import install_f2_bounds, verify_tools
-from daimon.testing.turn_fakes import RecordingLifecycle
-from mux.conformance.default_capability import (
+from daimon.testing.conformance.default_capability import (
     DEFAULT_SKILLS,
     DEFAULT_TOOLS,
     DefaultCapabilityAdapter,
     DefaultManifest,
     NamedSkill,
 )
-from mux.conformance.recording import Recorder
-from mux.conformance.runner import run_default_capability
-from mux.conformance.usage_settlement import AnthropicSessionSpend
+from daimon.testing.conformance.recording import Recorder
+from daimon.testing.conformance.runner import run_default_capability
+from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
+from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.f2_native_bounds import install_f2_bounds, verify_tools
+from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.actions import UserMessage
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from mux.conformance.default_capability import MCP_TOOLS
+from daimon.testing.conformance.default_capability import MCP_TOOLS
 from mux.contracts.ids import ModelRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolSpec
 from mux.drivers.openai import OpenAIDriver

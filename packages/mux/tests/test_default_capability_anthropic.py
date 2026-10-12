@@ -17,9 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 import yaml
-from daimon.testing.ma_models import ma_agent, ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
-from mux.conformance.default_capability import (
+from daimon.testing.conformance.default_capability import (
     BASH_RESULT,
     DEFAULT_TOOLS,
     FINAL_MESSAGE,
@@ -32,13 +30,15 @@ from mux.conformance.default_capability import (
     check_turn,
     skill_text,
 )
-from mux.conformance.recording import Recorder, Replay
-from mux.conformance.runner import (
+from daimon.testing.conformance.recording import Recorder, Replay
+from daimon.testing.conformance.runner import (
     PendingKind,
     PendingReason,
     replay_default_capability,
     run_default_capability,
 )
+from daimon.testing.ma_models import ma_agent, ma_session
+from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ModelRef, ResourceRef, Scope
 from mux.contracts.resources import (
     Agent,
@@ -52,7 +52,7 @@ from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 
 ROOT = Path(__file__).resolve().parents[3]
-TAPE = ROOT / "packages/mux/mux/conformance/tapes/anthropic-default-capability.json"
+TAPE = ROOT / "packages/testing/fixtures/conformance/tapes/anthropic-default-capability.json"
 NOW = datetime(2026, 10, 10, tzinfo=UTC).isoformat()
 MODEL = ModelRef(provider="anthropic", id="claude-haiku-4-5-20251001")
 SCOPE = Scope(

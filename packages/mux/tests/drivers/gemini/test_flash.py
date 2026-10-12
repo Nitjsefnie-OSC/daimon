@@ -3,8 +3,8 @@
 from collections.abc import Mapping
 
 import pytest
+from daimon.testing.drivers.gemini.fake import FakeTransport
 from mux.contracts.ids import ModelRef
-from mux.drivers.gemini.fake import FakeTransport
 from mux.drivers.gemini.flash import FLASH_MODELS, FlashAttempt, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError

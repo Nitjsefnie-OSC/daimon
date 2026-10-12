@@ -16,6 +16,7 @@ import httpx
 import pytest
 from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.testing.discord_surface import DiscordSurfaceHarness
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.isolated_sdk import build_async_anthropic, build_async_openai
 from daimon.testing.output_ownership import (
     CapturedBytes,
@@ -39,7 +40,6 @@ from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.artifacts import AnthropicArtifacts
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.openai._common import Context
 from mux.drivers.openai.artifacts import OpenAIArtifacts, artifact_identity
 from mux.drivers.openai.transport import SDKTransport

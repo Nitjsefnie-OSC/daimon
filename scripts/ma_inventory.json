@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2604,
+  "files_scanned": 2615,
   "parse_errors": [],
   "calls": [
     {
@@ -7600,8 +7600,8 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1495,
-      "end": 1498,
+      "line": 1496,
+      "end": 1499,
       "scope": "invoke",
       "category": "test",
       "resource": "sessions.threads.events.stream",
@@ -19663,7 +19663,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1157,
+      "line": 1158,
       "module": "anthropic",
       "names": [
         "AsyncStream"
@@ -19672,7 +19672,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1609,
+      "line": 1610,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -19681,7 +19681,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 2349,
+      "line": 2350,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"

@@ -5,8 +5,8 @@ from collections.abc import Iterator, Mapping
 import httpx
 import pytest
 from daimon.testing import isolated_sdk
+from daimon.testing.drivers.openai import conformance, conformance_sdk, default_capability
 from daimon.testing.isolated_sdk import SDK_ENV_VARS, build_async_openai
-from mux.drivers.openai import conformance, conformance_sdk, default_capability
 from mux.drivers.openai.transport import SDKTransport
 from openai import AsyncOpenAI
 

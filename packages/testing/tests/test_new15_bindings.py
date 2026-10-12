@@ -43,6 +43,7 @@ from daimon.testing.admission_evidence import AdmissionEffects
 from daimon.testing.channel_accounting import ControlledTurnPricing
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.discord_surface import DiscordSurfaceHarness
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
 from daimon.testing.ma import json_body
 from daimon.testing.ma_models import ma_session
@@ -52,7 +53,6 @@ from daimon.testing.outcome_oracle import LogObservation, VisibleText
 from daimon.testing.turn_router import build_turn_router
 from mux.contracts.ids import ChannelRef, ModelRef, Provider, ResourceRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.flash import FlashAttempt
 from mux.drivers.gemini.transport import SDKTransport as GeminiSDK
 from mux.drivers.openai.session_controls import SessionControls

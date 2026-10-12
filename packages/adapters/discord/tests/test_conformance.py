@@ -14,18 +14,11 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import daimon.adapters.discord.bot as bot_module
-import daimon.adapters.discord.conformance as conformance_module
+import daimon.testing.adapters.discord.conformance as conformance_module
 import discord
 import pytest
 import pytest_asyncio
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.conformance import (
-    AdmissionBarrier,
-    MentionTurn,
-    MultiHumanEnvelope,
-    ThreadInputs,
-    multi_human_evidence,
-)
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.defaults.provisioning import provision_tenant
@@ -33,6 +26,13 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.testing.adapters.discord.conformance import (
+    AdmissionBarrier,
+    MentionTurn,
+    MultiHumanEnvelope,
+    ThreadInputs,
+    multi_human_evidence,
+)
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
