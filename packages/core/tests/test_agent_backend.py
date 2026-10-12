@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
@@ -697,3 +698,87 @@ async def test_clear_preview_uses_the_same_default_and_digest(owned):
     from mux.contracts.config import DEFAULT_BACKEND
 
     assert await service.preview(agent, None) == await service.preview(agent, DEFAULT_BACKEND)
+
+
+async def test_scoped_source_reuse_projects_actual_sdk_retrieve_without_extra_request(owned):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.testing.ma_models import ma_agent
+    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+    _, agent, _, sessions = owned
+    native = ma_agent(
+        id="agent-owned", tenant_id=str(agent.tenant_id), name=agent.name, model="claude-opus-5-5"
+    )
+    payload = native.model_dump(mode="json")
+    payload["metadata"]["daimon_name"] = agent.name
+    trace = ScriptedTransport()
+    trace.queue(ScriptedReply("GET", "/v1/agents/agent-owned", httpx.Response(200, json=payload)))
+    async with trace.client() as client:
+        actual = await client.beta.agents.retrieve("agent-owned")
+        loaded = await load_backend_agent(
+            client, sessions, tenant_id=agent.tenant_id, agent_name=agent.name, actual_agent=actual
+        )
+    assert loaded.agent_id == derive_agent_uuid(tenant_id=agent.tenant_id, ma_agent_id=actual.id)
+    assert loaded.model == "claude-opus-5-5" and loaded.configuration_digest
+    assert [(r.method, r.path) for r in trace.requests] == [("GET", "/v1/agents/agent-owned")]
+    assert not trace.violations and not trace.replies
+
+
+@pytest.mark.parametrize("invalid", ["foreign", "missing_tenant", "wrong_name", "archived"])
+async def test_scoped_source_reuse_refuses_unbound_or_inactive_source_without_extra_request(
+    owned, invalid
+):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.testing.ma_models import ma_agent
+    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+    _, agent, _, sessions = owned
+    payload = ma_agent(
+        id="agent-owned", tenant_id=str(agent.tenant_id), name=agent.name
+    ).model_dump(mode="json")
+    payload["metadata"]["daimon_name"] = agent.name
+    if invalid == "foreign":
+        payload["metadata"]["daimon_tenant"] = str(uuid.uuid4())
+    elif invalid == "missing_tenant":
+        payload["metadata"].pop("daimon_tenant")
+    elif invalid == "wrong_name":
+        payload["metadata"]["daimon_name"] = "another"
+    else:
+        payload["archived_at"] = "2026-10-12T00:00:00Z"
+    trace = ScriptedTransport()
+    trace.queue(ScriptedReply("GET", "/v1/agents/agent-owned", httpx.Response(200, json=payload)))
+    async with trace.client() as client:
+        actual = await client.beta.agents.retrieve("agent-owned")
+        with pytest.raises(AgentBackendRefused):
+            await load_backend_agent(
+                client,
+                sessions,
+                tenant_id=agent.tenant_id,
+                agent_name=agent.name,
+                actual_agent=actual,
+            )
+    assert [(r.method, r.path) for r in trace.requests] == [("GET", "/v1/agents/agent-owned")]
+    assert not trace.violations and not trace.replies
+
+
+async def test_retained_and_disabled_resolution_need_no_fabricated_source(owned):
+    _, agent, _, sessions = owned
+    channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="no-source")
+    async with sessions.begin() as session:
+        retained = await set_channel_backend(session, channel, BackendConfig())
+    async with sessions.begin() as session:
+        assert await resolve_turn_backend(session, channel, None, enabled=False) == (
+            None,
+            False,
+            "default",
+        )
+        assert await resolve_turn_backend(
+            session, channel, None, enabled=True, retained_revision=0
+        ) == (None, False, "default")
+        result = await resolve_turn_backend(
+            session, channel, None, enabled=True, retained_revision=retained.local
+        )
+        assert result == (retained, False, "channel")
+        with pytest.raises(AgentBackendRefused, match="agent identity required"):
+            await resolve_turn_backend(session, channel, None, enabled=True)

@@ -27,10 +27,12 @@ from typing import Literal, cast
 
 import structlog
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import OPEN_ACCESS_POLICY
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.config import TurnSettings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.neutral_resources import NeutralResourceHost
@@ -582,7 +584,7 @@ def make_backend_service(
 async def resolve_turn_backend(
     session: AsyncSession,
     channel: ChannelRef,
-    agent: BackendAgent,
+    agent: BackendAgent | None,
     *,
     enabled: bool,
     retained_revision: int | None = None,
@@ -597,7 +599,7 @@ async def resolve_turn_backend(
             raise AgentBackendRefused("stale_revision")
         source: Literal["channel", "agent"] = "agent" if origin == "agent" else "channel"
         return retained, retained.thread_mode == "shared", source
-    if not isinstance(cast(object, agent), BackendAgent):
+    if not isinstance(agent, BackendAgent):
         raise AgentBackendRefused("agent_identity_required")
     tenant_id = uuid.UUID(channel.tenant_id)
     if agent.tenant_id != tenant_id:
@@ -641,6 +643,7 @@ async def load_backend_agent(
     tenant_id: uuid.UUID,
     agent_name: str,
     resource_host: NeutralResourceHost | None = None,
+    actual_agent: BetaManagedAgentsAgent | None = None,
 ) -> BackendAgent:
     """Read actual tenant-scoped resources at the same edge used by skill edits."""
     if resource_host is not None:
@@ -695,7 +698,15 @@ async def load_backend_agent(
             mcps=mcps,
             required_capabilities=_native_agent_requirements(actual.spec),
         )
-    actual = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
+    actual = actual_agent
+    if actual is not None:
+        metadata = actual.metadata or {}
+        if metadata.get(MA_METADATA_KEY_TENANT) != str(tenant_id):
+            raise AgentBackendRefused("tenant_mismatch")
+        if metadata.get(MA_METADATA_KEY_NAME) != agent_name or actual.archived_at is not None:
+            raise AgentBackendRefused("agent_not_found")
+    else:
+        actual = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
     if actual is None:
         raise AgentBackendRefused("agent_not_found")
     # Native SDK projection is hashed only; neither credentials nor URLs leave this edge.

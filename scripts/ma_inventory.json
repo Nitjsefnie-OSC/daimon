@@ -3824,6 +3824,30 @@
       ]
     },
     {
+      "file": "packages/core/tests/test_agent_backend.py",
+      "line": 711,
+      "end": 711,
+      "scope": "test_scoped_source_reuse_projects_actual_sdk_retrieve_without_extra_request",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "client.beta.agents.retrieve('agent-owned')",
+      "request_keys": [],
+      "response_access": [
+        "actual.id"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_agent_backend.py",
+      "line": 745,
+      "end": 745,
+      "scope": "test_scoped_source_reuse_refuses_unbound_or_inactive_source_without_extra_request",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "client.beta.agents.retrieve('agent-owned')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/core/tests/test_checkpoint_turn_scope.py",
       "line": 78,
       "end": 78,
@@ -13101,6 +13125,15 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/channel_backend.py",
+      "line": 30,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
       ],
       "category": "production"
     },

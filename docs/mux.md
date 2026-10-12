@@ -2169,7 +2169,11 @@ Agent retirement requires the profile's declared deletion support. Missing
 catalog support refuses at the same host/store authorization boundary; provider,
 tenant, account and workspace identity checks remain mandatory. This changes
 no default routes, operator grants or native request bodies.
-
+Retained and disabled backend selection needs no fresh agent projection. Fresh
+selection still requires the real scoped identity. Admission can reuse its
+already-read active Managed Agents response through `load_backend_agent`;
+the projection checks the same tenant/name metadata and avoids another native
+list or retrieve. Unbound or archived responses refuse without additional I/O.
 
 ### Replay fixture integrity
 
