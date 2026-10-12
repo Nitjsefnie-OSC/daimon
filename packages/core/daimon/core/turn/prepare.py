@@ -96,6 +96,7 @@ from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
+    from daimon.core.neutral_resources import ResolvedWorkerSpec
     from daimon.core.session_preparation_stages import WorkspaceTransfer
     from daimon.core.stores.neutral_catalog import AgentRevision
 
@@ -199,6 +200,7 @@ class ProviderPreparationRequest:
     now: Callable[[], dt.datetime]
     counterpart: AgentRevision | None = field(default=None, kw_only=True)
     source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
+    worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
