@@ -52,6 +52,7 @@ from daimon.core.permissions import (
     any_own_readers,
     any_readers_limited,
     home_of,
+    space_reach,
 )
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -511,7 +512,9 @@ async def load_read_policy(
     expired, another account's or another responder's counts as none too.
     An agent key minted in a channel needs no origin: its calls run inside
     that channel (`token_channel_id`), and only that channel. While a channel
-    is kept to its own agents the executing agent is resolved too.
+    is kept to its own agents the executing agent is resolved too. Either way
+    a turn in a Space is inside all its channels (`space_reach`), which the
+    Teams private-channel checks read straight from `origin_channel_ids`.
     """
     policy = await load_channel_policy(runtime, auth)
     agent = (
@@ -522,7 +525,7 @@ async def load_read_policy(
     bound = token_channel_id(auth)
     if bound is not None:
         return ChannelReadPolicy(
-            policy, frozenset({bound}), agent, origin_place=Place(channel_id=bound)
+            policy, space_reach(policy, {bound}), agent, origin_place=Place(channel_id=bound)
         )
     # Readers own are limited too, so an origin that holds a call is resolved.
     if not (any_readers_limited(policy) or resolve_without_seals):
@@ -536,7 +539,7 @@ async def load_read_policy(
         # A Slack thread's rule is keyed by its channel_id:thread_ts form.
         inside.add(f"{origin.parent_channel_id}:{origin.thread_id}")
     return ChannelReadPolicy(
-        policy, frozenset(inside), agent, origin, origin_place=turn_origin_place(origin)
+        policy, space_reach(policy, inside), agent, origin, origin_place=turn_origin_place(origin)
     )
 
 

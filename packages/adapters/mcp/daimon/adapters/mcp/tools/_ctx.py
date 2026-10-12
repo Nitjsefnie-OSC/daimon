@@ -90,8 +90,8 @@ async def _policy_gate(
 
     Reads the policy fresh on every call, so ``_admission_recheck`` can run it
     again right before a turn's session is created or its message is sent.
-    Returns the agent's home, the channel it is one of the own agents of
-    (`AgentPermissions.home`), when ``agent_names`` is given, else None.
+    Returns the channel the agent's runs are charged to, its home channel
+    (`AgentPermissions.budget_channel`), when ``agent_names`` is given, else None.
     """
 
     def refused(reason: TerminationReason) -> None:
@@ -183,7 +183,7 @@ async def _policy_gate(
             "those channels; a question about a shared report can't be answered here."
         )
 
-    owner = agent_permissions(policy, names).home if names else None
+    owner = agent_permissions(policy, names).budget_channel if names else None
     if auth.platform_user_id is None:
         return owner
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
