@@ -259,17 +259,17 @@ def interactive_decider(
             return ToolConfirmationResult(allow=True)
         if verdict.outcome == "deny":
             return ToolConfirmationResult(allow=False, deny_message=refusal_message(call, verdict))
-        prompt = prompt_for_tool_call(
-            call,
-            requester_platform_user_id=requester_platform_user_id,
-            now=now(),
-            timeout=timedelta(seconds=policy.confirmation_timeout_s),
-        )
         try:
+            prompt = prompt_for_tool_call(
+                call,
+                requester_platform_user_id=requester_platform_user_id,
+                now=now(),
+                timeout=timedelta(seconds=policy.confirmation_timeout_s),
+            )
             response = await confirm(prompt)
         except Exception as err:
-            # Named boundary: the hook is adapter code talking to a chat API;
-            # whatever it raises, the write must not run.
+            # Named boundary: prompt validation and the adapter's card must
+            # both succeed before the write may run.
             log.warning("tool_safety.confirm_failed", tool=call.key, error=str(err))
             response = "denied"
         answer = response.answer if isinstance(response, ApprovedConfirmation) else response

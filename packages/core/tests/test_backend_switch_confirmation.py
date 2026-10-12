@@ -67,6 +67,48 @@ def test_malformed_switch_reference_never_creates_an_approval(changes: dict[str,
         )
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"expected_revision": -1},
+        {"expected_revision": "2"},
+        {"expected_revision": None},
+        {"expected_revision": True},
+        {"preview_digest": "bad"},
+        {"target_backend": "unknown"},
+        {"agent_name": ""},
+    ],
+)
+async def test_malformed_switch_is_denied_without_crashing_sibling_decisions(
+    changes: dict[str, object], enabled: bool
+) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_tools
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.posture import PolicyApproval
+
+    confirm = AsyncMock(return_value="approved")
+    posture = chat_tool_confirmation(
+        ToolSafetyPolicy(enabled=enabled),
+        requester_platform_user_id="requester",
+        confirm=confirm,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=backend_switch_tools(enabled=True),
+    )
+    assert isinstance(posture, PolicyApproval)
+    preview_call = _call(preview_digest=None).model_copy(update={"tool_use_id": "preview-sibling"})
+    denied, preview = await asyncio.gather(
+        posture.decide(_call(**changes)), posture.decide(preview_call)
+    )
+    assert denied.allow is False
+    assert denied.deny_message and "did not run" in denied.deny_message
+    assert preview.allow is True
+    confirm.assert_not_awaited()
+
+
 def test_preview_is_a_read_but_confirm_is_never_unattended() -> None:
     policy = ToolSafetyPolicy(enabled=True, unattended_writes=("*",))
     trusted = frozenset({DAIMON_SERVER_NAME})

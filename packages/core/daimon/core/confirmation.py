@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, PUBLISH_TOOLS, ToolCall
+from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.ids import Provider
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -278,11 +279,6 @@ def prompt_for_tool_call(
         requester_platform_user_id=requester_platform_user_id,
         expires_at=now + timeout,
     )
-
-
-def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
-    """Project authoritative backend-selection eligibility into session controls."""
-    return frozenset({"request_agent_backend_switch"}) if enabled else frozenset()
 
 
 def backend_switch_tools_for_turn(deps: TurnDeps) -> frozenset[str]:

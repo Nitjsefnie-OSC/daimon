@@ -60,6 +60,7 @@ __all__ = [
     "ToolSafetyPolicy",
     "ToolVerdict",
     "VerdictReason",
+    "backend_switch_tools",
     "classify_tool",
     "decide_tool_call",
     "has_confirmation_gate",
@@ -108,6 +109,17 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
     "request_agent_backend_switch": "preview_digest",
 }
+
+
+def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
+    """Project authoritative backend-selection eligibility into session controls."""
+    return frozenset({"request_agent_backend_switch"}) if enabled else frozenset()
+
+
+def _always_confirmed_tools() -> frozenset[str]:
+    """Every other confirmation-table entry requires review when policy is on."""
+    return frozenset(CONFIRMED_DAIMON_TOOLS) - backend_switch_tools(enabled=True)
+
 
 #: Daimon's own tools that put content behind a link whoever holds it opens.
 #: A session that asks before publishing waits for the card on each, and an
@@ -397,7 +409,7 @@ def _confirmed_daimon_write(
 ) -> bool:
     field = (
         CONFIRMED_DAIMON_TOOLS.get(call.tool_name)
-        if call.tool_name == "add_skill" or call.tool_name in confirmed_tools
+        if call.tool_name in _always_confirmed_tools() or call.tool_name in confirmed_tools
         else None
     )
     return (
@@ -565,7 +577,7 @@ def session_tools_for_policy(
     if not policy.enabled and not asks_before_publishing and not confirmed_tools:
         return None
     asked = (
-        *(("add_skill",) if policy.enabled else ()),
+        *(sorted(_always_confirmed_tools()) if policy.enabled else ()),
         *sorted(confirmed_tools),
         *(sorted(PUBLISH_TOOLS) if asks_before_publishing else ()),
     )
