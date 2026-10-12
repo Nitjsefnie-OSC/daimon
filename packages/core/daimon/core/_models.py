@@ -1467,6 +1467,39 @@ class AgentMemoryStore(Base):
     )
 
 
+class AgentPersonalMemoryStore(Base):
+    """Per-(tenant, agent, account) MA memory store binding: one person's own memory.
+
+    `account_id` deliberately has no foreign key. Account erasure deletes the
+    account row first and the MA store afterwards (`purge`), so the binding has
+    to outlive the account: it is the record of which store is still to delete.
+    For the same reason archiving the agent keeps the row and only stamps
+    `archived_at`: an archived store still holds the person's memories, and
+    the row is what erasure deletes it by. An archived row is never mounted.
+    """
+
+    __tablename__ = "agent_personal_memory_store"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "agent_id", "account_id", name="pk_agent_personal_memory_store"
+        ),
+        Index("ix_agent_personal_memory_store_account_id", "account_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class GitHubAppInstallation(Base):
     """GitHub App installation record.
 

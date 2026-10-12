@@ -71,10 +71,15 @@ Deliberate carve-outs:
 - The user's GitHub-side OAuth grant is not revoked. No GitHub API client enters
   the purge path — we delete only our encrypted credential and oauth-state rows
   from our own DB.
-- Agent memory stores are agent-scoped and shared across all workspace users,
-  so account purge does NOT touch them — archiving one because a single member
-  invoked erasure would destroy the guild's shared agent memory. They may
-  retain information about the purged user.
+- An agent's shared memory store is agent-scoped and shared across all
+  workspace users, so account purge does NOT touch it — archiving it because a
+  single member invoked erasure would destroy the guild's shared agent memory.
+  It may retain information about the purged user. The person's own personal
+  memory stores (one per agent they talked to, archived ones included) ARE
+  deleted upstream after the DB transaction commits; their bindings carry no
+  FK to `accounts`, so they survive the account row as the record of what is
+  left, and `sweep_privacy_session_deletes` finishes any delete that failed or
+  never ran.
 - message_feedback rows cast in a tenant where the person has NO principal are
   out of reach of an erasure run from another tenant. This is the one table
   that records rows for someone with no principal anywhere: the reaction path
@@ -97,12 +102,17 @@ Deliberate carve-outs:
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Literal
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
+from daimon.core.memory_resource import (
+    delete_personal_memory_stores_for_account,
+    sweep_erased_personal_memory,
+)
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import agent_posts as agent_posts_store
@@ -600,6 +610,15 @@ async def purge_account(
     # a failure in one tenant does not skip the remaining tenants.
     if anthropic is not None:
         sessions = await retry_account_session_delete(anthropic, sm, account_id=account_id)
+        # The person's own memory stores, archived ones included: deleted
+        # upstream, then unbound. Independent of the session work item, which
+        # exists only while the account still had principals; a store that
+        # could not be deleted keeps its binding, and
+        # `sweep_privacy_session_deletes` finishes it.
+        if not await delete_personal_memory_stores_for_account(
+            anthropic, sm, account_id=account_id
+        ):
+            sessions = replace(sessions, upstream_error=True)
         return AccountPurgeResult(db=db_report, sessions=sessions)
 
     return AccountPurgeResult(db=db_report)
@@ -677,7 +696,16 @@ async def _retry_account_session_delete_locked(
 async def sweep_privacy_session_deletes(
     anthropic: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Retry queued account erasures, isolating failures by account."""
+    """Retry queued account erasures, isolating failures by account.
+
+    Also finishes the personal memory stores of every account already erased
+    (`sweep_erased_personal_memory`), whether or not a session work item is
+    left for it.
+    """
+    try:
+        await sweep_erased_personal_memory(anthropic, sm)
+    except Exception:
+        log.exception("purge.personal_memory_sweep_failed")
     async with sm() as session:
         work = await privacy_deletes_store.list_work(session)
     for item in work:

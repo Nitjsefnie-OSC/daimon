@@ -420,6 +420,7 @@ async def _start_turn_impl(
     *,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
+    personal_memory: bool = False,
 ) -> dict[str, str]:
     """Create a new MA session for the caller's agent and send the first message.
 
@@ -457,6 +458,14 @@ async def _start_turn_impl(
     isolated channel's own.
 
     A chat turn's own credential is refused (``_require_outside_chat_turn``).
+
+    ``personal_memory`` mounts the caller's own personal memory store beside
+    the shared one. Only a caller whose identity is a verified person passes
+    it: the hub, whose identity is the person's platform OAuth login and whose
+    session handles only that account can use (``hub._verify_account_owns_session``).
+    An agent key, an operator or CLI token, and an internal caller leave it
+    off: a key is the agent, its sessions are the agent's, and whoever holds
+    it is not established as one person.
 
     ``recheck`` (``_ctx._admission_recheck``) runs the access decision again
     immediately before the session is created and again before the message
@@ -573,6 +582,7 @@ async def _start_turn_impl(
             budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
             origin_seal_ids=seal,
+            personal_memory=personal_memory,
             # Vault, repo-token and env work run first: decide again right
             # before the session exists, so a pin or seal landing meanwhile
             # leaves none.
@@ -1004,6 +1014,7 @@ async def _ask_impl(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
+    personal_memory: bool = False,
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
@@ -1015,7 +1026,9 @@ async def _ask_impl(
     the first poll would hand back the previous turn's answer.
     """
     if handle is None:
-        started = await _start_turn_impl(runtime, auth, message, now=now, recheck=recheck)
+        started = await _start_turn_impl(
+            runtime, auth, message, now=now, recheck=recheck, personal_memory=personal_memory
+        )
     else:
         started = await _continue_turn_impl(
             runtime, auth, handle, message, now=now, recheck=recheck

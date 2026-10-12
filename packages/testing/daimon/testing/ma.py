@@ -779,7 +779,7 @@ def make_fake_memory_store_handler(
 
     Raises NotHandled for non-memory paths — compose with other handlers via
     combine_handlers. Covers: store create/retrieve/archive/delete, memory
-    create/list/retrieve. (update/versions endpoints are out of v1 scope.)
+    create/list/retrieve/delete. (update/versions endpoints are out of v1 scope.)
 
     When combining with make_fake_ma_handler (which returns a 404 catch-all),
     pass this handler first to combine_handlers() so requests are tried here before fallthrough.
@@ -829,6 +829,23 @@ def make_fake_memory_store_handler(
             return list_response(data)
 
         m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/memories/(?P<mid>[^/]+)", path)
+        if m and method == "DELETE":
+            sid, mid = m.group("sid"), m.group("mid")
+            expected = request.url.params.get("expected_content_sha256")
+            current = next((x for x in st.memories.get(sid, []) if x["id"] == mid), None)
+            if (
+                expected is not None
+                and current is not None
+                and current.get("content_sha256") != expected
+            ):
+                return httpx.Response(
+                    409, json={"type": "error", "error": {"type": "conflict_error"}}
+                )
+            kept = [x for x in st.memories.get(sid, []) if x["id"] != mid]
+            if len(kept) == len(st.memories.get(sid, [])):
+                return not_found_response("no such memory")
+            st.memories[sid] = kept
+            return httpx.Response(200, json={"id": mid, "type": "memory_deleted"})
         if m and method == "GET":
             sid, mid = m.group("sid"), m.group("mid")
             view = request.url.params.get("view", "basic")

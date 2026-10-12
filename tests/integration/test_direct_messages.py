@@ -1141,7 +1141,8 @@ async def test_dm_tightening_memory_policy_replaces_the_writable_session(
     modes = [
         [r["access"] for r in body["resources"] if r["type"] == "memory_store"] for body in created
     ]
-    assert modes == [["read_write"], ["read_only"]]
+    # Shared then personal: the DM policy tightens both mounts together.
+    assert modes == [["read_write", "read_write"], ["read_only", "read_only"]]
 
 
 async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_mcp_callers(

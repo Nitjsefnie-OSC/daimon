@@ -37,7 +37,8 @@ scope uses the same one.
 | Session outputs (Files API) | own | own | own | **own** (listed by session) | own | own |
 | Chat attachments | n/a | visible to channel readers | **shared, by design**: visible to everyone in the thread, and replayed history can carry them into other participants' agents | posted by the caller | n/a | not delivered |
 | Published notebooks | own | shared by link | shared by link | managed by the publisher; opened by anyone with the link | n/a | shared by link |
-| Agent memory (`/mnt/memory`) | own | **shared** | **shared** | **shared** | **own** (one store per agent) | shared, optionally read-only |
+| Agent memory, shared store (`/mnt/memory/daimon-…`) | own | **shared** | **shared** | **shared** | **own** (one store per agent) | shared, optionally read-only |
+| Agent memory, personal store (`/mnt/memory/personal-…`) | own | follows the caller | follows the caller | **own** (one per person per agent) | **own** | the caller's own, optionally read-only |
 | Agent keys (`.env`) | own | shared | shared | **shared** | **own** | shared |
 | Token MCP credentials | own | shared | shared | **shared** | **own** | shared |
 | OAuth MCP credentials | own | shared | shared | **own** | own | own |
@@ -185,19 +186,29 @@ stay with one person belongs in a DM, not a shared thread.
 
 ## Agent memory
 
-Memory is **one MA memory store per (tenant, agent)**
-(`packages/core/daimon/core/_models.py:1395-1398`,
-`packages/core/daimon/core/memory_resource.py:1-12`), mounted on every
-chat, routine and DM session of that agent
-(`packages/core/daimon/core/sessions.py:471-479`). It is
-not split by caller, thread, channel or DM. The agent is told it is "your
-persistent memory across all conversations and channels"
-(`packages/core/daimon/core/memory_resource.py:37-44`).
+An agent has two kinds of memory store (`packages/core/daimon/core/memory_resource.py`):
 
-A split is in progress: each person gets a personal store per agent beside the shared one ([PR #866](https://github.com/pymc-labs/daimon/pull/866), not yet merged). Until it ships, the single shared store described here is what runs.
+- **Shared**: one MA memory store per (tenant, agent), mounted on every
+  ordinary session of that agent, for every person, channel, thread and DM.
+  Its instructions keep it to team and agent knowledge (conventions, project
+  facts, how tools and skills behave) and forbid recording anything personal.
+- **Personal**: one store per (tenant, agent, account), mounted only on that
+  person's own sessions. A chat session is already one per caller, so another
+  person's session never has it mounted and cannot read it; that separation is
+  the mount, not the prompt. Only which store a fact is written to depends on
+  the agent following its instructions.
 
-What varies is only whether the mount is writable
-(`packages/core/daimon/core/memory_resource.py:119`). It is read-only:
+Personal stores are mounted on chat turns (channels, threads and DMs on every
+platform), on the hub's `ask` and `start_turn` (the caller is verified by their
+platform sign-in and only their account can use the session), and on a routine
+whose result reaches only its owner (no destination and no channel), read-only.
+Per-agent keys, operator and CLI tokens, `daimon sessions create` and routines
+with a destination mount the shared store alone. A person sees and clears their
+own personal store with `/memory mine` and `/memory forget-mine`; nobody can
+see or clear anyone else's. Details are in
+[architecture.md](architecture.md#shared-and-personal-memory).
+
+Both mounts of a session have the same access. They are read-only:
 
 - in a channel or thread with limited readers, unless the agent is that
   channel's own (`packages/core/daimon/core/turn/admission.py:560-564`);
@@ -205,7 +216,8 @@ What varies is only whether the mount is writable
   (`packages/core/daimon/core/turn/admission.py:563`);
 - in a routine run (`packages/core/daimon/core/headless_runner.py:335`).
 
-Read-only stops a turn from writing; it does not hide what others wrote.
+Read-only stops a turn from writing; it does not hide what others wrote to the
+shared store.
 
 The exception is an isolated session, which an agent-chat turn started from
 an uploaded bundle uses
@@ -294,10 +306,11 @@ gate `packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:93-112`; panel
 channel, or of that channel's own agent, is in addition visible only from
 inside that channel
 (`packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:340-343`). Each fire
-opens a fresh session on the creator's account with read-only memory
-(`packages/core/daimon/core/headless_runner.py:335`), and the session is
-stamped private so only its owner reads the transcript. A routine still runs
-with its agent's shared keys, connectors, repo and memory. See
+opens a fresh session on the creator's account with read-only memory, and the
+session is stamped private so only its owner reads the transcript. A routine
+still runs with its agent's shared keys, connectors, repo and shared memory; only
+one whose result reaches nobody but its owner also reads the owner's personal
+memory. See
 [routines.md](routines.md#who-may-do-what).
 
 ## DMs
@@ -308,8 +321,8 @@ MCP session tools open it only with the matching execution grant, admins
 included (`packages/adapters/mcp/daimon/adapters/mcp/tools/_session_access.py:198-215`).
 A Slack private turn carries that grant, so its own owner can inspect it. A
 Discord private scope carries none, so nobody can inspect it through MCP, not
-even its owner. It shares the agent's memory (read-only if the tenant says
-so), keys and connectors, and its spend counts toward the channel it came
+even its owner. It shares the agent's shared memory and mounts the person's own
+personal memory (both read-only if the tenant says so), keys and connectors, and its spend counts toward the channel it came
 from. Details are in
 [architecture.md](architecture.md#opt-in-dm-conversations).
 
@@ -348,12 +361,10 @@ boundary is explicit.
    other person can open it, and run code in it if it is editable
    (`packages/adapters/mcp/daimon/adapters/mcp/tools/notebook.py:172`).
    Only listing and deleting stay with the publisher's account.
-4. **Agent memory.** Both sessions mount the same store
-   (`packages/core/daimon/core/sessions.py:471-479`); what one writes the
-   other reads, in this thread and every other. Memory is being split per
-   person, with a personal store per agent mounted only in that person's
-   sessions ([PR #866](https://github.com/pymc-labs/daimon/pull/866), not yet
-   merged).
+4. **Shared agent memory.** Both sessions mount the agent's shared store;
+   what one writes there the other reads, in this thread and every other.
+   Each person's personal store is mounted only in their own session and does
+   not cross.
 5. **Agent keys, token connectors and the repo.** Both sessions mount the
    same `.env` (`packages/core/daimon/core/sessions.py:417-425`), the same
    token MCP credentials (`packages/core/daimon/core/sessions.py:390-411`) and
@@ -377,7 +388,7 @@ boundary is explicit.
 
 What does **not** cross: the session and its transcript, the sandbox, the
 Files API output listing, the carried work on a session replacement, OAuth
-connector grants, the Daimon MCP vault, notebook management (listing and
+connector grants, personal memory, the Daimon MCP vault, notebook management (listing and
 deleting), the per-member cap and routines.
 
 ## Known gaps
@@ -396,11 +407,9 @@ These are places where the code and its own description disagree today.
   attribution (`packages/core/daimon/core/stores/thread_sessions.py:17-20`),
   but support escalations on all three platforms also use it and store the
   session id it returns, which may be another caller's.
-- The memory instructions ask the agent to record "user preferences"
-  (`packages/core/daimon/core/memory_resource.py:37-44`) in a store every
-  caller of the agent shares, without saying it is shared between people.
-  [PR #866](https://github.com/pymc-labs/daimon/pull/866) (not yet merged)
-  moves personal facts to per-person stores.
+- Shared memory written before personal stores existed may still hold one
+  person's preferences; nothing was moved. `daimon memory personal-report`
+  lists, per agent, how many shared entries look personal, redacted.
 - A tenant owns MA skills by the first 8 hex characters of its id
   (`packages/core/daimon/core/defaults/metadata.py:177`,
   `packages/core/daimon/core/defaults/metadata.py:280`), a 32-bit prefix,

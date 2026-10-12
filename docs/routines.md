@@ -450,7 +450,12 @@ verify evidence, and use delivery tools for requested output. Agents can customi
 it with `context_fragments.routine` in their YAML spec; see [architecture](architecture.md#invocation-context-fragments).
 
 Routine sessions always mount persistent agent memory read-only, regardless of the
-tenant's chat or DM policy. They can use saved memory but cannot change it.
+tenant's chat or DM policy. They can use saved memory but cannot change it. A routine
+with a destination (or a channel) mounts the agent's shared memory only: it posts where
+other people may read it, with nobody there to ask. A routine with neither, made in a DM
+or with no origin, answers its owner alone and also mounts its owner's personal memory,
+read-only. This is decided from the routine at every fire, so giving it a destination
+stops the personal mount at its next run.
 
 A routine session is stamped like a turn in the channel it fires into: the
 destination's channel (a thread's parent), the thread, and the readers limits

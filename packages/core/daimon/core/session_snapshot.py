@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
@@ -113,6 +113,11 @@ class SessionSnapshot(BaseModel):
     repo_branch: str | None
     memory_store_id: str | None
     memory_read_only: bool = False
+    # The caller's own store (`memory_resource`), mounted beside the shared one
+    # with the same access. None for a session created without it, including
+    # every session from before it existed: `session_compat` never replaces a
+    # session only to add it.
+    personal_memory_store_id: str | None = None
     vault_id: str | None
 
     # Mutable axis — a difference here can be applied to the live session.
@@ -180,6 +185,10 @@ def fingerprint_identity(snapshot: SessionSnapshot) -> str:
     fields = _IDENTITY_FIELDS
     if snapshot.github_mode == "app":
         fields = (*fields, "github_mode", "repo_urls")
+    if snapshot.personal_memory_store_id is not None:
+        # Only when set, so every snapshot without one keeps the fingerprint
+        # it was recorded with.
+        fields = (*fields, "personal_memory_store_id")
     return _fingerprint(snapshot, fields)
 
 
@@ -201,8 +210,13 @@ def snapshot_from_created_session(
     vault_id: str | None,
     sent_skills: Sequence[MaSkill],
     github_mode: Literal["legacy", "app"] = "legacy",
+    personal_memory_store_ids: Collection[str] = (),
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
+
+    `personal_memory_store_ids` are the personal stores the creator may have
+    mounted; a memory-store resource is classed as personal only by its id,
+    never by its name or mount order, which MA does not promise to keep.
 
     `env_sha256` and `repo_token_issued_at` are not readable back off the
     session — only the creator knows the bytes it uploaded and when it minted
@@ -221,6 +235,7 @@ def snapshot_from_created_session(
         repo_token_issued_at=repo_token_issued_at,
         vault_id=vault_id,
         github_mode=github_mode,
+        personal_memory_store_ids=personal_memory_store_ids,
     )
 
 
@@ -230,6 +245,7 @@ def snapshot_from_retrieved_session(
     env_sha256: str | None = None,
     repo_token_issued_at: int | None = None,
     vault_id: str | None = None,
+    personal_memory_store_ids: Collection[str] = (),
 ) -> SessionSnapshot:
     """Snapshot a session created before snapshots were persisted (backfill).
 
@@ -244,6 +260,7 @@ def snapshot_from_retrieved_session(
         env_file_id=None,
         repo_token_issued_at=repo_token_issued_at,
         vault_id=vault_id,
+        personal_memory_store_ids=personal_memory_store_ids,
     )
 
 
@@ -256,6 +273,7 @@ def _snapshot_from_session(
     repo_token_issued_at: int | None,
     vault_id: str | None,
     github_mode: Literal["legacy", "app"] = "legacy",
+    personal_memory_store_ids: Collection[str] = (),
 ) -> SessionSnapshot:
     env_resource_id: str | None = None
     resolved_env_file_id = env_file_id
@@ -266,7 +284,8 @@ def _snapshot_from_session(
     repo_branch: str | None = None
     repo_mount_path: str | None = None
     memory_store_id: str | None = None
-    memory_read_only = False
+    personal_memory_store_id: str | None = None
+    memory_accesses: list[str | None] = []
 
     for resource in session.resources:
         if isinstance(resource, BetaManagedAgentsFileResource):
@@ -284,9 +303,17 @@ def _snapshot_from_session(
             if isinstance(resource.checkout, BetaManagedAgentsBranchCheckout):
                 repo_branch = resource.checkout.name
         else:
-            memory_store_id = resource.memory_store_id
-            memory_read_only = resource.access == "read_only"
+            if resource.memory_store_id in personal_memory_store_ids:
+                personal_memory_store_id = resource.memory_store_id
+            else:
+                memory_store_id = resource.memory_store_id
+            memory_accesses.append(resource.access)
 
+    # Read-only only when every memory mount is: one writable mount, shared or
+    # personal, is writable memory, and a turn that must be read-only replaces it.
+    memory_read_only = bool(memory_accesses) and all(
+        access == "read_only" for access in memory_accesses
+    )
     agent = session.agent
     return SessionSnapshot(
         ma_agent_id=agent.id,
@@ -300,6 +327,7 @@ def _snapshot_from_session(
         repo_branch=None if github_mode == "app" else repo_branch,
         memory_store_id=memory_store_id,
         memory_read_only=memory_read_only,
+        personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
@@ -383,6 +411,7 @@ def desired_snapshot(
     vault_id: str | None,
     env_file_id: str | None = None,
     memory_read_only: bool = False,
+    personal_memory_store_id: str | None = None,
     asks_before_publishing: bool = False,
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
@@ -418,8 +447,12 @@ def desired_snapshot(
         repo_branch=repo_branch,
         memory_store_id=memory_store_id,
         # No mount has no writable memory. Match the observed snapshot so a
-        # provisioning outage does not cause a replacement on every turn.
-        memory_read_only=memory_read_only and memory_store_id is not None,
+        # provisioning outage does not cause a replacement on every turn. Either
+        # store counts: a session holding only a personal mount (the shared
+        # provisioning failed) still has memory a read-only turn must not write.
+        memory_read_only=memory_read_only
+        and (memory_store_id is not None or personal_memory_store_id is not None),
+        personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id,
         tools_sha256=hash_tools(
             session_tools(

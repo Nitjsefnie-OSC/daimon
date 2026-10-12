@@ -518,3 +518,44 @@ def test_removed_token_only_grant_replaces_the_session() -> None:
     assert decide_session_compatibility(
         recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
     ) == ReplaceSession(reasons=("repo_set",))
+
+
+def test_a_live_session_is_not_replaced_only_to_add_the_callers_personal_store() -> None:
+    """Every session from before personal memory existed recorded none. The
+    caller's store appearing later must not end those conversations: the next
+    new session mounts it instead."""
+    recorded = SessionSnapshot.model_validate(
+        make_snapshot().model_dump(exclude={"personal_memory_store_id"})
+    )
+    desired = make_snapshot(personal_memory_store_id="memstore_alice")
+
+    assert recorded.personal_memory_store_id is None
+    assert identity_change_reasons(recorded, desired) == ()
+    assert (
+        decide_session_compatibility(
+            recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+        )
+        == ReuseAsIs()
+    )
+
+
+@pytest.mark.parametrize("desired_store", ["memstore_other", None])
+def test_a_session_whose_personal_store_changed_or_went_away_is_replaced(
+    desired_store: str | None,
+) -> None:
+    recorded = make_snapshot(personal_memory_store_id="memstore_alice")
+    desired = make_snapshot(personal_memory_store_id=desired_store)
+
+    assert decide_session_compatibility(
+        recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+    ) == ReplaceSession(reasons=("personal_memory_store",))
+
+
+def test_an_unchanged_personal_store_reuses_the_session() -> None:
+    snapshot = make_snapshot(personal_memory_store_id="memstore_alice")
+    assert (
+        decide_session_compatibility(
+            recorded=snapshot, desired=snapshot, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+        )
+        == ReuseAsIs()
+    )

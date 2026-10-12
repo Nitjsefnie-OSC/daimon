@@ -1,4 +1,8 @@
-"""Slack /memory handler — read-only view of the channel agent's memory.
+"""Slack /memory handler — the channel agent's shared memory, and your own.
+
+`/memory` and `/memory <path>` show the shared memory read-only.
+`/memory mine`, `/memory mine <path>` and `/memory forget-mine [code]` act on
+the invoking person's own personal memory only (`daimon.core.memory_view`).
 
 Ack-first contract: called from app.on_request AFTER the Socket Mode ack.
 Ephemeral-only (no modal, no trigger_id), mirroring help.py. The slash
@@ -20,9 +24,14 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.memory_view import (
+    PersonalMemoryReply,
     get_channel_memory_store,
     get_memory_content,
+    get_own_personal_memory_store,
     list_memory_paths,
+    parse_memory_args,
+    personal_memory_reply,
+    resolve_channel_agent,
 )
 from slack_sdk.errors import SlackApiError
 
@@ -56,6 +65,44 @@ def _fenced(header: str, content: str, limit: int) -> str:
     return f"{header}\n```\n{content}\n```"
 
 
+def _personal_text(reply: PersonalMemoryReply) -> str:
+    if reply.content is not None:
+        return _fenced(f"*`{reply.title}`*", reply.content, _SLACK_LIMIT)
+    parts = [f"*{reply.title}*"]
+    if reply.paths:
+        parts.append("\n".join(f"• `{p}`" for p in reply.paths))
+    if reply.hint:
+        parts.append(f"_{reply.hint}_")
+    return _truncate("\n\n".join(parts))
+
+
+async def _personal_memory_text(
+    runtime: SlackRuntime, *, team_id: str, user_id: str, channel_id: str, args: str
+) -> str:
+    """The invoker's own personal memory: never anyone else's, whatever the args."""
+    request = parse_memory_args(args)
+    agent = await resolve_channel_agent(
+        runtime.sessionmaker,
+        runtime.anthropic,
+        tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+        platform="slack",
+        user_id=user_id,
+        channel_id=channel_id,
+        default=runtime.deployment_default,
+    )
+    if agent is None:
+        return _EMPTY
+    store_id = await get_own_personal_memory_store(runtime.sessionmaker, agent)
+    reply = await personal_memory_reply(
+        runtime.anthropic,
+        agent_name=agent.agent_name,
+        store_id=store_id,
+        request=request,
+        command="/memory",
+    )
+    return _personal_text(reply)
+
+
 async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """Ephemeral /memory handler.
 
@@ -77,6 +124,15 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
         return
 
     try:
+        if parse_memory_args(path_arg).kind not in ("shared_list", "shared_show"):
+            await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                channel=channel_id,
+                user=user_id,
+                text=await _personal_memory_text(
+                    runtime, team_id=team_id, user_id=user_id, channel_id=channel_id, args=path_arg
+                ),
+            )
+            return
         resolved = await get_channel_memory_store(
             runtime.sessionmaker,
             runtime.anthropic,
