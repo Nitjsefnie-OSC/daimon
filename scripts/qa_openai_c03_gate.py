@@ -19,6 +19,8 @@ def digest(path: Path) -> str:
 
 def validate(args):
     """Validate before DB/guard/key access; the expected GO digest comes from lead."""
+    if getattr(args, "runner_pin", None) is None:
+        raise ValueError("C03 requires its reviewed runner pin and separate lead GO pin")
     path = getattr(args, "go_file", None)
     expected = getattr(args, "go_sha256", None)
     if path is None or not isinstance(expected, str) or len(expected) != 64:
@@ -47,6 +49,7 @@ def validate(args):
     if hashlib.sha256(raw_envelope).hexdigest() != ENVELOPE_SHA256:
         raise ValueError("C03 financial envelope differs from lead signature")
     now = datetime.now(UTC)
+    require_envelope_unexpired(approval, now=now)
     expiry = datetime.fromisoformat(go["expires_at"])
     if (
         expiry.tzinfo is None
@@ -109,6 +112,7 @@ def option_a_plan(envelope_path: Path):
     if hashlib.sha256(raw).hexdigest() != ENVELOPE_SHA256:
         raise ValueError("C03 financial envelope differs from lead signature")
     envelope = json.loads(raw)
+    require_envelope_unexpired(envelope)
     plan = ProbePlan.model_validate(envelope["probe_plan"])
     if (
         envelope.get("minimum_hold_usd") != "1.0755"
@@ -159,3 +163,9 @@ def require_option_a_config(config_path: Path, envelope_path: Path):
     ):
         raise ValueError("C03 OptionA config differs from three-request hold bound")
     return plan
+
+
+def require_envelope_unexpired(envelope, *, now=None):
+    expiry = datetime.fromisoformat(envelope["expires_at"])
+    if expiry.tzinfo is None or (now if now is not None else datetime.now(UTC)) >= expiry:
+        raise ValueError("C03 financial envelope expired or lacks an aware expiry")

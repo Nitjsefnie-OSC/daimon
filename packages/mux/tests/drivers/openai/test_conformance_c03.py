@@ -337,3 +337,20 @@ def test_changed_lane_recipe_refuses_even_with_a_valid_go(tmp_path):
     (lane / "live_pending.py").write_bytes(b"changed after review")
     with pytest.raises(ValueError, match="differs from reviewed commit"):
         gate.verify_harness(tmp_path / "checkout", lane)
+
+
+def test_signed_envelope_expiry_is_independent_of_go_expiry():
+    import importlib.util
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    location = Path(__file__).resolve().parents[5] / "scripts/qa_openai_c03_gate.py"
+    spec = importlib.util.spec_from_file_location("c03_gate", location)
+    assert spec is not None and spec.loader is not None
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    now = datetime(2026, 10, 13, tzinfo=UTC)
+    for expiry in ("2026-10-12T23:59:59+00:00", "2026-10-13T00:00:00+00:00", "2026-10-14T00:00:00"):
+        with pytest.raises(ValueError, match="financial envelope expired"):
+            gate.require_envelope_unexpired({"expires_at": expiry}, now=now)
+    gate.require_envelope_unexpired({"expires_at": "2026-10-13T00:00:01+00:00"}, now=now)

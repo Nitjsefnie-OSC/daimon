@@ -683,3 +683,8 @@ against its three-request, no-container, $1.0755 hold terms. Its model
 to the other retained cases, and cannot gate this explicitly priced workload.
 Historical financial regressions keep their original rate validity windows
 and clocks; their stale prices are never installed or admitted for live C03.
+
+Every C03 live entry requires its reviewed runner pin and separate pinned GO,
+including direct one-case invocation. The legacy/default-pin runner refuses
+C03 before file, budget, key or database access. Financial preparation also
+checks the signed envelope's own aware expiry; a newer GO cannot extend it.
