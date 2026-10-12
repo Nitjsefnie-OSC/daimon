@@ -65,6 +65,7 @@ from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_summary import ChannelSummary, load_tenant_summary
+from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 from pydantic import BaseModel
 from rich.console import Console
 from rich.markup import escape
@@ -479,10 +480,6 @@ async def channels_list(
 _ADMIN_COLUMNS = ("channel_id", "role_ids", "user_ids", "updated_at")
 
 
-_OPENAI_PROFILE = "openai.persistent_workspace"
-_ANTHROPIC_PROFILE = "anthropic.managed_agents"
-
-
 async def _copy_resource_host(
     rt: CliRuntime, *, tenant_id: uuid.UUID, platform: str, channel: str
 ) -> tuple[NeutralResourceHost, uuid.UUID] | None:
@@ -500,7 +497,7 @@ async def _copy_resource_host(
 
         async with rt.sessionmaker() as session:
             selected = await current_backend(session, channel_ref(tenant_id, platform, channel))
-        if selected is not None and selected.profile == "gemini.inline_reuse":
+        if selected is not None and selected.profile == INLINE_REUSE.profile_id:
             candidates = [
                 g
                 for g in rt.gemini_resource_grants
@@ -527,9 +524,9 @@ async def _copy_resource_host(
 
     async with rt.sessionmaker() as session:
         revision = await current_backend(session, channel_ref(tenant_id, platform, channel))
-    if revision is None or revision.profile == _ANTHROPIC_PROFILE:
+    if revision is None or revision.profile == MANAGED_AGENTS.profile_id:
         return None
-    if revision.profile != _OPENAI_PROFILE:
+    if revision.profile != PERSISTENT_WORKSPACE.profile_id:
         raise ChannelRuleRefused(
             "invalid", message="This channel's backend can't make its own copy of an agent yet."
         )

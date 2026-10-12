@@ -215,6 +215,7 @@ async def _hosted_agent(
     if rt.gemini_resource_hosts is not None:
         from daimon.adapters.cli.runtime import ResourceHostMismatch, request_gemini_resource_host
         from daimon.core.channel_backend import channel_ref, current_backend
+        from mux.profiles import INLINE_REUSE
 
         selected_grants = [g for g in rt.gemini_resource_grants if g.tenant_id == tenant_id]
         for grant in selected_grants:
@@ -222,7 +223,7 @@ async def _hosted_agent(
                 selected = await current_backend(
                     session, channel_ref(tenant_id, grant.platform, grant.channel_id)
                 )
-            if selected is None or selected.profile != "gemini.inline_reuse":
+            if selected is None or selected.profile != INLINE_REUSE.profile_id:
                 continue
             if selected.digest != grant.config_digest:
                 raise ResourceHostMismatch("Gemini resource grant is stale")

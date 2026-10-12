@@ -144,6 +144,17 @@ class OpenAIAgents:
     def __init__(self, context: Context) -> None:
         self._c = context
 
+    provider = "openai"
+    enabled = True
+
+    @property
+    def profile_id(self) -> str:
+        return self._c.profile_id
+
+    @property
+    def account_scope_id(self) -> str:
+        return self._c.account_scope_id
+
     def _decode(self, scope: Scope, raw: Object) -> Agent:
         self._c.record(scope, raw)
         return Agent(

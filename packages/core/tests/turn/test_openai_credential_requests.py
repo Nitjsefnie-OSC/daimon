@@ -34,7 +34,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.neutral_catalog import CatalogConflict
 from daimon.core.stores.turn_origins import create_origin, delete_origin
-from daimon.core.turn import openai_credential_requests as native_product
+from daimon.core.turn import native_credential_requests as native_product
 from daimon.core.turn.openai_credential_requests import (
     CONTROL_PREFIX,
     NativeCredentialOrigin,
@@ -415,6 +415,7 @@ async def case(db_engine: AsyncEngine, db_clean: None, tmp_path: Path) -> AsyncI
             row.agent.ref,
             row.catalog_id,
             row.local_revision,
+            scope,
         )
         delivery = NativeDelivery(tmp_path)
         adapter = OpenAINativeCredentialAdapter(

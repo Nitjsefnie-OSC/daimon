@@ -123,7 +123,9 @@ def fixed_clock(now: datetime) -> Clock:
 # Config revisions
 
 
-async def put_config_revision(session: AsyncSession, revision: ConfigRevision) -> ConfigRevision:
+async def put_config_revision(
+    session: AsyncSession, revision: ConfigRevision, *, origin: str = "channel"
+) -> ConfigRevision:
     channel = revision.channel
     key = {
         "tenant_id": _tenant(channel.tenant_id),
@@ -133,7 +135,7 @@ async def put_config_revision(session: AsyncSession, revision: ConfigRevision) -
     }
     inserted = await session.scalar(
         insert(ChannelConfigRevision)
-        .values(**key, digest=revision.digest, revision=_json(revision))
+        .values(**key, digest=revision.digest, revision=_json(revision), origin=origin)
         .on_conflict_do_nothing()
         .returning(ChannelConfigRevision.local)
     )
@@ -164,11 +166,19 @@ async def get_config_revision(
 
 
 async def latest_config_revision(
-    session: AsyncSession, channel: ChannelRef
+    session: AsyncSession, channel: ChannelRef, *, overrides_only: bool = False
 ) -> ConfigRevision | None:
+    selection = _channel_where(channel)
+    if overrides_only:
+        selection.extend(
+            (
+                ChannelConfigRevision.origin.in_(("channel", "channel_clear")),
+                ChannelConfigRevision.local > 0,
+            )
+        )
     body = await session.scalar(
         select(ChannelConfigRevision.revision)
-        .where(*_channel_where(channel))
+        .where(*selection)
         .order_by(ChannelConfigRevision.local.desc())
         .limit(1)
     )
@@ -176,7 +186,7 @@ async def latest_config_revision(
 
 
 async def latest_config_revision_and_sharing(
-    session: AsyncSession, channel: ChannelRef
+    session: AsyncSession, channel: ChannelRef, *, overrides_only: bool = False
 ) -> tuple[ConfigRevision | None, bool]:
     """The channel's newest revision, and whether any of its revisions was shared.
 
@@ -191,10 +201,18 @@ async def latest_config_revision_and_sharing(
         )
         .exists()
     )
+    selection = _channel_where(channel)
+    if overrides_only:
+        selection.extend(
+            (
+                ChannelConfigRevision.origin.in_(("channel", "channel_clear")),
+                ChannelConfigRevision.local > 0,
+            )
+        )
     row = (
         await session.execute(
             select(ChannelConfigRevision.revision, ever_shared)
-            .where(*_channel_where(channel))
+            .where(*selection)
             .order_by(ChannelConfigRevision.local.desc())
             .limit(1)
         )
@@ -885,3 +903,35 @@ class PostgresStateStore:
     async def mark_outbox_applied(self, row: OutboxRow) -> bool:
         async with self._tx() as session:
             return await mark_outbox_applied(session, row)
+
+
+async def next_config_local(session: AsyncSession, channel: ChannelRef) -> int:
+    """Allocate under the caller's existing tenant policy write fence."""
+    latest = await session.scalar(
+        select(func.max(ChannelConfigRevision.local)).where(*_channel_where(channel))
+    )
+    return int(latest or 0) + 1
+
+
+async def effective_revision(
+    session: AsyncSession, channel: ChannelRef, digest: str, origin: str
+) -> ConfigRevision | None:
+    body = await session.scalar(
+        select(ChannelConfigRevision.revision)
+        .where(
+            *_channel_where(channel),
+            ChannelConfigRevision.origin == origin,
+            ChannelConfigRevision.digest == digest,
+        )
+        .order_by(ChannelConfigRevision.local.desc())
+        .limit(1)
+    )
+    return ConfigRevision.model_validate(body) if body is not None else None
+
+
+async def config_origin(session: AsyncSession, channel: ChannelRef, local: int) -> str | None:
+    return await session.scalar(
+        select(ChannelConfigRevision.origin).where(
+            *_channel_where(channel), ChannelConfigRevision.local == local
+        )
+    )

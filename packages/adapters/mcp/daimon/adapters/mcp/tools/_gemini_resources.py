@@ -1,4 +1,4 @@
-"""Explicit operator capability for chat Add-skill on the Gemini A1 catalog.
+"""Explicit operator capability for chat Add-skill on the Gemini catalog.
 
 No SDK, manifest or credential discovery. The operator supplies the resource
 factory and exact account/channel configuration grants. Missing capability
@@ -13,10 +13,16 @@ from typing import TYPE_CHECKING
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpResourceHostFactory, McpRuntime
-from daimon.adapters.mcp.tools._openai_resources import MCP_AUTHORIZATION_ID
+from daimon.adapters.mcp.tools._native_resources import (
+    MCP_AUTHORIZATION_ID,
+    bind_native_host,
+    check_skill_origin,
+    check_skill_revision,
+)
 from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
+from mux.profiles.gemini import INLINE_REUSE
 
 if TYPE_CHECKING:
     from daimon.core.neutral_resources import NeutralResourceHost
@@ -38,7 +44,12 @@ class GeminiSkillGrant:
     def __post_init__(self) -> None:
         if any(
             not value.strip()
-            for value in (self.platform, self.channel_id, self.config_digest, self.account_scope_id)
+            for value in (
+                self.platform,
+                self.channel_id,
+                self.config_digest,
+                self.account_scope_id,
+            )
         ):
             raise ValueError("Gemini skill grants require explicit routing identities")
 
@@ -67,13 +78,7 @@ async def gemini_skill_host(
     """Select only an explicitly enabled, freshly authorized Gemini channel."""
     if capability is None or not capability.enabled or origin is None:
         return None
-    # An origin must be the verified caller's own chat identity before routing.
-    if (
-        origin.tenant_id != auth.tenant_id
-        or origin.account_id != auth.account_id
-        or origin.platform != auth.platform
-    ):
-        raise ToolError("This conversation's identity changed. Nothing was changed. Do not retry.")
+    check_skill_origin(auth, origin)
     # Unselected callers/channels pay no new configuration read. The operator's
     # capability for another channel must not change this channel's path.
     selected = tuple(
@@ -88,7 +93,8 @@ async def gemini_skill_host(
         return None
     async with runtime.session_factory() as session:
         revision = await current_backend(
-            session, channel_ref(auth.tenant_id, origin.platform, origin.parent_channel_id)
+            session,
+            channel_ref(auth.tenant_id, origin.platform, origin.parent_channel_id),
         )
     if revision is None or revision.profile != PROFILE:
         return None
@@ -99,16 +105,12 @@ async def gemini_skill_host(
         if grant.config_digest == revision.digest
         and grant.account_scope_id == factory.account_scope_id
     ]
-    if (
-        len(authorized) != 1
-        or revision.backend != "gemini"
-        or revision.model != "gemini-3.8-flash"
-        or revision.thread_mode != "per_caller"
-    ):
+    if len(authorized) != 1:
         raise ToolError(
             "This channel's Gemini skill capability is not authorized for this configuration. "
             "Nothing was changed. Do not retry."
         )
+    check_skill_revision(revision, INLINE_REUSE)
     return bind_gemini_host(
         factory(
             tenant_id=auth.tenant_id,
@@ -123,31 +125,13 @@ async def gemini_skill_host(
 
 
 def bind_gemini_host(host: object, *, auth: AuthIdentity, workspace: str) -> NeutralResourceHost:
-    """Validate the returned host's entire resource scope before any catalog I/O."""
-    from daimon.core.neutral_resources import NeutralResourceHost
+    """Select the native Gemini catalog for the shared scope binder."""
     from mux.drivers.gemini import GeminiCatalogAdapter
 
-    if not isinstance(host, NeutralResourceHost):
-        raise ToolError("This deployment's resource host is misconfigured. Nothing was changed.")
-    scope = host.scope
-    capabilities = host.backend.capabilities()
-    adapter = host.backend.agents
-    if (
-        scope.tenant_id != str(auth.tenant_id)
-        or scope.account_id != str(auth.account_id)
-        or scope.principal_id != f"mcp:{auth.account_id}"
-        or scope.authorization_id != MCP_AUTHORIZATION_ID
-        or scope.is_platform
-        or scope.is_legacy_host_authorized
-        or host.workspace != workspace
-        or capabilities.provider != "gemini"
-        or capabilities.profile_id != PROFILE
-        or not isinstance(adapter, GeminiCatalogAdapter)
-        or not adapter.enabled
-        or adapter.account_scope_id != workspace
-    ):
-        raise ToolError(
-            "This deployment's resource host is for a different tenant, account or workspace. "
-            "Nothing was changed. Do not retry."
-        )
-    return host
+    return bind_native_host(
+        host,
+        auth=auth,
+        workspace=workspace,
+        profile=INLINE_REUSE,
+        catalog_type=GeminiCatalogAdapter,
+    )

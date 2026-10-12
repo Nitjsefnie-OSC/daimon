@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2592,
+  "files_scanned": 2601,
   "parse_errors": [],
   "calls": [
     {
@@ -11325,7 +11325,7 @@
     },
     {
       "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/_openai_resources.py",
-      "line": 26,
+      "line": 35,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
@@ -13092,6 +13092,15 @@
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/channel_backend.py",
+      "line": 29,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "production"
     },
