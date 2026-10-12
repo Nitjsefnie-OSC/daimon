@@ -29,12 +29,12 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, PUBLISH_TOOLS, ToolCall
+from mux.contracts.ids import Provider
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
     from daimon.core.channel_backend import AgentBackendService
-    from daimon.core.config import TurnSettings
     from daimon.core.neutral_resources import NeutralResourceHost
     from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
     from daimon.core.turn.deps import TurnDeps
@@ -66,7 +66,7 @@ class BackendSwitchReference(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     agent: str = Field(min_length=1)
-    target_backend: Literal["anthropic", "openai", "gemini"]
+    target_backend: Provider
     expected_revision: int = Field(ge=0, strict=True)
     preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
 
@@ -280,24 +280,14 @@ def prompt_for_tool_call(
     )
 
 
-def backend_switch_tools(settings: TurnSettings) -> frozenset[str]:
-    """The existing backend-selection flags opt this tool into session cards."""
-    from daimon.core.channel_backend import backend_selection_enabled
-
-    return (
-        frozenset({"request_agent_backend_switch"})
-        if backend_selection_enabled(settings)
-        else frozenset()
-    )
+def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
+    """Project authoritative backend-selection eligibility into session controls."""
+    return frozenset({"request_agent_backend_switch"}) if enabled else frozenset()
 
 
 def backend_switch_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     """Read the turn's already-injected selector without another feature flag."""
-    return (
-        frozenset({"request_agent_backend_switch"})
-        if deps.backend_selection_enabled
-        else frozenset()
-    )
+    return backend_switch_tools(enabled=deps.backend_selection_enabled)
 
 
 def backend_switch_callbacks(
