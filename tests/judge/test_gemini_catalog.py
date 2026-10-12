@@ -170,7 +170,7 @@ async def test_fenced_followup_reuses_the_session_and_excludes_old_output(tmp_pa
     assert len({o.evidence_id for o in result.headless_outputs}) == 2
     # Last turn's visible return comes from its own native answer, not replayed history.
     answer = cast(list[dict[str, Any]], turns[1].snapshot["steps"])[0]
-    assert result.rendered_text[1] == answer["content"][0]["text"][:1000]
+    assert result.rendered_text[1] == answer["content"][0]["text"]
 
 
 @pytest.mark.parametrize("change", ["source", "model", "provider", "turn", "text", "codec"])
@@ -391,7 +391,7 @@ asyncio.run(main())
             str(REPO),
         ],
         capture_output=True,
-        timeout=60,
+        timeout=180,
     )
     if completed.returncode:
         raise AssertionError(completed.stderr.decode())

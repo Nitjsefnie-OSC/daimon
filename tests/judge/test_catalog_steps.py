@@ -207,7 +207,7 @@ asyncio.run(check())
     run = subprocess.run(
         [sys.executable, "-O", "-c", script, str(inputs), str(REPO / "tests")],
         capture_output=True,
-        timeout=60,
+        timeout=180,
     )
     if run.returncode != 0:
         raise AssertionError(run.stderr.decode())

@@ -13,6 +13,7 @@ import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
 
 import httpx
@@ -24,7 +25,14 @@ from daimon.core.channel_budget import parse_budget_spec
 from daimon.core.channel_rules import set_channel_rule
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import accounts, channel_admins, channel_budgets, routines, tenants
+from daimon.core.stores import (
+    accounts,
+    channel_admins,
+    channel_budgets,
+    routines,
+    tenant_ledger,
+    tenants,
+)
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.isolated_sdk import build_async_anthropic
@@ -371,12 +379,13 @@ class AdminBindings:
             )
         if command.operation.startswith("channel_budget_"):
             # These source ids name new parent channels; no guessed thread remap.
+            written = None
             async with self.sessions() as session, session.begin():
                 if command.operation == "channel_budget_set":
                     spec = parse_budget_spec(
                         limit_usd=command.args[0], window=command.options.get("--window", "monthly")
                     )
-                    await channel_budgets.set_channel_budget(
+                    written = await channel_budgets.set_channel_budget(
                         session,
                         tenant_id=tenant_id,
                         platform=self.platform,
@@ -395,6 +404,8 @@ class AdminBindings:
                 budget = await channel_budgets.get_channel_budget(
                     session, tenant_id=tenant_id, platform=self.platform, channel_id=channel_id
                 )
+            if budget != written:
+                raise RuntimeError("admin channel budget readback differs")
             return self.receipt(
                 command, {"budget": budget.model_dump(mode="json") if budget else None}
             )
@@ -413,13 +424,61 @@ class AdminBindings:
                 raise RuntimeError("admin tenant cap readback differs")
             return self.receipt(command, {"turn_cap": read.turn_cap})
         if command.operation == "tenant_credit":
-            # Frozen -<balance> is not a numeric CLI amount; the product CLI
-            # accepts positive credits only. Do not substitute a ledger write.
-            return AdminReceipt(
-                status="pending",
-                backend=self.backend,
-                operation=command.operation,
-                code="ADMIN_CREDIT_SOURCE_NOT_EXECUTABLE",
+            # Match tenants_credit's literal positive amount, note slug and
+            # idempotency identity. Frozen -<balance> cannot mean a ledger debit.
+            try:
+                amount = Decimal(command.args[0])
+            except (InvalidOperation, ValueError):
+                amount = Decimal("NaN")
+            exponent = amount.as_tuple().exponent
+            note = command.options.get("--note", "")
+            note_slug = re.sub(r"[_\W]+", "-", note.strip().lower()).strip("-")[:64].rstrip("-")
+            if (
+                not amount.is_finite()
+                or amount <= 0
+                or isinstance(exponent, int)
+                and exponent < -2
+                or not note_slug
+            ):
+                return AdminReceipt(
+                    status="pending",
+                    backend=self.backend,
+                    operation=command.operation,
+                    code="ADMIN_CREDIT_SOURCE_NOT_EXECUTABLE",
+                )
+            request_id = command.options.get("--id") or str(uuid.uuid4())
+            key = f"manual:credit:{tenant_id}:{note_slug}:usd{amount:.2f}:{request_id}"
+            async with self.sessions() as session, session.begin():
+                inserted = await tenant_ledger.insert_entry(
+                    session,
+                    tenant_id=tenant_id,
+                    delta_usd=amount,
+                    reason="manual_credit",
+                    idempotency_key=key,
+                )
+            async with self.sessions() as session:
+                rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant_id)
+                balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
+            matching = [row for row in rows if row.idempotency_key == key]
+            if (
+                len(matching) != 1
+                or matching[0].tenant_id != tenant_id
+                or matching[0].delta_usd != amount
+                or matching[0].reason != "manual_credit"
+                or matching[0].channel_id is not None
+                or matching[0].payment_event_id is not None
+                or matching[0].payment_intent is not None
+                or balance != sum((row.delta_usd for row in rows), Decimal("0"))
+            ):
+                raise RuntimeError("admin tenant credit readback differs")
+            return self.receipt(
+                command,
+                {
+                    "credit_id": request_id,
+                    "inserted": inserted,
+                    "ledger_entry": matching[0].model_dump(mode="json"),
+                    "balance_usd": str(balance),
+                },
             )
         if command.operation == "delete_routines":
             async with self.sessions() as session, session.begin():
