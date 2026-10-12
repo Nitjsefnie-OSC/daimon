@@ -106,6 +106,7 @@ from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
@@ -1230,8 +1231,8 @@ async def _attach_skills_to_requested_agent(
         )
         if collision is not None:
             raise DaimonError(f"cannot attach: {collision}")
-        return await runtime.anthropic.beta.agents.update(
-            fresh.id, version=fresh.version, skills=merged
+        return await guarded_agent_update(
+            runtime.anthropic, runtime.sessionmaker, fresh, skills=merged
         )
 
     try:

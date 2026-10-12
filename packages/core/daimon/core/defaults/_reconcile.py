@@ -60,6 +60,7 @@ async def _run_sweep(
     dry_run: bool,
     skills_view: list[SkillListResponse] | None = None,
     channel_skill_ids: set[str] | None = None,
+    session: AsyncSession | None = None,
 ) -> None:
     try:
         kwargs: dict[str, object] = {}
@@ -69,6 +70,7 @@ async def _run_sweep(
                 # still adds, failing every turn in that channel. Skip it.
                 raise DefaultsError("channel skills could not be read; skill sweep skipped")
             kwargs["channel_skill_ids"] = channel_skill_ids
+            kwargs["session"] = session
             if skills_view is not None:
                 kwargs["skills_view"] = skills_view
         for outcome in await sweep_fn(
@@ -86,11 +88,14 @@ async def _channel_skill_ids(
     """Every skill id a channel rule adds, or None when the read failed.
 
     Reads on the lock session when there is one (a second checkout could
-    starve a one-connection pool); a dry run reads on its own short session.
+    starve a one-connection pool), inside a savepoint so a failed read leaves
+    that transaction usable for the rest of the apply; a dry run reads on its
+    own short session.
     """
     try:
         if session is not None:
-            return await list_channel_skill_ids(session)
+            async with session.begin_nested():
+                return await list_channel_skill_ids(session)
         async with session_factory() as read_session:
             return await list_channel_skill_ids(read_session)
     except SQLAlchemyError as err:
@@ -290,6 +295,7 @@ async def _reconcile_core(
             dry_run,
             skills_view=skills_view,
             channel_skill_ids=await _channel_skill_ids(session_factory, skill_session),
+            session=skill_session,
         )
         return report
 

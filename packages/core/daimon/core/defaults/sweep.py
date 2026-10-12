@@ -31,7 +31,9 @@ from daimon.core.defaults.metadata import (
     strip_tenant_prefix,
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
-from daimon.core.ma import delete_skill_and_versions
+from daimon.core.errors import DefaultsError
+from daimon.core.skills.attachments import delete_skill_unless_attached
+from sqlalchemy.ext.asyncio import AsyncSession
 
 _log = structlog.get_logger(__name__)
 
@@ -112,6 +114,7 @@ async def sweep_removed_skills(
     tenant_id: uuid.UUID,
     dry_run: bool,
     channel_skill_ids: Collection[str],
+    session: AsyncSession | None,
     skills_view: list[SkillListResponse] | None = None,
 ) -> list[ResourceOutcome]:
     """Delete seeded skills that belong to this tenant and are no longer in the defaults tree.
@@ -134,6 +137,11 @@ async def sweep_removed_skills(
       - skill id is in channel_skill_ids (a channel rule still adds it; a
         session in that channel resolves it, so deleting it fails every turn
         there)
+
+    The agent and channel sets above are snapshots, a cheap first filter. A real
+    delete is then decided again on `session` (required unless dry_run) under
+    the skill's exclusive reference lock (`delete_skill_unless_attached`), so
+    an agent or channel attached since the snapshot keeps its skill.
 
     A full skills.list page raises SkillsListTruncatedError BEFORE any delete
     decision; _run_sweep's existing except (APIError, DaimonError) boundary converts
@@ -175,7 +183,12 @@ async def sweep_removed_skills(
                 )
             )
             continue
-        await delete_skill_and_versions(client, sk.id)
+        if session is None:
+            raise DefaultsError("the skill sweep needs a database session to delete")
+        outcome = await delete_skill_unless_attached(client, session, skill_id=sk.id, detach=False)
+        if not outcome.deleted:
+            _log.info("defaults.sweep_skip_attached_since", name=display_title, skill_id=sk.id)
+            continue
         outcomes.append(
             ResourceOutcome(
                 kind="skill", name=display_title, action=Action.DELETED, anthropic_id=sk.id

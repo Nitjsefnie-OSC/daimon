@@ -1481,6 +1481,56 @@ async def test_a_replacement_for_a_deleted_channel_skill_names_it_instead_of_ret
     assert still_live is not None and still_live.ma_session_id == first.ma_session_id
 
 
+async def test_the_missing_skill_message_holds_through_the_replacement_backoff(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+) -> None:
+    """PR #857 review: a retry inside the backoff names the skill too, without calling MA.
+
+    Separate connections, as in production: the failed preparation's stored
+    reason must survive the first refusal being raised.
+    """
+    sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await add_channel_skill(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="chan-1",
+        skill_id="skill_gone",
+        version="1",
+        name="qa-haiku-canary",
+        owner_agent_name=None,
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(sessionmaker, transport)
+    first = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    transport.fail_session_create = True
+    transport.fail_message = (
+        'Could not resolve one or more skills: skill "skill_gone" version "1" not found'
+    )
+    admission = replace(
+        _admission(account=account),
+        channel_skills=(
+            BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_gone", version="1"),
+        ),
+    )
+    with pytest.raises(SkillUnavailable, match="qa-haiku-canary"):
+        await _prepare(deps, admission, tenant=tenant, account=account)
+    creates = transport.creates
+
+    with pytest.raises(SkillUnavailable, match="qa-haiku-canary") as again:
+        await _prepare(deps, admission, tenant=tenant, account=account)
+
+    assert again.value.attached_to == "channel"
+    assert transport.creates == creates, "the backoff still holds: no new create"
+    live = await _live_row(sessionmaker, tenant=tenant, account=account)
+    assert live is not None and live.ma_session_id == first.ma_session_id
+
+
 async def test_two_concurrent_preparations_for_one_caller_create_exactly_one_session(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

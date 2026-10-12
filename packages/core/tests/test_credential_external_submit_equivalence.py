@@ -48,7 +48,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
+from daimon.testing.ma import build_fake_anthropic, skill_response
 
 BASE = "4b368d56fdce16934e65c4e48c51da18da4a5a7a"
 URL = "https://external.example.com/mcp"
@@ -197,6 +197,9 @@ def _transport(agent, row, effects, fault):
             return httpx.Response(200, json={"data": [body], "has_more": False})
         if request.method == "GET" and path == "/v1/agents/agt_test":
             return httpx.Response(200, json=body)
+        if request.method == "GET" and re.fullmatch(r"/v1/skills/[^/]+", path):
+            # The attach checks the skill still exists under its reference lock.
+            return httpx.Response(200, json=skill_response(path.rsplit("/", 1)[1]))
         if request.method == "POST" and path == "/v1/agents/agt_test":
             if fault == "attach":
                 return httpx.Response(

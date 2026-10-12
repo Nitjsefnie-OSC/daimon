@@ -8,6 +8,10 @@ references: non-archived agents on Managed Agents (skills are workspace-wide,
 so any tenant's agent counts) and `channel_skills` rows. With references, the
 delete is refused naming them, unless the caller asked to detach everywhere
 first.
+
+The final check and the provider delete run under the skill's exclusive
+reference lock (`reference_lock`), which every attach path takes shared before
+it writes a reference, so nothing can be attached between them.
 """
 
 from __future__ import annotations
@@ -21,13 +25,14 @@ from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillP
 from daimon.core.defaults.ma_index import list_agents_referencing_skill
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.errors import UserFacingError
-from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.ma import delete_skill_and_versions, update_agent_with_version_retry
+from daimon.core.skills.reference_lock import lock_skill_for_delete
 from daimon.core.stores.channel_skills import (
     list_skill_channel_rules,
     remove_skill_from_every_channel,
 )
 from daimon.core.stores.domain import ChannelSkillRow
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,14 @@ class SkillAttachments:
     def __bool__(self) -> bool:
         return bool(self.agents or self.channels)
 
+    def outside(self, tenant_id: uuid.UUID) -> tuple[int, int]:
+        """How many of the agents and channel rules belong to another tenant."""
+        tenant = str(tenant_id)
+        return (
+            sum(1 for agent in self.agents if agent.tenant != tenant),
+            sum(1 for row in self.channels if row.tenant_id != tenant_id),
+        )
+
 
 class SkillStillAttached(UserFacingError):
     """A delete was refused because agents or channel rules still use the skill."""
@@ -57,20 +70,56 @@ class SkillStillAttached(UserFacingError):
 
 async def find_skill_attachments(
     client: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
     *,
     skill_id: str,
 ) -> SkillAttachments:
-    """Every non-archived agent pinning `skill_id` and every channel rule adding it."""
+    """Every non-archived agent pinning `skill_id` and every channel rule adding it.
+
+    On its own this is a preview: use `delete_skill_unless_attached` to act on it.
+    """
     agents = [
         AgentAttachment(
             agent_id=agent.id, name=agent.name, tenant=agent.metadata.get(MA_METADATA_KEY_TENANT)
         )
         for agent in await list_agents_referencing_skill(client, skill_id)
     ]
-    async with sessionmaker() as session:
-        channels = await list_skill_channel_rules(session, skill_id=skill_id)
+    channels = await list_skill_channel_rules(session, skill_id=skill_id)
     return SkillAttachments(agents=tuple(agents), channels=tuple(channels))
+
+
+@dataclass(frozen=True)
+class GuardedDelete:
+    deleted: bool
+    """False when the skill is still attached and `detach` was not asked for."""
+    attachments: SkillAttachments
+    """What was found under the lock: refused on, or detached before deleting."""
+
+
+async def delete_skill_unless_attached(
+    client: AsyncAnthropic,
+    session: AsyncSession,
+    *,
+    skill_id: str,
+    detach: bool,
+) -> GuardedDelete:
+    """Delete `skill_id` unless something references it, or detach it first.
+
+    Runs in `session`'s open transaction: takes the exclusive reference lock,
+    checks again, detaches (channel rows are deleted on `session`, so they
+    commit with it), then deletes every version and the skill. The lock is
+    held until the caller's transaction ends, so an attach waiting on it sees
+    the skill gone and refuses.
+    """
+    await lock_skill_for_delete(session, skill_id)
+    attachments = await find_skill_attachments(client, session, skill_id=skill_id)
+    if attachments and not detach:
+        return GuardedDelete(deleted=False, attachments=attachments)
+    if attachments:
+        await _detach_agents(client, skill_id=skill_id, attachments=attachments)
+        await remove_skill_from_every_channel(session, skill_id=skill_id)
+    await delete_skill_and_versions(client, skill_id)
+    return GuardedDelete(deleted=True, attachments=attachments)
 
 
 def still_attached_message(
@@ -120,14 +169,10 @@ def still_attached_message(
     return message
 
 
-async def detach_skill_everywhere(
-    client: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    skill_id: str,
-    attachments: SkillAttachments,
+async def _detach_agents(
+    client: AsyncAnthropic, *, skill_id: str, attachments: SkillAttachments
 ) -> None:
-    """Remove `skill_id` from every agent in `attachments` and every channel rule.
+    """Remove `skill_id` from every agent in `attachments`.
 
     Each agent is re-read before its update (`update_agent_with_version_retry`),
     and keeps its other skills at the versions it pins.
@@ -145,15 +190,14 @@ async def detach_skill_everywhere(
             return await client.beta.agents.update(fresh.id, version=fresh.version, skills=kept)
 
         await update_agent_with_version_retry(client, attachment.agent_id, _apply)
-    async with sessionmaker() as session, session.begin():
-        await remove_skill_from_every_channel(session, skill_id=skill_id)
 
 
 __all__ = [
     "AgentAttachment",
     "SkillAttachments",
+    "GuardedDelete",
     "SkillStillAttached",
-    "detach_skill_everywhere",
+    "delete_skill_unless_attached",
     "find_skill_attachments",
     "still_attached_message",
 ]

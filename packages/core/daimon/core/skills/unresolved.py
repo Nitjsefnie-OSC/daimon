@@ -9,6 +9,7 @@ that rejection into copy that names the skill and says who must remove it.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from typing import Literal
@@ -35,7 +36,9 @@ class SkillUnavailable(UserFacingError):
         agent_name: str,
     ) -> None:
         self.skill_id = skill_id
-        self.attached_to = attached_to
+        self.label = label
+        self.attached_to: Literal["agent", "channel"] = attached_to
+        self.agent_name = agent_name
         if attached_to == "channel":
             where = "this channel adds"
             fix = (
@@ -52,6 +55,50 @@ class SkillUnavailable(UserFacingError):
             f"Daimon couldn't start this conversation: the skill {label} that {where} "
             f"no longer exists. {fix}"
         )
+
+
+_REASON_MARK = "skill_unavailable "
+
+
+def encode_reason(error: SkillUnavailable) -> str:
+    """A stored-reason form of `error`, so a later refusal can raise it again."""
+    fields = {
+        "skill_id": error.skill_id,
+        "label": error.label,
+        "attached_to": error.attached_to,
+        "agent_name": error.agent_name,
+    }
+    return _REASON_MARK + json.dumps(fields, sort_keys=True)
+
+
+def decode_reason(reason: str | None) -> SkillUnavailable | None:
+    """The `SkillUnavailable` a stored reason carries (after any `stage: `), or None."""
+    if reason is None:
+        return None
+    _, _, body = reason.partition(": ")
+    if not body.startswith(_REASON_MARK):
+        return None
+    try:
+        fields = json.loads(body[len(_REASON_MARK) :])
+    except ValueError:
+        return None
+    if not isinstance(fields, dict):
+        return None
+    skill_id, label = fields.get("skill_id"), fields.get("label")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    attached_to, agent_name = fields.get("attached_to"), fields.get("agent_name")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if not (
+        isinstance(skill_id, str)
+        and isinstance(label, str)
+        and isinstance(agent_name, str)
+        and attached_to in ("agent", "channel")
+    ):
+        return None
+    return SkillUnavailable(
+        skill_id=skill_id,
+        label=label,
+        attached_to="channel" if attached_to == "channel" else "agent",
+        agent_name=agent_name,
+    )
 
 
 def unresolved_skill_id(error: BaseException) -> tuple[str, str | None] | None:
@@ -91,4 +138,10 @@ def skill_unavailable(
     )
 
 
-__all__ = ["SkillUnavailable", "skill_unavailable", "unresolved_skill_id"]
+__all__ = [
+    "SkillUnavailable",
+    "decode_reason",
+    "encode_reason",
+    "skill_unavailable",
+    "unresolved_skill_id",
+]

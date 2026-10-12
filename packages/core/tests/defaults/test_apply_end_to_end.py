@@ -530,3 +530,36 @@ async def test_sweep_spares_a_skill_only_a_channel_rule_adds(
     assert not report.is_failure(), report
     assert [o for o in report.skills if o.action is Action.DELETED] == []
     assert deleted == []
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_a_failed_channel_skills_read_reports_the_skill_sweep_failed(
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+) -> None:
+    """PR #857 review: a real SQL error in the read is reported, not an aborted transaction.
+
+    The read runs in a savepoint on the lock transaction, so the rest of the
+    apply (`prune_seeded_skills`) still runs and the report says FAILED.
+    """
+    from daimon.core.defaults import _reconcile
+    from sqlalchemy import text
+
+    async def failed_read(session: AsyncSession) -> set[str]:
+        await session.execute(text("SELECT 1 / 0"))
+        raise AssertionError("division by zero should raise")
+
+    async def sweep_must_not_run(*args: object, **kwargs: object) -> list[object]:
+        raise AssertionError("the skill sweep must not run without the channel rules")
+
+    monkeypatch.setattr(_reconcile, "list_channel_skill_ids", failed_read)
+    monkeypatch.setattr(_reconcile, "sweep_removed_skills", sweep_must_not_run)
+    client = build_fake_anthropic_http(_full_router().dispatch)
+
+    report = await apply_defaults(
+        db_session_factory, client, tmp_path, dry_run=dry_run, run_preflight=False
+    )
+
+    assert any(o.action is Action.FAILED and o.name == "<sweep>" for o in report.skills)

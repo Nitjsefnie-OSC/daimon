@@ -81,6 +81,7 @@ from daimon.core.skill_sync.fetcher import (
     TarballTooLarge,
 )
 from daimon.core.skill_zip import canonical_zip_bytes
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.specs import SkillRepo, merge_default_agent_toolset
 from daimon.core.stores.agent_repo_binding import get_tenant_repo_proof_kind
 from daimon.core.stores.agent_skill_repo_credentials import (
@@ -902,17 +903,14 @@ async def sync_agent_skills(
             tools_arg = merge_default_agent_toolset(
                 [t.model_dump(mode="json", exclude_none=True) for t in fresh.tools]  # type: ignore[arg-type]  # dumped dicts satisfy Tool TypedDict shape
             )
-            return await anthropic_client.beta.agents.update(
-                fresh.id,
-                version=fresh.version,
+            return await guarded_agent_update(
+                anthropic_client,
+                sessionmaker,
+                fresh,
                 skills=union_list,
                 tools=tools_arg,  # type: ignore[arg-type]  # list[dict] satisfies list[Tool] at runtime
             )
-        return await anthropic_client.beta.agents.update(
-            fresh.id,
-            version=fresh.version,
-            skills=union_list,
-        )
+        return await guarded_agent_update(anthropic_client, sessionmaker, fresh, skills=union_list)
 
     try:
         updated = await update_agent_with_version_retry(anthropic_client, agent.id, _apply)
