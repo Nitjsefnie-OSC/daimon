@@ -89,6 +89,7 @@ from daimon.core.routine_delivery import (
     agent_posted_to,
     delivery_target,
     placement_unknown_is_unsafe,
+    record_failure,
     render_routine_controls,
 )
 from daimon.core.rule_views import (
@@ -346,14 +347,16 @@ async def _build_fire(
                 tenant_id=str(row.tenant_id),
             )
             async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=None, error="balance_depleted")
+                await record_failure(s, row.id, error="balance_depleted")
             return
 
         # Bind routine context now; headless_runner calls the factory once
         # (session_id, model_id) are known after create_session.
         platform_user_id = row.created_by_user_id
 
-        def usage_record_factory(session_id: str, model_id: str) -> Callable[..., Awaitable[None]]:
+        def usage_record_factory(
+            session_id: str, model_id: str
+        ) -> Callable[..., Awaitable[object]]:
             return functools.partial(
                 record_turn_usage,
                 sessionmaker=sm,
@@ -452,7 +455,7 @@ async def _build_fire(
                 channel_id=row.channel_id,
             )
             async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=None, error="channel_budget_exceeded")
+                await record_failure(s, row.id, error="channel_budget_exceeded")
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():

@@ -114,9 +114,10 @@ class Settings(BaseSettings):
     html_link_errors: bool = Field(
         default=False,
         description=(
-            "Opt in to a static HTML page for unavailable notebook document links "
-            "(GET /n/{slug}/, status 404). Other routes and methods keep their "
-            "existing responses. Disabled by default."
+            "Show the static HTML page for unavailable notebook document links "
+            "(GET /n/{slug}/, status 404) to every client. Browsers (Accept: text/html) "
+            "always get it; with this off, other clients keep the JSON error. Other "
+            "routes and methods keep their existing responses."
         ),
     )
     # Max bytes for the published notebook source. 1 MiB is far past a

@@ -412,6 +412,12 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
     async with selected.deps.sessionmaker() as db, db.begin():
         await make_tenant(db, id=selected.tenant_id)
     deps = replace(selected.deps, state_store=None)
+
+    async def forbidden_anthropic_backfill(*args: object, **kwargs: object) -> None:
+        pytest.fail("foreign native sessions must not enter Anthropic billing catch-up")
+
+    monkeypatch.setattr("daimon.core.turn.run.reconcile_unbilled", forbidden_anthropic_backfill)
+
     session_id = None
     for index in range(2):
         prepared = await bind_session_impl(

@@ -6,11 +6,12 @@ import asyncio
 import contextlib
 import types
 import uuid
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic as _anthropic
@@ -103,7 +104,9 @@ def _make_runtime(
     # "'async for' requires an object with __aiter__ method". Empty history
     # degrades it to the history-only rung, same as before that rescue path
     # existed.
-    anthropic.beta.sessions.events.list = MagicMock(return_value=_AsyncIter([]))
+    # The turn-end billing catch-up (`daimon.core.usage_reconcile`) awaits the
+    # same call for its first page, as the SDK's paginator allows.
+    anthropic.beta.sessions.events.list = MagicMock(side_effect=lambda *a, **k: _EmptyEventList())
     from daimon.core.ma_resolver import new_resolver_cache
 
     resolver_cache = new_resolver_cache()
@@ -147,6 +150,32 @@ def _make_turn_deps(
         resolver_cache=resolver_cache,
         billing_config=None,
     )
+
+
+class _EmptyEventPage:
+    """An SDK cursor page with no events and nothing after it."""
+
+    data: list[object] = []
+
+    def has_next_page(self) -> bool:
+        return False
+
+
+class _EmptyEventList:
+    """Stands in for the SDK's `AsyncPaginator` over an empty event log: it can
+    be iterated (`async for`) or awaited for its first page, as the real one can."""
+
+    def __aiter__(self) -> _EmptyEventList:
+        return self
+
+    async def __anext__(self) -> object:
+        raise StopAsyncIteration
+
+    def __await__(self) -> Generator[Any, None, _EmptyEventPage]:
+        async def _first() -> _EmptyEventPage:
+            return _EmptyEventPage()
+
+        return _first().__await__()
 
 
 class _AsyncIter:
@@ -2803,12 +2832,20 @@ class TestSessionReuse:
         runtime = _make_runtime(tenant.id, db_session_factory)
         bot = make_bot(runtime)
         message = _make_thread_message(thread_id=5557)
+        card = MagicMock(spec=discord.Message)
+        card.id = 777888999
+        message.channel.send = AsyncMock(return_value=card)
 
         await bot.on_message(message)
 
         assert mock_run_turn.call_count == 2, (
             "run_turn must be called twice: first attempt (dead) + recreate retry (success)"
         )
+        assert all(
+            "777888999" in call.kwargs["excluded_message_ids"]
+            for call in mock_build_xml.await_args_list
+        ), "the reseed keeps the turn's own status card out of history like the first build"
+        assert mock_build_xml.await_count == 1, "the delta turn built none; only the reseed did"
         # Second run_turn must use the new session id.
         second_call_kwargs = mock_run_turn.call_args_list[1].kwargs
         assert second_call_kwargs["session_id"] == new_session_id, (
@@ -3117,3 +3154,123 @@ class TestOverCapQueue:
             await turn
         mock_create_session.assert_not_called()
         assert bot.turn_queue.depth() == 0
+
+
+class TestOwnCardIsNotContext:
+    """The turn's own status card is posted before the context is built; it is not conversation."""
+
+    @staticmethod
+    async def _run(
+        mock_resolve: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        *,
+        seeded_watermark: str | None,
+    ) -> None:
+        from daimon.core.stores.identity import get_or_create_platform_principal
+        from daimon.core.stores.thread_sessions import create_thread_session
+
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        principal = await get_or_create_platform_principal(
+            db_session, tenant_id=tenant.id, platform="discord", external_id="111"
+        )
+        await db_session.commit()
+        if seeded_watermark is not None:
+            async with db_session_factory() as seed_session:
+                snapshot = _snapshot_of(ma_session(id="sesn_card_existing"))
+                await create_thread_session(
+                    seed_session,
+                    ma_agent_id="ag_test",
+                    tenant_id=tenant.id,
+                    platform="discord",
+                    thread_id="5557",
+                    account_id=principal.account_id,
+                    ma_session_id="sesn_card_existing",
+                    budget_channel_id="789",
+                    watermark_message_id=seeded_watermark,
+                    effective_config=snapshot,
+                    identity_fingerprint=fingerprint_identity(snapshot),
+                    mutable_fingerprint=fingerprint_mutable(snapshot),
+                )
+                await seed_session.commit()
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(thread_id=5557)
+        card = MagicMock(spec=discord.Message)
+        card.id = 777888999
+        message.channel.send = AsyncMock(return_value=card)
+        await bot.on_message(message)
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_first_turn_excludes_its_own_card_from_history(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_build_xml: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mock_create_session.return_value = ma_session(id="sesn_card_first")
+        mock_build_xml.return_value = ("<context></context>\n\n<user_query>hi</user_query>", [])
+
+        await self._run(
+            mock_resolve,
+            mock_find_env,
+            mock_find_agent,
+            db_session,
+            db_session_factory,
+            seeded_watermark=None,
+        )
+
+        mock_build_xml.assert_awaited()
+        assert mock_build_xml.await_args is not None
+        assert "777888999" in mock_build_xml.await_args.kwargs["excluded_message_ids"]
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.adapters.discord.bot.build_delta_xml", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_delta_turn_excludes_its_own_card_and_keeps_delivered_chunks_out(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_build_delta: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mock_build_delta.return_value = (
+            "<context></context>\n\n<user_query>hi</user_query>",
+            [],
+        )
+
+        await self._run(
+            mock_resolve,
+            mock_find_env,
+            mock_find_agent,
+            db_session,
+            db_session_factory,
+            seeded_watermark="111222333",
+        )
+
+        mock_create_session.assert_not_called()
+        assert mock_build_delta.await_args is not None
+        assert "777888999" in mock_build_delta.await_args.kwargs["excluded_message_ids"]

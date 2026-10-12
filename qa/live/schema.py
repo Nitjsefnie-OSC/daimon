@@ -108,6 +108,7 @@ class Assertion(Contract):
         "interrupt_within_s",
         "same_thread",
         "progress_seen",
+        "progress_text_seen",
         "no_blank_message",
         "message_count",
         "fences_balanced",
@@ -124,6 +125,8 @@ class Assertion(Contract):
         "card_text_now",
         "card_edits_min",
         "chunks_gap_max_s",
+        "footer_cost_matches_ledger",
+        "ledger_matches_usage",
     ]
     turn: int | None = Field(default=None, ge=1)
     url: str | None = None
@@ -152,6 +155,8 @@ class Assertion(Contract):
     label_pattern: str | None = None
     during: Literal["running"] | None = None
     alternatives: list[Assertion] = Field(default_factory=list["Assertion"], alias="of")
+    tol_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    tol_pct: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     @property
     def pending_extension(self) -> str | None:
@@ -161,6 +166,14 @@ class Assertion(Contract):
 
     @model_validator(mode="after")
     def required_arguments(self) -> Self:
+        if self.kind == "footer_cost_matches_ledger" and self.tol_usd is None:
+            raise ValueError("footer_cost_matches_ledger requires tol_usd")
+        if self.kind == "ledger_matches_usage" and self.tol_pct is None:
+            raise ValueError("ledger_matches_usage requires tol_pct")
+        if self.tol_usd is not None and self.kind != "footer_cost_matches_ledger":
+            raise ValueError("tol_usd requires footer_cost_matches_ledger")
+        if self.tol_pct is not None and self.kind != "ledger_matches_usage":
+            raise ValueError("tol_pct requires ledger_matches_usage")
         if self.kind in {"channel_text_present", "channel_text_absent"}:
             if self.since_turn is None or self.turn is not None:
                 raise ValueError("channel_text assertions require since_turn, without turn")
@@ -204,8 +217,10 @@ class Assertion(Contract):
             raise ValueError("CLI fields require cli_check")
         if self.kind == "same_thread" and self.as_turn is None:
             raise ValueError("same_thread requires as_turn")
-        if self.kind == "progress_seen" and self.within_s is None:
-            raise ValueError("progress_seen requires within_s")
+        if self.kind in {"progress_seen", "progress_text_seen"} and self.within_s is None:
+            raise ValueError(f"{self.kind} requires within_s")
+        if self.kind == "progress_text_seen" and not self.pattern:
+            raise ValueError("progress_text_seen requires pattern")
         if self.kind == "reaction_present" and not self.emoji:
             raise ValueError("reaction_present requires emoji")
         if self.kind == "db_check" and not self.sql:
@@ -322,9 +337,7 @@ class Scenario(ScenarioMetadata):
 PROPOSED_STEPS = frozenset({"pytest"})
 PROPOSED_ASSERTIONS = frozenset(
     {
-        "footer_cost_matches_ledger",
         "ledger_debits",
-        "ledger_matches_usage",
         "answer_length_chars",
         "answer_part_gap_s",
         "reaction_absent",

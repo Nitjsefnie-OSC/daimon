@@ -856,6 +856,15 @@ reusable; it is not a secure erasure guarantee. Apply secret-retention controls
 to backups and storage. Application encryption protects database-only access;
 access to both the database and the key ring permits decryption.
 
+## Managed staging image promotion
+
+The managed staging deploy publishes canonical short-commit tags only after its
+deployment gates pass. It tags notebook-host and report-host first, then Daimon
+last; the Daimon tag marks the tested set as ready for promotion. A rerun accepts
+an existing tag only when it points to the same tested digest. If the tag points
+elsewhere or the registry cannot be checked, the deploy fails. New tags are
+created without replacing or deleting existing tags.
+
 ## Worker shutdown during deployment
 
 For worker compose files, set `stop_grace_period: 90s` on Discord, Slack,
@@ -865,6 +874,12 @@ drain and cleanup before Docker sends SIGKILL. When recreating containers, use
 the compose grace. The managed deploy fetches its worker compose asset from
 GCS; its source lives in `pymc-labs/daimon-infra` and an operator uploads changes
 with OpenTofu before the next app deployment.
+
+For staging deployments using prebuilt CI images, the managed workflow registers
+its SSH key while migrations and MCP deployment run. It requires successful key
+setup on the notebook VM and, when running, the workers VM before refreshing
+either VM. A failed or incomplete setup stops the deployment. Manual staging
+deployments and production promotes perform key setup serially.
 
 ### Discord overlap during deployment
 

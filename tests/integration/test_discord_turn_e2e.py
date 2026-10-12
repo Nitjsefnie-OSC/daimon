@@ -12,7 +12,12 @@ content kwarg.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import re
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -20,6 +25,8 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
+import httpx
+from daimon.adapters.discord import theme
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_post_identity import fallback_name_prefix
@@ -28,8 +35,10 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.thread_sessions import list_orphaned_turns
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import build_turn_router, ma_session
+from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     MARouter,
@@ -215,3 +224,132 @@ async def test_discord_mention_delivers_agent_reply_via_edit(
     assert edit_calls[-1].kwargs["content"] == fallback_name_prefix("test-agent", _AGENT_TEXT), (
         "terminal success edits the embed message to the agent's labelled final text"
     )
+
+
+class _HeldStream(httpx.AsyncByteStream):
+    """An SSE stream MA opened and never writes to: the turn is running."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        await asyncio.Event().wait()
+        yield b""  # pragma: no cover - never reached
+
+
+_GONE = {"type": "error", "error": {"type": "not_found_error", "message": "session gone"}}
+
+
+@patch("daimon.adapters.discord.bot.build_context_xml")
+async def test_a_drain_during_mention_recovery_leaves_the_replacement_recoverable(
+    mock_build_context_xml: AsyncMock,
+    db_session: AsyncSession,
+    db_schema: str,
+) -> None:
+    """Re-review #823, mention path (the continuation path shares its
+    bookkeeping): the first session is gone, the replacement accepts the turn
+    and keeps running, and the drain cuts it. The marker must name the
+    replacement so the next boot interrupts the session actually running."""
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, pool_size=4, max_overflow=0
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await db_session.commit()
+
+    attempts: list[tuple[str, list[str]]] = []
+    accepted = asyncio.Event()
+    router = build_turn_router(
+        str(tenant.id), agent_id=_AGENT_ID, env_id=_ENV_ID, agent_text=_AGENT_TEXT
+    )
+    router.add("GET", r"/v1/sessions/[^/]+/events", lambda _r, _m: httpx.Response(404, json=_GONE))
+    for index, (method, pattern, handler) in enumerate(router.routes):
+        if method == "GET" and pattern.pattern.endswith("/events/stream"):
+            router.routes[index] = (
+                method,
+                pattern,
+                lambda request, _m: (
+                    httpx.Response(404, json=_GONE)
+                    if "/sess_gone/" in request.url.path
+                    else httpx.Response(
+                        200, headers={"content-type": "text/event-stream"}, stream=_HeldStream()
+                    )
+                ),
+            )
+        elif method == "POST" and pattern.pattern.endswith("/events"):
+
+            def record(request: httpx.Request, match: re.Match[str], handler=handler):
+                attempts.append(
+                    (
+                        request.url.path.split("/")[-2],
+                        [event["type"] for event in json.loads(request.content)["events"]],
+                    )
+                )
+                if "/sess_gone/" in request.url.path:
+                    return httpx.Response(404, json=_GONE)
+                response = handler(request, match)
+                accepted.set()
+                return response
+
+            router.routes[index] = (method, pattern, record)
+
+    runtime = _make_runtime(factory, router)
+    bot = _make_bot(runtime)
+    bot.close = AsyncMock()  # type: ignore[method-assign]
+    message = _make_thread_message(guild_id=123456)
+    thread = cast(MagicMock, message.channel)
+    mock_build_context_xml.return_value = ("<user_query>hello</user_query>", [])
+    try:
+        with (
+            patch(
+                "daimon.core.turn.prepare.create_session",
+                side_effect=[
+                    ma_session(id=sid, agent_id=_AGENT_ID_2, environment_id=_ENV_ID)
+                    for sid in ("sess_gone", "sess_replacement")
+                ],
+            ),
+            patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.1),
+        ):
+            turn = asyncio.create_task(bot.on_message(message))
+            await asyncio.wait_for(accepted.wait(), timeout=10.0)
+            await asyncio.wait_for(bot._drain_and_close(), timeout=15.0)  # pyright: ignore[reportPrivateUsage]
+            _, still_running = await asyncio.wait({turn}, timeout=5.0)
+        assert not still_running, "the drain cancels the mention turn"
+
+        async with factory() as session:
+            markers = await list_orphaned_turns(session, platform="discord")
+        assert [(m.ma_session_id, m.active_turn_message_id) for m in markers] == [
+            ("sess_replacement", "42")
+        ], "the marker moved onto the replacement before its turn was sent"
+        assert markers[0].active_turn_owner_key == runtime.owner_key
+
+        card = cast(MagicMock, thread.send.return_value)
+        card.webhook_id = None
+        card.embeds = [
+            discord.Embed(title="Working on it…", color=discord.Color(theme.COLOR_IN_PROGRESS))
+        ]
+        card.attachments = []
+        card.edit = AsyncMock(return_value=card)
+        thread.fetch_message = AsyncMock(return_value=card)
+        successor = _make_bot(runtime)
+        successor._orphan_recovery_armed = True  # pyright: ignore[reportPrivateUsage]
+        successor.get_channel = MagicMock(return_value=thread)  # type: ignore[method-assign]
+        await successor._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+        background = list(successor._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+        for task in background:
+            task.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
+
+        assert attempts[-2:] == [
+            ("sess_replacement", ["user.message"]),
+            ("sess_replacement", ["user.interrupt"]),
+        ], "boot interrupts the running replacement, not its dead predecessor"
+        assert ("sess_gone", ["user.interrupt"]) not in attempts
+        async with factory() as session:
+            assert await list_orphaned_turns(session, platform="discord") == []
+    finally:
+        await engine.dispose()

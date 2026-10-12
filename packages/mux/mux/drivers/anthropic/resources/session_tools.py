@@ -1,12 +1,18 @@
 """Fixed native session operations for M0 tools that consume SDK projections."""
 
-from collections.abc import AsyncIterator
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import datetime
 from typing import Literal, Protocol, cast
 
 from anthropic import AsyncAnthropic
+from anthropic.pagination import AsyncPageCursor
 from anthropic.types.beta.session_list_params import SessionListParams
+from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
 from anthropic.types.beta.sessions.event_list_params import EventListParams
 from anthropic.types.beta.sessions.event_send_params import EventSendParams
+from pydantic import PrivateAttr
 
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic.resources._authorization import (
@@ -43,13 +49,21 @@ class EventQuery(NativeConfig):
     page: str | None = None
     limit: int | None = None
     order: Literal["asc", "desc"] | None = None
-    created_at_gte: str | None = None
+    created_at_gte: str | datetime | None = None
+    created_at_lt: str | datetime | None = None
     types: list[str] | None = None
 
 
 class EventPage(NativeConfig):
     data: tuple[NativeSnapshot, ...]
     next_page: str | None
+    _continue: Callable[[], Awaitable[EventPage]] | None = PrivateAttr(default=None)
+
+    async def continue_page(self) -> EventPage:
+        """Continue this authorized native SDK page; never reconstruct its query."""
+        if not self.data or not self.next_page or self._continue is None:
+            raise RuntimeError("no authorized native event continuation")
+        return await self._continue()
 
 
 class SessionTools(Protocol):
@@ -119,8 +133,27 @@ class AnthropicSessionTools:
                 session.id, **cast(EventListParams, query.model_dump(exclude_unset=True))
             )
         )
-        # No normalization or paginator walk: callers read this exact SDK page.
-        return EventPage(
+        return self._event_page(scope, session, result)
+
+    def _event_page(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        result: AsyncPageCursor[BetaManagedAgentsSessionEvent],
+    ) -> EventPage:
+        # No eager paginator walk. The SDK owns continuation params/header order.
+        page = EventPage(
             data=tuple(native_snapshot(event) for event in result.data),
-            next_page=result.next_page,
+            # The SDK's own value; a page object without the field (an empty
+            # stand-in) reads as no cursor, as `has_next_page()` already says.
+            next_page=getattr(result, "next_page", None),
         )
+        if result.has_next_page():
+
+            async def continue_page() -> EventPage:
+                self._check(scope, session, "session")
+                following = await provider_call(result.get_next_page())
+                return self._event_page(scope, session, following)
+
+            page._continue = continue_page  # pyright: ignore[reportPrivateUsage]  # driver-owned cursor
+        return page

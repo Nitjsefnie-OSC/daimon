@@ -19,6 +19,7 @@ on:
       - "packages/core/daimon/core/agent_identity.py"
       - "packages/testing/daimon/testing/db.py"
       - "packages/testing/tests/test_db.py"
+      - "packages/adapters/discord/tests/test_bot.py"
       - "packages/core/daimon/core/turn/driver.py"
       - "packages/core/daimon/core/turn/reducers.py"
       - "packages/core/daimon/core/turn/render.py"
@@ -55,6 +56,7 @@ on:
       - "packages/adapters/slack/daimon/adapters/slack/boot_sweep.py"
       - "packages/adapters/slack/daimon/adapters/slack/__main__.py"
       - ".github/workflows/deploy.yml"
+      - "scripts/ci/iap-ssh-key.sh"
       - ".github/workflows/ci.yml"
       - ".github/workflows/promote.yml"
       - "packages/testing/daimon/testing/ci_shard.py"
@@ -139,6 +141,7 @@ on:
       - "packages/core/daimon/core/agent_identity.py"
       - "packages/testing/daimon/testing/db.py"
       - "packages/testing/tests/test_db.py"
+      - "packages/adapters/discord/tests/test_bot.py"
       # turn/
       - "packages/core/daimon/core/turn/driver.py"
       - "packages/core/daimon/core/turn/reducers.py"
@@ -182,6 +185,7 @@ on:
       - "packages/adapters/slack/daimon/adapters/slack/__main__.py"
       # the stop-before-start deploy that RollingOverlap assumes
       - ".github/workflows/deploy.yml"
+      - "scripts/ci/iap-ssh-key.sh"
       - ".github/workflows/ci.yml"
       - ".github/workflows/promote.yml"
       - "packages/testing/daimon/testing/ci_shard.py"

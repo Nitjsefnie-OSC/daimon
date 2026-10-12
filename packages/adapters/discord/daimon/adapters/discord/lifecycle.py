@@ -41,6 +41,7 @@ from daimon.adapters.discord.progress_receipt import InitialProgressReceipt
 from daimon.adapters.discord.provider_events import ProviderDraft
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
+from daimon.adapters.discord.thread_gone import ThreadStopped
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
@@ -348,7 +349,11 @@ class DiscordTurnLifecycle:
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
         waiting_for_tenant_slot: Callable[[], bool] | None = None,
+        thread_stopped: Callable[[], bool] | None = None,
     ) -> None:
+        # Once the turn's thread is gone or closed (#809) nothing more is written:
+        # no progress edit, no terminal card, no replacement for a missing card.
+        self._thread_stopped = thread_stopped or (lambda: False)
         self._requester_id = requester_id
         self._turn_id = turn_id
         self._trigger_message = trigger_message
@@ -567,6 +572,8 @@ class DiscordTurnLifecycle:
         """
         if self._unprompted:
             kwargs["silent"] = True
+        if self._thread_stopped():
+            raise ThreadStopped("thread is gone or closed")
         sent = await self._send(**kwargs)
         self._note_discord_time(getattr(sent, "id", None))
         return sent
@@ -576,6 +583,8 @@ class DiscordTurnLifecycle:
 
         Also used by admission and session-setup notices before the driver starts.
         """
+        if self._thread_stopped():
+            return
         await self._edit_message(self._message_ref, **kwargs)
 
     async def end_card(self, text: str) -> None:
@@ -583,6 +592,8 @@ class DiscordTurnLifecycle:
         try:
             await self._settle_progress()
             self._terminal = True
+            if self._thread_stopped():
+                return
             await self._edit_message(
                 self._message_ref,
                 content=text,
@@ -749,6 +760,9 @@ class DiscordTurnLifecycle:
         terminal_token: object | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> bool:
+        if self._thread_stopped():
+            log.info("turn.card_write_dropped", reason="thread_stopped", turn_id=str(self._turn_id))
+            return False
         may_outlive_terminal = progress or not self._terminal
 
         def stale_replacement() -> bool:
@@ -774,7 +788,7 @@ class DiscordTurnLifecycle:
                 return False
             delivered = self._revealed_first_chunk is not None or self._summary_ref is not None
             log.info("turn.message_missing", message_id=str(message.id), delivered=delivered)
-            if delivered:
+            if delivered or self._thread_stopped():
                 return False  # a stale edit must not turn a delivered answer into an error
             send_kwargs = dict(kwargs)
             attachments = send_kwargs.pop("attachments", None)
@@ -868,7 +882,7 @@ class DiscordTurnLifecycle:
 
     async def _maybe_flush(self, *, initial: bool = False) -> None:
         """Post or edit the embeds, subject to debounce. No-op after terminal."""
-        if self._terminal:
+        if self._terminal or self._thread_stopped():
             return
         now = self._clock()
         if self._message_ref is None:
@@ -934,7 +948,7 @@ class DiscordTurnLifecycle:
         rendered_json: str | None = None,
     ) -> None:
         try:
-            if not self._terminal:
+            if not self._terminal and not self._thread_stopped():
                 landed = await self._edit_message(
                     message, progress=True, embeds=embeds, view=self._cancel_view
                 )
@@ -1086,6 +1100,11 @@ class DiscordTurnLifecycle:
         ):
             self._discord_mark = snowflake
 
+    def _skip_terminal(self) -> None:
+        """End the card without a write: the thread it sits in is gone or closed."""
+        self._terminal = True
+        log.info("turn.terminal_skipped", reason="thread_stopped", turn_id=str(self._turn_id))
+
     def _mark_ended(self) -> None:
         """Close the turn's window on Discord's clock; the host's only if Discord gave none.
 
@@ -1101,6 +1120,9 @@ class DiscordTurnLifecycle:
         self._discord_mark = None  # only the terminal sends and edits close the window
         try:
             await self._settle_progress()
+            if self._thread_stopped():
+                self._skip_terminal()
+                return
             await self._deliver_success(state)
         finally:
             self._mark_ended()
@@ -1309,7 +1331,11 @@ class DiscordTurnLifecycle:
         the first chunk past Discord's message limit (re-splitting would strand
         the overflow messages already posted).
         """
-        if self._revealed_first_chunk is None or self._message_ref is None:
+        if (
+            self._revealed_first_chunk is None
+            or self._message_ref is None
+            or self._thread_stopped()
+        ):
             return False
         first_chunk = self._revealed_first_chunk
         prefix = fallback_name_prefix(self._agent_name, "")
@@ -1337,6 +1363,9 @@ class DiscordTurnLifecycle:
         self._discord_mark = None  # only the terminal sends and edits close the window
         try:
             await self._settle_progress()
+            if self._thread_stopped():
+                self._skip_terminal()
+                return
             await self._deliver_failure(state, err)
         finally:
             self._mark_ended()
@@ -1398,7 +1427,7 @@ class DiscordTurnLifecycle:
         # Sole delivery path (D-11). Sealed answers first, then the embed
         # flush -- matches on_terminal_success's existing order, so a sealed
         # answer never trails behind an embed that already moved past it.
-        if self._terminal:
+        if self._terminal or self._thread_stopped():
             return
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
@@ -1408,7 +1437,7 @@ class DiscordTurnLifecycle:
 
     async def _discard_embed(self) -> None:
         """Delete the embed this turn posted, if any, and forget it. Best effort."""
-        if self._message_ref is None or self._delete is None:
+        if self._message_ref is None or self._delete is None or self._thread_stopped():
             return
         try:
             await self._delete(self._message_ref)
@@ -1428,7 +1457,12 @@ class DiscordTurnLifecycle:
     async def _delete_card(self) -> None:
         """Delete the finished card once the answer is posted below it. Best effort."""
         card = self._card_message_ref
-        if card is None or self._delete is None or card is self._message_ref:
+        if (
+            card is None
+            or self._delete is None
+            or card is self._message_ref
+            or self._thread_stopped()
+        ):
             return
         try:
             await self._delete(card)

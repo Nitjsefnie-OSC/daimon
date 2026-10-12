@@ -11,7 +11,7 @@ import uuid
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.mcp_merge import (
@@ -49,6 +49,7 @@ async def reconcile_agent(
     account_id: uuid.UUID | None = None,
     public_url: str | None = None,
     managed: bool = True,
+    skills_view: list[SkillListResponse] | None = None,
 ) -> ResourceOutcome:
     """Reconcile a single agent against MA.
 
@@ -95,7 +96,12 @@ async def reconcile_agent(
     if update:
         spec = spec.model_copy(update=update)
 
-    resolved_skills = await resolve_refs(client, refs=spec.skills, tenant_id=tenant_id)
+    resolved_skills = await resolve_refs(
+        client,
+        refs=spec.skills,
+        tenant_id=tenant_id,
+        skills_view=skills_view if dry_run else None,
+    )
     matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
     ma_match = matches[0] if matches else None
     # Dedup: when MA holds multiple agents with the same daimon_name (the

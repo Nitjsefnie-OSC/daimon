@@ -37,6 +37,22 @@ _LINK_UNAVAILABLE_HTML = (
     "<p>This link is unavailable. Ask the sender to share a new link.</p></body></html>"
 )
 
+_ZERO_QUALITY = re.compile(r"(^|;)q=0(\.0*)?($|;)")
+
+
+def _browser_navigation(accept: str | None) -> bool:
+    """True when the `Accept` header lists `text/html` (a browser opening a link).
+
+    `*/*` alone (curl, httpx, `fetch`) is not a browser, so API clients keep JSON.
+    """
+    for item in (accept or "").split(","):
+        media, _, params = item.partition(";")
+        if media.strip().lower() != "text/html":
+            continue
+        return not _ZERO_QUALITY.search(params.replace(" ", "").lower())
+    return False
+
+
 # Headers we strip when forwarding (hop-by-hop and per-connection).
 # RFC 2616 §13.5.1 + additional connection-specific headers that MUST NOT
 # be forwarded by a proxy.
@@ -228,7 +244,14 @@ def create_proxy_router(state: AdminState) -> APIRouter:
             state, slug, request.headers, request.query_params.get("access_token")
         )
         if resolved is None:
-            if state.settings.html_link_errors and request.method == "GET" and path == "":
+            if (
+                request.method == "GET"
+                and path == ""
+                and (
+                    state.settings.html_link_errors
+                    or _browser_navigation(request.headers.get("accept"))
+                )
+            ):
                 return HTMLResponse(_LINK_UNAVAILABLE_HTML, status_code=status.HTTP_404_NOT_FOUND)
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no active notebook: {slug}")
         np, own_origin = resolved

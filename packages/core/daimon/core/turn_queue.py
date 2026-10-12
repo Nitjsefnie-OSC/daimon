@@ -194,6 +194,8 @@ class TurnQueue:
         # A bounded sample: an adapter with no heartbeat never drains it.
         self._waits_ms: deque[float] = deque(maxlen=_WAIT_SAMPLE)
         self._started = 0
+        # Set by a shutdown drain's cancellation phase: no slot is granted after it.
+        self._stopped = False
         _live_queues.add(self)
 
     @classmethod
@@ -241,9 +243,24 @@ class TurnQueue:
 
     # --- admission ------------------------------------------------------
 
+    def stop_dispatch(self) -> None:
+        """Grant no slot from now on: a shutdown is cancelling what is left.
+
+        Freed slots are not handed to waiting turns, and admission neither
+        starts nor queues a new one, so cancelling one turn cannot start the
+        next. Waiting tickets stay queued until their task is cancelled or
+        times out. Irreversible: the process is about to close.
+        """
+        self._stopped = True
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
     def _can_run(self, tenant_id: uuid.UUID) -> bool:
         return (
-            self._running.get(tenant_id, 0) < self._caps[tenant_id]
+            not self._stopped
+            and self._running.get(tenant_id, 0) < self._caps[tenant_id]
             and (self.global_cap is None or self._running_total < self.global_cap)
             and not self._queues.get(tenant_id)
         )
@@ -272,6 +289,9 @@ class TurnQueue:
         claimed = self.try_claim(tenant_id, cap=cap)
         if claimed is not None:
             return claimed
+        if self._stopped:
+            log.info("turn.queue.stopped", tenant_id=str(tenant_id), platform=self.platform)
+            return None
         fields = {"tenant_id": str(tenant_id), "platform": self.platform, **fields}
         tenant_depth = self.depth(tenant_id)
         if tenant_depth >= self.max_queued_per_tenant or self._depth >= self.max_queued:
@@ -327,7 +347,9 @@ class TurnQueue:
     def _dispatch(self) -> None:
         """Start waiting turns while slots are free: the first eligible tenant in
         rotation order goes next and moves to the back."""
-        while self.global_cap is None or self._running_total < self.global_cap:
+        while not self._stopped and (
+            self.global_cap is None or self._running_total < self.global_cap
+        ):
             tenant_id = next(
                 (t for t in self._rotation if self._running.get(t, 0) < self._caps[t]), None
             )

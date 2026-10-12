@@ -507,7 +507,7 @@ async def test_a_denied_turn_says_why_without_a_card(
     with patch.object(app_module, "admit", denied):
         await teams._run_turn(make_inbound(), TENANT)
     assert [a.text for a in sender.activities] == [
-        "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
+        "Your team's Daimon credit has run out.\n\nAn admin can top up with `billing` in a 1:1 chat with me."
     ], "the refusal says why, in the organisation's nouns"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
 

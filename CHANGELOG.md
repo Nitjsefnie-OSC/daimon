@@ -104,6 +104,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an opt-in requirement for destinations on MCP routine creation, warning before agent lookup or saving while preserving record-only defaults.
 - Add opt-in Discord credential-form expiry with durable retirement, retryable verified edits of the original card, and no background job by default.
 - Report separate default and opt-in QA product profiles, with explicit per-cell profile results and an opt-in PASS tally that never changes default-profile totals.
+- Opening an expired, revoked or unknown notebook or report link in a browser now shows a plain "Link unavailable" page asking the sender to share a new link, instead of a raw JSON error. The status codes (404 for notebooks, 403 for reports) and the link checks are unchanged, and API clients still get JSON unless `DAIMON_NOTEBOOK__HTML_LINK_ERRORS` / `DAIMON_REPORT__HTML_LINK_ERRORS` is set to give every client the page.
+- Model calls an agent made while its chat worker was down (a deploy or crash mid-turn) are now billed when the next turn in that thread ends, at the same price and once only. Previously they went unbilled unless the usage sweep was switched on.
+- When your team's Daimon credit runs out, the reply now says how to fix it: "An admin can top up with `/billing`." on Discord and Slack, and `billing` in a 1:1 chat on Teams. Before, it only said "Ask an admin to top up." without naming where.
+- A routine that posts to a channel or thread now says so there when it fails, instead of posting nothing. The notice names the routine, says what went wrong in plain words (for example "The request to the AI model failed." or "Your team's Daimon credit has run out.") and that it will try again at its next scheduled time. It is posted once when a routine starts failing, not on every failed run, and again only after a run has succeeded.
+- A file the agent makes that is over the upload limit (10 MB on most Discord servers, 20 MB on Slack and Teams) is no longer deleted. It stays in the agent's workspace and, on Discord and Slack, the thread gets one notice saying it was too big to attach and that you can ask for a smaller version or parts under the limit; later turns don't repeat the notice. Teams keeps such a file too, including in a channel without file access.
+- A Discord deploy now waits for every turn in progress, including wizard submits and DMs that are still queued or preparing, and starts no queued turn once it begins cancelling. A thread turn cut off by the deploy keeps its marker, so the next process delivers its finished answer or interrupts its session; a cut-off DM interrupts its own session. Before, a wizard turn was invisible to the drain and its session could keep running with nothing left to recover it.
+- Deleting a Discord thread while it is answering no longer leaves an error message in the channel. The turn stops, nothing more is written to the thread, and messages queued behind it are dropped instead of started. A deleted thread's chats are retired so a restart does not revive them. A thread that cannot be written to because it is archived and cannot be reopened stops the turn the same way, but keeps its chats.
+- A reply to an earlier Discord message is now answered about that message. The agent is told which message you replied to, including one from before its last turn, or part of a long answer, instead of treating your reply as being about the latest message.
+- Discord turns no longer show the agent their own status card as an empty message from itself right before your request, so it stops saying the message you replied to "has no text".
+- The **New agent** button in `/agent-setup` opens its form again. Discord had been rejecting the form, so clicking the button showed "This interaction failed" and no agent could be created from the panel.
+- Deploys no longer leave Discord buttons and slash commands unanswered for about 14 seconds: the new Discord container starts beside the old one and takes over the gateway through a database lease as soon as the old one has drained and closed.
+- The report viewer loads its stylesheet and script on installs that resolve FastAPI before 0.137, instead of staying on "Loading…".
+- Replacement checkpoints now report priced model calls in turn outcomes while retaining their predecessor-channel debits.
+- Restart recovery detaches a chat session when interrupting its orphaned turn fails, so the next message starts a fresh session instead of reaching a busy one.
+- Long Discord answers keep the consumed-input watermark while omitting their delivered answer chunks from the next turn's history.
+- Queued Discord mentions in one thread now reach the agent together, while a separate confirmation message starts its own turn.
+- Reused chat sessions are replaced when their budget channel changes, so the usage sweep charges missed turns to the channel that admitted them.
+- New Discord threads retain links to recent channel uploads after busy chat moves them outside the 25-message context window.
+- Discord continuations check thread history back to the queued handoff and retry when that history is unavailable, so a newer human reply cannot trigger stale work.
+- Follow-up turns obey the tenant's current concurrency cap after an operator changes it, without starting queued turns above a lowered cap.
+- Registered Discord tenants with an unjoined guild receive defaults updates on restart, so their agents no longer keep stale guidance.
+- One `yes` now approves only the latest skill-add preview in a thread, even when the previews target different agents.
+- Canceling Connect GitHub says "No changes saved", covering additions, removals, and working-repo edits.
+- After posting the Connect GitHub card, the agent no longer repeats the card's steps in its reply.
+- Connect GitHub links offered for a named repo open with that repo selected when it is available to add.
+- QA chunk delivery gaps use the answer edit time for cards observed running during the same turn; missing edit evidence remains pending.
+- QA reads nested Discord V2 card text for current-card assertions and records component-only card edits; unreadable card copy stays pending.
+
+- QA observes queue progress text during live turns and can post thread follow-ups before the first answer completes. Overlapping follow-up evidence is attributed per turn, and unattributable evidence stays PENDING.
+
+- QA running-card edit checks retain direct message snapshots on every poll and report missing or insufficient capture as PENDING.
+- QA running-card edit checks retain direct message snapshots on every poll, count successive changes, and report missing, sparse or gapped capture as PENDING. A failed card readback is recorded as unavailable instead of stopping the scenario.
+- Agents created before the Connect GitHub change get the new guidance on the next restart.
+- Agents no longer suggest pasting a GitHub token. When a private repo can't be read, they offer the Connect GitHub link. Agents that already use a saved token keep working.
+- QA reports model verification as n/a PENDING on confirmed pre-admission skipped turns, preserving product silence failures and recording zero spend.
+
+- Approval cards still up during a Discord restart are retired before the client closes, so their buttons no longer stay live.
+
+### Changed
+- QA expected CLI refusals reject transport/crash signatures before matching refusal text, reject empty-match patterns, and refuse wrapped or structured tenant-credit commands before mutation.
+- QA footer and ledger assertions compare scoped per-request token usage, independent rates and deployment markup with exact ledger debit identities.
+
+- QA supports frozen Discord answer/thread counts, nested alternatives, component/card observations, running card edits and chunk delivery gaps, with scoped guild and expected CLI-exit parameters.
+- Privacy delete previews, channel setup panels, network confirmations, and DM controls use the approved plain words across Discord, Slack, and Teams.
+- Connect GitHub shows an agent's complete repo list and working repo. Authorized users can add or remove repos and set or clear the working repo in one save. Live permission checks and stale-page detection protect changes made in chat.
+
+- Staging QA waits for a quiet deployment window before each scenario and records the CI evidence without changing staging deployments. A workflow rerun keeps its run id but is re-read by attempt, so its new deploy must also settle.
+- Staging QA records deployment images and restart evidence, keeps deploy-interrupted runs silent and PENDING, and retries once after workers settle within the pass budget.
+- GitHub setup sections on Discord, Slack, and Teams show repos and the working repo without grant-editing controls. Ask the agent in chat to change repos; Connect GitHub remains available.
+
+- QA restores normal alertable verdicts on the same worker image while preserving missing event-log checks; same-image restarts fail consistently regardless of probe timing.
+- Plain words and spaced text for feedback, help, billing, memory, routines, and wizard panels across Discord, Slack, and Teams.
+- Add bounded unauthenticated HTTP checks without Discord setup or model spend.
+- QA CLI readback passes validated argv, bounds UTF-8 bytes, and keeps unavailable hooks or malformed resolved expectations PENDING without stopping other checks.
 
 
 - Add optional accepted initial progress-card receipts for Discord, Slack and Teams, with offline SDK delivery controls and unchanged default rendering.
@@ -437,6 +491,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Authorize neutral resource calls with tenant/account ownership and explicit workspace scopes; use tenant scopes for agent/environment/skill reconciliation, tenant indexing and sweeps, and retain native skills paginator stop behavior.
 
+- The scheduler's headless usage sweep is off by default (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`). It listed every session in the shared Managed Agents workspace and drained its request rate limit, stalling admission. While it's off, headless MCP turns aren't metered and usage a live adapter missed isn't recovered; turning it back on backfills sessions still present in the workspace (and restores the full scan until the scoped sweep ships). `--once` honours the same switch.
+- Question-and-answer and checking tools no longer ask for approval as if they were writes. A tool whose name asks a question or checks an answer, or names a briefing (DeepWiki's `ask_wiki_question` and the EAP server's `eap_briefing` and `eap_verify_answer`), now runs without a card. A bare `ask`, such as another Daimon's agent-to-agent `ask`, still asks for approval. A server that marks a tool `readOnlyHint: false` is believed over a read-sounding name.
 - Teams 👍/👎 are now emoji buttons beside Ask a person instead of Teams' built-in thumbs. Older answers keep the built-in thumbs, which still work.
 - Teams answers end like Discord and Slack ones: a card under the answer shows the summary line (`Ada  12s  $0.042 used  $41.20 left`) with 👍/👎 and, when support is set up, Ask a person, all in one place. A tool-only or failed turn's card shows the summary line too.
 - Teams support and 👎 feedback posts are easier to read: each line is its own paragraph, since Teams ran them together, and the long message URL is a short "Open the message" link.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -17,6 +18,7 @@ import pytest
 from daimon.adapters.discord.bot import GLOBAL_CAP_NOTICE, DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import direct_messages as core_direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.direct_messages import reply_to_dm, start_dm
@@ -31,14 +33,16 @@ from daimon.core.stores.direct_messages import (
     dm_enabled,
     finish_message,
     get_conversation,
+    holds_claim,
     set_dm_enabled,
 )
 from daimon.core.stores.domain import Role
-from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_queue import TurnQueue
 from daimon.testing import build_turn_router
+from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_ledger_entry, make_tenant
 from daimon.testing.ma import build_fake_anthropic, combine_handlers, make_fake_memory_store_handler
 from daimon.testing.ma_models import ma_session
@@ -471,6 +475,135 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
     ):
         await DirectMessageCog(bot).on_message(message(3))
     assert bot.turn_queue.in_flight() == 0
+
+
+class _HeldStream(httpx.AsyncByteStream):
+    """An SSE stream MA opened and never writes to: the turn is running."""
+
+    async def __aiter__(self):
+        await asyncio.Event().wait()
+        yield b""  # pragma: no cover - never reached
+
+
+@pytest.mark.parametrize("interrupt_fails", [False, True], ids=["interrupted", "unconfirmed"])
+async def test_discord_drain_stops_a_running_dm_and_never_starts_a_queued_one(
+    db_session, db_schema, monkeypatch, interrupt_fails
+):
+    """#16: a shutdown cancels a DM whose turn MA is still running. A DM has no
+    marker for boot recovery, so its cleanup interrupts the session, or marks
+    the mapping dead when the interrupt is unconfirmed; and a DM queued behind
+    it at cap 1 never starts."""
+    accepted = asyncio.Event()
+    real_build_turn_router = build_turn_router
+
+    def holding_router(*args, **kwargs):
+        router = real_build_turn_router(*args, **kwargs)
+        for index, (method, pattern, handler) in enumerate(router.routes):
+            if method == "GET" and pattern.pattern.endswith("/events/stream"):
+                router.routes[index] = (
+                    method,
+                    pattern,
+                    lambda _r, _m: httpx.Response(
+                        200, headers={"content-type": "text/event-stream"}, stream=_HeldStream()
+                    ),
+                )
+            elif method == "POST" and pattern.pattern.endswith("/events"):
+
+                def send(request, match, handler=handler):
+                    response = handler(request, match)
+                    types = [event["type"] for event in json.loads(request.content)["events"]]
+                    if interrupt_fails and "user.interrupt" in types:
+                        return httpx.Response(
+                            400, json={"type": "error", "error": {"type": "invalid_request_error"}}
+                        )
+                    accepted.set()
+                    return response
+
+                router.routes[index] = (method, pattern, send)
+        return router
+
+    monkeypatch.setitem(globals(), "build_turn_router", holding_router)
+    # Two DMs run concurrently, so they need pooled connections, not the test's one.
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, pool_size=8, max_overflow=0
+    )
+    db_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    tenant, deps, admission, sent, *_ = await _setup(db_session, db_session_factory)
+    route = await _start(tenant, deps, admission)
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    runtime.turn_deps = deps
+    runtime.settings.discord.max_concurrent_turns = 1
+    runtime.settings.turn_queue = TurnQueueSettings()
+    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    bot.close = AsyncMock()  # type: ignore[method-assign]
+    guild = MagicMock(spec=discord.Guild)
+    member = MagicMock(spec=discord.Member)
+    member.id = 42
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    guild.fetch_member = AsyncMock(return_value=member)
+    channel = MagicMock(spec=discord.DMChannel)
+    channel.id = "dm-42"
+    channel.send = AsyncMock()
+
+    @asynccontextmanager
+    async def typing():
+        yield
+
+    channel.typing = typing
+
+    def message(message_id: int) -> discord.Message:
+        result = MagicMock(spec=discord.Message)
+        result.author.bot = False
+        result.author.id = 42
+        result.channel = channel
+        result.id = message_id
+        result.content = "continue"
+        return result
+
+    with (
+        patch.object(bot, "get_guild", return_value=guild),
+        patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.1),
+    ):
+        first = asyncio.create_task(DirectMessageCog(bot).on_message(message(1)))
+        await asyncio.wait_for(accepted.wait(), timeout=10.0)
+        second = asyncio.create_task(DirectMessageCog(bot).on_message(message(2)))
+        async with asyncio.timeout(5):
+            while not bot.turn_queue.depth():
+                await asyncio.sleep(0.01)
+        assert deps.running_turns.tasks() == {first, second}, "the queued DM is in progress"
+        await asyncio.wait_for(bot._drain_and_close(), timeout=15.0)
+        _, still_running = await asyncio.wait({first, second}, timeout=5.0)
+        for task in still_running:
+            task.cancel()
+
+    assert not still_running and first.cancelled() and second.cancelled()
+    assert bot.turn_queue.in_flight() == 0 and bot.turn_queue.depth() == 0
+    assert [event["type"] for body in sent for event in body["events"]] == [
+        "user.message",
+        "user.interrupt",
+    ], "the cut DM's session is interrupted; the queued DM sent nothing"
+    async with db_session_factory() as session:
+        statuses = (
+            (
+                await session.execute(
+                    sql_text("SELECT status FROM thread_sessions WHERE thread_id = :scope"),
+                    {"scope": route.scope_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        stored = await get_conversation(
+            session, platform="discord", route_key="dm-42", external_user_id="42"
+        )
+    assert statuses == (["dead"] if interrupt_fails else ["live"]), (
+        "an unconfirmed interrupt retires the mapping so the next DM gets a fresh session"
+    )
+    await engine.dispose()
+    assert stored is not None and stored.active_until is None, "the claim is released"
+    assert stored.recent_message_ids == ["1"], "the queued DM was never claimed"
 
 
 @pytest.mark.parametrize("denied", [False, True])
@@ -1566,3 +1699,108 @@ async def test_dm_source_sealed_during_recovery_is_quarantined(
             )
             is None
         )
+
+
+async def _claimed_dm(db_session, db_session_factory, *, ma_session_id):
+    tenant, deps, admission, sent, *_ = await _setup(db_session, db_session_factory)
+    route = await _start(tenant, deps, admission)
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as session:
+        row = await claim_message(
+            session,
+            platform="discord",
+            route_key="dm-42",
+            external_user_id="42",
+            message_id="claim-1",
+            expected_scope_id=route.scope_id,
+            now=now,
+            active_until=now + timedelta(minutes=2),
+        )
+        await create_thread_session(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=route.scope_id,
+            account_id=admission.account_id,
+            ma_session_id=ma_session_id,
+        )
+    return tenant, deps, admission, sent, route, row
+
+
+@pytest.mark.parametrize("claim_state", ["current", "cleared", "newer", "changed_scope"])
+async def test_a_shutdown_settles_a_dm_only_while_its_claim_holds(
+    db_session, db_session_factory, claim_state
+):
+    """A stale DM delivery neither interrupts nor retires a later one's session."""
+    tenant, deps, admission, sent, route, row = await _claimed_dm(
+        db_session, db_session_factory, ma_session_id="sess_claim"
+    )
+    async with db_session_factory.begin() as session:
+        if claim_state == "cleared":
+            await session.execute(
+                sql_text("UPDATE direct_message_conversations SET active_until = NULL")
+            )
+        elif claim_state == "newer":
+            await session.execute(
+                sql_text(
+                    "UPDATE direct_message_conversations "
+                    "SET active_until = active_until + interval '1 minute'"
+                )
+            )
+        elif claim_state == "changed_scope":
+            await session.execute(
+                sql_text("UPDATE direct_message_conversations SET scope_id = 'dm:new'")
+            )
+    async with db_session_factory.begin() as session:
+        assert await holds_claim(session, conversation=row) == (claim_state == "current")
+
+    await core_direct_messages._settle_shutdown_cancelled_dm(deps, row)
+
+    events = [event["type"] for body in sent for event in body["events"]]
+    assert events == (["user.interrupt"] if claim_state == "current" else [])
+    async with db_session_factory() as session:
+        assert (
+            await get_live_thread_session(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id=route.scope_id,
+                account_id=admission.account_id,
+            )
+            is not None
+        )
+
+
+async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mapping(
+    db_session, db_session_factory
+):
+    tenant, deps, admission, _sent, route, row = await _claimed_dm(
+        db_session, db_session_factory, ma_session_id="sess_timeout"
+    )
+
+    async def stalled(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    with (
+        patch.object(deps.anthropic.beta.sessions.events, "send", stalled),
+        patch.object(core_direct_messages, "_SHUTDOWN_INTERRUPT_TIMEOUT_S", 0.05),
+    ):
+        await asyncio.wait_for(core_direct_messages._settle_shutdown_cancelled_dm(deps, row), 2)
+
+    async with db_session_factory() as session:
+        assert (
+            await get_live_thread_session(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id=route.scope_id,
+                account_id=admission.account_id,
+            )
+            is None
+        ), "an unconfirmed interrupt retires the mapping"
+        stored = await get_conversation(
+            session, platform="discord", route_key="dm-42", external_user_id="42"
+        )
+    assert stored is not None and stored.active_until == row.active_until, (
+        "settling leaves releasing the claim to finish_message"
+    )

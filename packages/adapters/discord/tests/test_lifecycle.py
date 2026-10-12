@@ -407,6 +407,12 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
     monkeypatch.setattr(turn_runner, "trusted_servers_for", lambda *args: ())
     monkeypatch.setattr(turn_runner, "context_prompt", lambda *args, **kwargs: "")
     monkeypatch.setattr(turn_runner, "decide_before_send", lambda *args: None)
+    reconciled: list[str] = []
+
+    async def fake_reconcile(*, managed_session_id: str, **_kwargs: Any) -> None:
+        reconciled.append(managed_session_id)
+
+    monkeypatch.setattr(turn_runner, "reconcile_unbilled", fake_reconcile)
     result = await turn_runner.run_prepared_turn_impl(
         deps,
         prepared,
@@ -422,6 +428,7 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
         deadline=datetime.now(UTC) + timedelta(seconds=30),
     )
     assert result.state.error is not None and result.state.error.kind == "ceiling"
+    assert reconciled == ["fake-session"], "the billing catch-up still runs after a ceiling"
     assert len(cards) == 1
     release.set()
     await asyncio.wait_for(asyncio.gather(*lc._card_writes.terminal_tasks), 1)

@@ -24,7 +24,7 @@ from daimon.adapters.discord.output_delivery import (
 )
 from daimon.adapters.discord.post_transport import DiscordPostTransport, _webhooks
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.output_delivery import DeliverableFile
+from daimon.core.output_delivery import DeliverableFile, NoticedFiles
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -211,7 +211,7 @@ async def test_a_same_named_file_from_someone_else_or_another_size_still_posts()
     assert deleted == ["file_chart"]
 
 
-async def test_oversize_uses_guild_limit_and_posts_skip_notice() -> None:
+async def test_oversize_uses_guild_limit_posts_skip_notice_and_keeps_the_file() -> None:
     client, deleted = _client_with_file(filename="big chart", size_bytes=10 * _MIB + 1)
     thread = _thread()
 
@@ -226,8 +226,88 @@ async def test_oversize_uses_guild_limit_and_posts_skip_notice() -> None:
 
     thread.send.assert_awaited_once()
     notice = thread.send.await_args.args[0]
-    assert "big_chart" in notice and "10 MiB" in notice
-    assert deleted == ["file_chart"], "the entry is removed after the skip notice"
+    assert "big_chart" in notice and "10 MB upload limit" in notice
+    assert "still saved" in notice and "smaller version" in notice, (
+        "the notice says the file was kept and how to get it"
+    )
+    assert deleted == [], "an oversize file is kept, not deleted after the notice"
+
+
+async def test_a_kept_oversize_file_is_announced_once_across_turns() -> None:
+    """Regression for the 2026-10-11 1080p render: the file stays listed, so
+    every later turn's sweep sees it again and must not repeat the notice."""
+    client, deleted = _client_with_file(filename="render.mp4", size_bytes=182 * _MIB)
+    thread = _thread()
+    noticed = NoticedFiles()
+
+    for _ in range(3):
+        await deliver_session_outputs(
+            client,
+            thread,
+            session_id="sesn_1",
+            may_post=_allowed,
+            notice_thread_ids=set(),
+            noticed_files=noticed,
+            sleep=_no_sleep,
+        )
+
+    assert thread.send.await_count == 1, "one notice for the kept file, not one per turn"
+    assert deleted == []
+
+
+async def test_oversize_file_kept_and_normal_file_attached_and_cleared() -> None:
+    deleted: list[str] = []
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/files",
+        lambda request, match: list_response(
+            [
+                FileMetadata(
+                    id=file_id,
+                    created_at=NOW,
+                    filename=name,
+                    mime_type=mime,
+                    size_bytes=size,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json")
+                for file_id, name, mime, size in (
+                    ("file_big", "render.mp4", "video/mp4", 12 * _MIB),
+                    ("file_ok", "poster.png", "image/png", 9),
+                )
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"png-bytes"),
+    )
+
+    def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        deleted.append(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "file_deleted"})
+
+    router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
+    thread = _thread()
+
+    await deliver_session_outputs(
+        build_fake_anthropic(router.dispatch),
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        noticed_files=NoticedFiles(),
+        sleep=_no_sleep,
+    )
+
+    sends = thread.send.await_args_list
+    files = [call.kwargs["file"] for call in sends if "file" in call.kwargs]
+    notices = [call.args[0] for call in sends if call.args]
+    assert [file.filename for file in files] == ["poster.png"], "the normal file is attached"
+    assert len(notices) == 1 and "render.mp4" in notices[0]
+    assert deleted == ["file_ok"], "only the delivered file leaves the listing"
 
 
 @pytest.mark.parametrize(
@@ -252,7 +332,7 @@ async def test_oversize_notice_does_not_contradict_an_already_delivered_file(
         sleep=_no_sleep,
     )
     assert thread.send.await_count == expected_notices
-    assert deleted == ["file_chart"]
+    assert deleted == [], "an oversize file stays listed either way"
 
 
 async def test_missing_attach_permission_keeps_file_and_posts_one_notice() -> None:

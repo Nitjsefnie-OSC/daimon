@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 
+from qa.live.billing import BillingEvidence
 from qa.live.config import Pricing
 from qa.live.cost import Ledger
 from qa.live.models import STAGING_LEGACY_MODEL
@@ -47,6 +48,9 @@ class FakeBackend:
 
     def preflight(self, roles: set[str]) -> None:
         self.events.append("preflight")
+
+    def billing_evidence(self, turn: Turn) -> BillingEvidence:
+        raise Pending("billing evidence not configured in fake backend")
 
     def create_channel(self, name: str) -> str:
         self.events.append("create")
@@ -126,6 +130,9 @@ class FakeBackend:
 
     def deployment_image(self) -> str:
         return "a" * 40
+
+    def deployment_quiet(self) -> Message:
+        return {"quiet": True}
 
     def deployment_events(self, start: datetime, end: datetime, turns: list[Turn]) -> list[Message]:
         return []

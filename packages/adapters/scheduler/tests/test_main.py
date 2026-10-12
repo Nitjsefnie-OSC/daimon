@@ -1106,6 +1106,8 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
         trigger_message="trigger",
         next_fire_at=now - timedelta(minutes=1),
         tenant_id=tenant.id,
+        destination_kind="channel",
+        destination_id="111222333",
     )
     await db_session.commit()
 
@@ -1141,6 +1143,9 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
         f"routine must record 'balance_depleted' after balance gate rejection; "
         f"got {fetched.last_error!r}"
     )
+    assert fetched.delivery_status == "pending", "the destination is told the run failed"
+    assert fetched.delivery_payload is not None
+    assert fetched.delivery_payload.startswith("Your team's Daimon credit has run out.")
 
     await fake_client.close()
 
