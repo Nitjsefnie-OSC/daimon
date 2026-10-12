@@ -25,12 +25,14 @@ from daimon.core.stores import fleet, mux_state
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.fleet import WorkerPool
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.turn_queue import TurnQueue
 from daimon.testing.factories import make_account, make_tenant
 from mux.contracts.events import Event, NativeProvenance
-from mux.contracts.ids import ResourceRef
+from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ProviderBinding
 from mux.state.journal import JournalEntry
 from mux.state.memory import MemoryStateStore
+from mux.state.operations import SendClaimed, recovery
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -1128,3 +1130,198 @@ async def test_a_worker_bound_to_another_binding_is_refused_before_the_write(
             now=NOW,
         )
     assert await store.read_events(session.id) == []
+
+
+# The spawn path a worker driver follows, as store-side contract tests. The
+# driver's provider call is the one step these leave out.
+
+
+def _driver_scope(run: FleetRun) -> Scope:
+    return Scope(
+        tenant_id=str(run.tenant_id),
+        account_id=str(run.orchestrator_account_id),
+        principal_id="fleet-driver",
+        authorization_id="spawn_worker",
+    )
+
+
+async def _launch(
+    sm: async_sessionmaker[AsyncSession], store: PostgresStateStore, pool: WorkerPool, run: FleetRun
+) -> tuple[FleetWorker, ResourceRef, Any, str]:
+    """Pool place, private slot bound and leased, spawn operation begun."""
+    claimed = await pool.claim(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert claimed is not None
+    _, session, lease, binding_id = await _bind(
+        store, run, claimed, session_id=f"sess_{claimed.ordinal}_{claimed.attempts}"
+    )
+    begun = await store.begin_operation(
+        _driver_scope(run),
+        key=spawn_operation_key(run.id, claimed.ordinal),
+        request_digest=claimed.spec_digest,
+        operation_id=f"op_{claimed.id}",
+        now=NOW,
+        slot=worker_slot(run, claimed),
+    )
+    assert begun.record.operation.status == "pending"
+    return claimed, session, lease, binding_id
+
+
+async def test_the_spawn_path_runs_each_worker_once_and_settles_the_run(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm, max_workers=2)
+    for ordinal in range(2):
+        await _worker(sm, run, ordinal)
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    pool = WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2)
+    scope = _driver_scope(run)
+
+    for _ in range(2):
+        claimed, session, lease, binding_id = await _launch(sm, store, pool, run)
+        key = spawn_operation_key(run.id, claimed.ordinal)
+        await store.claim_send(scope, key, now=NOW, fence=lease)  # this send wins
+        with pytest.raises(SendClaimed):
+            await store.claim_send(scope, key, now=NOW, fence=lease)  # never twice
+        await store.advance_operation(scope, key, "accepted", now=NOW, fence=lease)
+        running = await fleet.mark_running(
+            sm,
+            tenant_id=run.tenant_id,
+            worker_id=claimed.id,
+            expected_version=claimed.version,
+            binding_id=binding_id,
+        )
+        answer = _final_message(session.id, f"answer {claimed.ordinal}")
+        pointer = await append_result(
+            store, run, running, session, answer, lease=lease, cursor="c", now=NOW
+        )
+        await fleet.record_result(
+            sm,
+            tenant_id=run.tenant_id,
+            worker_id=running.id,
+            expected_version=running.version,
+            result=pointer,
+        )
+        pool.release()
+
+    async with sm.begin() as transaction:
+        settled_run, workers = await fleet.run_status(
+            transaction, tenant_id=run.tenant_id, run_id=run.id, for_update=True
+        )
+        assert run_settled(settled_run, workers)
+        collecting = await fleet.set_run_status(
+            transaction,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            expected_version=settled_run.version,
+            status="collecting",
+        )
+    assert [w.result.excerpt for w in workers if w.result] == ["answer 0", "answer 1"]
+    assert collecting.status == "collecting"
+
+
+async def test_a_worker_lost_before_its_send_is_requeued_and_sent_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    await _worker(sm, run, 0)
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    pool = WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=3)
+    lost, _, _, _ = await _launch(sm, store, pool, run)
+    pool.release()  # the process died before claim_send; its lease will expire
+
+    async with sm() as session:
+        clock = (await session.execute(text("SELECT now()"))).scalar_one()
+    stale = await fleet.stale_workers(
+        sm, now=clock + timedelta(minutes=10), grace=timedelta(minutes=1)
+    )
+    assert [worker.id for _, worker in stale] == [lost.id]
+    key = spawn_operation_key(run.id, lost.ordinal)
+    operation = await store.get_operation(_driver_scope(run), key)
+    assert operation is not None and recovery(operation.operation) == "send"  # never sent
+
+    requeued = await fleet.requeue(sm, tenant_id=run.tenant_id, worker=lost, max_attempts=2)
+    assert (requeued.status, requeued.attempts) == ("pending", 1)
+    again = await pool.claim(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert again is not None and again.id == lost.id
+    later = NOW + timedelta(minutes=6)
+    successor = await store.acquire_lease(
+        worker_slot(run, again), holder="p2", turn_id="turn_2", now=later, ttl=timedelta(minutes=5)
+    )
+    begun = await store.begin_operation(
+        _driver_scope(run),
+        key=key,
+        request_digest=again.spec_digest,
+        operation_id=f"op_{again.id}_retry",
+        now=later,
+        slot=worker_slot(run, again),
+    )
+    assert not begun.fresh  # the same spawn operation, not a second one
+    await store.claim_send(_driver_scope(run), key, now=later, fence=successor)
+    with pytest.raises(SendClaimed):
+        await store.claim_send(_driver_scope(run), key, now=later, fence=successor)
+
+
+async def test_a_worker_lost_after_its_send_is_reconciled_never_resent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    await _worker(sm, run, 0)
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    pool = WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=3)
+    claimed, session, lease, binding_id = await _launch(sm, store, pool, run)
+    scope, key = _driver_scope(run), spawn_operation_key(run.id, claimed.ordinal)
+    await store.claim_send(scope, key, now=NOW, fence=lease)
+    running = await fleet.mark_running(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=claimed.id,
+        expected_version=claimed.version,
+        binding_id=binding_id,
+    )
+    pool.release()  # the process died mid-turn, after the send
+
+    operation = await store.get_operation(scope, key)
+    assert operation is not None and recovery(operation.operation) == "reconcile"
+    later = NOW + timedelta(minutes=6)
+    successor = await store.acquire_lease(
+        worker_slot(run, running),
+        holder="p2",
+        turn_id="turn_1",
+        now=later,
+        ttl=timedelta(minutes=5),
+    )
+    assert successor.took_over
+    with pytest.raises(SendClaimed):  # the successor reconciles; it can never resend
+        await store.claim_send(scope, key, now=later, fence=successor)
+    answer = _final_message(session.id, "finished upstream")
+    pointer = await append_result(
+        store, run, running, session, answer, lease=successor, cursor="c", now=later
+    )
+    done = await fleet.record_result(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=running.id,
+        expected_version=running.version,
+        result=pointer,
+    )
+    assert done.status == "succeeded" and done.attempts == 0
+
+
+async def test_a_full_fleet_pool_never_takes_the_tenants_chat_slots(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    for ordinal in range(3):
+        await _worker(sm, run, ordinal)
+    pool = WorkerPool(max_concurrent_workers=6, max_concurrent_workers_per_tenant=3)
+    claimed = [await pool.claim(sm, tenant_id=run.tenant_id, run_id=run.id) for _ in range(3)]
+    assert all(claimed)
+    chat = TurnQueue(
+        platform="discord", global_cap=None, max_queued_per_tenant=50, max_queued=500, max_wait_s=60
+    )
+    tickets = [chat.try_claim(run.tenant_id, cap=3) for _ in range(3)]  # tenant chat cap 3
+    assert all(tickets) and chat.in_flight(run.tenant_id) == 3
