@@ -1,7 +1,7 @@
 """Executable record: Discord, Slack and Teams draw the same in-progress status card.
 
 All three fold the turn state through `daimon.core.turn.status_lines`, so the
-headline, tool lines and draft are the same words and only the markup differs:
+headline, tool lines, draft and elapsed time are the same words and only the markup differs:
 Teams draws the tool lines as a monospace block and the draft as subtle text,
 since an Adaptive Card TextBlock renders no code fence or quote. One
 deliberate asymmetry: a Discord embed has a bar color and the others have none.
@@ -51,6 +51,7 @@ def _discord_lines() -> list[str]:
         "Details",
         *((data.details or "").replace("`", "").splitlines()),
         data.description.removeprefix("> "),
+        data.footer or "",
     ]
 
 
@@ -68,6 +69,8 @@ def _slack_lines() -> list[str]:
             text = block["elements"][0]["text"]
             if text.startswith("*Details*"):
                 lines.extend(text.replace("*", "").replace("`", "").splitlines())
+            else:
+                lines.append(text)
     return lines
 
 
