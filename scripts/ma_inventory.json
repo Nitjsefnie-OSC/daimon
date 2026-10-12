@@ -9617,6 +9617,68 @@
     },
     {
       "file": "packages/testing/tests/test_turn_router.py",
+      "line": 185,
+      "end": 185,
+      "scope": "test_history_replays_exact_emitted_spans_without_inventing_usage",
+      "category": "test",
+      "resource": "sessions.events.stream",
+      "call": "client.beta.sessions.events.stream('sess_one')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/testing/tests/test_turn_router.py",
+      "line": 188,
+      "end": 188,
+      "scope": "test_history_replays_exact_emitted_spans_without_inventing_usage",
+      "category": "test",
+      "resource": "sessions.events.stream",
+      "call": "client.beta.sessions.events.stream('sess_one')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/testing/tests/test_turn_router.py",
+      "line": 190,
+      "end": 192,
+      "scope": "test_history_replays_exact_emitted_spans_without_inventing_usage",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "client.beta.sessions.events.list('sess_one', order='asc', limit=100, types=['span.model_request_end'])",
+      "request_keys": [],
+      "response_access": [
+        "page.data",
+        "page.next_page"
+      ]
+    },
+    {
+      "file": "packages/testing/tests/test_turn_router.py",
+      "line": 203,
+      "end": 205,
+      "scope": "test_history_replays_exact_emitted_spans_without_inventing_usage",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "client.beta.sessions.events.list('sess_one', types=['span.model_request_end'], created_at_lt=boundary)",
+      "request_keys": [],
+      "response_access": [
+        "older.data"
+      ]
+    },
+    {
+      "file": "packages/testing/tests/test_turn_router.py",
+      "line": 207,
+      "end": 209,
+      "scope": "test_history_replays_exact_emitted_spans_without_inventing_usage",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "client.beta.sessions.events.list('sess_one', types=['span.model_request_end'], created_at_gte=boundary)",
+      "request_keys": [],
+      "response_access": [
+        "repeated.data"
+      ]
+    },
+    {
+      "file": "packages/testing/tests/test_turn_router.py",
       "line": 52,
       "end": 52,
       "scope": "test_build_turn_router_resolves_agent_and_environment_for_the_tenant",
@@ -9654,8 +9716,41 @@
     },
     {
       "file": "packages/testing/tests/test_turn_router.py",
-      "line": 185,
-      "end": 185,
+      "line": 177,
+      "end": 177,
+      "scope": "test_build_turn_router_session_id_scopes_the_event_routes",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "client.beta.sessions.events.list('sess_other')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/testing/tests/test_turn_router.py",
+      "line": 212,
+      "end": 212,
+      "scope": "test_history_replays_exact_emitted_spans_without_inventing_usage",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "client.beta.sessions.events.list('sess_one', page='invented')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/testing/tests/test_turn_router.py",
+      "line": 184,
+      "end": 184,
+      "scope": "test_history_replays_exact_emitted_spans_without_inventing_usage",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "client.beta.sessions.events.list('sess_one')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/testing/tests/test_turn_router.py",
+      "line": 222,
+      "end": 222,
       "scope": "test_build_turn_router_composes_with_an_existing_router",
       "category": "test",
       "resource": "sessions.retrieve",

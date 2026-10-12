@@ -118,13 +118,14 @@ def build_turn_router(
       GET  /v1/environments/{id}    -- retrieve, for re-fetch after resolve (any id)
       POST /v1/sessions/{id}/events -- send-initial event (run_turn)
       GET  /v1/sessions/{id}/events/stream -- SSE turn stream (run_turn)
+      GET  /v1/sessions/{id}/events -- emitted history (post-turn usage catch-up)
 
     The agent and environment carry `tenant_id_str` in their metadata so the
     resolver's tag lookup finds them. The stream is `turn_events(...)`; see
     there for the script and for `usage_event_id=None`.
 
     Knobs:
-      `session_id`        -- scope the two event routes to that session id
+      `session_id`        -- scope the event routes to that session id
                              only, so a turn run anywhere else has no route
                              and fails loudly (proves which session ran).
       `replacement_session_ids` -- idle sessions with retrieve and archive routes for replacements.
@@ -149,6 +150,7 @@ def build_turn_router(
     env_item = ma_environment(id=env_id, tenant_id=tenant_id_str).model_dump(mode="json")
     session_re = re.escape(session_id) if session_id is not None else r"[^/]+"
     counter = itertools.count()
+    history: dict[str, list[dict[str, Any]]] = {}
 
     def _send_events(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
         if sent_event_bodies is not None:
@@ -159,15 +161,46 @@ def build_turn_router(
         if stream_hits is not None:
             stream_hits.append(match["session_id"])
         suffix = f"_{next(counter)}" if fresh_event_ids else ""
-        return sse_response(
-            turn_events(
-                agent_text=agent_text,
-                usage_event_id=usage_event_id,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                event_id_suffix=suffix,
-            )
+        events = turn_events(
+            agent_text=agent_text,
+            usage_event_id=usage_event_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            event_id_suffix=suffix,
         )
+        recorded = history.setdefault(match["session_id"], [])
+        seen = {event["id"] for event in recorded}
+        recorded.extend(event for event in events if event["id"] not in seen)
+        return sse_response(events)
+
+    def _history(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        # Main #824 reads completed spans, with timestamp bounds for catch-up.
+        # Replay the exact stream objects, never mint fresh events on a read.
+        params = request.url.params
+        allowed = {"beta", "types[]", "order", "limit", "created_at[gte]", "created_at[lt]"}
+        assert set(params) <= allowed, f"Unscripted event-history query: {params}"
+        assert params.get("beta", "true") == "true", "Unscripted event-history beta flag"
+        order = params.get("order", "asc")
+        assert order in {"asc", "desc"}, f"Unscripted event-history order: {order}"
+        events = list(history.get(match["session_id"], []))
+        types = params.get_list("types[]")
+        if types:
+            events = [event for event in events if event["type"] in types]
+        events.sort(key=lambda event: event["processed_at"], reverse=order == "desc")
+        for key in ("created_at[gte]", "created_at[lt]"):
+            if (bound := params.get(key)) is not None:
+                at = datetime.fromisoformat(bound)
+                events = [
+                    event
+                    for event in events
+                    if (datetime.fromisoformat(event["processed_at"]) >= at)
+                    == (key == "created_at[gte]")
+                ]
+        if (limit := params.get("limit")) is not None:
+            assert int(limit) > 0 and len(events) <= int(limit), (
+                "Event-history fixture needs a scripted continuation page"
+            )
+        return list_response(events)
 
     target = router if router is not None else MARouter()
     target.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent_item]))
@@ -180,4 +213,5 @@ def build_turn_router(
         )
     target.add("POST", rf"/v1/sessions/(?P<session_id>{session_re})/events", _send_events)
     target.add("GET", rf"/v1/sessions/(?P<session_id>{session_re})/events/stream", _stream)
+    target.add("GET", rf"/v1/sessions/(?P<session_id>{session_re})/events", _history)
     return target

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Serve recorded turn events in the offline scripted router for main #824's post-turn billing catch-up; preserve scoped routes, usage identities and full dual-path golden comparisons.
+
 - Prove offline that a shared Anthropic thread keeps its provider after an OpenAI channel switch, while new threads run OpenAI and an unavailable original backend refuses explicitly.
 - Preserve oversized output files and main's notice deduplication while following every delivery listing page through the scoped output port.
 

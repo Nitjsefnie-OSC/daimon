@@ -173,6 +173,43 @@ async def test_build_turn_router_session_id_scopes_the_event_routes() -> None:
     assert await _collect_stream_event_types(client, "sess_only"), "the scoped session streams"
     with _transport_assertion("no route for GET /v1/sessions/sess_other"):
         await _collect_stream_event_types(client, "sess_other")
+    with _transport_assertion("no route for GET /v1/sessions/sess_other/events"):
+        await client.beta.sessions.events.list("sess_other")
+
+
+async def test_history_replays_exact_emitted_spans_without_inventing_usage() -> None:
+    client = build_fake_anthropic(
+        build_turn_router(str(uuid.uuid4()), fresh_event_ids=True).dispatch
+    )
+    assert (await client.beta.sessions.events.list("sess_one")).data == []
+    first_stream = await client.beta.sessions.events.stream("sess_one")
+    first = [event async for event in first_stream]
+    await _collect_stream_event_types(client, "sess_two")
+    second_stream = await client.beta.sessions.events.stream("sess_one")
+    second = [event async for event in second_stream]
+    page = await client.beta.sessions.events.list(
+        "sess_one", order="asc", limit=100, types=["span.model_request_end"]
+    )
+    assert [event.model_dump(mode="json") for event in page.data] == [
+        event.model_dump(mode="json")
+        for event in [*first, *second]
+        if event.type == "span.model_request_end"
+    ]
+    assert page.next_page is None
+    first_usage = first[1]
+    assert first_usage.type == "span.model_request_end"
+    boundary = first_usage.processed_at
+    assert boundary is not None
+    older = await client.beta.sessions.events.list(
+        "sess_one", types=["span.model_request_end"], created_at_lt=boundary
+    )
+    assert older.data == []
+    repeated = await client.beta.sessions.events.list(
+        "sess_one", types=["span.model_request_end"], created_at_gte=boundary
+    )
+    assert repeated.data == page.data
+    with _transport_assertion("Unscripted event-history query"):
+        await client.beta.sessions.events.list("sess_one", page="invented")
 
 
 async def test_build_turn_router_composes_with_an_existing_router() -> None:
