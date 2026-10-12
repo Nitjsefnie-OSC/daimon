@@ -1218,8 +1218,8 @@ class ThreadNamingSettings(BaseModel):
         description=(
             "Title bot-created Discord threads from the opening message with a short "
             "Haiku-generated name, chosen before the thread is created. The call is "
-            "metered to the tenant like any other model call. Set false to keep the "
-            "static 'Chat with <agent>' title."
+            "metered to the tenant like any other model call. Set false to title "
+            "threads with the opening message itself, cut to 50 characters."
         ),
     )
     max_input_chars: int = Field(

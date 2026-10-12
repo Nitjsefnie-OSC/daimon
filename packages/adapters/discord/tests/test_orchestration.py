@@ -505,7 +505,7 @@ class TestNewThreadCreation:
             assert not await list_recoverable_turn_card_intents(session, platform="discord")
 
         message.create_thread.assert_called_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-            name="Chat with test-agent",
+            name="Chat with daimon",  # a bare greeting; never the agent's slug
             auto_archive_duration=10080,
         )
         mock_create_session.assert_called_once()
@@ -1292,7 +1292,7 @@ class TestAutoArchive:
         await bot.on_message(message)
 
         message.create_thread.assert_called_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-            name="Chat with test-agent",
+            name="Chat with daimon",  # a bare greeting; never the agent's slug
             auto_archive_duration=10080,
         )
 

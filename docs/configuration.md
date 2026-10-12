@@ -1143,7 +1143,8 @@ title (``tests/parity/ test_thread_naming_discord_only.py``).
 
 Title bot-created Discord threads from the opening message with a short Haiku-generated
 name, chosen before the thread is created. The call is metered to the tenant like any
-other model call. Set false to keep the static 'Chat with &lt;agent&gt;' title.
+other model call. Set false to title threads with the opening message itself, cut to 50
+characters.
 
 ### `DAIMON_THREAD_NAMING__MAX_INPUT_CHARS`
 

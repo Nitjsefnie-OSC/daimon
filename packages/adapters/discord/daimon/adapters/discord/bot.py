@@ -160,7 +160,12 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_recovery_failure,
 )
 from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
-from daimon.core.thread_naming import naming_text, strip_mentions
+from daimon.core.thread_naming import (
+    THREAD_NAME_MAX_CHARS,
+    fallback_thread_name,
+    naming_text,
+    strip_mentions,
+)
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
@@ -4043,10 +4048,20 @@ class DaimonBot(commands.Bot):
                             created_thread_ids.append(existing.id)
                         return existing
                 # Name before creation to avoid a Discord rename system message.
-                thread_name = f"Chat with {agent.name}"
+                # The fallback title quotes the message, never the agent's
+                # internal name (a slug like "qa-haiku-canary" means nothing
+                # to the reader).
                 naming = self.runtime.settings.thread_naming
-                opening_text = naming_text(
-                    strip_mentions(message.content), [a.filename for a in message.attachments]
+                message_text = strip_mentions(message.content)
+                attachment_names = [a.filename for a in message.attachments]
+                opening_text = naming_text(message_text, attachment_names)
+                discord_cfg = self.runtime.settings.discord
+                bot_name = discord_cfg.bot_display_name if discord_cfg else "daimon"
+                thread_name = fallback_thread_name(
+                    message_text,
+                    default=attachment_names[0][:THREAD_NAME_MAX_CHARS]
+                    if attachment_names
+                    else f"Chat with {bot_name}",
                 )
                 try:
                     if naming.enabled and opening_text:
