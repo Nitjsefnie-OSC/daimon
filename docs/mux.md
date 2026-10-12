@@ -1993,3 +1993,20 @@ missing or decreasing evidence preserves held spend and the original workflow
 verdict. The standard conformance registry and historical live certificates
 remain unchanged. See `packages/mux/mux/drivers/gemini/LIVE-ROUND.md` for the
 reviewed recipe, exact model-limit arithmetic and pending boundaries.
+
+
+### Shared native credential authorization
+
+Explicit native credential offers use `daimon.core.turn.native_credential_requests.NativeCredentialAdapter`
+with the selected mux profile. The provider constructors retain their existing control
+prefixes and disabled defaults. Both require an independently authorized resource scope,
+a caller-bound per-caller session, an unchanged durable binding, and a catalog model
+matching the retained channel revision. Registration does not consume or probe secrets.
+The adapter rechecks the caller, policy, binding and catalog after native readback and
+again after request registration before posting the shared product card.
+
+Native MCP grant verification and resource host binding share these rules across the
+selected providers. A resource host must match the caller's tenant, account, principal,
+operator authorization and workspace, and its enabled native catalog must match its
+profile and account scope. Channel skill routes use `check_backend` before allocating
+that host. Unconfigured channels and disabled capabilities retain the existing route.

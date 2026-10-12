@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,7 +21,7 @@ import discord
 import httpx
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.tools import gemini_credential_requests as native_mcp
+from daimon.adapters.mcp.tools import native_credential_requests as native_mcp
 from daimon.adapters.mcp.tools.discord._posted_card import build_card_view
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -25,10 +32,9 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.mux_state import PostgresStateStore
-from daimon.core.stores.neutral_catalog import CatalogConflict
+from daimon.core.stores.neutral_catalog import AgentRevision, CatalogConflict
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from daimon.core.turn.gemini_credential_requests import (
-    CONTROL_PREFIX,
     GeminiNativeCredentialAdapter,
     NativeCredentialOrigin,
     NativeCredentialRequest,
@@ -37,7 +43,7 @@ from daimon.core.turn.gemini_credential_requests import (
 from daimon.testing.db import build_test_engine, require_owned_sessionmaker
 from daimon.testing.discord_surface import DiscordSurfaceHarness
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.isolated_sdk import build_gemini_client
+from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
@@ -53,6 +59,9 @@ from mux.state.memory import MemoryStateStore
 from pydantic import TypeAdapter
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from tests.turn import test_openai_credential_requests as openai_tests
+from tests.turn.test_openai_credential_requests import Case as OpenAICase
 
 if TYPE_CHECKING:
     from google.genai import Client
@@ -106,7 +115,11 @@ class NativeWire:
             return httpx.Response(200, json={"id": id_, "tools": None})
         if req.method == "GET" and req.url.path.startswith("/v1beta/agents/"):
             return httpx.Response(
-                200, json={**self.agents[req.url.path.rsplit("/", 1)[-1]], **self.get_changes}
+                200,
+                json={
+                    **self.agents[req.url.path.rsplit("/", 1)[-1]],
+                    **self.get_changes,
+                },
             )
         raise AssertionError("No other native operation belongs in an A3 offer")
 
@@ -172,7 +185,7 @@ class NativeDelivery:
 
 
 @dataclass
-class Case:
+class GeminiCase:
     adapter: GeminiNativeCredentialAdapter
     origin: NativeCredentialOrigin
     wire: NativeWire
@@ -207,7 +220,9 @@ def owned_clean(request: pytest.FixtureRequest, owned_engine: AsyncEngine) -> No
 
 
 @pytest.fixture
-async def case(owned_engine: AsyncEngine, owned_clean: None, tmp_path: Path) -> AsyncIterator[Case]:
+async def gemini_case(
+    owned_engine: AsyncEngine, owned_clean: None, tmp_path: Path
+) -> AsyncIterator[GeminiCase]:
     sessions = async_sessionmaker(owned_engine, expire_on_commit=False)
     async with sessions.begin() as db:
         tenant = await make_tenant(db, workspace_id="100")
@@ -300,7 +315,9 @@ async def case(owned_engine: AsyncEngine, owned_clean: None, tmp_path: Path) -> 
                 thread.channel,
                 1,
                 ResolvedBackend(
-                    backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"
+                    backend="gemini",
+                    profile="gemini.inline_reuse",
+                    model="gemini-3.8-flash",
                 ),
             )
         )
@@ -331,12 +348,29 @@ async def case(owned_engine: AsyncEngine, owned_clean: None, tmp_path: Path) -> 
             public_base_url="https://mcp.invalid",
             now=lambda: NOW,
         )
-        yield Case(adapter, origin, wire, delivery, sessions)
+        yield GeminiCase(adapter, origin, wire, delivery, sessions)
         assert interactions.requests == []
     finally:
         await sdk.aio.aclose()
         sdk.close()
     # A3 never constructs a legacy client or reads an MA identity authority.
+
+
+openai_case = openai_tests.case
+isolated = openai_tests.isolated
+owned_database_preflight = openai_tests.owned_database_preflight
+db_preflight = openai_tests.db_preflight
+
+type Case = GeminiCase | OpenAICase
+
+
+@pytest.fixture(params=("gemini_case", "openai_case"), ids=("gemini", "openai"))
+def case(request: pytest.FixtureRequest) -> Case:
+    return cast(Case, request.getfixturevalue(request.param))
+
+
+def control_prefix(case: Case) -> str:
+    return f"nc_{case.origin.agent.provider}_input:"
 
 
 @pytest.mark.parametrize("kind,target", [("github", "GitHub"), ("env", "ACME_API_KEY")])
@@ -346,7 +380,9 @@ async def test_actual_native_target_posts_shared_offer(case: Case, kind: str, ta
     registered = case.delivery.registered[0]
     message = case.delivery.surface.gateway.surviving_messages()[0]
     assert receipt.message_id == message.message_id and receipt.thread == case.origin.binding.thread
-    assert receipt.request == registered.ref and receipt.request.provider == "gemini"
+    assert (
+        receipt.request == registered.ref and receipt.request.provider == case.origin.agent.provider
+    )
     assert (
         registered.origin.agent == case.origin.agent and registered.agent_name == "credential-team"
     )
@@ -354,10 +390,12 @@ async def test_actual_native_target_posts_shared_offer(case: Case, kind: str, ta
     assert registered.origin.requester_account_id != uuid.UUID(case.adapter.host.scope.account_id)
     assert all(req.method == "GET" for req in case.wire.requests[before:])
     assert len(case.wire.requests[before:]) == 1
-    assert CONTROL_PREFIX in message.payload_json and '"ztc:' not in message.payload_json
+    assert control_prefix(case) in message.payload_json and '"ztc:' not in message.payload_json
     assert "gh_connect:" not in message.payload_json
     if kind == "github":
-        assert message.component_labels == ("Connect GitHub",)
+        assert message.component_labels == (
+            ("Connect GitHub",) if isinstance(case, GeminiCase) else ("Open offer",)
+        )
         payload = _OBJECT.validate_json(message.payload_json)
         embeds = payload["embeds"]
         assert isinstance(embeds, list) and len(embeds) == 1
@@ -386,14 +424,14 @@ async def test_default_off_or_missing_native_delivery_refuses_before_io(
     case: Case, missing: str
 ) -> None:
     if missing == "flag":
-        adapter = GeminiNativeCredentialAdapter(
+        adapter = type(case.adapter)(
             case.sessions,
             case.adapter.host,
             delivery=case.delivery,
             public_base_url="https://mcp.invalid",
         )
     else:
-        adapter = GeminiNativeCredentialAdapter(
+        adapter = type(case.adapter)(
             case.sessions,
             case.adapter.host,
             operator_enabled=True,
@@ -426,15 +464,18 @@ async def test_foreign_or_stale_target_refuses_before_native_io(case: Case, bad:
         origin = replace(origin, agent=origin.agent.model_copy(update={"provider": "anthropic"}))
     elif bad == "workspace":
         origin = replace(
-            origin, agent=origin.agent.model_copy(update={"account_scope_id": "foreign"})
+            origin,
+            agent=origin.agent.model_copy(update={"account_scope_id": "foreign"}),
         )
     elif bad == "resource_account":
         origin = replace(
-            origin, agent=origin.agent.model_copy(update={"account_id": str(uuid.uuid4())})
+            origin,
+            agent=origin.agent.model_copy(update={"account_id": str(uuid.uuid4())}),
         )
     elif bad == "session_account":
         origin = replace(
-            origin, session=origin.session.model_copy(update={"account_id": str(uuid.uuid4())})
+            origin,
+            session=origin.session.model_copy(update={"account_id": str(uuid.uuid4())}),
         )
     elif bad == "generation":
         origin = replace(origin, binding=origin.binding.model_copy(update={"generation": 2}))
@@ -479,7 +520,8 @@ async def test_fresh_refusal_after_native_registration_posts_nothing(
             )
         elif changed == "binding":
             await case.adapter.store.put_binding(
-                case.origin.binding.model_copy(update={"generation": 2}), expected_generation=1
+                case.origin.binding.model_copy(update={"generation": 2}),
+                expected_generation=1,
             )
         else:
             async with case.sessions.begin() as db:
@@ -531,12 +573,17 @@ async def test_native_mcp_dispatch_posts_actual_verified_target_offer(
     async def authenticated(ctx: Context) -> AuthIdentity:
         return auth
 
-    async def granted(identity: AuthIdentity, origin_id: str) -> native_mcp.GeminiCredentialGrant:
+    async def granted(identity: AuthIdentity, origin_id: str) -> native_mcp.NativeCredentialGrant:
         assert identity == auth and origin_id == str(case.origin.origin_id)
-        return native_mcp.GeminiCredentialGrant(case.adapter, case.origin)
+        return native_mcp.NativeCredentialGrant(case.adapter, case.origin)
 
-    monkeypatch.setattr(native_mcp, "_auth", authenticated)
-    await native_mcp.register_gemini_credential_tools(server, operator_enabled=True, grants=granted)
+    await native_mcp.register_native_credential_tools(
+        server,
+        profile=case.adapter.profile,
+        auth_resolver=authenticated,
+        operator_enabled=True,
+        grants=granted,
+    )
     before = len(case.wire.requests)
     arguments = {"origin_context_id": str(case.origin.origin_id)}
     if kind == "env":
@@ -550,10 +597,12 @@ async def test_native_mcp_dispatch_posts_actual_verified_target_offer(
     message = case.delivery.surface.gateway.surviving_messages()[0]
     assert receipt.message_id == message.message_id
     assert receipt.request == case.delivery.registered[0].ref
-    assert CONTROL_PREFIX in message.payload_json
+    assert control_prefix(case) in message.payload_json
     assert len(case.wire.requests[before:]) == 1 and case.wire.requests[-1].method == "GET"
     if kind == "github":
-        assert message.component_labels == ("Connect GitHub",)
+        assert message.component_labels == (
+            ("Connect GitHub",) if isinstance(case, GeminiCase) else ("Open offer",)
+        )
         payload = _OBJECT.validate_json(message.payload_json)
         embeds = payload["embeds"]
         assert isinstance(embeds, list) and len(embeds) == 1
@@ -571,7 +620,19 @@ async def test_native_mcp_dispatch_posts_actual_verified_target_offer(
         assert "ACME_API_KEY" in message.payload_json
 
 
-@pytest.mark.parametrize("bad", ["tenant", "requester", "origin", "host_account", "host_tenant"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "tenant",
+        "requester",
+        "origin",
+        "host_account",
+        "host_tenant",
+        "principal",
+        "authorization",
+        "profile",
+    ],
+)
 async def test_native_mcp_factory_mismatch_refuses_before_io(
     case: Case, monkeypatch: pytest.MonkeyPatch, bad: str
 ) -> None:
@@ -585,12 +646,17 @@ async def test_native_mcp_factory_mismatch_refuses_before_io(
     async def authenticated(ctx: Context) -> AuthIdentity:
         return auth
 
-    async def granted(identity: AuthIdentity, origin_id: str) -> native_mcp.GeminiCredentialGrant:
-        return native_mcp.GeminiCredentialGrant(case.adapter, case.origin)
+    async def granted(identity: AuthIdentity, origin_id: str) -> native_mcp.NativeCredentialGrant:
+        origin = case.origin
+        if bad in ("principal", "authorization"):
+            origin = replace(
+                origin,
+                resource_scope=origin.resource_scope.model_copy(update={bad + "_id": "foreign"}),
+            )
+        return native_mcp.NativeCredentialGrant(case.adapter, origin)
 
     if bad in ("host_account", "host_tenant"):
         host = case.adapter.host
-        assert isinstance(host.backend, GeminiManagedAgents)
         field = "account_id" if bad == "host_account" else "tenant_id"
         case.adapter.host = NeutralResourceHost(
             host.backend,
@@ -598,11 +664,27 @@ async def test_native_mcp_factory_mismatch_refuses_before_io(
             scope=host.scope.model_copy(update={field: str(uuid.uuid4())}),
             account_scope_id=host.workspace,
             operation_key="foreign-factory-return",
-            resource_catalog_enabled=True,
-            catalog_adapter=host.backend.catalog_adapter,
+            resource_catalog_enabled=isinstance(case, GeminiCase),
+            catalog_adapter=cast(GeminiManagedAgents, host.backend).catalog_adapter
+            if isinstance(case, GeminiCase)
+            else None,
         )
-    monkeypatch.setattr(native_mcp, "_auth", authenticated)
-    await native_mcp.register_gemini_credential_tools(server, operator_enabled=True, grants=granted)
+    from mux.profiles import get_profile
+
+    profile = (
+        case.adapter.profile
+        if bad != "profile"
+        else get_profile(
+            "openai.persistent_workspace" if isinstance(case, GeminiCase) else "gemini.inline_reuse"
+        )
+    )
+    await native_mcp.register_native_credential_tools(
+        server,
+        profile=profile,
+        auth_resolver=authenticated,
+        operator_enabled=True,
+        grants=granted,
+    )
     before = len(case.wire.requests)
     with pytest.raises(ToolError, match="native credential grant mismatched"):
         await server.call_tool(
@@ -618,39 +700,47 @@ async def test_returned_host_scope_is_verified_before_database_or_native_io(
     case: Case, owned_engine: AsyncEngine, axis: str
 ) -> None:
     host = case.adapter.host
-    assert isinstance(host.backend, GeminiManagedAgents)
     expected = case.origin.resource_scope
     if axis == "workspace":
-        workspace = "foreign-workspace"
-        # The constructor itself is required to refuse a mismatched workspace.
-        before = len(case.wire.requests)
-        with pytest.raises(UnsupportedCapability):
-            NeutralResourceHost(
-                host.backend,
-                case.sessions,
-                scope=expected,
-                account_scope_id=workspace,
-                operation_key="foreign-return",
-                resource_catalog_enabled=True,
-                catalog_adapter=host.backend.catalog_adapter,
-            )
-        assert len(case.wire.requests) == before
-        return
-    field = {
-        "tenant": "tenant_id",
-        "account": "account_id",
-        "principal": "principal_id",
-        "authorization": "authorization_id",
-    }[axis]
-    returned = NeutralResourceHost(
-        host.backend,
-        case.sessions,
-        scope=expected.model_copy(update={field: str(uuid.uuid4())}),
-        account_scope_id=host.workspace,
-        operation_key="foreign-return",
-        resource_catalog_enabled=True,
-        catalog_adapter=host.backend.catalog_adapter,
-    )
+        if isinstance(case, GeminiCase):
+            before = len(case.wire.requests)
+            with pytest.raises(UnsupportedCapability):
+                NeutralResourceHost(
+                    host.backend,
+                    case.sessions,
+                    scope=expected,
+                    account_scope_id="foreign-workspace",
+                    operation_key="foreign-return",
+                    resource_catalog_enabled=True,
+                    catalog_adapter=cast(GeminiManagedAgents, host.backend).catalog_adapter,
+                )
+            assert len(case.wire.requests) == before
+            return
+        returned = NeutralResourceHost(
+            host.backend,
+            case.sessions,
+            scope=expected,
+            account_scope_id="foreign-workspace",
+            operation_key="foreign-return",
+        )
+    else:
+        field = {
+            "tenant": "tenant_id",
+            "account": "account_id",
+            "principal": "principal_id",
+            "authorization": "authorization_id",
+        }[axis]
+        returned = NeutralResourceHost(
+            host.backend,
+            case.sessions,
+            scope=expected.model_copy(update={field: str(uuid.uuid4())}),
+            account_scope_id=host.workspace,
+            operation_key="foreign-return",
+            resource_catalog_enabled=isinstance(case, GeminiCase),
+            catalog_adapter=cast(GeminiManagedAgents, host.backend).catalog_adapter
+            if isinstance(case, GeminiCase)
+            else None,
+        )
     # A legitimately constructed host can still be the wrong factory result.
     case.adapter.host = returned
     sql: list[object] = []
@@ -669,9 +759,14 @@ async def test_returned_host_scope_is_verified_before_database_or_native_io(
     assert not case.delivery.registered and not case.delivery.surface.gateway.events
 
 
-async def test_native_readback_drift_refuses_before_register_or_post(case: Case) -> None:
-    case.wire.get_changes = {"tools": []}
-    with pytest.raises(ProviderError, match="catalog_native_definition_drift"):
+async def test_native_readback_drift_refuses_before_register_or_post(
+    case: Case,
+) -> None:
+    if isinstance(case, GeminiCase):
+        case.wire.get_changes = {"tools": []}
+    else:
+        case.wire.agents[case.origin.agent.id]["model"] = "different-model"
+    with pytest.raises((ProviderError, CatalogConflict)):
         await case.adapter.offer(case.origin, kind="github")
     assert not case.delivery.registered and not case.delivery.surface.gateway.events
 
@@ -698,6 +793,7 @@ class NamesOnly(Mapping[str, str]):
         raise AssertionError("read ambient value")
 
 
+@pytest.mark.parametrize("provider", ["gemini", "openai"])
 @pytest.mark.parametrize(
     "name",
     [
@@ -710,7 +806,7 @@ class NamesOnly(Mapping[str, str]):
     ],
 )
 def test_replay_sdk_refuses_present_value_traps_before_allocation(
-    name: str, monkeypatch: pytest.MonkeyPatch
+    provider: str, name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def forbidden(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError("allocated SDK/HTTP client")
@@ -721,5 +817,222 @@ def test_replay_sdk_refuses_present_value_traps_before_allocation(
         patch.setattr("google.genai.Client", forbidden)
         patch.setattr(httpx, "Client", forbidden)
         patch.setattr(httpx, "AsyncClient", forbidden)
-        with pytest.raises(ValueError, match="ambient SDK"):
-            replay_client(wire)
+        with pytest.raises(ValueError):
+            if provider == "gemini":
+                build_gemini_client(transport=wire)
+            else:
+                build_async_openai(transport=wire)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("backend", "anthropic"), ("profile", "anthropic.managed_agents"), ("thread_mode", "shared")],
+)
+async def test_retained_revision_must_match_native_route(
+    case: Case, monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    revision = await case.adapter.store.get_config_revision(case.origin.binding.thread.channel, 1)
+    assert revision is not None
+
+    async def changed(*args: object) -> ConfigRevision:
+        return revision.model_copy(update={field: value})
+
+    monkeypatch.setattr(case.adapter.store, "get_config_revision", changed)
+    before = len(case.wire.requests)
+    with pytest.raises(ScopeViolation, match="configuration unavailable"):
+        await case.adapter.offer(case.origin, kind="github")
+    assert len(case.wire.requests) == before and not case.delivery.registered
+
+
+@pytest.mark.parametrize("field,value", [("provider", "anthropic"), ("id", "different-model")])
+async def test_catalog_model_must_match_retained_revision(
+    case: Case, monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    entry = await case.adapter.host.entry(case.origin.catalog_id)
+    changed = replace(
+        entry,
+        agent=entry.agent.model_copy(
+            update={
+                "spec": entry.agent.spec.model_copy(
+                    update={"model": entry.agent.spec.model.model_copy(update={field: value})}
+                )
+            }
+        ),
+    )
+
+    async def foreign_entry(*args: object) -> AgentRevision:
+        return changed
+
+    monkeypatch.setattr(case.adapter.host, "entry", foreign_entry)
+    before = len(case.wire.requests)
+    with pytest.raises(CatalogConflict, match="target changed"):
+        await case.adapter.offer(case.origin, kind="github")
+    assert len(case.wire.requests) == before and not case.delivery.registered
+
+
+@pytest.mark.parametrize(
+    "axis",
+    [
+        "tenant",
+        "account",
+        "principal",
+        "authorization",
+        "workspace",
+        "provider",
+        "profile",
+        "catalog_type",
+        "catalog_enabled",
+        "catalog_account",
+        "catalog_provider",
+        "catalog_profile",
+    ],
+)
+async def test_shared_resource_binder_refuses_every_foreign_axis(
+    case: Case, monkeypatch: pytest.MonkeyPatch, axis: str
+) -> None:
+    from daimon.adapters.mcp.tools._gemini_resources import bind_gemini_host
+    from daimon.adapters.mcp.tools._native_resources import MCP_AUTHORIZATION_ID
+    from daimon.adapters.mcp.tools._openai_resources import bind_host
+
+    auth = AuthIdentity(
+        tenant_id=uuid.UUID(case.adapter.host.scope.tenant_id),
+        account_id=uuid.UUID(case.adapter.host.scope.account_id),
+        role=Role.ADMIN,
+    )
+    host = case.adapter.host
+    scope = host.scope.model_copy(
+        update={"principal_id": f"mcp:{auth.account_id}", "authorization_id": MCP_AUTHORIZATION_ID}
+    )
+    monkeypatch.setattr(host, "scope", scope)
+    binder = bind_gemini_host if isinstance(case, GeminiCase) else bind_host
+    assert binder(host, auth=auth, workspace=host.workspace) is host
+    workspace = host.workspace
+    if axis in ("tenant", "account", "principal", "authorization"):
+        monkeypatch.setattr(host, "scope", scope.model_copy(update={axis + "_id": "foreign"}))
+    elif axis == "workspace":
+        workspace = "foreign"
+    elif axis in ("provider", "profile"):
+        capabilities = host.backend.capabilities().model_copy(
+            update={
+                "provider" if axis == "provider" else "profile_id": "anthropic"
+                if axis == "provider"
+                else "anthropic.managed_agents"
+            }
+        )
+        monkeypatch.setattr(host.backend, "capabilities", lambda: capabilities)
+    elif axis == "catalog_type":
+        monkeypatch.setattr(host.backend, "agents", object())
+    else:
+        port = host.backend.agents
+        field = {
+            "catalog_enabled": "enabled",
+            "catalog_account": "account_scope_id",
+            "catalog_provider": "provider",
+            "catalog_profile": "profile_id",
+        }[axis]
+        value = False if axis == "catalog_enabled" else "foreign"
+        monkeypatch.setattr(type(port), field, property(lambda _: value), raising=False)
+    before = len(case.wire.requests)
+    with pytest.raises(ToolError, match="different tenant, account or workspace"):
+        binder(host, auth=auth, workspace=workspace)
+    assert len(case.wire.requests) == before and not case.delivery.registered
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("backend", "anthropic"), ("model", "unreviewed-model"), ("thread_mode", "shared")],
+)
+async def test_shared_skill_admission_refuses_invalid_revision(
+    case: Case, field: str, value: str
+) -> None:
+    from daimon.adapters.mcp.tools._native_resources import check_skill_revision
+
+    revision = await case.adapter.store.get_config_revision(case.origin.binding.thread.channel, 1)
+    assert revision is not None
+    check_skill_revision(revision, case.adapter.profile)
+    with pytest.raises(ToolError, match="not authorized"):
+        check_skill_revision(revision.model_copy(update={field: value}), case.adapter.profile)
+    assert not case.delivery.registered
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("backend", "anthropic"), ("model", "unreviewed-model"), ("thread_mode", "shared")],
+)
+async def test_skill_routes_reject_invalid_configuration_before_factory(
+    case: Case, monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.runtime import McpResourceHostFactory, McpRuntime
+    from daimon.adapters.mcp.tools import _gemini_resources, _openai_resources
+    from daimon.core.stores.domain import TurnOriginRow
+    from daimon.core.turn import openai_deployment
+
+    revision = await case.adapter.store.get_config_revision(case.origin.binding.thread.channel, 1)
+    assert revision is not None
+    revision = revision.model_copy(update={field: value})
+    auth = AuthIdentity(
+        tenant_id=uuid.UUID(case.origin.resource_scope.tenant_id),
+        account_id=case.origin.requester_account_id,
+        role=Role.ADMIN,
+        platform="discord",
+    )
+    origin = cast(
+        TurnOriginRow,
+        SimpleNamespace(
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            parent_channel_id="101",
+        ),
+    )
+    calls: list[object] = []
+
+    class Factory:
+        account_scope_id = case.adapter.host.workspace
+
+        def __call__(self, **kwargs: object) -> NeutralResourceHost:
+            calls.append(None)
+            raise AssertionError("invalid revision allocated a native host")
+
+    factory = cast(McpResourceHostFactory, Factory())
+    runtime = cast(
+        McpRuntime, SimpleNamespace(session_factory=case.sessions, resource_hosts=factory)
+    )
+
+    async def current(*args: object) -> ConfigRevision:
+        return revision
+
+    module = _gemini_resources if isinstance(case, GeminiCase) else _openai_resources
+    monkeypatch.setattr(module, "current_backend", current)
+    with pytest.raises(ToolError, match="not authorized"):
+        if isinstance(case, GeminiCase):
+            cap = _gemini_resources.GeminiSkillCapability(
+                factory,
+                (
+                    _gemini_resources.GeminiSkillGrant(
+                        auth.tenant_id,
+                        auth.account_id,
+                        "discord",
+                        "101",
+                        revision.digest,
+                        factory.account_scope_id,
+                    ),
+                ),
+                enabled=True,
+            )
+            await module.gemini_skill_host(runtime, auth, origin, capability=cap, operation="proof")
+        else:
+            deployment = SimpleNamespace(
+                platform="discord",
+                channel_id="101",
+                config_digest=revision.digest,
+                account_id=str(auth.account_id),
+                project=factory.account_scope_id,
+            )
+            monkeypatch.setattr(
+                openai_deployment, "authorized_deployments", lambda _: (deployment,)
+            )
+            await module.openai_skill_host(runtime, auth, origin, operation="proof")
+    assert calls == []

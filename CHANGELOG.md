@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 - Derive live OpenAI probe authorization from a registered canonical GO pin, matching financial envelope and unused attempt identity instead of fixing one attempt in the runner.
+- Share native credential authorization and MCP resource host binding across explicitly selected providers, enforcing the same scoped caller, account, channel revision and model checks before catalog access.
 
 - Preserve OpenAI session occupancy when accepted work has no visible active root yet, allowing observation to continue without retrying creation or admitting a new turn.
 

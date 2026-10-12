@@ -17,10 +17,19 @@ from typing import TYPE_CHECKING, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._native_resources import (
+    MCP_AUTHORIZATION_ID as MCP_AUTHORIZATION_ID,
+)
+from daimon.adapters.mcp.tools._native_resources import (
+    bind_native_host,
+    check_skill_origin,
+    check_skill_revision,
+)
 from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
+from mux.profiles.openai import PERSISTENT_WORKSPACE
 
 if TYPE_CHECKING:
     from anthropic.types.beta import BetaManagedAgentsAgent
@@ -29,7 +38,6 @@ if TYPE_CHECKING:
 
 OPENAI_PROFILE = "openai.persistent_workspace"
 ANTHROPIC_PROFILE = "anthropic.managed_agents"
-MCP_AUTHORIZATION_ID = "mcp-deployment-operator"
 
 
 def _principal(auth: AuthIdentity) -> str:
@@ -37,15 +45,21 @@ def _principal(auth: AuthIdentity) -> str:
 
 
 async def openai_skill_host(
-    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None, *, operation: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow | None,
+    *,
+    operation: str,
 ) -> NeutralResourceHost | None:
     """The bound OpenAI host for this turn's channel, or None for the existing path."""
     factory = runtime.resource_hosts
     if factory is None or origin is None:
         return None
+    check_skill_origin(auth, origin)
     async with runtime.session_factory() as session:
         revision = await current_backend(
-            session, channel_ref(auth.tenant_id, origin.platform, origin.parent_channel_id)
+            session,
+            channel_ref(auth.tenant_id, origin.platform, origin.parent_channel_id),
         )
     if revision is None or revision.profile == ANTHROPIC_PROFILE:
         return None
@@ -67,6 +81,7 @@ async def openai_skill_host(
     ]
     if len(authorized) != 1:
         return None
+    check_skill_revision(revision, PERSISTENT_WORKSPACE)
     return bind_host(
         factory(
             tenant_id=auth.tenant_id,
@@ -81,29 +96,16 @@ async def openai_skill_host(
 
 
 def bind_host(host: object, *, auth: AuthIdentity, workspace: str) -> NeutralResourceHost:
-    """Refuse a host for any tenant, account, principal, authorization or workspace but ours."""
-    from daimon.core.neutral_resources import NeutralResourceHost
+    """Select the native OpenAI catalog for the shared scope binder."""
+    from mux.drivers.openai.agents import OpenAIAgents
 
-    if not isinstance(host, NeutralResourceHost):
-        raise ToolError("This deployment's resource host is misconfigured. Nothing was changed.")
-    scope = host.scope
-    capabilities = host.backend.capabilities()
-    if (
-        scope.tenant_id != str(auth.tenant_id)
-        or scope.account_id != str(auth.account_id)
-        or scope.principal_id != _principal(auth)
-        or scope.authorization_id != MCP_AUTHORIZATION_ID
-        or scope.is_platform
-        or scope.is_legacy_host_authorized
-        or host.workspace != workspace
-        or capabilities.provider != "openai"
-        or capabilities.profile_id != OPENAI_PROFILE
-    ):
-        raise ToolError(
-            "This deployment's resource host is for a different tenant, account or workspace. "
-            "Nothing was changed. Do not retry."
-        )
-    return host
+    return bind_native_host(
+        host,
+        auth=auth,
+        workspace=workspace,
+        profile=PERSISTENT_WORKSPACE,
+        catalog_type=OpenAIAgents,
+    )
 
 
 @dataclass(frozen=True)
