@@ -41,7 +41,7 @@ async def backend_selection_turn(envelope: BackendTurnEnvelope) -> PreparedTurn:
     """Return the binding actually produced by normal ingress and execution.
 
     Hosts supply first/existing/new-thread inputs and CURRENT config; core's
-     backend-selection collector independently reads revisions and persisted bindings. This
+    backend-selection collector independently reads revisions and persisted bindings. This
     callback never pins an old admission or repairs a backend selector. A real
     AdmissionDenied is re-raised after the adapter renders its normal refusal.
     Bypassed admission/binding, multiple turns and wrong scope fail closed.

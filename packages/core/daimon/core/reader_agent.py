@@ -1,6 +1,6 @@
 """Derive a read-only reader variant of a publisher's agent.
 
-SPEC context/§1.7: a published report is answered by a *variant* of whatever
+A published report is answered by a *variant* of whatever
 agent the publisher names, not a fixed generic `report-reader` agent. The
 variant keeps the source's prompt, model and skills (so it answers in the
 voice the client already knows) and loses every MCP server and every

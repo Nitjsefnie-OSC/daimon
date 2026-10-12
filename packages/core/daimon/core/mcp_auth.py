@@ -100,7 +100,7 @@ def mint_internal_mcp_token(
     Signed HS256 with ``secret``. ``sub`` is the stringified account UUID (stable
     across principal renames); ``iat`` is ``int(now.timestamp())``.
 
-    ``is_admin: True`` is always minted for headless execution — headless/routine tokens run with
+    ``is_admin: True`` is always minted — headless/routine tokens run with
     admin privileges.
 
     ``internal: True`` is the trusted-token discriminator. The MCP admin

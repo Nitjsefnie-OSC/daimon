@@ -342,7 +342,7 @@ class AnthropicSessions:
         request = self._create_request(scope, spec)
         payload = request.model_dump(mode="python", exclude_unset=True)
         if any(resource["type"] == "github_repository" for resource in request.resources or ()):
-            # The resource layer owns the shared credential resolver/redaction boundary.
+            # Shared credential resolution and redaction live in resources._secrets.
             from mux.drivers.anthropic.resources._secrets import (
                 credential_request,
                 unavailable_secret,

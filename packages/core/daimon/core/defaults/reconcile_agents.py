@@ -178,7 +178,7 @@ async def reconcile_agent(
         # survive `defaults apply`. Spec wins on name/skill_id collision.
         # These merges — and the update call itself — live inside `_apply` so
         # a version-conflict retry recomputes them against the freshly-
-        # retrieved agent, never the stale `ma_match` read above :
+        # retrieved agent, never the stale `ma_match` read above:
         # a naive retry against `ma_match` would silently drop or duplicate a
         # concurrent writer's skills/MCP-server changes.
         async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:

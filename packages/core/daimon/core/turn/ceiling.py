@@ -60,7 +60,7 @@ def remaining_s(deadline: datetime, *, now: datetime) -> float:
     return max((deadline - now).total_seconds(), _MIN_REMAINING_S)
 
 
-# The hard ceiling: rendered through the adapters' existing generic error path, both of
+# Rendered through the adapters' existing generic error path, both of
 # which truncate to `str(err)[:100]`. `TurnError.__str__` is `f"{kind}: {msg}"`,
 # so this message must leave room for the "ceiling: " prefix -- see
 # `ceiling_error` and the length invariant pinned in test_ceiling.py.

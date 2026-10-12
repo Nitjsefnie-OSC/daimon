@@ -1,8 +1,8 @@
 """Explicit OpenAI host composition; no SDK/key discovery or default selection.
 
 Operators inject an authorized native session plan and private driver transport.
-The host publishes its actual binding before running, then the journal owns the lease,
-send claims and journal. Unknown container cost remains durable pending usage.
+The host publishes its actual binding before running. `TurnPersistence` owns
+the lease, send claims and journal. Unknown container cost remains durable pending usage.
 """
 
 from __future__ import annotations

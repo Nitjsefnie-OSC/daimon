@@ -4,7 +4,7 @@ requires.
 Every call to `run_turn` must declare how the
 turn is billed. `Billed` carries an event-only recorder (no `session_id`
 passthrough — the recorder binds session/tenant context itself via
-`functools.partial`, with the existing recorder binder). `BillingExempt` carries a
+`functools.partial`). `BillingExempt` carries a
 closed `ExemptReason` literal: widening the set of exempt reasons is a
 deliberate, reviewable act (edit the `Literal`, not a free-form string),
 not something a caller can invent inline.

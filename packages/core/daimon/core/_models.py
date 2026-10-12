@@ -425,7 +425,7 @@ class Routine(Base):
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_result_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # optional place the result goes, and the outbox that posts it.
+    # Optional place the result goes, and the outbox that posts it.
     destination_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     destination_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivery_status: Mapped[str | None] = mapped_column(Text, nullable=True)

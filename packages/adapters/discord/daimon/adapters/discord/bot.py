@@ -1014,7 +1014,7 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
-            # post routine results to their destinations. Same
+            # Post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
             self._spawn(
                 run_delivery_poller(
@@ -4043,7 +4043,7 @@ class DaimonBot(commands.Bot):
         category_id, category_unresolved = await _resolve_category(message.channel, fetch=False)
 
         # --- Stage one: admission (identity, config cascade, missing-config
-        # bail, MA resolve/retrieve, balance gate, cap gate) -- admission admit(). ---
+        # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
         try:
             admission = await admit(
                 self.runtime.turn_deps,
@@ -4410,7 +4410,7 @@ class DaimonBot(commands.Bot):
         if self.runtime.settings.discord.tenant_cap_waiting_card:
             await lifecycle.on_slot_started()
 
-        # preparation boundary: the per-turn ceiling clock starts here, once admission
+        # The per-turn ceiling clock starts here, once admission
         # has passed and the turn holds its slot, and covers session
         # bind/create (bind_session) plus the driver pump (run_prepared_turn)
         # as ONE shared budget -- admit() and the queue wait are outside it.
@@ -4427,7 +4427,7 @@ class DaimonBot(commands.Bot):
         session_account_id = admission.account_id
 
         # --- Stage two: bind_session (find-or-create, mapping write,
-        # recorder binding) -- admission bind_session(). ---
+        # recorder binding) -- bind_session(). ---
         try:
             prepared = await bind_session(
                 self.runtime.turn_deps,
