@@ -15,14 +15,27 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_host import OpenAIHostRuntime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.core.turn.runtime_manifest import ApiKeyEnvironment
+from daimon.core.turn.runtime_manifest import (
+    ApiKeyEnvironment,
+    ConfigurationGrant,
+    fixed_plan_origin_allowed,
+    manifest_configuration_matches,
+)
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import SessionSpec
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import Transport
 from mux.errors import ScopeViolation
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 _MANIFEST = TypeAdapter(list[dict[str, JsonValue]])
@@ -39,7 +52,8 @@ class OpenAIDeployment(BaseModel):
     platform: Nonblank
     channel_id: Nonblank
     account_id: Nonblank
-    config_digest: Nonblank
+    config_digest: Nonblank | None = None
+    configuration_grant: ConfigurationGrant | None = None
     project: Nonblank
     agent_id: Nonblank
     environment_id: Nonblank
@@ -47,10 +61,18 @@ class OpenAIDeployment(BaseModel):
     spend_limit_usd_cents: Annotated[int, Field(gt=0, strict=True)] | None = None
     skill_ids: tuple[Nonblank, ...] = ()
 
+    @model_validator(mode="after")
+    def _configuration_authorization(self) -> OpenAIDeployment:
+        if self.config_digest is None and self.configuration_grant is None:
+            raise ValueError("a deployment requires exact or bounded configuration authorization")
+        return self
+
 
 def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
     revision = request.admission.backend_revision
     if revision is None or revision.profile != "openai.persistent_workspace":
+        raise AdmissionDenied(reason="backend_unsupported")
+    if not fixed_plan_origin_allowed(getattr(request.admission, "backend_revision_origin", None)):
         raise AdmissionDenied(reason="backend_unsupported")
     manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
     if not manifest_path:
@@ -69,7 +91,7 @@ def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
             and row.get("platform") == revision.channel.platform
             and row.get("channel_id") == revision.channel.channel_id
             and row.get("account_id") == request.scope.account_id
-            and row.get("config_digest") == revision.digest
+            and manifest_configuration_matches(row, revision)
         ]
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")

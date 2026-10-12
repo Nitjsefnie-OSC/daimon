@@ -19,14 +19,27 @@ from daimon.core.turn.gemini import (
 )
 from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiStorage
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.core.turn.runtime_manifest import ApiKeyEnvironment
+from daimon.core.turn.runtime_manifest import (
+    ApiKeyEnvironment,
+    ConfigurationGrant,
+    fixed_plan_origin_allowed,
+    manifest_configuration_matches,
+)
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini.core import compile_agent, compile_environment
 from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.errors import ScopeViolation
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 
@@ -39,7 +52,8 @@ class GeminiPlan(BaseModel):
     platform: Nonblank
     channel_id: Nonblank
     account_id: Nonblank
-    config_digest: Nonblank
+    config_digest: Nonblank | None = None
+    configuration_grant: ConfigurationGrant | None = None
     project: Nonblank
     api_key_env: ApiKeyEnvironment
     records_path: Path
@@ -52,9 +66,17 @@ class GeminiPlan(BaseModel):
     tools: tuple[ToolSpec, ...]
     environment: EnvironmentSpec
 
+    @model_validator(mode="after")
+    def _configuration_authorization(self) -> GeminiPlan:
+        if self.config_digest is None and self.configuration_grant is None:
+            raise ValueError("a deployment requires exact or bounded configuration authorization")
+        return self
+
 
 def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
     revision = request.admission.backend_revision
+    if not fixed_plan_origin_allowed(getattr(request.admission, "backend_revision_origin", None)):
+        raise AdmissionDenied(reason="backend_unsupported")
     path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
     if revision is None or revision.profile != PROFILE or not path:
         raise AdmissionDenied(reason="backend_unsupported")
@@ -72,7 +94,7 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
             and row.get("account_id") == request.scope.account_id
             and row.get("platform") == revision.channel.platform
             and row.get("channel_id") == revision.channel.channel_id
-            and row.get("config_digest") == revision.digest
+            and manifest_configuration_matches(row, revision)
         ]
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")

@@ -2023,3 +2023,53 @@ authorized tenant, account, principal, authorization and provider workspace.
 Gemini catalog readback must also match the same declared profile and configured
 adapter. Default routing, missing grants and mismatch refusals keep their
 existing behavior; the CLI constructs no additional provider clients.
+
+## Agent backend preferences
+
+Admin backend preferences use the existing neutral-path flags: both
+`turn.path=mux` and `turn.channel_backends=true` must be set. No preference
+means the same Anthropic agent and model as before. An explicit channel
+configuration takes priority over the agent preference, which takes priority
+over that default. Clearing a channel override restores agent inheritance;
+explicitly selecting Anthropic remains a channel override. Clearing an agent
+preference restores inheritance; reverting
+appends a revision with the previous value. Existing threads retain their
+immutable configuration, rather than following a later preference change.
+
+The tenant access policy's `enabled_backends` allowlist defaults to Anthropic.
+Selections must be explicitly enabled before an admin can save them. The existing
+policy store keeps this allowlist in a defaulted column on its existing record,
+leaving the legacy policy JSON readable by older processes and after downgrade.
+Compatibility
+previews list unsupported attachments/capabilities, target thread-mode limits,
+existing model list prices, and an explicitly unknown whole-turn maximum where
+no complete bound is enforced. Preview digests bind the current agent facts,
+policy, price line and preference revision; stale confirmations refuse.
+
+Changes use a compare-and-set revision and record an existing security-audit
+event in the same transaction. Preferences do not store credentials or copy
+provider resources. Agent-derived effective configurations share the existing
+immutable channel revision namespace but never become channel overrides.
+
+Operator deployment manifests may keep their exact `config_digest` authorization
+or supply a closed `configuration_grant` with explicit `profiles`, `models`,
+`thread_modes`, and `requires`. Every tenant/account/channel constraint remains
+mandatory; bounds are not authorization to substitute an unrelated native agent.
+Agent-origin native preparation therefore refuses before manifest, credential
+or native I/O until independently authorized resource-counterpart proof is
+available. Channel-origin native deployments keep their existing behavior.
+
+Disable the feature through the existing flags to stop new preference selection;
+retain stored revisions and audit history. Destructive schema downgrade removes
+agent-origin materializations and preference history and must not be used while
+threads depend on those revisions. Default/channel-origin history survives.
+
+Backend resolution requires the host-resolved scoped agent identity; names are
+only display snapshots. Recreated agents start without the deleted identity's
+preference. Read-only selection uses the existing shared policy fence. Concurrent
+materializations use the existing immutable insert conflict check and a bounded
+retry, while operator writes retain the existing exclusive fence. A held writer
+causes acquisition-only refusal/retry through the existing transaction owner;
+readers do not bypass policy isolation. The generic StateStore latest-revision
+API includes all materializations; explicit channel override reads use
+`current_backend`, including immutable clear markers.

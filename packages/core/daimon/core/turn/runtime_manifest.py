@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, Field, JsonValue, TypeAdapter, ValidationError
+from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
+from mux.contracts.profile import Capability
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+)
 
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
@@ -64,3 +75,42 @@ def validate_configured_runtime_manifest() -> None:
         reference = row.get("api_key_env")
         if isinstance(reference, str):
             validate_api_key_env(reference)
+
+
+class ConfigurationGrant(BaseModel):
+    """Finite operator-authorized resolved fields; no wildcard defaults."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    profiles: tuple[str, ...] = Field(min_length=1)
+    models: tuple[str | None, ...] = Field(min_length=1)
+    thread_modes: tuple[ThreadMode, ...] = Field(min_length=1)
+    requires: dict[Capability, CapabilityRequirement]
+
+
+def configuration_matches(
+    revision: ConfigRevision, *, digest: str | None, grant: ConfigurationGrant | None
+) -> bool:
+    """Legacy exact grants remain exact; bounded grants authorize only declared fields."""
+    if grant is None:
+        return digest == revision.digest
+    return (
+        revision.profile in grant.profiles
+        and revision.model in grant.models
+        and revision.thread_mode in grant.thread_modes
+        and dict(revision.requires) == grant.requires
+    )
+
+
+def manifest_configuration_matches(row: Mapping[str, JsonValue], revision: ConfigRevision) -> bool:
+    """Match before any credential lookup; invalid grants refuse at the loader boundary."""
+    raw = row.get("configuration_grant")
+    grant = ConfigurationGrant.model_validate(raw) if raw is not None else None
+    digest = row.get("config_digest")
+    return configuration_matches(
+        revision, digest=digest if isinstance(digest, str) else None, grant=grant
+    )
+
+
+def fixed_plan_origin_allowed(origin: str | None) -> bool:
+    """An operator's fixed native plan is not an agent-counterpart proof."""
+    return origin in (None, "channel")

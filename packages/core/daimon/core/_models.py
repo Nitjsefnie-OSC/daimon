@@ -276,6 +276,9 @@ class TenantAccessPolicyRecord(Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    enabled_backends: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[\"anthropic\"]'::jsonb")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -3261,6 +3264,7 @@ class ChannelConfigRevision(Base):
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     local: Mapped[int] = mapped_column(Integer, nullable=False)
     digest: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'channel'"))
     # A `mux.contracts.config.ConfigRevision` as JSON.
     revision: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -3549,3 +3553,28 @@ class DiscordGatewayLease(Base):
     holder_owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentBackendRevisionRecord(Base):
+    """Tenant/agent-scoped immutable backend settings, like channel revisions."""
+
+    __tablename__ = "agent_backend_revision"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "local"),
+        CheckConstraint("local > 0", name="ck_agent_backend_local"),
+        CheckConstraint(
+            "backend IS NULL OR backend IN ('anthropic', 'openai', 'gemini')",
+            name="ck_agent_backend_provider",
+        ),
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    local: Mapped[int] = mapped_column(Integer, nullable=False)
+    backend: Mapped[str | None] = mapped_column(Text)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    preview_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    previous_local: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

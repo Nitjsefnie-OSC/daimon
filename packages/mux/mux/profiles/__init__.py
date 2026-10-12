@@ -9,8 +9,11 @@ admission; the conformance suite is what moves a capability out of
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
+from mux.contracts.config import BackendConfig, ResolvedBackend, ThreadMode, resolve_default
 from mux.contracts.errors import InvalidConfig
+from mux.contracts.ids import Provider
 from mux.contracts.profile import Profile
 from mux.profiles.anthropic import MANAGED_AGENTS
 from mux.profiles.gemini import INLINE_REUSE
@@ -36,3 +39,50 @@ __all__ = [
     "PROFILES",
     "get_profile",
 ]
+
+
+@dataclass(frozen=True)
+class BackendSelection:
+    config: BackendConfig
+    thread_modes: tuple[ThreadMode, ...]
+
+
+_BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
+    "anthropic": BackendSelection(BackendConfig(), ("per_caller", "shared")),
+    "openai": BackendSelection(
+        BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"),
+        ("per_caller",),
+    ),
+    "gemini": BackendSelection(
+        BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
+        ("per_caller",),
+    ),
+}
+RUNNABLE_PROFILES: frozenset[str] = frozenset(
+    resolve_default(selection.config).profile for selection in _BACKEND_SELECTIONS.values()
+)
+
+
+def backend_selection(backend: Provider) -> ResolvedBackend:
+    """The supported admin selection; provider choices stay in the profile seam."""
+    try:
+        selection = _BACKEND_SELECTIONS[backend]
+    except KeyError:
+        raise InvalidConfig("unknown backend selection") from None
+    return resolve_default(selection.config)
+
+
+def shared_threads_available(backend: Provider) -> bool:
+    """Read the same admitted thread modes used by selection and runnable checks."""
+    return "shared" in _BACKEND_SELECTIONS[backend].thread_modes
+
+
+def runnable_selection(selection: ResolvedBackend) -> bool:
+    """One release constraint table for profile, model and thread mode."""
+    declared = _BACKEND_SELECTIONS[selection.backend]
+    resolved = resolve_default(declared.config)
+    return (
+        selection.profile == resolved.profile
+        and selection.model == resolved.model
+        and selection.thread_mode in declared.thread_modes
+    )

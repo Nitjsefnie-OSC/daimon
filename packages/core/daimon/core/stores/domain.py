@@ -14,6 +14,8 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from daimon.core.session_snapshot import SessionSnapshot
+from mux.contracts.ids import PROVIDERS, Provider
+from mux.contracts.profile import Capability
 from pydantic import BaseModel, ConfigDict, Field
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
@@ -1058,3 +1060,60 @@ class TurnOriginRow(BaseModel):
     role: Role
     created_at: datetime
     expires_at: datetime
+
+
+class _Facts(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+
+class CompatibilityItem(_Facts):
+    name: str = Field(min_length=1)
+    requires: tuple[Capability, ...]
+    providers: tuple[Provider, ...] = PROVIDERS
+
+
+class BackendAgent(_Facts):
+    """Host-resolved scoped agent; never populate this from request ownership claims."""
+
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    name: str = Field(min_length=1)
+    configuration_digest: str = Field(min_length=1)
+    model: str | None = None
+    skills: tuple[CompatibilityItem, ...] = ()
+    mcps: tuple[CompatibilityItem, ...] = ()
+    required_capabilities: tuple[Capability, ...] = ()
+    shared_threads: bool = False
+
+
+class TenantBackendPolicy(_Facts):
+    tenant_id: uuid.UUID
+    revision: str
+    enabled_backends: tuple[Provider, ...] = ("anthropic",)
+
+
+class AgentBackendRevision(_Facts):
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    local: int = Field(ge=1)
+    backend: Provider | None
+    agent_name: str
+    preview_digest: str
+    digest: str
+    previous_local: int | None
+    created_at: datetime
+
+
+class CompatibilityPreview(_Facts):
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    target_backend: Provider
+    setting_revision: int = Field(ge=0)
+    policy_revision: str
+    unsupported_skills: tuple[str, ...]
+    unsupported_mcps: tuple[str, ...]
+    unsupported_capabilities: tuple[str, ...]
+    shared_thread_limits: tuple[str, ...]
+    cost_line: str
+    allowed: bool
+    digest: str

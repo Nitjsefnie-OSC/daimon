@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2574,
+  "files_scanned": 2580,
   "parse_errors": [],
   "calls": [
     {
@@ -12898,6 +12898,15 @@
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/channel_backend.py",
+      "line": 29,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "production"
     },
