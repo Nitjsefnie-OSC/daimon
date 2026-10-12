@@ -55,6 +55,7 @@ from daimon.adapters.discord.post_transport import (
     clear_webhook_backoff,
     known_webhook_ids,
 )
+from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
@@ -970,6 +971,7 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     post=self._post_github_request_expiry,
                     should_stop=lambda: self.draining or self.is_closed(),
+                    retire_form=lambda row: edit_posted_card(self, row=row, state="expired"),
                 )
             )
             self._spawn(

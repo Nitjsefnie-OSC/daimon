@@ -242,10 +242,10 @@ class CredentialRequestButton(
                 await interaction.response.send_message(
                     _expired_message_for_row(request_row), ephemeral=True
                 )
-                # Opportunistic, and only here: a card goes stale silently
-                # (nothing sweeps expiries), so the late click of the one
-                # person who could have used it is the event that can still
-                # correct the channel's copy. The refusal is sent first --
+                # The request-expiry poller retires an unclicked card on its
+                # next tick, but only best effort and in bounded batches; a
+                # click before then, or on a card its edit failed for,
+                # corrects the channel's copy here instead. The refusal is sent first --
                 # the edit is a different message, and the clicker's own
                 # answer must not wait on it. A wrong-requester click edits
                 # nothing: it would let anyone in the channel retire a card
