@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from dataclasses import replace
+from typing import Any
 
 import pytest
 from daimon.core import direct_messages
@@ -12,6 +13,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -34,7 +36,7 @@ async def test_a_dm_turn_is_admitted_against_its_source_channel(
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
     monkeypatch.setattr(direct_messages, "admit", refuse)
-    deps = cast(TurnDeps, type("Deps", (), {"sessionmaker": db_session_factory})())
+    deps = replace(deps_for(None, db_session_factory), turn_path=None)
 
     with pytest.raises(AdmissionDenied):
         await reply_to_dm(
@@ -65,7 +67,6 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
     db_session_factory, monkeypatch, owns_claim, interrupt_ack
 ):
     from datetime import UTC, datetime, timedelta
-    from types import SimpleNamespace
 
     from daimon.core.stores.direct_messages import claim_message, finish_message
     from daimon.core.stores.thread_sessions import get_thread_session_by_id
@@ -109,7 +110,7 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
         return interrupt_ack
 
     monkeypatch.setattr(direct_messages, "interrupt_orphaned_session", interrupt)
-    deps = cast(TurnDeps, SimpleNamespace(sessionmaker=db_session_factory, anthropic=client))
+    deps = replace(deps_for(client, db_session_factory), turn_path=None)
     await direct_messages._settle_shutdown_cancelled_dm(deps, claimed)
     assert calls == (["owned-dm-session"] if owns_claim else [])
     async with db_session_factory() as session:

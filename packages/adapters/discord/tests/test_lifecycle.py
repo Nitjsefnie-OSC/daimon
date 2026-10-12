@@ -14,6 +14,7 @@ import time
 import types
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -47,6 +48,7 @@ from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, Tu
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from daimon.testing.turn_fakes import deps_for
 from discord.http import HTTPClient, Route
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -394,13 +396,12 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
         backend=None,
         runtime=None,
     )
-    deps = types.SimpleNamespace(
+    deps = replace(
+        deps_for(None, None),
         tool_safety=False,
         public_url="https://example.test",
-        anthropic=None,
         turn_path="legacy",
         backend=None,
-        sessionmaker=None,
     )
     monkeypatch.setattr(turn_runner, "run_turn", fake_driver)
     monkeypatch.setattr(turn_runner, "chat_tool_confirmation", lambda *args, **kwargs: None)

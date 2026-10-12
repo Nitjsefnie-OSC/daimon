@@ -7,14 +7,11 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
-from pathlib import Path
 from typing import Literal, cast
 
 import httpx
 import pytest
 from daimon.core import channel_backend, mux_backend
-from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
@@ -22,7 +19,6 @@ from daimon.core.turn import io as io_module
 from daimon.core.turn import prepare as preparation
 from daimon.core.turn import runtimes as runtime_module
 from daimon.core.turn.admission import Admission
-from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import LegacyTurnIO, TurnCodecRequest, TurnIO, turn_io
 from daimon.core.turn.persistence import TurnPersistence
@@ -32,6 +28,7 @@ from daimon.core.turn.run import _turn_port_kwargs
 from daimon.testing.isolated_sdk import build_async_openai
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.turn_fakes import deps_for as deps_for
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -80,27 +77,6 @@ async def openai_backend() -> AsyncIterator[OpenAIDriver]:
             journal=MemoryRecoveryJournal(),
             usage_revisions=MemoryUsageRevisions(),
         )
-
-
-def deps_for(client: object, sm: async_sessionmaker[AsyncSession]) -> TurnDeps:
-    from anthropic import AsyncAnthropic
-
-    return TurnDeps(
-        anthropic=cast(AsyncAnthropic, client),
-        sessionmaker=sm,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/unused"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal(1),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        turn_path="mux",
-    )
 
 
 def admission() -> Admission:

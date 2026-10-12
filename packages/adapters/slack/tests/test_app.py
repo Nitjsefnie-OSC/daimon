@@ -19,6 +19,7 @@ import pathlib
 import re
 import uuid
 from collections.abc import Coroutine
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -63,6 +64,7 @@ from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing import ma_agent, ma_model_usage, ma_session, ma_session_agent
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -312,7 +314,7 @@ def _make_app(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
     return SlackApp(runtime=runtime)
 

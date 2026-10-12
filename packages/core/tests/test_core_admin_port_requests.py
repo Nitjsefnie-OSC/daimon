@@ -2,8 +2,8 @@
 
 import contextlib
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Literal, Self, cast
 from unittest.mock import AsyncMock, Mock
 
@@ -17,8 +17,8 @@ from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.stores.direct_messages import DirectMessageRow
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.turn import session_identity
-from daimon.core.turn.deps import TurnDeps
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic.core_admin import CoreAdmin
 from mux.errors import ScopeViolation
@@ -409,15 +409,11 @@ async def test_dm_quarantine_keeps_archive_wire_and_sealed_error(
         def session_ref(session_id: str, authorized: Scope) -> ResourceRef:
             return resource_ref(backend, "session", session_id, scope=authorized)
 
-        deps = cast(
-            TurnDeps,
-            SimpleNamespace(
-                anthropic=client if path == "legacy" else unused_client,
-                sessionmaker=factory,
-                turn_path=path,
-                backend=backend if path == "mux" else None,
-                backend_session_ref=session_ref,
-            ),
+        deps = replace(
+            deps_for(client if path == "legacy" else unused_client, factory),
+            turn_path=path,
+            backend=backend if path == "mux" else None,
+            backend_session_ref=session_ref,
         )
         with pytest.raises(DaimonError) as caught:
             await direct_messages._quarantine(deps, conversation)  # pyright: ignore[reportPrivateUsage]

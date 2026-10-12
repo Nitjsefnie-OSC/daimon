@@ -8,7 +8,7 @@ import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.isolated_sdk import build_async_anthropic
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.provider_fixtures import FixtureGap
+from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import Provider
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -149,7 +150,7 @@ async def owned_submit(
                 billing_config=None,
                 deployment_default=DeploymentDefault(),
                 resolver_cache=new_resolver_cache(),
-                turn_deps=MagicMock(),
+                turn_deps=replace(deps_for(client, db_session_factory), turn_path=None),
                 mcp_token_probe=probe,
             )
             yield OwnedSubmit(runtime, row, probe, interaction, requests)

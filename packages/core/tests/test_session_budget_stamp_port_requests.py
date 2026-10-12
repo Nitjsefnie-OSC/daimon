@@ -2,8 +2,8 @@
 
 import contextlib
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Self, cast
 from unittest.mock import AsyncMock, Mock
 
@@ -16,6 +16,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 from mux.errors import ScopeViolation
@@ -60,7 +61,7 @@ def host(
     monkeypatch.setattr(session_preparation, "get_live_thread_session", lookup)
     monkeypatch.setattr(session_preparation, "set_budget_channel_stamp", write)
     monkeypatch.setattr(session_preparation.log, "warning", warning)
-    deps = cast(TurnDeps, SimpleNamespace(anthropic=client, sessionmaker=factory))
+    deps = replace(deps_for(client, factory), turn_path=None)
     return deps, lookup, write, warning
 
 

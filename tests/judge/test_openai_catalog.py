@@ -179,7 +179,7 @@ async def test_fenced_followup_reuses_the_session_and_excludes_old_output(tmp_pa
     assert result.rendered_text[1] == answer["content"][0]["text"]
 
 
-@pytest.mark.parametrize("change", ["source", "model", "provider", "turn", "text", "codec"])
+@pytest.mark.parametrize("change", ["source", "model", "provider", "turn", "text"])
 async def test_corrupt_pin_or_selection_refuses_before_transport(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -204,10 +204,6 @@ async def test_corrupt_pin_or_selection_refuses_before_transport(
             update={"turn": 99} if change == "turn" else {"request_text": "foreign input"}
         )
         fixture = fixture.model_copy(update={"turns": (first,)})
-    elif change == "codec":
-        fixture = fixture.model_copy(
-            update={"codec_source": fixture.codec_source.model_copy(update={"sha256": "0" * 64})}
-        )
     scenario = scenario.model_copy(update={"providers": (fixture, scenario.providers[1])})
     with pytest.raises(ValueError):
         await execute_openai_cell(
@@ -397,3 +393,22 @@ async def test_ambient_sdk_options_refuse_without_client_construction(
         await execute_openai_cell(
             plan, scenario, fixture, source_root=CATALOG, repository_root=REPO
         )
+
+
+async def test_product_source_provenance_is_not_a_native_behavior_gate() -> None:
+    plan, scenario, fixture = selected("QA-NEW37-MARKDOWN-TABLE-READABLE")
+    changed = fixture.model_copy(
+        update={"codec_source": fixture.codec_source.model_copy(update={"sha256": "0" * 64})}
+    )
+    providers = tuple(changed if p.backend == "openai" else p for p in scenario.providers)
+    source = scenario.model_copy(update={"providers": providers})
+    result = await execute_openai_cell(
+        plan, source, changed, source_root=CATALOG, repository_root=REPO
+    )
+    baseline = await execute_openai_cell(
+        plan, scenario, fixture, source_root=CATALOG, repository_root=REPO
+    )
+    assert result.status == baseline.status
+    assert result.rendered_text == baseline.rendered_text
+    assert result.request_count == baseline.request_count and result.request_count > 0
+    assert result.host_outcome == baseline.host_outcome

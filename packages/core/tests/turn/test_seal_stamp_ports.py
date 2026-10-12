@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -19,6 +20,7 @@ from daimon.core.turn.errors import SessionBusyError
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.turn_fakes import deps_for
 from mux.errors import ScopeViolation
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,9 +59,7 @@ def _deps(
         trace.append("publish")
 
     monkeypatch.setattr(prepare, "record_session_seals", publish)
-    return cast(
-        TurnDeps, SimpleNamespace(anthropic=client, sessionmaker=SimpleNamespace(begin=begin))
-    )
+    return replace(deps_for(client, SimpleNamespace(begin=begin)), turn_path=None)
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,7 @@
 """Admitted identity reaches the private transport without changing SDK traffic."""
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Literal, cast
 from uuid import UUID
@@ -10,11 +11,11 @@ from anthropic import AsyncAnthropic
 from daimon.core import ma
 from daimon.core.errors import TurnError
 from daimon.core.turn.admission import Admission, AdmissionGrant
-from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.io import turn_io
 from daimon.core.turn.run import _turn_port_kwargs  # pyright: ignore[reportPrivateUsage]
 from daimon.testing.ma import list_response, send_events_response
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.transport import LegacyTurnTransport
 from mux.errors import ScopeViolation
@@ -39,7 +40,7 @@ def test_prepared_turn_binds_the_real_account_on_both_paths(
     admission = cast(
         Admission, SimpleNamespace(account_id=ACCOUNT, grant=None, backend_revision=None)
     )
-    deps = cast(TurnDeps, SimpleNamespace(turn_path=path, backend=None))
+    deps = replace(deps_for(None, None), turn_path=path, backend=None)
     args = _turn_port_kwargs(deps, admission, "session", tenant_id=TENANT)
     assert args.get("scope") == SCOPE
     assert "backend" not in args and "session_ref" not in args
@@ -55,7 +56,7 @@ def test_prepared_turn_refuses_a_grant_from_another_tenant(
 ) -> None:
     grant = cast(AdmissionGrant, SimpleNamespace(tenant_id=UUID(int=603)))
     admission = cast(Admission, SimpleNamespace(account_id=ACCOUNT, grant=grant))
-    deps = cast(TurnDeps, SimpleNamespace(turn_path=path, backend=None))
+    deps = replace(deps_for(None, None), turn_path=path, backend=None)
     with pytest.raises(ScopeViolation):
         _turn_port_kwargs(deps, admission, "session", tenant_id=TENANT)
 

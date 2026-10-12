@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -39,6 +39,7 @@ from daimon.testing.factories import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.outcome_oracle import LogObservation, VisibleText
+from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import Provider, Scope
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -438,11 +439,9 @@ async def test_foreign_routed_bind_is_refused_before_connection_or_callback() ->
     attempts: list[object] = []
     for engine in (owned_engine, foreign_engine):
         event.listen(engine.sync_engine, "do_connect", lambda *args, **kwargs: attempts.append(1))
-    deps = cast(
-        TurnDeps,
-        SimpleNamespace(
-            sessionmaker=async_sessionmaker(owned_engine, binds={AsyncSession: foreign_engine})
-        ),
+    deps = replace(
+        deps_for(None, async_sessionmaker(owned_engine, binds={AsyncSession: foreign_engine})),
+        turn_path=None,
     )
     invoke = AsyncMock()
     try:
@@ -494,7 +493,7 @@ async def test_foreign_routed_bind_is_refused_before_connection_or_callback() ->
 async def test_capture_gaps_and_invalid_evidence_never_become_certification(case: str) -> None:
     engine = create_async_engine("postgresql+asyncpg://localhost/daimon_test_nc_N5")
     tenant, account = uuid.uuid4(), uuid.uuid4()
-    deps = cast(TurnDeps, SimpleNamespace(sessionmaker=async_sessionmaker(engine)))
+    deps = replace(deps_for(None, async_sessionmaker(engine)), turn_path=None)
     scope = Scope(
         tenant_id=str(tenant), account_id=str(account), principal_id="p", authorization_id="auth"
     )

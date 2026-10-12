@@ -184,7 +184,7 @@ def artifact_turn(source: ScenarioFixture, invocation: Object, index: int) -> Na
 def generate(data: Path, output: Path) -> AnthropicIndex:
     pack = load_provider_fixtures(data / "index.json", catalog_root=data / "catalog")
     codec = SourcePin(path=CODEC, sha256=CODEC_SHA256)
-    codec.verify(ROOT)
+    codec.resolve(ROOT)
     entries: list[AnthropicEntry] = []
     output.mkdir(parents=True, exist_ok=True)
     for source in pack.scenarios:

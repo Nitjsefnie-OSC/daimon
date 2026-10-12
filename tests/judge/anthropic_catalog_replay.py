@@ -43,8 +43,8 @@ class AnthropicRecipe:
         entry = next((e for e in index.entries if e.scenario_id == self.entry.scenario_id), None)
         if entry != self.entry or index.codec != self.codec:
             raise ValueError("Anthropic recipe differs from its pinned manifest")
-        self.codec.verify(self.repository_root)
-        index.authoring.verify(self.repository_root)
+        self.codec.resolve(self.repository_root)
+        index.authoring.resolve(self.repository_root)
         index.input_index.verify(self.manifest.parent.parent)
         self.entry.input.verify(self.manifest.parent.parent)
         self.entry.replay.verify(self.manifest.parent)

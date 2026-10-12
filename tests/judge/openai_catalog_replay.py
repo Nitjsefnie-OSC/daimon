@@ -141,7 +141,7 @@ async def execute_openai_turns(
     if any(name in present_names for name in OFFLINE_SDK_ENV):
         raise ValueError("offline OpenAI replay refuses ambient SDK options")
     fixture = BackendFixture.model_validate_json(fixture.model_dump_json())
-    fixture.codec_source.verify(repository_root)
+    fixture.codec_source.resolve(repository_root)
     scenario.projection.verify(source_root)
     invocations = [i for i in plan.invocations if i.operation == "host_turn"]
     validate_native_coverage(plan, fixture)
