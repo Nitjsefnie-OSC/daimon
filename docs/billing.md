@@ -53,79 +53,54 @@ the model calls in that replayed suffix through the same recorder, and a
 per-turn set of billed event ids keeps every call to one recorder invocation
 whether it arrives live, in a replay, or both. Calls made after an interrupt
 or a turn ceiling, or while the adapter process is down, are not seen by the
-driver at all; the [turn-end catch-up](#the-turn-end-catch-up) bills them
-the next time a chat turn on that session ends, and
-[the sweep](#the-tables) is the backstop for sessions no turn revisits.
+driver at all; [settling the session](#settling-a-session) bills them when
+that turn ends.
 
-### The turn-end catch-up
+### Settling a session
 
-The adapter process can go away mid-turn (a deploy restarts it, it crashes)
-while the Managed Agents session keeps running and making model calls that
-no recorder sees. The next message in that thread reuses the session, but
-its driver replays only its own turn, so those calls would stay unbilled.
-`packages/core/daimon/core/usage_reconcile.py` closes that hole for chat
-turns (`run_prepared_turn`, Discord, Slack and Teams).
+`settle_session` in `packages/core/daimon/core/usage_sweep.py` is the one
+path that bills model calls no live stream metered. It lists the session's
+`span.model_request_end` events newest first, skips those with a
+`usage_events` row (written in the same transaction as the debit), and
+replays the rest through the recorder. Price, markup, budget channel, the
+`turn_debit` reason and the `turn:<session>:<event>` key are the live
+path's, so a call recorded twice is debited once.
 
-When a chat turn is over — after its answer, failure or ceiling message has
-been rendered — the turn reads the session's `span.model_request_end` events
-oldest first and bills every one with no `usage_events` row through the
-turn's own recorder. Price, markup, budget channel, the `turn_debit` reason
-and the `turn:<session>:<event>` ledger key are the live path's, so a call
-the live stream or the sweep also records is debited once. It never runs in
-front of the user's message and does not count against the turn ceiling.
-
-- **Order.** Managed Agents lists a session's events in `processed_at`
-  order, and its `created_at[gte]`/`created_at[lt]` filters compare
-  `processed_at` (see the List Events API reference); the catch-up relies on
-  both.
-- **Bounds.** Per turn, at most 10 forward reads and one repair read of up
-  to 100 calls each (plus one re-open per scan if Managed Agents rejects a
-  stored page cursor), all inside a single 5-second budget that covers
-  Managed Agents reads and database work together. A pass that runs out
-  keeps what it has committed.
-- **Adapter time.** The catch-up runs inside the adapter's turn task after the
-  answer is shown, so that task (and anything queued behind it in the same
-  thread) can be held for up to the 5-second budget; a caught-up session
-  usually costs two small reads.
-- **Resuming.** `usage_reconcile_progress` stores, per session, the newest
-  call time the forward scan handled (with the ids handled at exactly that
-  time) and, while a listing is unfinished, Managed Agents' cursor for its
-  next page. Every handled page is committed with that cursor, so the next
-  pass reads the next unread page rather than pages already handled, even
-  through many calls sharing one timestamp. A pass that can read and bill one
-  page within its budget therefore always advances, and a backlog is billed
-  over successive turns on the session. If Managed Agents rejects a stored
-  cursor, that listing is re-opened from where it began, once.
-- **Late calls.** Managed Agents does not document that a call is listable
-  before newer calls are. A repair scan rereads the history behind the
-  forward position, one page per turn, continued with its own stored cursor
-  and restarted from the top once it reaches that position. A repair cycle
-  starts only once the forward scan has no unfinished listing, so a backlog
-  is billed first. When a pass runs out of budget before a due repair page,
-  the next pass reads the repair page first, so a slow forward read cannot
-  starve it. A call listed late is billed within one repair cycle: about
-  N / 100 further turns on the session for N calls of history, counting only
-  turns whose budget fits a repair page, and not at all if no further turn
-  happens.
-- **Failures.** A Managed Agents or database error is logged as
-  `billing.reconcile_failed` (a deleted session as `billing.reconcile_skipped`)
-  and never fails the turn; the next turn on the session retries.
-- **Evidence.** A pass that finds a missing call, leaves the forward listing
-  unfinished, or misses a due repair page logs
-  `billing.reconciled_unbilled` with `managed_session_id`, `scanned`,
-  `missing` (calls with no usage row when read), `repaired` (of those, found
-  by the repair scan), `debited` and `debit_usd`
-  (ledger rows this pass actually inserted), `pages`, `truncated` (forward
-  listing unfinished), `repair_skipped` (a repair page was due but not read)
-  and `elapsed_s`.
-- **Attribution.** A recovered call's `usage_events` row carries the platform
-  user of the turn that caught it up, which is not necessarily the person
-  whose turn was cut off; the tenant debit and channel budget are unaffected.
-  It is not part of that turn's own cost in its turn outcome or footer.
-- **What it does not reach.** A session no chat turn touches again (a thread
-  nobody writes in after the crash, a headless or MCP `start_turn` session,
-  a session replaced or deleted before the next turn) is recovered only by
-  the sweep, which is off by default.
+- **Chat turns.** When a chat turn is over (after its answer, failure or
+  ceiling message is shown), `run_prepared_turn` settles the session with
+  the turn's own recorder: at most 10 pages of 100 calls in one 5-second
+  budget, outside the turn ceiling. This bills calls made while the adapter
+  was down (a deploy or crash mid-turn) or after an interrupt or ceiling.
+- **Headless agent-chat turns.** MCP `start_turn`, `continue_turn` and `ask`
+  never drive a stream. Each send records a settle request for its own
+  `user.message`. When `get_my_session`, `list_events` or `ask`'s own wait
+  next reads the session `idle` or `terminated`, and a `session.status_idle`
+  or `session.status_terminated` event is listed after that message (a bare
+  `idle` right after a send can be the previous turn's), the read settles the
+  session with the same bounds before it returns, and clears the request
+  once the settle has read to the end. The recorder is built from the
+  session's stamps (below). A billing error is logged as
+  `billing.settle_failed` and never fails the read.
+- **Progress.** `usage_reconcile_progress.covered_through` is the newest
+  call time a completed settle read. The next settle lists from ten minutes
+  before it, so it usually costs one read; a call Managed Agents lists later
+  than that is billed only by a full read ([the backlog](#the-backlog)
+  settle). No automatic settle reads a call made before the backlog cutoff.
+  A settle cut short by its page or time bound keeps every debit it wrote
+  and leaves the watermark, and the request, for the next one.
+- **Attribution.** For sessions billed by their stamps, `daimon_tenant` is
+  the billed tenant (it must exist in this database), `daimon_account`
+  resolves to the owning person's platform user, `daimon_budget_channel` is
+  the channel charged, and the model is the one frozen in the session. A
+  call the chat path recovers carries the platform user of the turn that
+  settled it, which is not necessarily the person whose turn was cut off.
+- **Evidence.** A settle that finds an unbilled call, or stops before the
+  end, logs `billing.settled` with `managed_session_id`, `scanned`,
+  `unbilled`, `debited`, `debit_usd` (rows this settle inserted) and
+  `complete`.
+- **What it does not reach.** A headless session nobody reads again after
+  its turn ends is billed by [the sweep](#the-tables). Calls from before
+  this path was deployed are [the backlog](#the-backlog).
 
 The posture is a union in `packages/core/daimon/core/turn/posture.py`:
 `Billed(record=...)` or `BillingExempt(reason=...)`. There is deliberately no
@@ -282,16 +257,14 @@ Two boundaries of the design worth stating plainly:
   so queued turns do not widen the bound. Follow-up turns read the tenant's
   current turn cap before taking a new queue ticket. Once the adapter observes
   a lower cap, running turns finish, but new turns wait until enough slots are
-  free. An MCP `start_turn` session is worse. Its spend reaches the ledger only
-  when the scheduler's usage sweep next reads the
-  session: up to two sweep passes plus one tick interval later, and not at
-  all while the sweep is switched off (its default, see "The sweep" below).
-  Until then the gate reads a balance that leaves out earlier headless turns,
-  and MCP turns have no concurrency cap. The overdraft is therefore bounded
-  by what a tenant can start between two sweeps, not by N concurrent turns.
-  `formal/metering/BalanceGate.tla` checks the concurrent-turn bound for chat
-  turns, where it holds, and has a counterexample in which headless turns
-  exceed it. The between-sweeps bound is stated here, not model-checked.
+  free. An MCP `start_turn` session is worse. Its spend reaches the ledger
+  only when a read sees its turn ended or the sweep settles it, and MCP
+  turns have no concurrency cap. Until then the gate
+  reads a balance that leaves out headless turns not yet settled, so the
+  overdraft is bounded by what a tenant runs before those reads, not by N
+  concurrent turns. `formal/metering/BalanceGate.tla` checks the
+  concurrent-turn bound for chat turns, where it holds, and has a
+  counterexample in which headless turns exceed it.
   Neither bound covers a refund or dispute of credit already spent: that
   clawback is a further debit, and can take the balance lower still.
 - **`BillingExempt` usage is absorbed by the operator, not debited to the
@@ -302,9 +275,9 @@ Two boundaries of the design worth stating plainly:
   recorder (`BillingExempt(reason="headless-unrecorded")`). The live recorder
   never sees these turns, and the session such a caller creates is stamped
   `daimon_billing_exempt=<reason>` (`create_session` in
-  `packages/core/daimon/core/sessions.py`), so [the sweep](#the-tables) skips
-  it too. The sweep still prices the session and logs what the tenant would
-  have paid; see [Seeing absorbed spend](#seeing-absorbed-spend).
+  `packages/core/daimon/core/sessions.py`), so settling it debits nothing. A
+  settle still prices it and logs what the tenant would have paid; see
+  [Seeing absorbed spend](#seeing-absorbed-spend).
 
   The stamp is written once, when the session is created, so **the posture of
   the session's creator covers every turn on it.** The same account can hold
@@ -313,9 +286,9 @@ Two boundaries of the design worth stating plainly:
   platform user continuing an exempt session is absorbed as well; an exempt
   caller acting on a billed session (an MCP `continue_turn` with an internal
   token, or `daimon run --session` on a chat thread's session) is debited to
-  the tenant by the sweep, with the platform user taken from the session's
-  account stamp. `daimon run` normally targets a session from
-  `daimon sessions create`, which carries no tenant stamp and is never swept.
+  the tenant when the session is settled, with the platform user taken from
+  the session's account stamp. `daimon run` normally targets a session from
+  `daimon sessions create`, which carries no tenant stamp and is never settled.
 
 ## Channel budgets
 
@@ -331,12 +304,12 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   tenant was charged for turns there, not the pre-markup usage `/billing`
   totals. Debits carry the parent channel, so a thread counts toward its
   channel. A session records it in its own
-  `daimon_budget_channel` metadata stamp, which [the sweep](#the-tables)
-  reads; it is kept apart from `daimon_channel`, where the conversation runs,
+  `daimon_budget_channel` metadata stamp, which a
+  [settle](#settling-a-session) reads; it is kept apart from `daimon_channel`, where the conversation runs,
   so a DM counts toward its source channel without being placed in it.
   If the channel charged by policy changes between turns, Daimon replaces the
   session before the next turn. A running old session must finish first. This
-  keeps the sweep's session stamp aligned with that turn's admission even when
+  keeps the session stamp a settle reads aligned with that turn's admission even when
   its live usage event was missed. The immutable stamp is also kept in
   `thread_sessions.budget_channel_id`; older mappings read their stamp from MA
   on the next bind and replace only if it differs. If MA cannot be read, the
@@ -543,7 +516,7 @@ at most once.
   ends earliest first, then on ordinary credit. A window that opens and closes
   while the scheduler is down expires without a grant.
 - **Late spend.** Every turn debit stores `occurred_at`, the model call's own
-  time, so a call the [sweep](#the-tables) records after the window closed
+  time, so a call a [settle](#settling-a-session) records after the window closed
   still counts as spend inside it. Fifteen minutes after the close a
   `promo_expiry_refund` entry, keyed
   `promo_expiry_refund:{code_id}:{tenant_id}`, credits back that late spend,
@@ -591,7 +564,7 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 | --- | --- |
 | `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique `idempotency_key` prevents replayed writes; top-ups also check the payment intent to recognize older event-keyed credits. Debits carry the `channel_id` they count against, if any, and a channel code's credit the channel it was redeemed in. |
 | `usage_events` | token counts per model call, with the same `channel_id`. No money column; cost is computed on read. |
-| `usage_reconcile_progress` | per Managed Agents session, the [turn-end catch-up](#the-turn-end-catch-up)'s forward position, the stored page cursors of its unfinished forward and repair listings, and whether a due repair page was missed. |
+| `usage_reconcile_progress` | per Managed Agents session, the [settle](#settling-a-session) watermark (`covered_through`) and a pending headless settle request (`settle_turn_event_id`, `settle_requested_at`). Its other columns, from an earlier catch-up design, are unused and will be dropped. |
 | `payment_events` | Stripe webhook dedup, keyed by the Stripe event id, with the compare-and-set `credited_at`. Explicitly not a ledger. |
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
@@ -609,70 +582,53 @@ beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 
-**The sweep.** The sweep is **off by default**
-(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=false`): the current implementation
-lists every session in the Managed Agents workspace and reads their events,
-which drained the workspace request rate limit and stalled turn admission.
-While it is off, three things pause: usage from MCP `start_turn` sessions
-(and other headless sessions with no live recorder) is not debited; usage a
-live adapter missed (a crashed adapter, an interrupted turn) is not
-recovered unless a later chat turn on the same session runs the
-[turn-end catch-up](#the-turn-end-catch-up); and absorbed spend for exempt sessions is not logged. Turning it
-back on replays what was missed, because recording is idempotent and the
-startup pass reads every stamped session, but only for sessions and events
-still present in the workspace. A scoped replacement that reads only recently
-active sessions is planned; until it ships, the rest of this section
-describes the sweep when it is switched on.
+**The sweep.** The sweep is on by default
+(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=false` turns it off). It runs on its
+own scheduler loop and settles the pending headless settle requests no read
+cleared, oldest first, 50 a pass: a session whose turn has ended is settled
+and its request cleared; one still running keeps its request; a deleted one
+has it cleared. It reads only the sessions those requests name, never the
+whole workspace, and never calls before the backlog cutoff. While it is off,
+such a session is billed the next time it is read or continued after its
+turn ends. Each pass logs `usage_sweep.completed` with `pending` and
+`recorded`.
 
-An MCP `start_turn` creates a session and sends a message but
-never drives the stream, so the inline hook never fires for it.
-`packages/core/daimon/core/usage_sweep.py` closes that hole. On its own
-scheduler loop, pausing the tick interval between passes, it lists Managed
-Agents sessions, skips any without a `daimon_tenant` stamp, belonging to a
-tenant this deployment does not own, or stamped `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. It requests only that event type and skips
-events already in `usage_events` before writing, so a session that is fully
-metered costs one query and a read of its model calls, not a write per call.
-After a successful pass, it skips event
-reads for sessions last updated before that pass started minus 15 minutes.
-The watermark stays in scheduler memory; startup and hourly passes read all
-stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
-against already-metered sessions precisely because the idempotency grain is
-the same. A call with a `usage_events` row counts as metered, because the
-recorder writes that row and its debit in one transaction.
-
-The sweep and the live recorder race for each model call, and the first
-commit wins. The amount is the same either way, because both price at the
-session's own model. The attribution is not: when the sweep commits first, or
-is the only writer (a crashed adapter, an interrupted turn, a headless
-session), the row carries `turn_debit` and the platform user of the session's
-`daimon_account` stamp. It does not carry the turn's reason and author.
-
-The sweep bills every session whose `daimon_tenant` stamp names a tenant in
+A settle bills every session whose `daimon_tenant` stamp names a tenant in
 its own database, and a session carries no deployment identity. Tenant ids are
 derived from `(platform, workspace id)`. Two deployments whose API keys share
 one Managed Agents workspace, and which both have the same Discord server or
-Slack workspace installed, would each debit the other's sessions. Give each
+Slack workspace installed, could each debit the other's sessions. Give each
 deployment its own Managed Agents workspace.
+
+### The backlog
+
+Calls made before this settle path was deployed are the backlog. The
+migration that introduced it recorded that moment as the `covered_through`
+of the reserved `usage_reconcile_progress` row `backlog-cutoff`, and no
+automatic settle (chat turn end, MCP read, sweep) reads a call older than
+it, so new turns are billed for every tenant and the backlog for none.
+
+`daimon usage settle-backlog --internal UUID [--internal UUID ...]` settles
+the backlog of every MCP agent-chat session a turn outcome names (or only
+those given with `--session`), each over its whole history. An internal
+tenant's unbilled calls are debited; every other tenant's are waived: the
+session's watermark is set to the cutoff, marking it settled, and
+`billing.backlog_waived` logs the tenant's would-be debit, but nothing is
+charged. Exempt sessions are skipped. It is a dry run unless `--apply` is
+given, and prints per tenant whether its backlog is debited or waived, the
+sessions and calls it covers, their raw cost and the would-be debit.
+Recording is idempotent, so applying twice debits once.
 
 ### Seeing absorbed spend
 
-For every exempt session it skips, the sweep reads the session's
-`span.model_request_end` events, prices them exactly as the recorder would,
-and logs `usage_sweep.exempt_skipped` with `tenant_id`, `managed_session_id`,
-`reason`, `model_id`, `priced` (false for a model with no published rates,
-which prices at zero as in the recorder), `model_calls`, the four token
-counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
-`DAIMON_BILLING__MARKUP` applied). Each pass ends with one
-`usage_sweep.completed` line carrying `recorded` (calls written in that
-pass), `exempt_sessions`,
-`exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
-
-Nothing is written to the database for these sessions. An exempt session is
-logged again when its events are read, including the hourly full pass. Total
-the absorbed spend by distinct
-`managed_session_id` (taking its latest line), not by summing every line or
-the per-pass totals.
+When an exempt headless session is settled, its calls are read and priced
+exactly as the recorder would, and `usage_sweep.exempt_skipped` is logged with
+`tenant_id`, `managed_session_id`, `reason`, `model_id`, `priced` (false for a
+model with no published rates, which prices at zero as in the recorder),
+`model_calls`, `cost_usd` (the raw price) and `would_be_debit_usd` (with
+`DAIMON_BILLING__MARKUP` applied). Nothing is written for these sessions, not
+even a watermark, so each line covers the session's whole history: total the
+absorbed spend by distinct `managed_session_id` (taking its latest line).
 
 ## Settings that turn things on
 
@@ -767,10 +723,10 @@ Deleting a tenant removes its stored names.
 
 Two things those numbers are not. They are pre-markup, as above. And tenant
 aggregates exclude rows with no platform user attached, so spend recovered by
-the sweep from a session with no account stamp is debited to the ledger but
+a settle from a session with no account stamp is debited to the ledger but
 does not appear in the panel's tenant total.
 Usage the operator absorbs (`BillingExempt` sessions) is in neither the
-ledger nor the panel; it appears only in the sweep's logs, as described in
+ledger nor the panel; it appears only in the settle logs, as described in
 [Seeing absorbed spend](#seeing-absorbed-spend).
 
 For a single finished turn there is `get_turn_cost` in

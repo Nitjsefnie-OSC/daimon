@@ -31,7 +31,7 @@ Session assembly is delegated to `create_session` in `daimon.core.sessions`
 (the same collapse that unified the MCP `start_turn` path) — this is the
 single source of truth for vault/PAT/env-mount/repo-resource assembly AND
 the `daimon_tenant`/`daimon_account` metadata stamp that
-`daimon.core.usage_sweep.sweep_headless_usage` requires to bill a session.
+`daimon.core.usage_sweep.session_billing` requires to bill a session.
 `run_turn` keeps its string `agent_id`/`environment_id` signature (the
 scheduler only has ids) and bridges to `create_session`'s SDK-object
 signature via `beta.agents.retrieve` / `beta.environments.retrieve`
@@ -252,8 +252,8 @@ async def run_turn_impl(
        case; missing either raises ``ValueError`` (no fallback to an
        account-scoped vault). ``create_session`` also stamps the
        session's ``metadata`` with ``daimon_tenant``/``daimon_account`` when
-       given, which is what makes the session visible to
-       ``usage_sweep.sweep_headless_usage``. The repo binding is
+       given, which is what ``usage_sweep.session_billing`` bills the
+       session by. The repo binding is
        fetched unconditionally inside ``create_session`` — the operator
        ``github_fallback_pat`` clones ``anon:`` (verified-public) bindings
        even without a per-agent PAT.

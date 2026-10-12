@@ -3362,42 +3362,27 @@ class DiscordGatewayLease(Base):
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class UsageReconcileProgress(Base):
-    """Where the turn-end billing catch-up is in one MA session.
+class SessionSettleState(Base):
+    """How far billing has settled one MA session, and whether a settle is pending.
 
-    The catch-up reads the session's `span.model_request_end` events in
-    `processed_at` order (`daimon.core.usage_reconcile`) with two scans:
+    `covered_through` is the newest `span.model_request_end` time a completed
+    settle read (`daimon.core.usage_sweep.settle_session`); the next one lists
+    from a short overlap before it. `settle_turn_event_id`/`settle_requested_at`
+    are set by a headless send (the turn's own `user.message`) and cleared once
+    that turn has been settled.
 
-    - forward: `covered_through`/`covered_ids` is the newest call time handled
-      and the ids handled at exactly that time. While a forward listing is
-      unfinished, `forward_since` is the filter it was opened with and
-      `forward_page` MA's cursor for its next page, so a resumed pass reads
-      the next unread page instead of rereading covered ones.
-    - repair: a rescan of history older than `repair_lt` (the forward
-      position when the cycle began), from `repair_since`, continued with
-      `repair_page`. NULL `repair_lt` means no cycle is in progress.
-
-    `repair_starved` is set when a pass starts with a repair page due and
-    cleared once one is handled; while it is set, the next pass runs the
-    repair scan first, so a slow forward read cannot starve it.
-
-    A missing row means "never read". Private to `daimon.core.stores.**` per
-    the import-linter ORM contract.
+    The table keeps its original name; its cursor columns from the former
+    forward/repair catch-up are no longer mapped and are dropped later.
+    A missing row means "never settled". Private to `daimon.core.stores.**`
+    per the import-linter ORM contract.
     """
 
     __tablename__ = "usage_reconcile_progress"
 
     managed_session_id: Mapped[str] = mapped_column(Text, primary_key=True)
     covered_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    covered_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
-    forward_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    forward_page: Mapped[str | None] = mapped_column(Text)
-    repair_lt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    repair_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    repair_page: Mapped[str | None] = mapped_column(Text)
-    repair_starved: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    settle_turn_event_id: Mapped[str | None] = mapped_column(Text)
+    settle_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -12,6 +12,7 @@ import pytest
 from daimon.adapters.cli.commands import usage
 from daimon.adapters.cli.main import app
 from daimon.core.stores.turn_usage import ChannelUsageRow, TurnUsageRow
+from daimon.core.usage_sweep import BacklogTotal
 from typer.testing import CliRunner
 
 pytestmark = pytest.mark.no_cli_local_seed
@@ -117,3 +118,43 @@ def test_usage_command_rejects_unknown_origin_before_configuration(
     result = CliRunner().invoke(app, ["usage", "turns", str(uuid4()), "--origin", "invalid"])
     assert result.exit_code == 2
     assert "origin must be" in result.output
+
+
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+def test_settle_backlog_is_a_dry_run_unless_applied(
+    monkeypatch: pytest.MonkeyPatch, apply: bool
+) -> None:
+    internal = [uuid4(), uuid4()]
+    rows = [
+        BacklogTotal(tenant_id=internal[0], action="debit", sessions=1, calls=2),
+        BacklogTotal(tenant_id=uuid4(), action="waive", sessions=3, calls=4),
+    ]
+    settle = AsyncMock(return_value=rows)
+    engine = SimpleNamespace(dispose=AsyncMock())
+    monkeypatch.setattr(
+        usage,
+        "load_settings",
+        lambda: SimpleNamespace(
+            database=SimpleNamespace(url="unused", pool_size=5, max_overflow=10, pool_timeout=30.0),
+            anthropic=SimpleNamespace(
+                api_key=SimpleNamespace(get_secret_value=lambda: "key"),
+                base_url="https://api.anthropic.com",
+            ),
+            billing=SimpleNamespace(markup=Decimal("1.1")),
+        ),
+    )
+    monkeypatch.setattr(usage, "build_engine", lambda url, **kwargs: engine)
+    monkeypatch.setattr(usage, "build_session_factory", lambda engine: "sessionmaker")
+    monkeypatch.setattr(usage, "settle_backlog", settle)
+    args = ["usage", "settle-backlog", "--internal", str(internal[0])]
+    args += ["--internal", str(internal[1]), "--json"]
+
+    result = CliRunner().invoke(app, [*args, "--apply"] if apply else args)
+
+    assert result.exit_code == 0, result.output
+    assert [r["action"] for r in json.loads(result.output)] == ["debit", "waive"]
+    assert settle.await_args is not None
+    assert settle.await_args.kwargs["internal"] == frozenset(internal)
+    assert settle.await_args.kwargs["apply"] is apply
+    assert settle.await_args.kwargs["markup"] == Decimal("1.1")
+    engine.dispose.assert_awaited_once()

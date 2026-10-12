@@ -801,8 +801,8 @@ async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> Non
     """A scheduler-fired (headless) session must carry
     daimon_tenant + daimon_account metadata, mirroring create_session's stamp
     (test_sessions.py::test_create_session_tags_metadata_with_account_and_tenant_when_both_provided),
-    so sweep_headless_usage (usage_sweep.py:57-61) does not skip it and routine
-    sessions get billed.
+    so usage_sweep.session_billing does not skip it and routine sessions get
+    billed.
     """
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()

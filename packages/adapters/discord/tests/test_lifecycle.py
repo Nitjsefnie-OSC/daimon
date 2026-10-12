@@ -444,10 +444,10 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
     monkeypatch.setattr(turn_runner, "decide_before_send", lambda *args: None)
     reconciled: list[str] = []
 
-    async def fake_reconcile(*, managed_session_id: str, **_kwargs: Any) -> None:
-        reconciled.append(managed_session_id)
+    async def fake_settle(_anthropic: Any, _sessionmaker: Any, session_id: str, **_: Any) -> None:
+        reconciled.append(session_id)
 
-    monkeypatch.setattr(turn_runner, "reconcile_unbilled", fake_reconcile)
+    monkeypatch.setattr(turn_runner, "settle_session", fake_settle)
     result = await turn_runner.run_prepared_turn_impl(
         deps,
         prepared,

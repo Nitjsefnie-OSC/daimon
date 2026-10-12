@@ -97,21 +97,27 @@ from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
+from daimon.core.stores import session_settle_state
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
+from sqlalchemy.exc import SQLAlchemyError
 
 from mcp.types import ImageContent, TextContent
 
 log = structlog.get_logger(__name__)
+
+OnRead = Callable[[BetaManagedAgentsSession], Awaitable[None]]
+"""Sees a session the tool just read (`_settle_when_finished`)."""
 
 # Each transcript page costs two upstream calls (ownership retrieve + events
 # list), so an uncapped walk on a long session can outlast any client timeout.
@@ -135,6 +141,45 @@ def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
     if not sent.data:
         raise ToolError("send returned no accepted event")
     return sent.data[0].id
+
+
+async def _request_settle(runtime: McpRuntime, session_id: str, turn_event_id: str) -> None:
+    """Leave a settle request for the turn just sent.
+
+    Nothing meters a headless turn live, so its calls are billed by
+    `usage_sweep.settle_finished_turn` once a status or transcript read sees
+    the turn ended, or by the scheduler drain of requests nobody polled.
+
+    Named boundary: the turn is already running, so a failed write is logged
+    rather than failing the send; a later send or poll on the session settles
+    its calls too.
+    """
+    try:
+        async with runtime.session_factory.begin() as db:
+            await session_settle_state.request_settle(
+                db, managed_session_id=session_id, turn_event_id=turn_event_id
+            )
+    except SQLAlchemyError:
+        log.exception("billing.settle_request_failed", managed_session_id=session_id)
+
+
+def _settle_when_finished(runtime: McpRuntime) -> OnRead:
+    """Bill a headless turn the moment a read sees it ended (bounded, synchronous)."""
+
+    async def on_read(session: BetaManagedAgentsSession) -> None:
+        try:
+            await settle_finished_turn(
+                runtime.client,
+                runtime.session_factory,
+                session,
+                markup=runtime.settings.billing.markup,
+            )
+        except Exception:
+            # Named boundary: the caller asked for status or a transcript, which
+            # billing must never fail. The settle request stays for the next read.
+            log.exception("billing.settle_failed", managed_session_id=session.id)
+
+    return on_read
 
 
 class AgentDescription(BaseModel):
@@ -605,6 +650,7 @@ async def _start_turn_impl(
         ],
     )
     turn_event_id = _turn_boundary(sent)
+    await _request_settle(runtime, session.id, turn_event_id)
 
     return {
         "handle": session.id,
@@ -691,6 +737,7 @@ async def _continue_turn_impl(
             ],
         )
     turn_event_id = _turn_boundary(sent)
+    await _request_settle(runtime, handle, turn_event_id)
     return {
         "handle": handle,
         "turn_event_id": turn_event_id,
@@ -721,13 +768,18 @@ async def _get_session_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     handle: str,
+    *,
+    on_read: OnRead | None = None,
 ) -> SessionInfo:
-    """Return one session's status/metadata (no reply text, no side effects).
+    """Return one session's status/metadata (no reply text).
 
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03).
+    cross-agent handles (WR-03). ``on_read`` (the tool's
+    ``_settle_when_finished``) sees the session read.
     """
     s = await _verify_agent_owns_session(runtime, auth, handle)
+    if on_read is not None:
+        await on_read(s)
     return SessionInfo.from_ma(s)
 
 
@@ -875,6 +927,8 @@ async def _list_events_impl(
     order: Literal["asc", "desc"] | None,
     created_at_gte: str | None = None,
     types: list[str] | None = None,
+    *,
+    on_read: OnRead | None = None,
 ) -> Page[SessionEventOut]:
     """List a session's events (the transcript) for the caller to read.
 
@@ -886,9 +940,11 @@ async def _list_events_impl(
     the whole transcript: pass the ``turn_started_at`` from ``start_turn``/
     ``continue_turn`` as ``created_at_gte`` and
     ``types=["agent.message", "session.status_idle"]`` to see only this
-    turn's reply and completion signal.
+    turn's reply and completion signal. ``on_read`` is as for ``_get_session_impl``.
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    session = await _verify_agent_owns_session(runtime, auth, handle)
+    if on_read is not None:
+        await on_read(session)
     list_kwargs: dict[str, Any] = {}
     if page is not None:
         list_kwargs["page"] = page
@@ -1015,6 +1071,7 @@ async def _ask_impl(
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
     personal_memory: bool = False,
+    on_read: OnRead | None = None,
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
@@ -1041,7 +1098,7 @@ async def _ask_impl(
     deadline = clock() + timeout_seconds
 
     while True:
-        current = await _get_session_impl(runtime, auth, handle)
+        current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
         # Only terminated is treated as terminal: the status value set is
         # upstream-controlled (see SessionInfo.status), so an unmodeled
         # transient status keeps polling until the deadline instead of
@@ -1232,7 +1289,14 @@ def register_agent_chat_tools(
             agent_names=pin_names,
         )
         return _ask_tool_result(  # type: ignore[return-value]
-            await _ask_impl(runtime, auth, message, handle=handle, recheck=recheck_for(auth, "ask"))
+            await _ask_impl(
+                runtime,
+                auth,
+                message,
+                handle=handle,
+                recheck=recheck_for(auth, "ask"),
+                on_read=_settle_when_finished(runtime),
+            )
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1266,7 +1330,9 @@ def register_agent_chat_tools(
         ``idle``/``terminated``) before reading the transcript with
         ``list_events``.
         """
-        return await _get_session_impl(runtime, await _auth(ctx), handle)
+        return await _get_session_impl(
+            runtime, await _auth(ctx), handle, on_read=_settle_when_finished(runtime)
+        )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def archive_my_session(ctx: Context, handle: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
@@ -1343,7 +1409,15 @@ def register_agent_chat_tools(
         state and must not be trusted. ``rescheduling`` counts as running.
         """
         return await _list_events_impl(
-            runtime, await _auth(ctx), handle, page, limit, order, created_at_gte, types
+            runtime,
+            await _auth(ctx),
+            handle,
+            page,
+            limit,
+            order,
+            created_at_gte,
+            types,
+            on_read=_settle_when_finished(runtime),
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
