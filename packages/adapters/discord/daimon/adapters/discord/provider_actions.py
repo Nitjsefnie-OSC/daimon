@@ -19,6 +19,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionHook,
     ProviderActionPrompt,
 )
+from mux.profiles import emits_legacy_events_for
 
 import discord
 
@@ -197,6 +198,6 @@ def provider_action_options(
     prepared: PreparedTurn, factory: Callable[[], ProviderActionHook]
 ) -> ProviderActionOptions:
     ref = prepared.session_ref
-    if ref is not None and ref.provider != "anthropic":
+    if ref is not None and not emits_legacy_events_for(ref.provider):
         return {"provider_action": factory()}
     return {}

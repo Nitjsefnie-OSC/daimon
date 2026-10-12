@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Literal, NoReturn, cast
 
 import discord
+import mux.profiles as profiles
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import (
@@ -24,6 +25,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.adapters.discord import lifecycle as discord_lifecycle
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.provider_events import ProviderDraft
 from daimon.adapters.discord.tool_confirmation import build_confirmation_view
 from daimon.core.confirmation import ConfirmationPrompt
 from daimon.core.posted_controls.confirmation import (
@@ -122,6 +124,44 @@ class Posts:
             cancel_view=cancel,
             clock=lambda: 1000.0,
         )
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+@pytest.mark.parametrize("emits_legacy_events", [False, True])
+async def test_draft_and_lifecycle_follow_declared_profile_rendering_policy(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider, emits_legacy_events: bool
+) -> None:
+    monkeypatch.setattr(
+        profiles,
+        "PROFILES",
+        {
+            key: profile.model_copy(update={"emits_legacy_events": emits_legacy_events})
+            for key, profile in profiles.PROFILES.items()
+        },
+    )
+    event = preview(provider, "declared draft")
+    draft = ProviderDraft()
+    assert draft.text(event) == (None if emits_legacy_events else "declared draft")
+    assert draft.text(event.model_copy(update={"thread_id": "child"})) is None
+
+    posts = Posts()
+    lifecycle = posts.lifecycle()
+    await lifecycle.on_provider_event(event)
+    assert posts.sent == posts.edited == []
+    assert lifecycle._state.text_preview == (None if emits_legacy_events else "declared draft")
+    assert (lifecycle._provider_draft is None) == emits_legacy_events
+    lifecycle._terminal = True
+    await lifecycle.on_provider_event(message(provider, "late terminal draft"))
+    assert lifecycle._state.text_preview == (None if emits_legacy_events else "declared draft")
+
+
+async def test_default_managed_profile_keeps_neutral_drafts_out_of_legacy_rendering() -> None:
+    event = preview("anthropic", "unused neutral draft")
+    assert ProviderDraft().text(event) is None
+    lifecycle = Posts().lifecycle()
+    await lifecycle.on_provider_event(event)
+    assert lifecycle._provider_draft is None
+    assert lifecycle._state.text_preview is None
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])

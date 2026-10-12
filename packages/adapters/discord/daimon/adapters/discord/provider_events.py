@@ -1,6 +1,7 @@
 """Local draft display from neutral events; no history or terminal authority."""
 
 from mux.contracts.events import AgentMessageDeltaPayload, AgentMessagePayload, Event, TextPart
+from mux.profiles import emits_legacy_events_for
 
 
 class ProviderDraft:
@@ -14,7 +15,7 @@ class ProviderDraft:
         self._sequences: dict[int, int] = {}
 
     def text(self, event: Event) -> str | None:
-        if event.native.provider == "anthropic" or event.thread_id is not None:
+        if emits_legacy_events_for(event.native.provider) or event.thread_id is not None:
             return None
         payload = event.typed_payload()
         if isinstance(payload, AgentMessagePayload) and event.authority in {
