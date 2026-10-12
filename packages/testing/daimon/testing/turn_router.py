@@ -28,7 +28,14 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
     BetaManagedAgentsTextBlock,
 )
-from daimon.testing.ma import MARouter, json_body, list_response, send_events_response, sse_response
+from daimon.testing.ma import (
+    MARouter,
+    NotHandled,
+    json_body,
+    list_response,
+    send_events_response,
+    sse_response,
+)
 from daimon.testing.ma_models import (
     DEFAULT_MODEL_ID,
     ma_agent,
@@ -118,7 +125,7 @@ def build_turn_router(
       GET  /v1/environments/{id}    -- retrieve, for re-fetch after resolve (any id)
       POST /v1/sessions/{id}/events -- send-initial event (run_turn)
       GET  /v1/sessions/{id}/events/stream -- SSE turn stream (run_turn)
-      GET  /v1/sessions/{id}/events -- emitted history (post-turn usage catch-up)
+      GET  /v1/sessions/{id}/events -- exact post-turn usage catch-up query only
 
     The agent and environment carry `tenant_id_str` in their metadata so the
     resolver's tag lookup finds them. The stream is `turn_events(...)`; see
@@ -174,19 +181,25 @@ def build_turn_router(
         return sse_response(events)
 
     def _history(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
-        # Main #824 reads completed spans, with timestamp bounds for catch-up.
+        # Post-turn billing reads completed spans, with timestamp bounds for catch-up.
         # Replay the exact stream objects, never mint fresh events on a read.
         params = request.url.params
+        if (
+            params.get_list("beta") != ["true"]
+            or params.get_list("order") != ["asc"]
+            or params.get_list("limit") != ["100"]
+            or params.get_list("types[]") != ["span.model_request_end"]
+        ):
+            # Transcript/idle reads belong to the caller's existing routes.
+            raise NotHandled
         allowed = {"beta", "types[]", "order", "limit", "created_at[gte]", "created_at[lt]"}
         assert set(params) <= allowed, f"Unscripted event-history query: {params}"
         assert params.get("beta", "true") == "true", "Unscripted event-history beta flag"
-        order = params.get("order", "asc")
-        assert order in {"asc", "desc"}, f"Unscripted event-history order: {order}"
         events = list(history.get(match["session_id"], []))
         types = params.get_list("types[]")
         if types:
             events = [event for event in events if event["type"] in types]
-        events.sort(key=lambda event: event["processed_at"], reverse=order == "desc")
+        events.sort(key=lambda event: event["processed_at"])
         for key in ("created_at[gte]", "created_at[lt]"):
             if (bound := params.get(key)) is not None:
                 at = datetime.fromisoformat(bound)

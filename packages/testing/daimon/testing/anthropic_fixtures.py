@@ -320,7 +320,7 @@ def anthropic_turn_tape(
 
     An explicit runner session override is allowed because native events carry
     no session ID. Input/root IDs and payloads remain immutable.
-    Fresh product-host tapes explicitly opt into main #824's post-turn first
+    Fresh product-host tapes explicitly opt into the post-turn first
     history page. Direct-driver tapes keep their existing requests unchanged.
     """
     if entry.scenario_id != scenario.scenario_id or turn not in scenario.turns:
@@ -400,7 +400,7 @@ def anthropic_turn_tape(
         return tape
     if turn.turn != 1:
         raise ValueError("first-pass usage catch-up requires a fresh first-turn tape")
-    # Main #824, 073318184: the fresh session's first ascending usage scan.
+    # The fresh session's first ascending usage scan.
     # Exact query, native spans and dependencies; no global replay allowance.
     catchup = WireReply(
         id="usage-catchup",

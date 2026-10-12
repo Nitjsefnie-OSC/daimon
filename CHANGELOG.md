@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Restrict scripted usage catch-up to main #824's exact query so caller-owned transcript and idle routes retain their replies; refresh the live recipe metadata for the main-attributed golden updates.
+
 - Add an exact opt-in Anthropic first-turn usage catch-up tape for main #824 and retarget the DM delivery sensitivity probe after main #823's helper move.
 
 - Serve recorded turn events in the offline scripted router for main #824's post-turn billing catch-up; preserve scoped routes, usage identities and full dual-path golden comparisons.

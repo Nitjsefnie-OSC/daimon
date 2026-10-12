@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import anthropic
+import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
@@ -18,7 +19,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
     BetaManagedAgentsUserMessageEvent,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
-from daimon.testing.ma import MARouter, build_fake_anthropic, session_response
+from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, session_response
 from daimon.testing.turn_router import (
     AGENT_ID,
     AGENT_TEXT,
@@ -181,7 +182,11 @@ async def test_history_replays_exact_emitted_spans_without_inventing_usage() -> 
     client = build_fake_anthropic(
         build_turn_router(str(uuid.uuid4()), fresh_event_ids=True).dispatch
     )
-    assert (await client.beta.sessions.events.list("sess_one")).data == []
+    assert (
+        await client.beta.sessions.events.list(
+            "sess_one", order="asc", limit=100, types=["span.model_request_end"]
+        )
+    ).data == []
     first_stream = await client.beta.sessions.events.stream("sess_one")
     first = [event async for event in first_stream]
     await _collect_stream_event_types(client, "sess_two")
@@ -201,15 +206,53 @@ async def test_history_replays_exact_emitted_spans_without_inventing_usage() -> 
     boundary = first_usage.processed_at
     assert boundary is not None
     older = await client.beta.sessions.events.list(
-        "sess_one", types=["span.model_request_end"], created_at_lt=boundary
+        "sess_one", order="asc", limit=100, types=["span.model_request_end"], created_at_lt=boundary
     )
     assert older.data == []
     repeated = await client.beta.sessions.events.list(
-        "sess_one", types=["span.model_request_end"], created_at_gte=boundary
+        "sess_one",
+        order="asc",
+        limit=100,
+        types=["span.model_request_end"],
+        created_at_gte=boundary,
     )
     assert repeated.data == page.data
     with _transport_assertion("Unscripted event-history query"):
-        await client.beta.sessions.events.list("sess_one", page="invented")
+        await client.beta.sessions.events.list(
+            "sess_one", order="asc", limit=100, types=["span.model_request_end"], page="invented"
+        )
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        {"beta": "true"},
+        {"beta": "true", "order": "desc", "limit": "1", "types[]": "session.status_idle"},
+        {"beta": "true", "order": "asc", "limit": "100"},
+        {"beta": "true", "order": "asc", "limit": "1", "types[]": "span.model_request_end"},
+    ),
+)
+def test_catchup_does_not_shadow_later_transcript_or_idle_routes(query: dict[str, str]) -> None:
+    router = build_turn_router("tenant", session_id="sess_only")
+    transcript = [{"id": "evt_caller", "type": "agent.message"}]
+    request = httpx.Request(
+        "GET", "https://offline.invalid/v1/sessions/sess_only/events", params=query
+    )
+    with pytest.raises(AssertionError, match="no route for GET"):
+        router.dispatch(request)
+    router.add("GET", r"/v1/sessions/sess_only/events", lambda _r, _m: list_response(transcript))
+    assert router.dispatch(request).json() == {"data": transcript, "next_page": None}
+    catchup = httpx.Request(
+        "GET",
+        "https://offline.invalid/v1/sessions/sess_only/events",
+        params={
+            "beta": "true",
+            "order": "asc",
+            "limit": "100",
+            "types[]": "span.model_request_end",
+        },
+    )
+    assert router.dispatch(catchup).json() == {"data": [], "next_page": None}
 
 
 async def test_build_turn_router_composes_with_an_existing_router() -> None:
