@@ -1779,6 +1779,11 @@ refuses before the second mutation when completion cannot be proved. Acceptance,
 EOF, preview/child records and an idle-only snapshot do not release occupancy;
 provider input-mode guards are unchanged.
 
+The runner records the full GO digest as four colon-delimited hexadecimal groups
+in its public receipt. Admission still compares the original canonical digest;
+receipt reconstruction uses the same audit and writer, preserving secret refusal
+and leaving settlement unchanged.
+
 Every completion poll revalidates the accepted input's root across all saved
 history pages. Conflicting roots or reassignment from an acknowledged or
 previously resolved root refuse before the acknowledgement-loss fault or second
