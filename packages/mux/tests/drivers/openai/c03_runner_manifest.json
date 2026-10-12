@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "purpose": "C03 OptionA only, separate lead GO required",
+  "envelope_sha256": "91a4bd4b2159e7b3d00533a6aa2c44edcc4168d9a492b6df6eefced52ddb90b1",
+  "files": {
+    "live_pending.py": "1a07a9f03d0e4be11e12ffd58bb15da6823921e4c9220e4a2a44a4e81921b7da",
+    "live_smoke.py": "7e4efd267fd5d45123e9c5f0e19aade6aa2c9a6b6df72a44d092f2fe28434400",
+    "live_c03.sh": "b0ed65724f9e7328f66d4112acdee5167337fd81a46c3b772b9db9fa9c995a57",
+    "prepare_live_c03.py": "3b64877c3409cce1e69f59a19719e2aac39ba13cd667df466535564fa01f6a3c",
+    "offline_live_pending_test.py": "bb896e3549ce3706f2540846ffcd6ed22bea096f74feb8514081093eae6f8f1c",
+    "offline_live_c03_test.py": "5a252cafedbab7939dc3468a02ff8e491bb4be2ba1dba0a7a7eb27f224b019a5"
+  }
+}
