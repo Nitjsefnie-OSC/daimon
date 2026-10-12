@@ -12,8 +12,8 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.authz import AgentRef, FleetFacts, Place, Subject
 from daimon.core.channel_budget import (
+    admit_fleet_worker,
     produce_fleet_budget,
-    reserve_fleet_worker,
     watch_fleet_budget,
 )
 from daimon.core.fleet import FleetConflict, worker_slot
@@ -186,17 +186,54 @@ async def add(sm, parent, *, ordinal=0, budget="1"):
         )
 
 
-async def reserve(sm, parent, worker):
+async def next_run(sm, parent, run, *, cap="2"):
     async with sm() as db, db.begin():
-        return await reserve_fleet_worker(
+        other = await fleet.create_run(
+            db,
+            tenant_id=run.tenant_id,
+            orchestrator_account_id=parent.fleet.account_id,
+            orchestrator_session_id=run.orchestrator_session_id,
+            orchestrator_binding_id=run.orchestrator_binding_id,
+            platform=run.platform,
+            channel_id=run.channel_id,
+            thread_id=run.thread_id,
+            operation_key=f"next:{uuid4()}",
+            total_budget_usd=Decimal(cap),
+            deadline_at=run.deadline_at,
+            max_workers=4,
+            created_by="host",
+        )
+    return replace(parent, fleet=replace(parent.fleet, run_id=other.id)), other
+
+
+async def reserve(sm, parent, worker, *, session=None, prices=None):
+    with localcontext() as context:
+        context.prec = 80
+        budget = worker.budget_usd.normalize()
+    resolved = resolve_worker_spec(
+        parent,
+        parent.spec,
+        policy=POLICY,
+        now=datetime.now(UTC),
+        limits=parent.limits.model_copy(update={"budget_usd": budget}),
+    )
+
+    async def admit(db):
+        return await admit_fleet_worker(
             db,
             parent=parent,
             policy=POLICY,
-            worker_id=worker.id,
-            expected_version=worker.version,
-            prices=tariffs(parent),
+            resolved=resolved,
+            ordinal=worker.ordinal,
+            role=worker.role,
+            prices=prices if prices is not None else tariffs(parent),
             markup=Decimal(1),
         )
+
+    if session is not None:
+        return await admit(session)
+    async with sm() as db, db.begin():
+        return await admit(db)
 
 
 async def read(sm, parent, worker, *, prices=None):
@@ -439,18 +476,10 @@ async def test_new_run_counts_unknown_holds_from_other_completed_runs(sm):
 async def test_unknown_pricing_and_erased_actor_cannot_authorize_dispatch(sm):
     parent, run = await setup(sm)
     worker = await add(sm, parent)
-    async with sm() as db, db.begin():
-        refused = await reserve_fleet_worker(
-            db,
-            parent=parent,
-            policy=POLICY,
-            worker_id=worker.id,
-            expected_version=worker.version,
-            prices={},
-            markup=Decimal(1),
-        )
+    refused = await reserve(sm, parent, worker, prices={})
     assert not refused.admitted and refused.reason == "pricing_unavailable"
     assert (await read(sm, parent, worker)).worker_exposure_usd == 0
+    worker = await add(sm, parent, ordinal=1)
     assert (await reserve(sm, parent, worker)).admitted
     from daimon.core.stores import accounts
 
@@ -601,15 +630,7 @@ async def test_open_fleet_transaction_does_not_block_another_tenants_ordinary_le
     async with sm() as db, db.begin():
         other = await make_tenant(db)
     async with sm() as admission, admission.begin():
-        snapshot = await reserve_fleet_worker(
-            admission,
-            parent=parent,
-            policy=POLICY,
-            worker_id=worker.id,
-            expected_version=worker.version,
-            prices=tariffs(parent),
-            markup=Decimal(1),
-        )
+        snapshot = await reserve(sm, parent, worker, session=admission)
         assert snapshot.admitted
         # The original append-only writer must commit while admission stays open.
         async with sm() as ordinary, ordinary.begin():
@@ -637,15 +658,7 @@ async def test_same_tenant_ordinary_debit_serializes_before_fleet_funds_check(sm
         async with sm() as db, db.begin():
             admission_pid = await db.scalar(text("SELECT pg_backend_pid()"))
             started.set()
-            return await reserve_fleet_worker(
-                db,
-                parent=parent,
-                policy=POLICY,
-                worker_id=worker.id,
-                expected_version=worker.version,
-                prices=tariffs(parent),
-                markup=Decimal(1),
-            )
+            return await reserve(sm, parent, worker, session=db)
 
     async with sm() as ordinary:
         await ordinary.begin()
@@ -685,12 +698,13 @@ async def test_flag_off_financial_admission_does_not_touch_database():
             raise AssertionError("flag-off admission must not read or allocate")
 
     with pytest.raises(FleetConflict, match="root authorization"):
-        await reserve_fleet_worker(
+        await admit_fleet_worker(
             NoDB(),
             parent=disabled,
             policy=POLICY,
-            worker_id=uuid4(),
-            expected_version=1,
+            resolved=resolve_worker_spec(parent, parent.spec, policy=POLICY, now=datetime.now(UTC)),
+            ordinal=0,
+            role="worker",
             prices=tariffs(parent),
             markup=Decimal(1),
         )
@@ -739,6 +753,213 @@ async def test_old_native_attempt_cannot_reopen_financial_admission(sm):
     refused = await reserve(sm, parent, workers[0])
     assert not refused.admitted and refused.reason == "accepted_attempt_inventory_unavailable"
     assert refused.worker_exposure_usd == funded.worker_exposure_usd == 1
+
+
+async def test_never_claimed_cancel_releases_zero_spend_and_next_run_can_use_funds(sm):
+    parent, run = await setup(sm, funds="3", cap="3")
+    worker = await add(sm, parent, budget="2")
+    funded = await reserve(sm, parent, worker)
+    async with sm() as db, db.begin():
+        await fleet.finish(
+            db,
+            tenant_id=run.tenant_id,
+            worker_id=worker.id,
+            expected_version=funded.worker.version,
+            status="cancelled",
+            error_code="cancelled_before_claim",
+        )
+        await fleet.set_run_status(
+            db,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            expected_version=funded.run.version,
+            status="cancelled",
+        )
+    other_parent, other = await next_run(sm, parent, run)
+    other_worker = await add(sm, other_parent, budget="2")
+    accepted = await reserve(sm, other_parent, other_worker)
+    assert accepted.admitted and accepted.prepaid_available_usd == 1
+    released = await read(sm, parent, worker)
+    assert released.worker_exposure_usd == released.run_exposure_usd == 0
+    assert released.reason == "terminal"
+    async with sm() as db, db.begin():
+        graph, stamps = await fleet.lock_budget(
+            db, tenant_id=run.tenant_id, actor_id=parent.fleet.account_id, run_id=other.id
+        )
+        assert run.id not in {item.id for item, _ in graph}
+        assert worker.id not in stamps
+        ledger = await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)
+    assert len(ledger) == 1 and ledger[0].delta_usd == 3
+    cancelled = asyncio.Event()
+    assert (
+        await watch_fleet_budget(
+            sessionmaker=sm,
+            parent=parent,
+            worker_id=worker.id,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            cancelled=cancelled,
+            finished=asyncio.Event(),
+            read_timeout=3,
+        )
+        == "terminal"
+    )
+    assert cancelled.is_set()
+
+
+@pytest.mark.parametrize("evidence", ["claim", "requeue", "zero_revision"])
+async def test_ambiguous_cancel_without_bound_binding_keeps_its_whole_hold(sm, evidence):
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    funded = await reserve(sm, parent, worker)
+    current = funded.worker
+    if evidence in ("claim", "requeue"):
+        async with sm() as db, db.begin():
+            current = await fleet.claim_worker(db, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+            if evidence == "requeue":
+                current = await fleet.requeue(
+                    db, tenant_id=run.tenant_id, worker=current, max_attempts=2
+                )
+    else:
+        await usage(sm, parent, run, worker, inputs=0, outputs=0)
+    assert current.binding_id is None
+    async with sm() as db, db.begin():
+        await fleet.finish(
+            db,
+            tenant_id=run.tenant_id,
+            worker_id=worker.id,
+            expected_version=current.version,
+            status="cancelled",
+            error_code="ambiguous_allocation",
+        )
+    after = await read(sm, parent, worker)
+    assert after.reason == "terminal" and after.worker_exposure_usd == 1
+    assert after.prepaid_available_usd == 9
+
+
+async def test_another_runs_verified_overrun_does_not_latch_current_run(sm):
+    parent, run = await setup(sm, provider="anthropic", funds="10", cap="1")
+    worker = await add(sm, parent)
+    assert (await reserve(sm, parent, worker)).admitted
+    await usage(sm, parent, run, worker, inputs=1_000_000, outputs=1)
+    overrun = await read(sm, parent, worker)
+    assert overrun.reason == "run_budget_exceeded"
+    other_parent, _ = await next_run(sm, parent, run, cap="1")
+    other_worker = await add(sm, other_parent, budget=".1")
+    current = await reserve(sm, other_parent, other_worker)
+    assert current.admitted and current.reason is None
+    assert current.prepaid_available_usd == Decimal("7.899990")
+    assert (await read(sm, parent, worker)).reason == "run_budget_exceeded"
+
+
+async def test_financially_refused_spawn_is_terminal_and_cannot_claim_pool_slot(sm):
+    parent, run = await setup(sm, funds=".1", cap="3")
+    worker = await add(sm, parent)
+    refused = await reserve(sm, parent, worker)
+    assert not refused.admitted and refused.worker.status == "cancelled"
+    async with sm() as db, db.begin():
+        assert await fleet.claim_worker(db, tenant_id=run.tenant_id, run_id=run.id, cap=3) is None
+
+
+async def test_terminal_fully_debited_history_is_not_in_the_next_budget_graph(sm):
+    parent, run = await setup(sm, provider="anthropic", funds="3", cap="2")
+    worker = await add(sm, parent)
+    assert (await reserve(sm, parent, worker)).admitted
+    await usage(sm, parent, run, worker, inputs=500_000, outputs=0)
+    spent = await read(sm, parent, worker)
+    assert spent.worker_exposure_usd == spent.run.observed_usd == 1
+    async with sm() as db, db.begin():
+        await fleet.finish(
+            db,
+            tenant_id=run.tenant_id,
+            worker_id=worker.id,
+            expected_version=spent.worker.version,
+            status="cancelled",
+            error_code="terminal",
+        )
+        await fleet.set_run_status(
+            db,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            expected_version=spent.run.version,
+            status="cancelled",
+        )
+    other_parent, other = await next_run(sm, parent, run, cap="1")
+    other_worker = await add(sm, other_parent)
+    accepted = await reserve(sm, other_parent, other_worker)
+    assert accepted.admitted and accepted.prepaid_available_usd == 1
+    async with sm() as db, db.begin():
+        graph, _ = await fleet.lock_budget(
+            db, tenant_id=run.tenant_id, actor_id=parent.fleet.account_id, run_id=other.id
+        )
+        assert run.id not in {item.id for item, _ in graph}
+
+
+async def test_store_cannot_lower_a_hold_without_the_producers_zero_spend_evidence(sm):
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    assert (await reserve(sm, parent, worker)).admitted
+    async with sm() as db, db.begin():
+        graph, _ = await fleet.lock_budget(
+            db, tenant_id=run.tenant_id, actor_id=parent.fleet.account_id, run_id=run.id
+        )
+        with pytest.raises(FleetConflict, match="cannot be released"):
+            await fleet.save_budget(
+                db,
+                tenant_id=run.tenant_id,
+                graph=graph,
+                exposures={worker.id: Decimal(0)},
+                debits={run.id: Decimal(0)},
+            )
+    assert (await read(sm, parent, worker)).worker_exposure_usd == 1
+
+
+async def test_unrelated_open_ordinary_write_does_not_cancel_actual_budget_watcher(sm, monkeypatch):
+    from daimon.core import channel_budget
+
+    parent, _ = await setup(sm)
+    worker = await add(sm, parent)
+    assert (await reserve(sm, parent, worker)).admitted
+    async with sm() as db, db.begin():
+        other = await make_tenant(db)
+    finished, cancelled, polled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = channel_budget.produce_fleet_budget
+
+    async def observed_read(*args, **kwargs):
+        value = await original(*args, **kwargs)
+        assert value.admitted and value.worker_exposure_usd == 1
+        polled.set()
+        return value
+
+    monkeypatch.setattr(channel_budget, "produce_fleet_budget", observed_read)
+    async with sm() as ordinary, ordinary.begin():
+        await tenant_ledger.insert_entry(
+            ordinary,
+            tenant_id=other.id,
+            delta_usd=Decimal(1),
+            reason="topup",
+            idempotency_key=f"ordinary:{other.id}",
+        )
+        task = asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=sm,
+                parent=parent,
+                worker_id=worker.id,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                read_timeout=3,
+            )
+        )
+        try:
+            await asyncio.wait_for(polled.wait(), 3)
+            finished.set()
+            assert await asyncio.wait_for(task, 3) == "finished"
+            assert not cancelled.is_set()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_atomic_spawn_reservation_and_audit_roll_back_together(sm):

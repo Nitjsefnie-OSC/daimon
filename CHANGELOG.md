@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build turn-test dependencies from the real TurnDeps bundle and validate replay behavior against recorded payloads instead of freezing implementation source bytes.
 - Reserve opted-in fleet workers against prepaid and channel budget room, retain unknown charges across restarts, and request cancellation from durable priced usage without adding root debits or another worker deadline.
 - Reserve opted-in fleet workers against prepaid and channel budget room, retain unknown charges across restarts, and request cancellation from durable priced usage without adding root debits or another worker deadline. Scope financial locking to the tenant's existing ledger foreign key and revalidate tariffs before native allocation.
+- Add opted-in fleet financial admission with scoped locking and fresh tariff checks. Retain ambiguous usage across restarts, release proven never-allocated cancellations, and keep overrun latches within their run without adding root debits or another worker deadline.
 
 - Add the durable fleet store behind orchestrated worker fleets (off by default, `DAIMON_FLEET__*`): run and worker rows, a per-tenant and per-process worker pool separate from chat turns, worker results kept in each worker's own journal, and migration `0093_fleet_runs`.
 

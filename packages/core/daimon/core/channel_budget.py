@@ -319,7 +319,7 @@ class FleetBudgetUsage:
 
     Exposure includes all unknown final usage at its whole worker reservation.
     Original ledger debit is already contained in exposure, never added twice.
-    A terminal status is not final-actual proof; this interface never refunds.
+    Only proven never-allocated terminal workers release their unspent hold.
     """
 
     run: FleetRun
@@ -348,12 +348,12 @@ async def _fleet_worker_money(
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
     price_floor: bool,
-) -> tuple[Decimal, Decimal, bool]:
+) -> tuple[Decimal, Decimal, bool, bool]:
     binding = await mux_state.get_binding(session, worker_slot(run, worker))
     if binding is None:
         if worker.binding_id is not None:
             raise FleetConflict("accepted worker binding is unavailable")
-        return Decimal(0), Decimal(0), False
+        return Decimal(0), Decimal(0), False, True
     if (
         binding.provider != worker.backend
         or binding.profile != worker.profile
@@ -367,7 +367,7 @@ async def _fleet_worker_money(
         if debit < 0:
             raise FleetConflict("worker ledger cannot prove nonnegative spend")
         if not rows.revisions or not price_floor:
-            return debit, debit, False
+            return debit, debit, False, False
         native = rows.revisions[0].observation.session
         usage = await read_delegated_usage(
             session, scope=scope, bindings=(HostUsageBinding(binding, native),), prices=prices
@@ -375,7 +375,7 @@ async def _fleet_worker_money(
         floor = (usage.token_floor_usd * markup).quantize(
             Decimal("0.000001"), rounding=ROUND_CEILING
         )
-        return max(floor, debit), debit, bool(usage.unpriced_observations)
+        return max(floor, debit), debit, bool(usage.unpriced_observations), False
 
 
 async def _produce_fleet_budget(
@@ -391,7 +391,8 @@ async def _produce_fleet_budget(
 
     Use the store's tenant/actor/run/worker lock order. Read originals, derive
     conservative money once, and persist before returning an admission refusal.
-    Terminal/crashed rows participate; changing status cannot free a bound.
+    Terminal/crashed unknowns retain their bound. Only proof of cancellation
+    before any claim or native evidence releases the unused reservation.
     Caller owns commit, including refusals that retain new overrun evidence.
     """
     if not markup.is_finite() or markup <= 0:
@@ -400,7 +401,9 @@ async def _produce_fleet_budget(
     if facts.scope.is_platform or facts.scope.is_legacy_host_authorized:
         raise FleetConflict("fleet budget requires tenant authority")
     tenant_id = uuid.UUID(facts.scope.tenant_id)
-    graph = await fleet_store.lock_budget(session, tenant_id=tenant_id, actor_id=facts.account_id)
+    graph, started_at = await fleet_store.lock_budget(
+        session, tenant_id=tenant_id, actor_id=facts.account_id, run_id=facts.run_id
+    )
     pair = next((pair for pair in graph if pair[0].id == facts.run_id), None)
     if pair is None:
         raise FleetConflict("fleet run is unavailable")
@@ -452,12 +455,13 @@ async def _produce_fleet_budget(
     floors: dict[uuid.UUID, Decimal] = {}
     exposures: dict[uuid.UUID, Decimal] = {}
     debits: dict[uuid.UUID, Decimal] = {}
+    zero_spend: set[uuid.UUID] = set()
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         for other_run, members in graph:
             debit_total = Decimal(0)
             for member in members:
-                floor, debit, unpriced = await _fleet_worker_money(
+                floor, debit, unpriced, no_native_evidence = await _fleet_worker_money(
                     session,
                     other_run,
                     member,
@@ -468,12 +472,28 @@ async def _produce_fleet_budget(
                 )
                 pricing_unavailable = pricing_unavailable or unpriced
                 floors[member.id] = floor
-                # Unfunded rows do not acquire a reservation by being read.
-                exposures[member.id] = max(member.reserved_usd, floor)
+                # An unbound starting/claimed worker is ambiguous. The retained
+                # claim stamp and attempt inventory must also prove no allocation.
+                if (
+                    member.status == "cancelled"
+                    and started_at[member.id] is None
+                    and member.binding_id is None
+                    and member.attempts == member.turns_used == 0
+                    and no_native_evidence
+                ):
+                    zero_spend.add(member.id)
+                    exposures[member.id] = debit
+                else:
+                    exposures[member.id] = max(member.reserved_usd, floor)
                 debit_total += debit
             debits[other_run.id] = debit_total
         graph = await fleet_store.save_budget(
-            session, tenant_id=tenant_id, graph=graph, exposures=exposures, debits=debits
+            session,
+            tenant_id=tenant_id,
+            graph=graph,
+            exposures=exposures,
+            debits=debits,
+            zero_spend=frozenset(zero_spend),
         )
         run, workers = next(pair for pair in graph if pair[0].id == run.id)
         worker = next(w for w in workers if w.id == worker_id)
@@ -499,7 +519,9 @@ async def _produce_fleet_budget(
             )
             channel_available = channel.remaining_usd - held
         reason = None
-        if balance is None:
+        if run.status != "running" or worker.status not in ("pending", "starting", "running"):
+            reason = "terminal"
+        elif balance is None:
             reason = "funding_unavailable"
         elif available is not None and (
             available < 0 or (reserve and run.total_budget_usd > available + run.reserved_usd)
@@ -510,17 +532,15 @@ async def _produce_fleet_budget(
             or (reserve and run.total_budget_usd > channel_available + run.reserved_usd)
         ):
             reason = "channel_budget_exceeded"
-        elif any(r.reserved_usd > r.total_budget_usd for r, _ in graph):
+        elif run.reserved_usd > run.total_budget_usd:
             reason = "run_budget_exceeded"
         elif (
-            any(w.reserved_usd > w.budget_usd for _, members in graph for w in members)
+            any(w.reserved_usd > w.budget_usd for w in workers)
             or floors[worker.id] >= worker.budget_usd
         ):
             reason = "worker_budget_exceeded"
         elif pricing_unavailable:
             reason = "pricing_unavailable"
-        elif run.status != "running" or worker.status not in ("pending", "starting", "running"):
-            reason = "terminal"
         elif worker.attempts or worker.turns_used:
             reason = "accepted_attempt_inventory_unavailable"
         if reserve and reason is None and worker.reserved_usd < worker.budget_usd:
@@ -536,7 +556,12 @@ async def _produce_fleet_budget(
             else:
                 exposures[worker.id] = worker.budget_usd
                 graph = await fleet_store.save_budget(
-                    session, tenant_id=tenant_id, graph=graph, exposures=exposures, debits=debits
+                    session,
+                    tenant_id=tenant_id,
+                    graph=graph,
+                    exposures=exposures,
+                    debits=debits,
+                    zero_spend=frozenset(zero_spend),
                 )
                 run, workers = next(pair for pair in graph if pair[0].id == run.id)
                 worker = next(w for w in workers if w.id == worker_id)
@@ -563,7 +588,7 @@ async def produce_fleet_budget(
     )
 
 
-async def reserve_fleet_worker(
+async def _reserve_fleet_worker(
     session: AsyncSession,
     *,
     parent: WorkerPermissions,
@@ -591,8 +616,11 @@ async def reserve_fleet_worker(
     )
     if not decision:
         raise FleetConflict("reservation requires current root authorization")
-    graph = await fleet_store.lock_budget(
-        session, tenant_id=uuid.UUID(parent.fleet.scope.tenant_id), actor_id=parent.fleet.account_id
+    graph, _ = await fleet_store.lock_budget(
+        session,
+        tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
+        actor_id=parent.fleet.account_id,
+        run_id=parent.fleet.run_id,
     )
     pair = next((p for p in graph if p[0].id == parent.fleet.run_id), None)
     if pair is None:
@@ -668,7 +696,10 @@ async def watch_fleet_budget(
                 )
                 cancelled.set()
                 return "usage_unavailable"
-            if usage.reason not in (None, "terminal") or not usage.admitted:
+            if usage.reason == "terminal":
+                cancelled.set()
+                return "terminal"
+            if not usage.admitted:
                 log.warning("fleet.budget_cancel", reason=usage.reason or "not_admitted")
                 cancelled.set()
                 return "budget_exceeded"
@@ -761,7 +792,9 @@ async def admit_fleet_worker(
     ):
         raise FleetConflict("resolved worker belongs to another root")
     tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
-    await fleet_store.lock_budget(session, tenant_id=tenant_id, actor_id=parent.fleet.account_id)
+    await fleet_store.lock_budget(
+        session, tenant_id=tenant_id, actor_id=parent.fleet.account_id, run_id=parent.fleet.run_id
+    )
     worker = await fleet_store.add_worker(
         session,
         tenant_id=tenant_id,
@@ -779,7 +812,7 @@ async def admit_fleet_worker(
         reviewer_of=reviewer_of,
         result_contract=result_contract,
     )
-    return await reserve_fleet_worker(
+    usage = await _reserve_fleet_worker(
         session,
         parent=parent,
         policy=policy,
@@ -788,3 +821,14 @@ async def admit_fleet_worker(
         prices=prices,
         markup=markup,
     )
+    if not usage.admitted and usage.worker.status == "pending":
+        ended = await fleet_store.finish(
+            session,
+            tenant_id=tenant_id,
+            worker_id=worker.id,
+            expected_version=usage.worker.version,
+            status="cancelled",
+            error_code=usage.reason or "not_admitted",
+        )
+        usage = replace(usage, worker=ended)
+    return usage

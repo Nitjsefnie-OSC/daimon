@@ -1058,37 +1058,23 @@ returns disjoint token floors at provider list price without markup, existing
 signed customer ledger debits including markup, and pending revisions. The
 floor and debit amounts overlap and must not be added. The orchestrator rollup
 creates no second debit. Token floors omit unknown infrastructure and rates. A zero floor or settled latest observation
-is not proof of complete final usage and never releases an admitted bound.
+alone is not proof of complete final usage or permission to release an admitted bound.
 
 
-Fleet financial admission uses `channel_budget.reserve_fleet_worker` in the
-same transaction as canonical worker creation. Each admitted worker reserves
-its entire immutable budget. The product `produce_fleet_budget` reads original
-usage and debits, then retains the greater of that reservation, a verified
-marked-up token floor, existing debit, and previous held exposure. Unknown or
-terminal usage never refunds a reservation. Run exposure sums the worker
-exposures; remaining prepaid funds subtract only holds not already debited.
-Refresh prices token floors for the authorized current run; other tenant runs
-contribute their retained reservations and original ledger debits. An undebited
-floor in another run is discovered by that run's refresh. These financial
-interfaces therefore do not certify a hard prepaid or provider spend ceiling.
-New spawns refuse after an overrun, when their run exceeds authenticated parent
-authority or available prepaid/channel funds, or when pricing is unavailable.
-Reservation, preallocation and refresh share one resolved tariff gate, including
-funded workers without native usage. Financial transactions fence only their
-tenant's funds through the existing ledger foreign key, then actor and fleet
-rows; unrelated ordinary ledger inserts continue without a new writer query.
-Operator-funded admission and replacement attempts remain unavailable without
-their authoritative funding and accepted-attempt inventory proofs.
+Fleet monetary interfaces are opt-in host seams; ordinary turns do not call
+them. `channel_budget.admit_fleet_worker` is the single transactional spawn and
+reservation entry point. Its producer retains ambiguous charges at their whole
+bound, releasing only a cancelled worker with proof it was never claimed or
+allocated and has no native accounting evidence. The graph covers live or
+unsettled runs plus the requested run for terminal readback; overrun latches
+belong to the current run, while other holds reduce available tenant funds.
 
-A pool claim allocates concurrency only. Before any native preparation the
-host uses `require_fleet_worker_admission`, commits its fresh monetary readback,
-and stops on a refusal. Spec and resource permissions still come from the
-existing resolver and driver. `watch_fleet_budget` reads this same product
-producer and requests existing driver cancellation on a spent worker limit or
-overrun. Equal total reservations alone do not cancel unspent workers. Read
-failures log a reason and exception class, cancel defensively, and retain
-holds; the read timeout is explicit or eight polling intervals. Worker deadline
-enforcement belongs solely to `run_prepared_turn`. These monetary interfaces
-create no tenant-ledger charge, assert no final native actual, and impose no
-provider-native hard cap. The ordinary turn path starts no budget watcher.
+Native preparation requires fresh `require_fleet_worker_admission` readback,
+including the shared tariff check. Hosts composing fleet row writers acquire
+`stores.fleet.lock_budget` before any run or worker lock, then commit before
+native I/O. Financial locking uses the tenant's existing ledger foreign key;
+unrelated ordinary writes continue. The budget watcher has no separate worker
+deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
+admission, replacement inventory and exact final settlement remain unavailable
+here. These interfaces create no ledger charge or provider-native hard cap;
+other runs' undebited native floors are discovered by their own refresh.

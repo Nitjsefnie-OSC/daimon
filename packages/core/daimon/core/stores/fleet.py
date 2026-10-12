@@ -652,14 +652,20 @@ class WorkerPool:
         self._slots.release()
 
 
+type BudgetGraph = tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...]
+
+
 async def lock_budget(
-    session: AsyncSession, *, tenant_id: uuid.UUID, actor_id: uuid.UUID
-) -> tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...]:
+    session: AsyncSession, *, tenant_id: uuid.UUID, actor_id: uuid.UUID, run_id: uuid.UUID
+) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
     """Join the caller's financial transaction before any fleet row transition.
 
     Same tenant lock as pool claims, then the financial owner's tenant row,
     actor, runs and workers. Ordinary ledger inserts use their existing foreign
     key lock; no global table lock or additional writer query is required.
+    Every caller composing fleet row writers must acquire this first, before
+    either a run or worker lock. Include only live/unsettled runs and the
+    requested run for terminal readback. Return original allocation stamps.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
@@ -679,7 +685,12 @@ async def lock_budget(
     runs = tuple(
         await session.scalars(
             select(FleetRunRow)
-            .where(FleetRunRow.tenant_id == tenant_id)
+            .where(
+                FleetRunRow.tenant_id == tenant_id,
+                (FleetRunRow.id == run_id)
+                | FleetRunRow.status.in_(RUN_TRANSITIONS)
+                | (FleetRunRow.reserved_usd > FleetRunRow.observed_usd),
+            )
             .order_by(FleetRunRow.id)
             .with_for_update()
         )
@@ -687,13 +698,19 @@ async def lock_budget(
     workers = tuple(
         await session.scalars(
             select(FleetWorkerRow)
-            .where(FleetWorkerRow.tenant_id == tenant_id)
+            .where(
+                FleetWorkerRow.tenant_id == tenant_id,
+                FleetWorkerRow.run_id.in_(run.id for run in runs),
+            )
             .order_by(FleetWorkerRow.id)
             .with_for_update()
         )
     )
-    return tuple(
-        (_run(run), tuple(_worker(w) for w in workers if w.run_id == run.id)) for run in runs
+    return (
+        tuple(
+            (_run(run), tuple(_worker(w) for w in workers if w.run_id == run.id)) for run in runs
+        ),
+        {w.id: w.started_at for w in workers},
     )
 
 
@@ -701,22 +718,24 @@ async def save_budget(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    graph: tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...],
+    graph: BudgetGraph,
     exposures: Mapping[uuid.UUID, Decimal],
     debits: Mapping[uuid.UUID, Decimal],
-) -> tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...]:
-    """Persist the producer's held exposure; never decrease a worker's hold.
+    zero_spend: frozenset[uuid.UUID] = frozenset(),
+) -> BudgetGraph:
+    """Persist exposure selected by the sole monetary producer.
 
     Caller has lock_budget's transaction/graph. Run sums are derived in SQL,
     with the same exact Numeric basis as the rows, never ambient Decimal math.
     No status, result, usage outbox or tenant debit is changed here.
+    Only the producer's proven never-allocated evidence class may decrease.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
     for run, workers in graph:
         for worker in workers:
             amount = _amount(exposures[worker.id])
-            if amount < worker.reserved_usd:
+            if amount < worker.reserved_usd and worker.id not in zero_spend:
                 raise FleetConflict("unknown worker exposure cannot be released")
             if amount == worker.reserved_usd:
                 continue
