@@ -65,7 +65,7 @@ async def test_invalid_final_usage_keeps_known_counts_full_hold_one_fetch_and_cl
     native = FaultyFinal(mode)
     selected = admission(tmp_path, "C06")
     result = await execute(selected, mock=httpx.MockTransport(native.handle))
-    assert result["status"] == "pass"  # Workflow and financial verification are separate.
+    assert result["status"] == ("fail" if mode == "foreign-model" else "pass")
     assert result["actual_usd"] is None and result["held_usd"] == "1.032192"
     assert native.gets == 2 and len(native.deletes) == 1 and len(native.posts) == 1
     receipt = BudgetGuard(selected.config, tmp_path / "spend.md").report()[0]

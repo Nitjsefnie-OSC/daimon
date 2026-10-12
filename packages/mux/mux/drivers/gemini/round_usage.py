@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import JsonValue
 
@@ -75,7 +76,20 @@ class NativeEvidence:
     uncertain: bool = False
     final_get: bool = False
     final_complete: bool = False
+    terminal: Object | None = None
+    overrun: bool = False
     audit_retained: bool = False
+
+
+@dataclass(frozen=True)
+class NativeRoute:
+    kind: Literal["create", "stream", "cancel", "readback", "cleanup"]
+    session: ResourceRef
+    native_id: str | None
+    request_sha256: str
+    request_model: str | None
+    final: bool = False
+    token: object = field(default_factory=object, repr=False, compare=False)
 
 
 class UsageBook:
@@ -84,11 +98,161 @@ class UsageBook:
     def __init__(self, output: Path, aliases: EvidenceAliases) -> None:
         self.output, self.aliases = output, aliases
         self.native: dict[str, NativeEvidence] = {}
+        self.model_drift = False
+        self.acceptances: dict[object, str] = {}
         self.private = output.parent / ".gemini-round-private" / output.name
         for directory in (self.private.parent, self.private):
             directory.mkdir(mode=0o700, exist_ok=True)
             if directory.is_symlink() or directory.stat().st_mode & 0o777 != 0o700:
                 raise BudgetRefused("native audit directory must be private")
+
+    def taint(self, native_id: str | None) -> None:
+        if native_id is not None and native_id in self.native:
+            evidence = self.native[native_id]
+            evidence.uncertain, evidence.final_complete = True, False
+
+    def note_model(self, projection: Object, native_id: str | None) -> None:
+        if projection.get("model") not in (None, MODEL):
+            self.model_drift = True
+            self.taint(native_id)
+
+    @staticmethod
+    def projection(raw: Object, native_id: str) -> Object:
+        interaction = raw.get("interaction")
+        base = interaction if isinstance(interaction, dict) else {}
+        models: list[JsonValue] = []
+        for value in (base, raw):
+            if value.get("model") is not None:
+                models.append(value["model"])
+            config = value.get("agent_config")
+            if isinstance(config, dict) and config.get("model") is not None:
+                models.append(config["model"])
+            steps = value.get("steps")
+            if isinstance(steps, list):
+                models.extend(
+                    step["model"]
+                    for step in steps
+                    if isinstance(step, dict) and step.get("model") is not None
+                )
+        status = raw.get("status", base.get("status"))
+        return {
+            "id": native_id,
+            "status": status
+            if isinstance(status, str)
+            and (status in OUTCOMES or status in ("in_progress", "requires_action"))
+            else None,
+            "updated": raw.get("updated", base.get("updated")),
+            "model": (MODEL if all(v == MODEL for v in models) else "unverified-model")
+            if models
+            else None,
+        }
+
+    def receive(self, raw: Object, route: NativeRoute, *, success: bool) -> tuple[Object, ...]:
+        """The sole native-response entry: all kinds, envelopes and meter sources.
+
+        The route is sealed at actual request admission. Event IDs never become
+        interaction IDs; explicit foreign identities cannot contribute floors.
+        Only the independently scoped final GET can certify exact terminal usage.
+        """
+        native_id = route.native_id
+        self.note_model(self.projection(raw, native_id or "unbound"), native_id)
+        if native_id is None:
+            accepted = raw.get("id")
+            interaction = raw.get("interaction")
+            if "event_type" in raw or accepted is None:
+                accepted = raw.get("interaction_id")
+                if accepted is None and isinstance(interaction, dict):
+                    accepted = interaction.get("id")
+            prior = self.acceptances.get(route.token)
+            if accepted is None:
+                accepted = prior
+            if route.kind != "create" or not success or not isinstance(accepted, str):
+                return ()
+            if prior is not None and accepted != prior:
+                self.taint(prior)
+                raise BudgetRefused("native create stream changed its accepted interaction")
+            native_id = accepted
+            initial = self.projection(raw, native_id)
+            # Bootstrap ownership before processing any meter or SDK decoding.
+            if prior is None:
+                self.accept(
+                    initial,
+                    route.session,
+                    route.request_sha256,
+                    request_model=route.request_model,
+                    observe=False,
+                )
+                self.acceptances[route.token] = native_id
+        if native_id not in self.native or self.native[native_id].session != route.session:
+            raise BudgetRefused("native meter route differs from its accepted scoped identity")
+        self.note_model(self.projection(raw, native_id), native_id)
+        interaction = raw.get("interaction")
+        identities = [raw["interaction_id"]] if "interaction_id" in raw else []
+        if "id" in raw and "event_type" not in raw:
+            identities.append(raw["id"])
+        if isinstance(interaction, dict) and "id" in interaction:
+            identities.append(interaction["id"])
+        for identity in identities:
+            if isinstance(identity, str):
+                self.aliases.identity(identity)
+        if any(identity != native_id for identity in identities):
+            self.taint(native_id)
+            raise BudgetRefused("native response identity differs from its admitted route")
+        snapshots: list[Object] = []
+        foreign_nested = False
+
+        def walk(value: JsonValue, inherited: Object, *, native: bool = False) -> None:
+            nonlocal foreign_nested
+            if isinstance(value, list):
+                for item in value:
+                    walk(item, inherited, native=native)
+                return
+            if not isinstance(value, dict):
+                return
+            declared = [value["interaction_id"]] if "interaction_id" in value else []
+            if (
+                "id" in value
+                and "event_type" not in value
+                and (native or "usage" in value or "usageMetadata" in value)
+            ):
+                declared.append(value["id"])
+            for identity in declared:
+                if isinstance(identity, str):
+                    self.aliases.identity(identity)
+            if any(identity != native_id for identity in declared):
+                self.taint(native_id)
+                foreign_nested = True
+                return
+            projected = self.projection(value, native_id)
+            self.note_model(projected, native_id)
+            context = {
+                name: projected[name] if projected[name] is not None else inherited.get(name)
+                for name in ("id", "status", "updated", "model")
+            }
+            for source in ("usageMetadata", "usage"):
+                if value.get(source) is not None:
+                    snapshot: Object = {**context, source: value[source]}
+                    self.observe(native_id, snapshot)
+                    snapshots.append(snapshot)
+            for name, child in value.items():
+                if name not in ("usageMetadata", "usage"):
+                    walk(child, context, native=name in ("interaction", "interactions"))
+
+        walk(raw, self.projection(raw, native_id), native=route.kind != "stream")
+        if foreign_nested:
+            raise BudgetRefused("nested native meter has a foreign interaction identity")
+        if route.kind == "create" and not snapshots:
+            self.observe(native_id, self.projection(raw, native_id))
+        if route.final:
+            if success and raw.get("id") == native_id:
+                terminal = self.projection(raw, native_id)
+                for source in ("usageMetadata", "usage"):
+                    if source in raw:
+                        terminal[source] = raw[source]
+                self.observe(native_id, terminal, final=True)
+            else:
+                self.failed_final(native_id)
+        return tuple(snapshots)
 
     def accept(
         self,
@@ -97,6 +261,7 @@ class UsageBook:
         request_sha256: str,
         *,
         request_model: str | None = None,
+        observe: bool = True,
     ) -> None:
         native_id = raw.get("id")
         if not isinstance(native_id, str) or not native_id or native_id in self.native:
@@ -120,7 +285,8 @@ class UsageBook:
             file.flush()
             os.fsync(file.fileno())
         evidence.audit_retained = True
-        self.observe(native_id, raw)
+        if observe:
+            self.observe(native_id, raw)
 
     @staticmethod
     def usage_id(native_id: str) -> str:
@@ -128,6 +294,7 @@ class UsageBook:
 
     def observe(self, native_id: str, raw: Object, *, final: bool = False) -> None:
         evidence = self.native[native_id]
+        evidence.final_complete = False
         if final:
             if evidence.final_get:
                 raise BudgetRefused("terminal usage fetch must occur exactly once")
@@ -161,6 +328,11 @@ class UsageBook:
                 else max(candidate or 0, thought or 0)
             )
             evidence.output_floor = max(output, evidence.output_floor or 0)
+        evidence.overrun = evidence.overrun or (
+            max(evidence.maxima.get(COUNTERS[0], 0), evidence.maxima.get(COUNTERS[1], 0))
+            > INPUT_MAX
+            or (evidence.output_floor or 0) > OUTPUT_MAX
+        )
         stamp = timestamp(raw.get("updated"))
         if stamp is None or (evidence.updated is not None and stamp < evidence.updated):
             # Even a non-final contradictory/stale read remains durable unknown.
@@ -176,20 +348,30 @@ class UsageBook:
                     if name in COUNTERS
                 )
                 or stamp == evidence.updated
-                and metadata != prior
+                and any(metadata.get(name) != prior.get(name) for name in COUNTERS)
             ):
                 evidence.uncertain = True
                 return
         evidence.updated, evidence.latest = stamp, dict(raw)
         if final:
+            evidence.terminal = dict(raw)
+        if evidence.terminal is not None:
+            terminal = evidence.terminal
+            terminal_meter = counter_metadata(terminal)
+            terminal_counts = {
+                name: count
+                for name in COUNTERS
+                if type(count := terminal_meter.get(name)) is int and count >= 0
+            }
             evidence.final_complete = (
                 not evidence.uncertain
                 and evidence.audit_retained
-                and raw.get("status") in OUTCOMES
-                and len(counts) == len(COUNTERS)
-                and counts[COUNTERS[1]] <= counts[COUNTERS[0]]
-                and all(counts[name] >= value for name, value in evidence.maxima.items())
-                and counts[COUNTERS[2]] + counts[COUNTERS[3]] >= (evidence.output_floor or 0)
+                and terminal.get("status") in OUTCOMES
+                and len(terminal_counts) == len(COUNTERS)
+                and terminal_counts[COUNTERS[1]] <= terminal_counts[COUNTERS[0]]
+                and all(terminal_counts[name] >= value for name, value in evidence.maxima.items())
+                and terminal_counts[COUNTERS[2]] + terminal_counts[COUNTERS[3]]
+                >= (evidence.output_floor or 0)
             )
 
     def failed_final(self, native_id: str) -> None:
@@ -205,9 +387,9 @@ class UsageBook:
         observed = datetime.now(UTC)
         for native_id, evidence in self.native.items():
             complete = complete and evidence.final_complete and not evidence.uncertain
-            if evidence.final_complete and not evidence.uncertain and evidence.latest is not None:
+            if evidence.final_complete and not evidence.uncertain and evidence.terminal is not None:
                 observation = observation_from_interaction(
-                    evidence.latest,
+                    evidence.terminal,
                     evidence.session,
                     revision=1,
                     observed_at=observed,
@@ -255,12 +437,7 @@ class UsageBook:
         )
 
     def exceeds_interaction_limit(self) -> bool:
-        return any(
-            max(evidence.maxima.get(COUNTERS[0], 0), evidence.maxima.get(COUNTERS[1], 0))
-            > INPUT_MAX
-            or (evidence.output_floor or 0) > OUTPUT_MAX
-            for evidence in self.native.values()
-        )
+        return any(evidence.overrun for evidence in self.native.values())
 
     def public_facts(self) -> list[Object]:
         result: list[Object] = []
@@ -290,6 +467,7 @@ class UsageBook:
                     "tainted_counters": list[JsonValue](sorted(evidence.tainted_counters)),
                     "max_seen_output": evidence.output_floor,
                     "final_get": evidence.final_get,
+                    "overrun": evidence.overrun,
                     "complete": evidence.final_complete,
                     "uncertain": evidence.uncertain,
                     "private_audit_retained": evidence.audit_retained,

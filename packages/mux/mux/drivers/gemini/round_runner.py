@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import subprocess
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,7 +36,6 @@ from mux.drivers.gemini.deployment import (
     _require_clean_environment,  # pyright: ignore[reportPrivateUsage]
 )
 from mux.drivers.gemini.live_cert import EvidenceAliases, read_key, write_report
-from mux.drivers.gemini.normalize import OUTCOMES
 from mux.drivers.gemini.round_cases import (
     INPUT_MAX,
     MODEL,
@@ -46,7 +45,13 @@ from mux.drivers.gemini.round_cases import (
     run_c04,
     run_c06,
 )
-from mux.drivers.gemini.round_usage import COUNTERS, UsageBook, counter_metadata, timestamp
+from mux.drivers.gemini.round_usage import (
+    COUNTERS,
+    NativeRoute,
+    UsageBook,
+    counter_metadata,
+    timestamp,
+)
 from mux.drivers.gemini.transport import API_REVISION, Object, SDKTransport, provider_call
 
 type Case = Literal["C06", "C04"]
@@ -189,6 +194,91 @@ def validate_config(path: Path, envelope: Envelope, *, live: bool) -> BudgetConf
     return config
 
 
+class MeterFrames:
+    """Observe raw SSE data without changing bytes, framing or SDK delivery."""
+
+    def __init__(self, receive: Callable[[Object], None], taint: Callable[[], None]) -> None:
+        self.receive, self.taint = receive, taint
+        self.pending = b""
+        self.data: list[bytes] = []
+        self.error: Exception | None = None
+        self.skip_lf = False
+
+    def feed(self, chunk: bytes) -> None:
+        if self.skip_lf and chunk:
+            chunk = chunk.removeprefix(b"\n")
+            self.skip_lf = False
+        self.pending += chunk
+        while True:
+            separators = [
+                index for value in (b"\n", b"\r") if (index := self.pending.find(value)) >= 0
+            ]
+            if not separators:
+                break
+            index = min(separators)
+            if self.pending[index : index + 1] == b"\r" and index + 1 == len(self.pending):
+                self.skip_lf = True  # Process CR now; absorb a later split LF.
+            size = 2 if self.pending[index : index + 2] == b"\r\n" else 1
+            line, self.pending = self.pending[:index], self.pending[index + size :]
+            self.line(line)
+        if len(self.pending) + sum(map(len, self.data)) > 4_194_304:
+            self.taint()
+            raise BudgetRefused("native meter frame exceeded the bounded decoder")
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+
+    def line(self, line: bytes) -> None:
+        if not line:
+            if self.data:
+                data, self.data = b"\n".join(self.data), []
+                if data != b"[DONE]":
+                    try:
+                        raw = TypeAdapter[Object](Object).validate_json(data)
+                    except ValueError:
+                        self.taint()
+                        self.error = self.error or BudgetRefused("native meter frame is malformed")
+                        return
+                    try:
+                        self.receive(raw)
+                    except Exception as error:
+                        self.taint()
+                        self.error = self.error or error
+        elif line.startswith(b"data:"):
+            self.data.append(line[5:].removeprefix(b" "))
+
+    def finish(self) -> None:
+        self.feed(b"")
+        if self.pending:
+            self.line(self.pending.removesuffix(b"\r"))
+            self.pending = b""
+        self.line(b"")
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+
+
+class MeterStream(httpx.AsyncByteStream):
+    def __init__(self, source: httpx.AsyncByteStream, frames: MeterFrames) -> None:
+        self.source, self.frames = source, frames
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        try:
+            async for chunk in self.source:
+                self.frames.feed(chunk)
+                yield chunk
+            self.frames.finish()
+        except BaseException:
+            self.frames.taint()
+            raise
+
+    async def aclose(self) -> None:
+        try:
+            self.frames.finish()
+        finally:
+            await self.source.aclose()
+
+
 class RoundWire:
     """One scope, bounded actual request bytes; GET/cancel are not send retries."""
 
@@ -216,6 +306,7 @@ class RoundWire:
         self.request_model: str | None = None
         self.drivers: list[tuple[GeminiManagedAgents, ResourceRef]] = []
         self.http_snapshots: dict[str, Object] = {}
+        self.routes: dict[httpx.Request, NativeRoute] = {}
         self.responses: list[JsonValue] = []
 
     def bind_session(self, session: ResourceRef) -> None:
@@ -270,6 +361,7 @@ class RoundWire:
                 self.session is None
                 or self.posts >= self.maximum
                 or self.book.exceeds_interaction_limit()
+                or self.book.model_drift
                 or parsed.get("tools") != []
                 or parsed.get("agent") != BASE_AGENT
                 or parsed.get("background") is not True
@@ -290,6 +382,9 @@ class RoundWire:
             self.current_input_sha256 = hashlib.sha256(
                 json.dumps(parsed["input"], sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
+            route = NativeRoute(
+                "create", self.session, None, self.request_sha256, self.request_model
+            )
         elif request.method == "POST":
             native_id = (
                 path.split("/")[-2]
@@ -304,14 +399,39 @@ class RoundWire:
             ):
                 raise BudgetRefused("unreviewed native mutation route")
             self.cancels += 1
+            accepted = self.book.native[native_id]
+            route = NativeRoute(
+                "cancel",
+                accepted.session,
+                native_id,
+                accepted.request_sha256,
+                accepted.request_model,
+            )
         elif request.method in ("GET", "DELETE"):
             native_id = path.rsplit("/", 1)[-1]
             if native_id not in self.book.native:
                 raise BudgetRefused("round read/delete must target an accepted owned interaction")
             if path != f"/v1beta/interactions/{native_id}":
                 raise BudgetRefused("unreviewed native read/delete route")
+            accepted = self.book.native[native_id]
+            kind = (
+                "cleanup"
+                if request.method == "DELETE"
+                else "stream"
+                if request.url.params.get("stream") == "true"
+                else "readback"
+            )
+            route = NativeRoute(
+                kind,
+                accepted.session,
+                native_id,
+                accepted.request_sha256,
+                accepted.request_model,
+                final=kind == "readback" and self.final,
+            )
         else:
             raise BudgetRefused("unreviewed SDK request method")
+        self.routes[request] = route
         self.recorder.record(
             RequestMetadata(
                 method=request.method,
@@ -321,87 +441,71 @@ class RoundWire:
             (),
         )
 
-    async def capture_response(self, response: httpx.Response) -> None:
-        """Retain exact native nullable counters BEFORE SDK integer coercion."""
+    def receive_native(self, response: httpx.Response, raw: Object) -> None:
+        """All JSON bodies and SSE frames converge here, before SDK decoding."""
         request = response.request
-        if "application/json" not in response.headers.get("content-type", ""):
+        route = self.routes.get(request)
+        if route is None:
+            raise BudgetRefused("native response lacks an admitted request route")
+        snapshots = self.book.receive(raw, route, success=response.status_code < 300)
+        self.http_snapshots[request.url.path] = {"id": raw.get("id")}
+        for snapshot in snapshots:
+            native_id = snapshot.get("id")
+            counts = counter_metadata(snapshot)
+            projected_counts: Object = {}
+            for name in COUNTERS:
+                count = counts.get(name)
+                projected_counts[name] = count if type(count) is int and count >= 0 else None
+            updated = timestamp(snapshot.get("updated"))
+            self.responses.append(
+                {
+                    "method": request.method,
+                    "path": self.book.aliases.path(request.url.path),
+                    "response_kind": route.kind,
+                    "http_status": response.status_code,
+                    "interaction": self.book.aliases.identity(native_id)
+                    if isinstance(native_id, str)
+                    else None,
+                    "interaction_status": snapshot.get("status"),
+                    "updated": updated.isoformat() if updated else None,
+                    "usageMetadata": projected_counts,
+                    "meter_origin": "usageMetadata"
+                    if snapshot.get("usageMetadata") is not None
+                    else "usage",
+                }
+            )
+
+    async def capture_response(self, response: httpx.Response) -> None:
+        route = self.routes.get(response.request)
+        if route is None:
+            raise BudgetRefused("native response lacks an admitted request route")
+        content_type = response.headers.get("content-type", "")
+        if "text/event-stream" in content_type:
+            self.book.receive({}, route, success=response.status_code < 300)
+            frames = MeterFrames(
+                lambda raw: self.receive_native(response, raw),
+                lambda: self.book.taint(route.native_id),
+            )
+            if response.is_stream_consumed:
+                frames.feed(response.content)
+                frames.finish()
+            else:
+                if not isinstance(response.stream, httpx.AsyncByteStream):
+                    self.book.taint(route.native_id)
+                    raise BudgetRefused("native meter stream is not asynchronously owned")
+                response.stream = MeterStream(response.stream, frames)
             return
         await response.aread()
-        raw = (
-            TypeAdapter[Object](Object).validate_json(response.content) if response.content else {}
-        )
-        native_id = raw.get("id")
-        counts = counter_metadata(raw)
-        status = raw.get("status")
-        projected_status = (
-            status
-            if isinstance(status, str)
-            and (status in OUTCOMES or status in ("in_progress", "requires_action"))
-            else None
-        )
-        updated = timestamp(raw.get("updated"))
-        if isinstance(native_id, str):
-            self.book.aliases.identity(native_id)
-        self.responses.append(
-            {
-                "method": request.method,
-                "path": self.book.aliases.path(request.url.path),
-                "http_status": response.status_code,
-                "interaction": self.book.aliases.identity(native_id)
-                if isinstance(native_id, str)
-                else None,
-                "interaction_status": projected_status,
-                "updated": updated.isoformat() if updated else None,
-                "usageMetadata": {
-                    name: counts.get(name) if type(counts.get(name)) is int else None
-                    for name in COUNTERS
-                },
-                "meter_origin": "usageMetadata"
-                if raw.get("usageMetadata") is not None
-                else ("usage" if raw.get("usage") is not None else None),
-            }
-        )
-        if isinstance(native_id, str) and response.status_code < 300:
-            # Only the exact request route can bind this HTTP snapshot.
-            is_create = request.method == "POST" and request.url.path.rstrip("/").endswith(
-                "/interactions"
+        try:
+            raw = (
+                TypeAdapter[Object](Object).validate_json(response.content)
+                if response.content
+                else {}
             )
-            routed = request.url.path.rsplit("/", 1)[-1] == native_id
-            if is_create or routed:
-                models: list[JsonValue] = []
-                if raw.get("model") is not None:
-                    models.append(raw["model"])
-                agent_config = raw.get("agent_config")
-                if isinstance(agent_config, dict) and agent_config.get("model") is not None:
-                    models.append(agent_config["model"])
-                steps = raw.get("steps")
-                if isinstance(steps, list):
-                    for step in steps:
-                        if isinstance(step, dict) and step.get("model") is not None:
-                            models.append(step["model"])
-                model = (
-                    (MODEL if all(value == MODEL for value in models) else "unverified-model")
-                    if models
-                    else None
-                )
-                self.http_snapshots[request.url.path] = {
-                    "id": native_id,
-                    "status": projected_status,
-                    "updated": updated.isoformat() if updated else None,
-                    "model": model,
-                    "usageMetadata": counts,
-                }
-                native = self.http_snapshots[request.url.path]
-                # Keep independently owned HTTP facts BEFORE the SDK can reject
-                # a malformed sibling field during decoding.
-                if is_create:
-                    if self.session is None or self.request_sha256 is None:
-                        raise BudgetRefused("native acceptance lacks scoped POST provenance")
-                    self.book.accept(
-                        native, self.session, self.request_sha256, request_model=self.request_model
-                    )
-                elif request.method == "GET" and native_id in self.book.native:
-                    self.book.observe(native_id, native, final=self.final)
+        except ValueError:
+            self.book.taint(route.native_id)
+            raise BudgetRefused("native response is malformed") from None
+        self.receive_native(response, raw)
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         if self.session is None or self.attempts >= self.maximum:
@@ -703,6 +807,10 @@ async def execute(
                 "fail",
                 ("native interaction exceeded its individual model-limit premise",),
             )
+        if book.model_drift:
+            result = Result(
+                envelope.case, "fail", ("native response reported an unreviewed model",)
+            )
         recorder.save(
             output / f"{envelope.case}.json",
             fixture_id=envelope.case,
@@ -728,6 +836,7 @@ async def execute(
             "receipt": receipt.model_dump(mode="json"),
             "interactions": TypeAdapter(list[JsonValue]).validate_python(book.public_facts()),
             "http_usage": wire.responses if wire else [],
+            "native_model_drift": book.model_drift,
             "cleanup": [aliases.identity(i) for i in sorted(wire.deleted)] if wire else [],
         }
         write_report(output / "result.json", report)

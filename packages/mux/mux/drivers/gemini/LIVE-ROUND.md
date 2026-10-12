@@ -108,6 +108,23 @@ cache-write category unknown so minimum pricing uses the cheapest compatible
 remainder, rather than treating an older cached zero as exact for a newer prompt.
 Complete measured terminal DTOs still retain the reviewed no-cache-write zero.
 
+Every admitted request seals its scope and accepted native target once. All
+response bodies, including both cancel routes, readbacks and cleanup, and every
+received raw SSE meter enter the same accumulator before SDK decoding. Stream
+tapping is lazy and byte-preserving; partial frames and all same-chunk peers are
+processed before codec refusal. SSE event IDs never identify interactions.
+Explicit foreign interaction IDs are refused and cannot contribute charges.
+The book retains maxima per interaction/category and a sticky interaction
+overrun; settlement reads only that book. Only the retained final GET snapshot
+certifies exact usage, and it must cover every observation, including later
+cleanup meters. Cancel/stream bookkeeping cannot release host occupancy.
+
+Any native root, agent-config or step model differing from `gemini-3.8-flash`
+sets a sticky drift flag, retains unknown actual/full holds, refuses further
+interaction creates and forces the case result to FAIL. Later primary-model
+responses cannot clear that flag. Missing native model remains labelled request
+provenance as described above; it is never replaced by an invented native model.
+
 Offline tests use real SDK MockTransport request bytes, fake native responses,
 disposable ledgers and no key access. Their numeric settlement is synthetic,
 never canonical live spend or a new live PASS. After dual-sign/merge, N8 installs
