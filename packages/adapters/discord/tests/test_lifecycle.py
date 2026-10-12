@@ -13,6 +13,7 @@ import json
 import time
 import types
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -596,6 +597,7 @@ def _make_lifecycle(
     tenant_id: uuid.UUID | None = None,
     budget_channel_id: str | None = None,
     in_dm: bool | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -626,6 +628,7 @@ def _make_lifecycle(
         tenant_id=tenant_id,
         budget_channel_id=budget_channel_id,
         in_dm=in_dm,
+        clock=clock,
     )
     return lc, sends, edits
 
@@ -812,6 +815,22 @@ class TestDebounce:
 
         assert len(edits) == 1, "edit should fire after debounce elapsed"
         assert edits[0][0] is _SENTINEL_REF, "edit should use stored message ref"
+
+    async def test_unchanged_render_after_debounce_moves_the_elapsed_timer(self) -> None:
+        """During a long tool call the driver re-renders the unchanged state;
+        once the debounce has passed, that edit carries a later elapsed time."""
+        now = [100.0]
+        lc, sends, edits = _make_lifecycle(clock=lambda: now[0])
+        running = _running_tool_turn("bash")
+
+        await lc.on_render(running)
+        now[0] += 12.0
+        await lc.on_render(running)
+        now[0] += 12.0
+        await lc.on_render(running)
+
+        assert len(sends) == 1
+        assert [e[1]["embeds"][0].footer.text for e in edits] == ["12s", "24s"]
 
     async def test_terminal_flushes_immediately_with_no_render_tick(self) -> None:
         """Terminal success bypasses on_render and the debounce entirely --

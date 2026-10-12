@@ -703,6 +703,44 @@ async def test_without_intent_id_cancel_value_still_uses_status_timestamp(
     assert cancel_button["value"] == lc.status_ts
 
 
+async def test_unchanged_running_state_rerendered_moves_the_elapsed_time(
+    fake_slack_web_client: Any,
+) -> None:
+    """The driver re-renders an unchanged state on every tick during a long
+    tool call; the debounce turns those into edits of the same message, each
+    carrying a later elapsed time."""
+    clock_now = [100.0]
+    lc = SlackTurnLifecycle(
+        client=fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="1700000000.000000",
+        cancel=asyncio.Event(),
+        author_id="U_AUTHOR",
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        register=lambda ts, event, author: None,
+        deregister=lambda ts: None,
+        clock=lambda: clock_now[0],
+    )
+    running = TurnState(
+        content=[
+            ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+        ]
+    )
+
+    await lc.on_render(running)
+    footers: list[str] = []
+    for elapsed in (1, 12, 13, 24):
+        clock_now[0] = 100.0 + elapsed
+        updates_before = _update_count(fake_slack_web_client)
+        await lc.on_render(running)
+        if _update_count(fake_slack_web_client) > updates_before:
+            footers.append(_last_update_blocks(fake_slack_web_client)[-1]["elements"][0]["text"])
+
+    assert _post_count(fake_slack_web_client) == 1
+    assert footers == ["12s", "24s"]
+
+
 async def test_status_ts_is_none_before_anything_is_posted(fake_slack_web_client: Any) -> None:
     """A freshly constructed lifecycle reports status_ts as None."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
