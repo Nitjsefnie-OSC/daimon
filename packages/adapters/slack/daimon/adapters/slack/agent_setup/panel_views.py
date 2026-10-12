@@ -210,10 +210,10 @@ ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
 
 ACTION_ADD_SKILL: Final = "agent_setup__skill_add"
+"""Open the Add skill form for the agent on Details."""
 ACTION_BACKEND_SELECT: Final = "agent_setup__backend_select"
 ACTION_BACKEND_CONFIRM: Final = "agent_setup__backend_confirm"
 ACTION_BACKEND_CANCEL: Final = "agent_setup__backend_cancel"
-"""Open the Add skill form for the agent on Details."""
 
 ACTION_REVOKE_TOKEN: Final = "agent_setup__revoke_token"
 """Revoke one minted token; the button's `value` is its jti.
@@ -604,7 +604,10 @@ def build_details_view(
     blocks.extend(_detail_list_blocks(details, meta=meta))
     if is_admin and backend_options:
         choices = [
-            {"text": {"type": "plain_text", "text": "Use default (Anthropic)"}, "value": "clear"},
+            {
+                "text": {"type": "plain_text", "text": channel_backend.DEFAULT_BACKEND_LABEL},
+                "value": "clear",
+            },
             *(
                 {"text": {"type": "plain_text", "text": provider}, "value": provider}
                 for provider in backend_options

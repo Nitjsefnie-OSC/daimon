@@ -463,7 +463,7 @@
     },
     "source": {
       "path": "packages/adapters/mcp/daimon/adapters/mcp/tools/agents.py",
-      "sha256": "56fbdd36e7646edb1c582462edbfd33e6c51ee2db946350e61ce3d915ef34113"
+      "sha256": "fc415b73e8565bed6d967d8d1821034e8493b8eb418bd6a41960d760cd69a4f9"
     }
   },
   "create_routine": {
@@ -1030,7 +1030,7 @@
     },
     "source": {
       "path": "packages/adapters/mcp/daimon/adapters/mcp/tools/agents.py",
-      "sha256": "56fbdd36e7646edb1c582462edbfd33e6c51ee2db946350e61ce3d915ef34113"
+      "sha256": "fc415b73e8565bed6d967d8d1821034e8493b8eb418bd6a41960d760cd69a4f9"
     }
   },
   "github_connect": {
@@ -3156,7 +3156,7 @@
     },
     "source": {
       "path": "packages/adapters/mcp/daimon/adapters/mcp/tools/agents.py",
-      "sha256": "56fbdd36e7646edb1c582462edbfd33e6c51ee2db946350e61ce3d915ef34113"
+      "sha256": "fc415b73e8565bed6d967d8d1821034e8493b8eb418bd6a41960d760cd69a4f9"
     }
   }
 }

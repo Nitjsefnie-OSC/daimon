@@ -267,7 +267,7 @@ def details_card(
                     label="Model backend",
                     value=backend_selection or "clear",
                     choices=[
-                        Choice(title="Use default (Anthropic)", value="clear"),
+                        Choice(title=channel_backend.DEFAULT_BACKEND_LABEL, value="clear"),
                         *(Choice(title=provider, value=provider) for provider in backend_options),
                     ],
                 ),

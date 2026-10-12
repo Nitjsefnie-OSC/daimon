@@ -46,7 +46,13 @@ from daimon.core.stores.domain import (
 )
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.admission import admit
-from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
+from mux.contracts.config import (
+    DEFAULT_BACKEND,
+    BackendConfig,
+    ConfigRevision,
+    ResolvedBackend,
+    resolve_default,
+)
 from mux.contracts.ids import ChannelRef, Provider
 from mux.contracts.profile import SUPPORTED, Capability
 from mux.contracts.resources import AgentSpec
@@ -62,6 +68,7 @@ from mux.state.store import ConfigRevisionConflict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
+DEFAULT_BACKEND_LABEL = f"Use default ({DEFAULT_BACKEND.capitalize()})"
 
 
 class BackendUnsupported(DaimonError):
@@ -167,6 +174,14 @@ class BackendActor:
     tenant_id: uuid.UUID
     account_id: uuid.UUID
     subject: Subject
+
+
+@dataclass(frozen=True)
+class BackendSelectionState:
+    agent: BackendAgent
+    revision: AgentBackendRevision | None
+    policy: TenantBackendPolicy
+    preview: CompatibilityPreview
 
 
 @dataclass(frozen=True)
@@ -317,8 +332,9 @@ class AgentBackendService:
             )
 
     async def _preview(
-        self, session: AsyncSession, agent: BackendAgent, target: Provider
+        self, session: AsyncSession, agent: BackendAgent, target: Provider | None
     ) -> CompatibilityPreview:
+        target = target or DEFAULT_BACKEND
         current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
         return compatibility_preview(
             agent,
@@ -328,10 +344,41 @@ class AgentBackendService:
             cost_line=self._cost_line(agent, target),
         )
 
-    async def preview(self, agent: BackendAgent, target_backend: Provider) -> CompatibilityPreview:
+    async def preview(
+        self, agent: BackendAgent, target_backend: Provider | None = None
+    ) -> CompatibilityPreview:
         self._require_enabled()
         async with self._sessions() as session:
             return await self._preview(session, agent, target_backend)
+
+    async def read_selection(
+        self,
+        client: AsyncAnthropic,
+        *,
+        tenant_id: uuid.UUID,
+        agent_name: str,
+        target_backend: Provider | None = None,
+        resource_host: NeutralResourceHost | None = None,
+    ) -> BackendSelectionState | None:
+        """Read an optional panel selection, preserving strict mutation refusals."""
+        if not self.enabled:
+            return None
+        try:
+            agent = await load_backend_agent(
+                client,
+                self._sessions,
+                tenant_id=tenant_id,
+                agent_name=agent_name,
+                resource_host=resource_host,
+            )
+            return BackendSelectionState(
+                agent=agent,
+                revision=await self.current(agent),
+                policy=await self.tenant_policy(tenant_id),
+                preview=await self.preview(agent, target_backend),
+            )
+        except AgentBackendRefused:
+            return None
 
     async def _change(
         self,
@@ -364,8 +411,8 @@ class AgentBackendService:
                 if current.previous_local is not None and previous is None:
                     raise AgentBackendRefused("no_previous_revision")
                 backend = previous.backend if previous else None
-            target = backend or "anthropic"
-            preview = await self._preview(session, agent, target)
+            preview = await self._preview(session, agent, backend)
+            target = preview.target_backend
             if not preview.allowed:
                 raise AgentBackendRefused("backend_not_allowed")
             if expected_preview_digest is not None and preview.digest != expected_preview_digest:

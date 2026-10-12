@@ -40,6 +40,7 @@ from daimon.adapters.mcp.tools._rule_view import (
     load_isolation_view,
     load_skill_owners,
 )
+from daimon.adapters.mcp.tools.agent_chat import require_outside_chat_turn
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
@@ -1007,14 +1008,17 @@ async def _set_agent_backend_impl(
     *,
     backend: Provider | None,
     expected_revision: int | None = None,
+    preview_only: bool = False,
 ) -> dict[str, JsonValue]:
     _require_admin(auth)
     if auth.agent_id is not None or auth.is_external:
         raise ToolError("An agent key or external account cannot change model backends.")
-    if auth.chat_agent_id is not None:
+    try:
+        require_outside_chat_turn(auth)
+    except ToolError as exc:
         raise ToolError(
             "Use request_agent_backend_switch in chat so the admin can confirm the preview."
-        )
+        ) from exc
     if not channel_backend.backend_selection_enabled(runtime.settings.turn):
         raise ToolError("Model backend selection is disabled on this deployment.")
     service = channel_backend.make_backend_service(runtime.session_factory, runtime.settings.turn)
@@ -1030,7 +1034,17 @@ async def _set_agent_backend_impl(
             tenant_id=auth.tenant_id,
             agent_name=name,
         )
-        preview = await service.preview(agent, backend or "anthropic")
+        preview = await service.preview(agent, backend)
+        if preview_only:
+            return {
+                "agent": name,
+                "applied": False,
+                "preview": cast(
+                    dict[str, JsonValue],
+                    TypeAdapter(type(preview)).dump_python(preview, mode="json"),
+                ),
+                "applies": "No setting was changed. Existing threads and channel overrides remain.",
+            }
         current = await channel_backend.load_backend_agent(
             runtime.client,
             runtime.session_factory,
@@ -1069,6 +1083,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             name: str,
             backend: Provider | None,
             expected_revision: int | None = None,
+            preview_only: bool = False,
         ) -> dict[str, JsonValue]:
             """Set an enabled model backend, or clear the agent setting with backend=null.
 
@@ -1077,6 +1092,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             The returned preview names compatibility limits and list prices.
             Existing threads keep their backend; channel overrides still apply.
             expected_revision refuses a setting changed since it was read.
+            preview_only returns the compatibility and cost preview without applying it.
             """
             return await _set_agent_backend_impl(
                 runtime,
@@ -1084,6 +1100,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 name,
                 backend=backend,
                 expected_revision=expected_revision,
+                preview_only=preview_only,
             )
 
     @mcp.tool
