@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve pinned OpenAI GO digests in the existing audited grouped format, and reuse the same receipt audit/write path for retained evidence.
 - Read CLI resource host identities and routing from declared provider profiles while preserving existing scope checks and default behavior.
+- Select Discord legacy event rendering and neutral action cards from the registered profile policy, preserving existing drafts, controls and terminal behavior.
+
 - Route Slack and Teams legacy event rendering and native action callbacks through one declared profile capability, preserving existing adapter behavior.
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.

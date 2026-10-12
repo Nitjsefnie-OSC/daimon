@@ -1231,6 +1231,11 @@ rendering or attachment failures preserve the original answer. See
 
 Discord consumes neutral message snapshots and ordered previews through an optional local lifecycle tap. Previews affect the draft only; existing host terminal callbacks finalize the progress card and deliver the authoritative answer. Anthropic retains its native display path. Alternate-provider usage remains observation-based, and an unverified cost is omitted from the footer. Generic confirmation cards retain Approve/Deny and approved/denied/expired states.
 
+Discord selects that legacy display path from the registered profile's
+`emits_legacy_events` declaration. Profiles without legacy events use neutral
+drafts and typed action cards; the existing draft ordering, thread filtering,
+requester controls and terminal callbacks remain unchanged.
+
 Slack also consumes root neutral snapshots and ordered previews through the optional local tap. Authoritative snapshots replace draft fragments; terminal output comes from host state. Existing status-card replacement, Cancel routing, generic confirmation controls, and Anthropic pricing remain unchanged. An unverified alternate-provider cost is omitted.
 
 Teams renders root neutral snapshots and ordered previews locally, retaining its debounce, unprompted silence and existing terminal card retirement. Host state owns final answers. Alternate-provider observations and missing observations bypass Anthropic display meters, so unknown cost is omitted; the native Anthropic path is unchanged.
