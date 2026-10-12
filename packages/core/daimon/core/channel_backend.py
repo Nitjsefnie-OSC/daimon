@@ -588,6 +588,7 @@ async def resolve_turn_backend(
     *,
     enabled: bool,
     retained_revision: int | None = None,
+    validate_origin: Callable[[ResolvedBackend, Literal["channel", "agent"]], None] | None = None,
 ) -> tuple[ConfigRevision | None, bool, Literal["channel", "agent", "default"]]:
     """Resolve and retain through the existing immutable channel revision namespace."""
     if not enabled or retained_revision == 0:
@@ -618,6 +619,8 @@ async def resolve_turn_backend(
     if not backend_is_enabled(setting.backend, policy.enabled_backends):
         raise AgentBackendRefused("backend_not_allowed")
     selection = backend_selection(setting.backend)
+    if validate_origin is not None:
+        validate_origin(selection, "agent")
     check_backend(ConfigRevision.create(channel, 1, selection))
     for _ in range(3):
         effective = await mux_state.effective_revision(

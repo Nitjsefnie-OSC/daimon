@@ -120,7 +120,7 @@ async def test_foreign_callback_receives_usage_only_frame_and_keeps_pending_sign
         ),
     )
     prepared = PreparedTurn(
-        admission=replace(admitted(), backend_revision=revision),
+        admission=replace(admitted(), backend_revision=revision, backend_revision_origin="channel"),
         ma_session_id=NATIVE.id,
         mapping_id=None,
         watermark=None,
@@ -172,7 +172,7 @@ def test_foreign_recorder_requires_an_admitted_authorized_native_ref(change: str
         }[change]
         ref = NATIVE.model_copy(update={field: "anthropic" if change == "provider" else "other"})
     prepared = PreparedTurn(
-        admission=replace(admitted(), backend_revision=revision),
+        admission=replace(admitted(), backend_revision=revision, backend_revision_origin="channel"),
         ma_session_id=NATIVE.id,
         mapping_id=None,
         watermark=None,
@@ -246,7 +246,7 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
         return False
 
     prepared = PreparedTurn(
-        admission=replace(admitted(), backend_revision=revision),
+        admission=replace(admitted(), backend_revision=revision, backend_revision_origin="channel"),
         ma_session_id=ref.id,
         mapping_id=None,
         watermark=None,
@@ -335,6 +335,7 @@ async def test_anthropic_prepared_turn_never_forwards_a_provider_action_callback
         selected = replace(
             selected,
             backend_revision=ConfigRevision.create(CHANNEL, 1, resolve_default(BackendConfig())),
+            backend_revision_origin="channel",
         )
 
     async def record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:

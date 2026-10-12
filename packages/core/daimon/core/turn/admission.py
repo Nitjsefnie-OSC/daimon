@@ -105,9 +105,10 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from mux.contracts.admission import Admission as BackendAdmission
-from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import ThreadRef
 from mux.errors import ScopeViolation
+from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Slot
 
 __all__ = [
@@ -227,10 +228,27 @@ class Admission:
     # Whether any revision of the channel ever shared threads, read with the
     # revision itself; a channel never shared reads no thread binding.
     backend_ever_shared: bool = field(default=False, compare=False, repr=False)
+    # Required whenever a revision exists; unconfigured legacy turns have neither.
     backend_revision_origin: Literal["channel", "agent"] | None = field(
         default=None, compare=False, repr=False
     )
     backend_footer_profile: str | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.backend_revision is not None and self.backend_revision_origin not in (
+            "channel",
+            "agent",
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+
+
+def _require_backend_origin(
+    selection: ResolvedBackend, origin: Literal["channel", "agent"]
+) -> None:
+    from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
+
+    if selection.profile != MANAGED_AGENTS.profile_id and not fixed_plan_origin_allowed(origin):
+        raise AdmissionDenied(reason="backend_unsupported")
 
 
 @dataclass(frozen=True)
@@ -736,7 +754,11 @@ async def admit_impl(
                         backend_ever_shared,
                         source,
                     ) = await channel_backend.resolve_turn_backend(
-                        selection_session, channel, source_agent, enabled=True
+                        selection_session,
+                        channel,
+                        source_agent,
+                        enabled=True,
+                        validate_origin=_require_backend_origin,
                     )
                     backend = (
                         check_backend(backend_revision, enabled_backends=policy.enabled_backends)

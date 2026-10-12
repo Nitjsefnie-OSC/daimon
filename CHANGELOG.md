@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution. Agent-origin native execution refuses until an authorized resource counterpart is available.
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution. Backend eligibility leaves legacy policy JSON readable during rolling upgrades and downgrade. Agent-origin native execution refuses until an authorized resource counterpart is available.
 - Add shared scoped OpenAI/Gemini counterpart catalog readback with strict source identity and revision pins, installed operator configuration checks, and native resource drift refusals. Agent-origin execution remains refused until complete source preservation is proven.
+- Require trusted origin evidence with configured turn revisions, refuse unproven native agent selection before persisting a revision, and publish the prepared binding within the existing preparation deadline.
+
 - Reuse already-scoped agent reads for backend selection and allow retained or disabled selection without a fabricated source projection.
 
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution by scoped resource identity. Channel clears restore inheritance, and concurrent reads share the existing policy fence. Backend eligibility leaves legacy policy JSON readable during rolling upgrades and downgrade. Agent-origin native execution refuses until an authorized resource counterpart is available.

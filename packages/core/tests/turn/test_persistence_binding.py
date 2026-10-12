@@ -190,7 +190,10 @@ async def test_shared_prepared_turn_uses_n2_persisted_binding_and_not_the_writer
         contexts: list[TurnPersistence] = []
         for writer in (alice, bob):
             admitted = replace(
-                admission(writer.id, tenant.id), shared_owner=owner, backend_revision=revision
+                admission(writer.id, tenant.id),
+                shared_owner=owner,
+                backend_revision=revision,
+                backend_revision_origin="channel",
             )
             context = await prepared_persistence(
                 dependencies,
@@ -327,7 +330,10 @@ async def test_missing_shared_binding_is_not_claimed_by_the_turn(
         digest=resolved.content_digest(),
     )
     admitted = replace(
-        admission(account.id, tenant.id), shared_owner=shared_owner(slot), backend_revision=revision
+        admission(account.id, tenant.id),
+        shared_owner=shared_owner(slot),
+        backend_revision=revision,
+        backend_revision_origin="channel",
     )
     try:
         with pytest.raises(ScopeViolation, match="persisted binding"):
@@ -606,7 +612,11 @@ async def test_provider_preparation_consumes_only_its_preexisting_native_binding
         )
         await store.put_binding(expected, expected_generation=1)
     dependencies = replace(deps(async_sessionmaker(db_engine)), state_store=store)
-    admitted = replace(admission(account_id, tenant_id), backend_revision=revision)
+    admitted = replace(
+        admission(account_id, tenant_id),
+        backend_revision=revision,
+        backend_revision_origin="channel",
+    )
     ref = ResourceRef(
         id="native-session",
         kind="session",

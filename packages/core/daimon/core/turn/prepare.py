@@ -63,6 +63,7 @@ from daimon.core.shared_threads import (
     record_shared_binding,
     resolve_shared_thread,
 )
+from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
@@ -656,10 +657,54 @@ async def bind_session(
                 # The thread runs under the revision it was bound with (checked
                 # runnable by `resolve_shared_thread`), so dispatch picks that
                 # provider even after the channel moves to another.
+                origin = admission.backend_revision_origin
+                if shared.revision != admission.backend_revision:
+                    async with deps.sessionmaker() as session:
+                        persisted_origin = await mux_state.config_origin(
+                            session, shared.revision.channel, shared.revision.local
+                        )
+                    if persisted_origin not in ("channel", "channel_clear", "agent"):
+                        raise AdmissionDenied(reason="backend_unsupported")
+                    origin = "agent" if persisted_origin == "agent" else "channel"
                 admission = replace(
-                    admission, shared_owner=shared.owner, backend_revision=shared.revision
+                    admission,
+                    shared_owner=shared.owner,
+                    backend_revision=shared.revision,
+                    backend_revision_origin=origin,
                 )
                 session_account_id = shared.owner
+            publish: Callable[[PreparedTurn], Awaitable[None]] | None = None
+            if (
+                deps.backend_selection_enabled
+                and admission.private_dm_id is None
+                and not (admission.grant is not None and admission.grant.is_dm)
+                and admission.config.thread_binding_kind != "setup"
+            ):
+                # Complete the first binding inside the preparation owner's
+                # existing ceiling before exposing it to an awaiting caller.
+                from daimon.core.turn.binding import prepared_persistence
+
+                async def _publish(prepared: PreparedTurn) -> None:
+                    if shared is not None:
+                        async with deps.sessionmaker() as session:
+                            await record_shared_binding(
+                                session, shared, ma_session_id=prepared.ma_session_id
+                            )
+                            await session.commit()
+                    await prepared_persistence(
+                        deps,
+                        prepared.admission,
+                        tenant_id=tenant_id,
+                        platform=platform,
+                        thread_id=thread_id,
+                        session_id=prepared.ma_session_id,
+                        mapping_id=prepared.mapping_id,
+                        session_ref=prepared.session_ref,
+                        operation_key="preparation",
+                    )
+
+                publish = _publish
+
             result = await bind_session_impl(
                 deps,
                 admission,
@@ -673,32 +718,12 @@ async def bind_session(
                 transfer=transfer,
                 deadline=deadline,
                 now=now,
+                _on_prepared=publish,
             )
-            if shared is not None:
+            if shared is not None and publish is None:
                 async with deps.sessionmaker() as session:
                     await record_shared_binding(session, shared, ma_session_id=result.ma_session_id)
                     await session.commit()
-            if (
-                deps.backend_selection_enabled
-                and admission.private_dm_id is None
-                and not (admission.grant is not None and admission.grant.is_dm)
-                and admission.config.thread_binding_kind != "setup"
-            ):
-                # Publish through the same binding owner used by execution,
-                # before returning a prepared session to an awaiting caller.
-                from daimon.core.turn.binding import prepared_persistence
-
-                await prepared_persistence(
-                    deps,
-                    result.admission,
-                    tenant_id=tenant_id,
-                    platform=platform,
-                    thread_id=thread_id,
-                    session_id=result.ma_session_id,
-                    mapping_id=result.mapping_id,
-                    session_ref=result.session_ref,
-                    operation_key="preparation",
-                )
     except BaseException as exc:
         observation.finish(error=exc)
         raise
@@ -887,6 +912,7 @@ async def bind_session_impl(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    _on_prepared: Callable[[PreparedTurn], Awaitable[None]] | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
 
@@ -936,6 +962,12 @@ async def bind_session_impl(
 
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
 
+    async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
+        result = await preparing
+        if _on_prepared is not None:
+            await _on_prepared(result)
+        return result
+
     profile = _admitted_profile(admission)
     if profile != "anthropic.managed_agents":
         prepare = _PROVIDER_PREPARATIONS.get(profile)
@@ -969,30 +1001,35 @@ async def bind_session_impl(
             request = replace(request, deps=provider_deps)
             runtimes = ScopedTurnRuntimes(request, deps.turn_runtime_factory)
             request = replace(request, deps=replace(provider_deps, turn_runtimes=runtimes))
+
+        async def _prepare_provider() -> PreparedTurn:
+            result = await prepare(request)
+            ref = result.session_ref
+            backend = result.backend
+            if ref is None or (
+                _admitted_profile(result.admission) != profile
+                or result.admission.backend_revision != admission.backend_revision
+                or result.admission.backend_revision_origin != admission.backend_revision_origin
+                or (backend is not None and backend.capabilities().profile_id != profile)
+                or ref.provider != get_profile(profile).provider
+                or ref.id != result.ma_session_id
+                or ref.kind != "session"
+                or ref.tenant_id != scope.tenant_id
+                or ref.account_id != scope.account_id
+                or result.admission.account_id != admission.account_id
+                or result.session_account_id != session_account_id
+            ):
+                raise ScopeViolation("preparation", "provider returned a foreign prepared session")
+            if runtimes is not None:
+                result = replace(result, runtime=runtimes.resolved)
+            return result
+
         try:
-            result = await asyncio.wait_for(
-                prepare(request), timeout=remaining_s(effective_deadline, now=now())
+            return await asyncio.wait_for(
+                _complete(_prepare_provider()), timeout=remaining_s(effective_deadline, now=now())
             )
         except TimeoutError as error:
             raise ceiling_error() from error
-        ref = result.session_ref
-        backend = result.backend
-        if ref is None or (
-            _admitted_profile(result.admission) != profile
-            or result.admission.backend_revision != admission.backend_revision
-            or (backend is not None and backend.capabilities().profile_id != profile)
-            or ref.provider != get_profile(profile).provider
-            or ref.id != result.ma_session_id
-            or ref.kind != "session"
-            or ref.tenant_id != scope.tenant_id
-            or ref.account_id != scope.account_id
-            or result.admission.account_id != admission.account_id
-            or result.session_account_id != session_account_id
-        ):
-            raise ScopeViolation("preparation", "provider returned a foreign prepared session")
-        if runtimes is not None:
-            result = replace(result, runtime=runtimes.resolved)
-        return result
 
     async def _bind() -> PreparedTurn:
         # Decide the admission again at the moment its session is found,
@@ -1067,7 +1104,9 @@ async def bind_session_impl(
         return prepared_turn
 
     try:
-        return await asyncio.wait_for(_bind(), timeout=remaining_s(effective_deadline, now=now()))
+        return await asyncio.wait_for(
+            _complete(_bind()), timeout=remaining_s(effective_deadline, now=now())
+        )
     except TimeoutError as err:
         log.error(
             "turn.ceiling_exceeded",
