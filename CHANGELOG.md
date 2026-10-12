@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Serve recorded turn events in the offline scripted router for main #824's post-turn billing catch-up; preserve scoped routes, usage identities and full dual-path golden comparisons.
 
 - Preserve oversized output files and main's notice deduplication while following every delivery listing page through the scoped output port.
+- Read neutral resource catalog, tool, skill digest and deletion behavior from declared profiles while preserving scoped authorization and native requests.
+
 - Preserve pinned OpenAI GO digests in the existing audited grouped format, and reuse the same receipt audit/write path for retained evidence.
 - Read CLI resource host identities and routing from declared provider profiles while preserving existing scope checks and default behavior.
 - Select Discord legacy event rendering and neutral action cards from the registered profile policy, preserving existing drafts, controls and terminal behavior.

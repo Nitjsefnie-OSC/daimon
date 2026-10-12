@@ -47,6 +47,8 @@ Capability = Literal[
     "native_schedules",
     "model_request_usage",
     "workspace_export_import",
+    "neutral_catalog",
+    "agent_delete",
 ]
 
 CORE_CAPABILITIES: frozenset[Capability] = frozenset(
@@ -79,6 +81,10 @@ class Profile(Contract):
     core: bool
     support: FrozenMap[Capability, Support]
     extensions: tuple[ExtensionRef, ...] = ()
+    execution_tool: Literal["bash", "code_execution"] = "code_execution"
+    skill_digest: Literal["version"] | None = None
+    tool_readback: Literal["authored", "compiled"] = "authored"
+    catalog_readback: Literal["retrieve", "verify"] = "retrieve"
     emits_legacy_events: bool = False
     """The host receives SDK events alongside normalized events for rendering."""
 

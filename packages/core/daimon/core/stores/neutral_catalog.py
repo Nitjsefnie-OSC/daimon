@@ -15,7 +15,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from daimon.core._models import (
     Account,
@@ -23,9 +23,10 @@ from daimon.core._models import (
     NeutralSkillVersion,
 )
 from daimon.core.skills.ingest import SkillBundle, SkillPreview, bundle_from_upload
-from mux.contracts.ids import Scope
+from mux.contracts.ids import Provider, Scope
 from mux.contracts.resources import Agent
 from mux.errors import ScopeViolation
+from mux.profiles import neutral_catalog_profile_for
 from sqlalchemy import ColumnElement, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -62,10 +63,10 @@ class PostgresNeutralCatalog:
         self,
         sessions: async_sessionmaker[AsyncSession],
         *,
-        provider: Literal["openai", "gemini"],
+        provider: Provider,
         account_scope_id: str,
     ) -> None:
-        if provider not in ("openai", "gemini") or not account_scope_id.strip():
+        if neutral_catalog_profile_for(provider) is None or not account_scope_id.strip():
             raise ValueError("an alternate provider and a nonblank workspace are required")
         self._sessions = sessions
         self._provider = provider

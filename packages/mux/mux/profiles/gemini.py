@@ -18,7 +18,12 @@ INLINE_REUSE = Profile(
     sdk_pin="google-genai>=2.7.0,<3",
     core=False,
     extensions=(ExtensionRef(namespace="gemini.session", version=1),),
+    execution_tool="code_execution",
+    skill_digest="version",
+    catalog_readback="verify",
     support={
+        "neutral_catalog": "emulated",
+        "agent_delete": "unsupported",
         "thread_workspace_persistence": "unsupported",
         "turn_lifecycle": "native",
         "cancel": "native",

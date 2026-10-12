@@ -9,14 +9,19 @@ import pytest
 from mux import profiles
 from mux.contracts import ports
 from mux.contracts.extensions import ExtensionConfig, ExtensionRef
+from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.profile import CORE_CAPABILITIES, Profile
+from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.errors import ExtensionVersionError, InvalidConfig, UnsupportedCapability
 from mux.profiles import (
+    INLINE_REUSE,
     MANAGED_AGENTS,
     PERSISTENT_WORKSPACE,
     PROFILES,
     emits_legacy_events_for,
     get_profile,
+    native_agent_tools,
+    neutral_catalog_profile_for,
 )
 from pydantic import ValidationError
 
@@ -111,3 +116,81 @@ def test_no_port_exposes_a_raw_client() -> None:
             continue
         names = {n for n in dir(port) if not n.startswith("__")}
         assert not {n for n in names if "client" in n or n.startswith("raw")}, port.__name__
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    (("anthropic", None), ("openai", PERSISTENT_WORKSPACE), ("gemini", INLINE_REUSE)),
+)
+def test_catalog_selection_uses_profile_support(
+    provider: Provider, expected: Profile | None
+) -> None:
+    assert neutral_catalog_profile_for(provider) is expected
+    assert neutral_catalog_profile_for("unregistered") is None
+
+
+def test_catalog_support_can_be_removed_without_provider_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disabled = PERSISTENT_WORKSPACE.model_copy(
+        update={"support": {**PERSISTENT_WORKSPACE.support, "neutral_catalog": "unsupported"}}
+    )
+    monkeypatch.setattr(profiles, "PROFILES", {disabled.profile_id: disabled})
+    assert neutral_catalog_profile_for(disabled.provider) is None
+
+
+def test_ambiguous_catalog_declarations_refuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    duplicate = PERSISTENT_WORKSPACE.model_copy(update={"profile_id": "openai.other_workspace"})
+    monkeypatch.setattr(
+        profiles,
+        "PROFILES",
+        {PERSISTENT_WORKSPACE.profile_id: PERSISTENT_WORKSPACE, duplicate.profile_id: duplicate},
+    )
+    with pytest.raises(InvalidConfig, match="ambiguous neutral catalog"):
+        neutral_catalog_profile_for(PERSISTENT_WORKSPACE.provider)
+
+
+def test_resource_profile_native_projection_preserves_authored_intent() -> None:
+    authored = AgentSpec(
+        name="tools",
+        model=ModelRef(provider="openai", id="offline"),
+        tools=(
+            ToolSpec(name="bash", kind="builtin"),
+            ToolSpec(name="web_search", kind="builtin"),
+            ToolSpec(name="server", kind="mcp_toolset"),
+            ToolSpec(name="helper", kind="custom", description="", input_schema=None),
+        ),
+    )
+    assert native_agent_tools(PERSISTENT_WORKSPACE, authored) == (
+        ToolSpec(name="web_search", kind="builtin"),
+        ToolSpec(name="helper", kind="custom", input_schema={}),
+    )
+    assert native_agent_tools(INLINE_REUSE, authored) == authored.tools
+    assert (
+        native_agent_tools(
+            PERSISTENT_WORKSPACE.model_copy(update={"tool_readback": "authored"}), authored
+        )
+        == authored.tools
+    )
+    assert PERSISTENT_WORKSPACE.execution_tool == "bash"
+    assert PERSISTENT_WORKSPACE.skill_digest is None
+    assert PERSISTENT_WORKSPACE.support_for("agent_delete") == "native"
+    assert INLINE_REUSE.execution_tool == "code_execution"
+    assert INLINE_REUSE.skill_digest == "version"
+    assert INLINE_REUSE.catalog_readback == "verify"
+    assert INLINE_REUSE.support_for("agent_delete") == "unsupported"
+
+
+def test_new_resource_declarations_default_closed_for_old_profile_rows() -> None:
+    row = PERSISTENT_WORKSPACE.model_dump()
+    for key in ("execution_tool", "skill_digest", "tool_readback", "catalog_readback"):
+        row.pop(key)
+    row["support"] = {
+        k: v for k, v in row["support"].items() if k not in {"neutral_catalog", "agent_delete"}
+    }
+    restored = Profile.model_validate(row)
+    assert restored.support_for("neutral_catalog") == "unknown"
+    assert restored.support_for("agent_delete") == "unknown"
+    assert restored.skill_digest is None
+    assert restored.tool_readback == "authored"
+    assert restored.catalog_readback == "retrieve"
