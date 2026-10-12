@@ -86,6 +86,8 @@ class TurnObservation:
     account_id: uuid.UUID | None = None
     agent_id: str | None = None
     session_id: str | None = None
+    backend_profile: str | None = field(default=None, kw_only=True)
+    """Admitted profile displayed only for explicitly configured neutral turns."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _started: float = field(default_factory=time.monotonic)

@@ -251,6 +251,7 @@ async def native_host(
                 environment=ma_environment(),
                 config=ResolvedConfig(agent_name="configured", environment_name="configured"),
                 backend_revision=CONFIG,
+                backend_revision_origin="channel",
                 backend=check_backend(CONFIG),
                 origin_channel_id=CHANNEL.channel_id,
             )

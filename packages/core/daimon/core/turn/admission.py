@@ -34,6 +34,7 @@ from anthropic.types.beta import (
     BetaManagedAgentsAgent,
     BetaManagedAgentsCustomSkill,
 )
+from daimon.core import channel_backend
 from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
@@ -59,7 +60,9 @@ from daimon.core.channel_backend import (
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     MAResolverMissError,
     resolve_agent,
@@ -90,6 +93,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
+from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
@@ -101,9 +105,10 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from mux.contracts.admission import Admission as BackendAdmission
-from mux.contracts.config import ConfigRevision
+from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import ThreadRef
 from mux.errors import ScopeViolation
+from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Slot
 
 __all__ = [
@@ -223,6 +228,27 @@ class Admission:
     # Whether any revision of the channel ever shared threads, read with the
     # revision itself; a channel never shared reads no thread binding.
     backend_ever_shared: bool = field(default=False, compare=False, repr=False)
+    # Required whenever a revision exists; unconfigured legacy turns have neither.
+    backend_revision_origin: Literal["channel", "agent"] | None = field(
+        default=None, compare=False, repr=False
+    )
+    backend_footer_profile: str | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.backend_revision is not None and self.backend_revision_origin not in (
+            "channel",
+            "agent",
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+
+
+def _require_backend_origin(
+    selection: ResolvedBackend, origin: Literal["channel", "agent"]
+) -> None:
+    from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
+
+    if selection.profile != MANAGED_AGENTS.profile_id and not fixed_plan_origin_allowed(origin):
+        raise AdmissionDenied(reason="backend_unsupported")
 
 
 @dataclass(frozen=True)
@@ -445,21 +471,38 @@ async def admit_impl(
             thread_id=thread_id,
         )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
-        # Off by default: with the flag unset this reads nothing.
+        # Feature-disabled turns retain the existing channel read and skip all
+        # agent preference, materialization and thread-pinning work.
+        channel = channel_ref(tenant_id, platform, channel_id) if deps.channel_backends else None
         backend_revision, backend_ever_shared = (
-            await current_backend_and_sharing(session, channel_ref(tenant_id, platform, channel_id))
-            if deps.channel_backends
+            await current_backend_and_sharing(session, channel)
+            if channel is not None
             else (None, False)
         )
+        configured_channel = backend_revision is not None
+        selection_enabled = deps.backend_selection_enabled
         if (
-            deps.channel_backends
-            and deps.turn_path == "mux"
+            selection_enabled
+            and channel is not None
             and backend_revision is not None
+            and await mux_state.config_origin(session, channel, backend_revision.local)
+            == "channel_clear"
+        ):
+            backend_revision = None
+            configured_channel = False
+        backend_revision_origin: Literal["channel", "agent"] | None = (
+            "channel" if configured_channel else None
+        )
+        backend_footer_profile: str | None = None
+        retained_revision: int | None = None
+        if (
+            selection_enabled
+            and channel is not None
             and thread_id is not None
             and not is_dm
             and config.thread_binding_kind != "setup"
         ):
-            thread = ThreadRef(channel=backend_revision.channel, thread_id=thread_id)
+            thread = ThreadRef(channel=channel, thread_id=thread_id)
             slots = [Slot(thread=thread, account_id=str(principal.account_id))]
             if backend_ever_shared:
                 slots.insert(0, Slot(thread=thread))
@@ -475,21 +518,66 @@ async def admit_impl(
                     raise ScopeViolation(
                         binding.id, "selected binding differs from authorized thread"
                     )
-                # Legacy unconfigured Anthropic bindings use revision zero.
-                if binding.config_revision == 0 and binding.provider == "anthropic":
+                retained_revision = binding.config_revision
+                try:
+                    retained, _, source = await channel_backend.resolve_turn_backend(
+                        session, channel, None, enabled=True, retained_revision=retained_revision
+                    )
+                except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
+                    raise AdmissionDenied(reason="backend_unsupported") from error
+                if retained_revision == 0:
+                    default = resolve_default(BackendConfig())
+                    if (binding.provider, binding.profile) != (default.backend, default.profile):
+                        raise AdmissionDenied(reason="backend_unsupported")
+                    backend_revision = None
+                    backend_revision_origin = None
                     break
-                retained = await mux_state.get_config_revision(
-                    session, thread.channel, binding.config_revision
-                )
                 if retained is None or (
                     retained.channel != thread.channel
-                    or retained.local != binding.config_revision
+                    or retained.local != retained_revision
                     or retained.backend != binding.provider
                     or retained.profile != binding.profile
                 ):
                     raise AdmissionDenied(reason="backend_unsupported")
                 backend_revision = retained
+                backend_revision_origin = source if source != "default" else None
+                backend_footer_profile = retained.profile
                 break
+            if retained_revision is None:
+                # A caller's older session remains on its original default
+                # backend even if neutral thread bindings did not yet exist.
+                previous = await get_thread_session_at(
+                    session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=thread_id,
+                    account_id=principal.account_id,
+                    at=now,
+                )
+                if previous is not None:
+                    if previous.channel_id not in (None, channel_id):
+                        raise ScopeViolation(
+                            previous.ma_session_id,
+                            "session history differs from authorized channel",
+                        )
+                    retained_revision = 0
+                    backend_revision = None
+                    backend_revision_origin = None
+        if selection_enabled and backend_revision is not None:
+            backend_footer_profile = backend_revision.profile
+        if selection_enabled and channel is not None and retained_revision == 0:
+            # Check the retained default profile too; its removal must refuse
+            # the thread instead of silently selecting a new provider.
+            default = resolve_default(BackendConfig())
+            if configured_channel:
+                backend_footer_profile = default.profile
+            try:
+                check_backend(
+                    ConfigRevision.create(channel, 0, default),
+                    enabled_backends=policy.enabled_backends,
+                )
+            except BackendUnsupported as error:
+                raise AdmissionDenied(reason="backend_unsupported") from error
     mark("config")
 
     # --- An external caller is never answered in a setup conversation, even
@@ -517,7 +605,14 @@ async def admit_impl(
     # and be runnable here. Before any MA call; a channel never configured has
     # no revision and skips it. ---
     try:
-        backend = check_backend(backend_revision) if backend_revision is not None else None
+        backend = (
+            check_backend(
+                backend_revision,
+                enabled_backends=policy.enabled_backends if selection_enabled else None,
+            )
+            if backend_revision is not None
+            else None
+        )
     except BackendUnsupported as err:
         raise AdmissionDenied(reason="backend_unsupported") from err
 
@@ -638,6 +733,56 @@ async def admit_impl(
     _require_run_agent(policy, grant)
     mark("agent_policy")
 
+    if selection_enabled and channel is not None:
+        if retained_revision is None and not configured_channel:
+            # Reuse the authorized source read; a friendly name cannot carry
+            # another resource's backend preference.
+            try:
+                source_agent = await channel_backend.load_backend_agent(
+                    deps.anthropic,
+                    deps.sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_name=(agent.metadata or {}).get(MA_METADATA_KEY_NAME, config.agent_name),
+                    actual_agent=agent,
+                )
+            except channel_backend.AgentBackendRefused as error:
+                raise AdmissionDenied(reason="backend_unsupported") from error
+            async with deps.sessionmaker() as selection_session:
+                try:
+                    (
+                        backend_revision,
+                        backend_ever_shared,
+                        source,
+                    ) = await channel_backend.resolve_turn_backend(
+                        selection_session,
+                        channel,
+                        source_agent,
+                        enabled=True,
+                        validate_origin=_require_backend_origin,
+                    )
+                    backend = (
+                        check_backend(backend_revision, enabled_backends=policy.enabled_backends)
+                        if backend_revision is not None
+                        else None
+                    )
+                except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
+                    raise AdmissionDenied(reason="backend_unsupported") from error
+                # Preparation uses another transaction. Publish the immutable
+                # effective revision and its origin before that transaction.
+                await selection_session.commit()
+            backend_revision_origin = source if source != "default" else None
+            if backend_revision is not None:
+                backend_footer_profile = backend_revision.profile
+        elif retained_revision == 0 and not configured_channel:
+            async with deps.sessionmaker() as selection_session:
+                preference = await channel_backend.current_agent_backend(
+                    selection_session,
+                    tenant_id,
+                    derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+                )
+            if preference is not None and preference.backend is not None:
+                backend_footer_profile = resolve_default(BackendConfig()).profile
+
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
         dm_source_channel_id if is_dm else channel_id
     )
@@ -721,6 +866,8 @@ async def admit_impl(
 
     result = Admission(
         backend_revision=backend_revision,
+        backend_revision_origin=backend_revision_origin,
+        backend_footer_profile=backend_footer_profile,
         backend_ever_shared=backend_ever_shared,
         backend=backend,
         memory_read_only=memory_read_only,
@@ -853,6 +1000,11 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         setup_thread=grant.run_place.setup_thread,
     )
     _require_run_agent(policy, grant)
+    if deps.backend_selection_enabled and admission.backend_revision is not None:
+        try:
+            check_backend(admission.backend_revision, enabled_backends=policy.enabled_backends)
+        except BackendUnsupported as error:
+            raise AdmissionDenied(reason="backend_unsupported") from error
     if grant.dm_source is not None and dm_source_limited(
         policy,
         source_channel_id=grant.dm_source.channel_id,

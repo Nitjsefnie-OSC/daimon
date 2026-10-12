@@ -452,6 +452,8 @@ async def test_c14_normal_current_config_retains_native_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request, _, _, store, wire, runtime = native_host
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
     from daimon.core.stores.tenants import get_tenant
 
     async with request.deps.sessionmaker.begin() as db:
@@ -465,6 +467,11 @@ async def test_c14_normal_current_config_retains_native_binding(
             db, tenant=tenant, agent_name="test-agent", environment_name="test-env"
         )
         await make_ledger_entry(db, tenant=tenant, delta_usd=Decimal(100))
+        await set_access_policy(
+            db,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai")),
+        )
     ancillary = build_turn_router(str(TENANT))
     memory = make_fake_memory_store_handler()
     calls: list[httpx.Request] = []

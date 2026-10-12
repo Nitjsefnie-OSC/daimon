@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2604,
+  "files_scanned": 2606,
   "parse_errors": [],
   "calls": [
     {
@@ -3822,6 +3822,30 @@
       "response_access": [
         "row.latest_version"
       ]
+    },
+    {
+      "file": "packages/core/tests/test_agent_backend.py",
+      "line": 718,
+      "end": 718,
+      "scope": "test_scoped_source_reuse_projects_actual_sdk_retrieve_without_extra_request",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "client.beta.agents.retrieve('agent-owned')",
+      "request_keys": [],
+      "response_access": [
+        "actual.id"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_agent_backend.py",
+      "line": 752,
+      "end": 752,
+      "scope": "test_scoped_source_reuse_refuses_unbound_or_inactive_source_without_extra_request",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "client.beta.agents.retrieve('agent-owned')",
+      "request_keys": [],
+      "response_access": []
     },
     {
       "file": "packages/core/tests/test_checkpoint_turn_scope.py",
@@ -10928,7 +10952,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_gateway_ingress.py",
-      "line": 869,
+      "line": 885,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsAgentMessageEvent",
@@ -13101,6 +13125,15 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/channel_backend.py",
+      "line": 30,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
       ],
       "category": "production"
     },

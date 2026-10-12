@@ -33,11 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution. Agent-origin native execution refuses until an authorized resource counterpart is available.
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution. Backend eligibility leaves legacy policy JSON readable during rolling upgrades and downgrade. Agent-origin native execution refuses until an authorized resource counterpart is available.
 - Add shared scoped OpenAI/Gemini counterpart catalog readback with strict source identity and revision pins, installed operator configuration checks, and native resource drift refusals. Agent-origin execution remains refused until complete source preservation is proven.
+- Require trusted origin evidence with configured turn revisions, refuse unproven native agent selection before persisting a revision, and publish the prepared binding within the existing preparation deadline.
+
+- Reuse already-scoped agent reads for backend selection and allow retained or disabled selection without a fabricated source projection.
 
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution by scoped resource identity. Channel clears restore inheritance, and concurrent reads share the existing policy fence. Backend eligibility leaves legacy policy JSON readable during rolling upgrades and downgrade. Agent-origin native execution refuses until an authorized resource counterpart is available.
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 - Let workspace admins preview and select an agent's model backend in agent setup, or set and clear it through the CLI and direct MCP tool, when backend selection is explicitly enabled. Previews include compatibility and pricing limits; existing threads keep their backend.
+- Keep each opt-in turn thread on its first admitted backend, including threads created before backend selection was enabled; new threads use the channel override or agent preference, and configured turn footers identify the retained backend.
 
 - Preserve OpenAI session occupancy when accepted work has no visible active root yet, allowing observation to continue without retrying creation or admitting a new turn.
 
