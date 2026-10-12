@@ -23,7 +23,13 @@ from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_admins import GroupMembersFor
 from daimon.core.channel_budget_notice import BudgetNotifier
-from daimon.core.config import GithubAppSettings, McpSettings, Settings, TurnSettings
+from daimon.core.config import (
+    GithubAppSettings,
+    McpSettings,
+    Settings,
+    TurnSettings,
+    load_turn_settings,
+)
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.mux_backend import TurnRuntime
@@ -90,6 +96,20 @@ class TurnDeps:
     state_store: StateStore | None = None
     # Every turn inside `run_prepared_turn`, whatever started it; read by shutdown drains.
     running_turns: RunningTurns = field(default_factory=RunningTurns)
+
+    @property
+    def backend_selection_enabled(self) -> bool:
+        """Use the settings owner's opt-in boundary for every turn stage."""
+        if not self.channel_backends:
+            return False
+        from daimon.core import channel_backend
+
+        return channel_backend.backend_selection_enabled(
+            TurnSettings(
+                path=self.turn_path or load_turn_settings().path,
+                channel_backends=self.channel_backends,
+            )
+        )
 
 
 def _reveal(secret: SecretStr | None) -> str | None:

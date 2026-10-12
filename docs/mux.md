@@ -2175,6 +2175,38 @@ already-read active Managed Agents response through `load_backend_agent`;
 the projection checks the same tenant/name metadata and avoids another native
 list or retrieve. Unbound or archived responses refuse without additional I/O.
 
+### Backend preferences and existing turns
+
+Normal channel turn preparation publishes the first session's binding
+through the existing state store before returning it to the caller. That binding pins
+the provider and immutable effective revision; an existing thread keeps them
+after a preference change or revert. Older caller-owned Anthropic session
+mappings also retain the default when backend selection is first enabled.
+
+A missing original profile, unavailable retained revision or provider removed
+from the current tenant allowlist produces `backend_unsupported` before any
+provider request. It does not redirect an existing conversation. Agent
+preferences materialize in the existing channel revision namespace with agent
+origin, and remain excluded from explicit channel overrides. One-step revert
+uses the settings owner's existing revision and authorization checks and
+affects new threads; it does not rewrite existing bindings.
+
+The shared chat summary displays the admitted backend on explicitly configured
+turns, using trusted profile metadata. Unconfigured turns and either disabled
+flag retain their existing footer. These rules do not authorize a deployment,
+staging write, live provider call or a provider unsupported on the selected
+surface.
+
+The settings, preview, selection and revert proofs establish their own
+behavior; they do not prove an agent-origin native turn can run. Both default
+runtime loaders and injected native runtimes retain the shared origin refusal
+until a provider-owned counterpart proof is available. New preferences also
+resolve preferences by the UUID of the already authorized source agent before
+session assembly. Matching names across catalogs cannot establish identity,
+and a recreated namesake does not inherit the old preference. Channel clear
+allows new threads to inherit that identity’s preference or the default;
+retained threads keep their original revision.
+
 ### Replay fixture integrity
 
 Offline replay checks recorded scenario inputs, native request and response
