@@ -3560,6 +3560,79 @@ class TestOverCapQueue:
         mock_create_session.assert_not_called()
         assert bot.turn_queue.depth() == 0
 
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_mention_waiting_on_the_tenant_cap_shows_the_queued_hourglass(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Cap 1, two mentions: the second gets ⌛ while it waits, then the normal lifecycle."""
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        mock_create_session.side_effect = [ma_session(id="sess-cap-1"), ma_session(id="sess-cap-2")]
+        first_running = asyncio.Event()
+        finish_first = asyncio.Event()
+        reactions_at_start: list[list[tuple[str, str]]] = []
+
+        def reactions(message: MagicMock) -> list[tuple[str, str]]:
+            added = [("+", c.args[0]) for c in message.add_reaction.await_args_list]
+            removed = [("-", c.args[0]) for c in message.remove_reaction.await_args_list]
+            return added + removed
+
+        async def run_turn(*_args: object, **_kwargs: object) -> MagicMock:
+            if not first_running.is_set():
+                first_running.set()
+                await finish_first.wait()
+            else:
+                reactions_at_start.append(reactions(second))
+            return MagicMock()
+
+        mock_run_turn.side_effect = run_turn
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        bot.runtime.settings.discord.max_concurrent_turns_per_tenant = 1  # pyright: ignore[reportOptionalMemberAccess]
+        first, second = (_make_channel_message(channel_id=cid) for cid in (789, 790))
+        for index, message in enumerate((first, second)):
+            card = MagicMock(spec=discord.Message)
+            card.id = 5000 + index
+            card.webhook_id = None
+            card.edit = AsyncMock(return_value=card)
+            thread = MagicMock(spec=discord.Thread)
+            thread.id = 6000 + index
+            thread.send = AsyncMock(return_value=card)
+            message.create_thread = AsyncMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+            message.remove_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+
+        first_turn = asyncio.create_task(bot.on_message(first))
+        await asyncio.wait_for(first_running.wait(), 5)
+        second_turn = asyncio.create_task(bot.on_message(second))
+        for _ in range(200):
+            if second.add_reaction.await_count >= 2:  # pyright: ignore[reportAttributeAccessIssue]
+                break
+            await asyncio.sleep(0.01)
+        assert bot.turn_queue.depth(tenant.id) == 1
+        assert reactions(second) == [("+", "👀"), ("+", "⌛")]  # pyright: ignore[reportArgumentType]
+
+        finish_first.set()
+        await asyncio.wait_for(asyncio.gather(first_turn, second_turn), 5)
+        assert reactions_at_start == [[("+", "👀"), ("+", "⌛"), ("-", "⌛")]], (
+            "the hourglass is gone once the turn holds its slot"
+        )
+        assert reactions(second) == [("+", "👀"), ("+", "⌛"), ("-", "⌛"), ("-", "👀")]  # pyright: ignore[reportArgumentType]
+        assert reactions(first) == [("+", "👀"), ("-", "👀")], "a turn that never waited: no ⌛"  # pyright: ignore[reportArgumentType]
+        assert bot.turn_queue.in_flight() == 0
+
 
 class TestOwnCardIsNotContext:
     """The turn's own status card is posted before the context is built; it is not conversation."""

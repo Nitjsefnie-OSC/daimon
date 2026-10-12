@@ -1,9 +1,9 @@
 """Turn slots and the queue in front of them, one per adapter process.
 
 A turn over the global cap (`max_concurrent_turns`) or its tenant's cap waits
-here for a slot instead of being refused. The queue is backstage: a queued turn
-shows the same "Working on it…" card with Stop as a running one, and the only
-difference a person sees is time.
+here for a slot instead of being refused. A queued turn shows the same
+"Working on it…" card with Stop as a running one; the adapter may also mark the
+trigger as queued (`wait_for_slot`'s `on_queued`), as Discord does with ⌛.
 
 - Admission (`TurnQueue.admit`) runs a turn at once when its tenant and the
   process both have a free slot and nobody of its tenant is already waiting;

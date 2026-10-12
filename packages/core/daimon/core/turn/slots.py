@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Literal
@@ -101,6 +101,7 @@ async def wait_for_slot(
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     default_cap: int | None = None,
+    on_queued: Callable[[], Awaitable[None]] | None = None,
 ) -> SlotResult:
     """Wait, after the card is up, until this turn holds a slot.
 
@@ -111,7 +112,8 @@ async def wait_for_slot(
     balance or capacity refusal on "balance_depleted" or "queue_full". Each
     records the turn's outcome. Adapters pass their configured `default_cap`
     so a follow-up reads the current tenant override (or its cleared default)
-    before taking a new ticket.
+    before taking a new ticket. `on_queued` runs once, before the wait, when
+    the turn has to wait for a slot, so the adapter can show its queued marker.
     """
     holder = _current_holder.get()
     if holder is None:
@@ -132,6 +134,8 @@ async def wait_for_slot(
                 observation.finish(reason=_REASONS["queue_full"])
             return "queue_full"
     holder.current = ticket
+    if ticket.queued and on_queued is not None:
+        await on_queued()
     result = await wait_for_ticket(ticket, cancel, sessionmaker=sessionmaker, tenant_id=tenant_id)
     if result != "started":
         ticket.release()  # a Stop that raced the grant, or a refusal after it
