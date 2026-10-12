@@ -25,7 +25,7 @@ import secrets
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -226,6 +226,7 @@ async def submit_mcp_token(
         peek_credential_request,
     )
     from daimon.testing.factories import make_account, make_tenant
+    from daimon.testing.turn_fakes import deps_for
     from pydantic import HttpUrl
 
     async with sessionmaker() as session, session.begin():
@@ -278,15 +279,20 @@ async def submit_mcp_token(
     settings = MagicMock()
     settings.mcp.public_url = HttpUrl("https://qa-daimon.example.com/mcp")
     settings.mcp.jwt_secret.get_secret_value.return_value = "q" * 32
+    client = isolated_anthropic(managed_agents)
     runtime = DiscordRuntime(
         settings=settings,
-        anthropic=isolated_anthropic(managed_agents),
+        anthropic=client,
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(fernet=build_multifernet((Fernet.generate_key().decode(),))),  # pyright: ignore[reportArgumentType]  # a form submit never runs a turn
+        turn_deps=replace(
+            deps_for(client, sessionmaker),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            turn_path=None,
+        ),
         mcp_token_probe=probe,
     )
     modal = McpCredentialModal(runtime=runtime, request_row=row)

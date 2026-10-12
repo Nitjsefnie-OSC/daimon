@@ -16,9 +16,14 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import discord
 import httpx
 import pytest
+from cryptography.fernet import MultiFernet
+from daimon.adapters.discord.credential_modals import McpCredentialModal
 from daimon.core.mcp_token_check import is_token_rejected
+from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.running import RunningTurns
 from daimon.testing.db import DatabasePreflight
 from daimon.testing.headless_bindings import (
     QA_TOKEN_MCP_URL,
@@ -116,11 +121,32 @@ async def test_the_qa_host_really_tells_a_wrong_token_from_the_right_one(served:
 
 
 async def test_new27_a_rejected_token_through_the_real_modal(
-    served: _Served, db_session_factory: async_sessionmaker[AsyncSession]
+    served: _Served,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    original_submit = McpCredentialModal.on_submit
+    observed: list[TurnDeps] = []
+
+    async def observe_submit(self: McpCredentialModal, interaction: discord.Interaction) -> None:
+        runtime = self._runtime
+        deps = runtime.turn_deps
+        assert isinstance(deps, TurnDeps)
+        assert deps.anthropic is runtime.anthropic
+        assert deps.sessionmaker is runtime.sessionmaker is db_session_factory
+        assert isinstance(deps.fernet, MultiFernet)
+        assert deps.fernet.decrypt(deps.fernet.encrypt(b"credential")) == b"credential"
+        assert deps.turn_path is None
+        assert deps.defaults_root == Path("/unused")
+        assert isinstance(deps.running_turns, RunningTurns)
+        observed.append(deps)
+        await original_submit(self, interaction)
+
+    monkeypatch.setattr(McpCredentialModal, "on_submit", observe_submit)
     receipt = await submit_mcp_token(
         db_session_factory, mcp_transport=served.transport, token=NEW27_TOKEN
     )
+    assert len(observed) == 1
 
     # The real server refused the token, and nothing reached a vault or the agent.
     assert receipt.probe_statuses == (401,)
