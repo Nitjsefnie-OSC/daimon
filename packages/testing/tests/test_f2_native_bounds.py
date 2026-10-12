@@ -208,7 +208,9 @@ async def test_acceptance_wire_never_permits_message_or_thread_work():
         await transport.aclose()
 
 
-@pytest.mark.parametrize("fault", [None, "financial", "workload_envelope", "tools", "no_go"])
+@pytest.mark.parametrize(
+    "fault", [None, "financial", "workload_envelope", "tools", "no_go", "expiry"]
+)
 def test_acceptance_exact_signed_envelope_and_separate_go(tmp_path, monkeypatch, fault):
     import hashlib
     from datetime import UTC, datetime
@@ -221,7 +223,11 @@ def test_acceptance_exact_signed_envelope_and_separate_go(tmp_path, monkeypatch,
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return datetime(2026, 10, 11, 19, tzinfo=UTC)
+            return (
+                datetime(2026, 10, 12, tzinfo=UTC)
+                if fault == "expiry"
+                else datetime(2026, 10, 11, 19, tzinfo=UTC)
+            )
 
     monkeypatch.setattr(probe, "datetime", Clock)
     fixtures = Path(__file__).parent / "fixtures/anthropic-live"

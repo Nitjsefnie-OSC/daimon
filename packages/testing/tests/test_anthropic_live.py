@@ -54,6 +54,20 @@ def clean_env(monkeypatch):
             monkeypatch.delenv(name)
 
 
+@pytest.fixture
+def signed_price_clock(monkeypatch):
+    """The immutable financial fixture is valid only on 2026-10-11."""
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            at = datetime(2026, 10, 11, 19, tzinfo=UTC)
+            return at.replace(tzinfo=None) if tz is None else at.astimezone(tz)
+
+    monkeypatch.setattr(live, "datetime", Clock)
+    return Clock.now(UTC)
+
+
 def admission(tmp_path, monkeypatch, package="A7"):
     guard = anthropic_session_guard(tmp_path)
     config = BudgetConfig.load(guard.config_path)
@@ -789,7 +803,7 @@ async def test_completed_leg_refuses_credential_bearing_output_before_file_write
     "corruption",
     [None, "go", "expiry", "source", "recipe", "config", "binding", "financial", "old_envelope"],
 )
-def test_exact_signed_admission_and_stale_pins(tmp_path, package, corruption):
+def test_exact_signed_admission_and_stale_pins(tmp_path, package, corruption, signed_price_clock):
     """Public signed metadata snapshots only; no canonical ledger/key access."""
     from datetime import timedelta
     from pathlib import Path
@@ -844,7 +858,7 @@ def test_exact_signed_admission_and_stale_pins(tmp_path, package, corruption):
         go["native_tools"] = native_tools()
     go_path = tmp_path / "go.json"
     go_path.write_text(json.dumps(go))
-    now = datetime(2026, 10, 11, 13, tzinfo=UTC)
+    now = signed_price_clock
     clean = True
     if corruption == "go":
         go_path.write_text("{}")
@@ -1137,7 +1151,7 @@ def fragmented_usage(case, event):
 
 
 @pytest.mark.parametrize("case", ["crlf", "lf", "json", "multi"])
-async def test_sdk_decoded_fragmentation_never_bypasses_the_signed_stop(case):
+async def test_sdk_decoded_fragmentation_never_bypasses_the_signed_stop(case, signed_price_clock):
     from pathlib import Path
 
     from anthropic import AsyncStream
@@ -1968,7 +1982,9 @@ async def test_native_create_ack_body_is_not_read_twice_before_sdk_consumption(
     "split",
     ["absent", None, {}, {"ephemeral_5m_input_tokens": 100}, {"ephemeral_1h_input_tokens": 100}],
 )
-def test_real_a7_cache_write_counts_keep_unknown_ttl_and_use_conservative_monitor(split):
+def test_real_a7_cache_write_counts_keep_unknown_ttl_and_use_conservative_monitor(
+    split, signed_price_clock
+):
     from pathlib import Path
 
     from mux.conformance.budget import TokenUsage
