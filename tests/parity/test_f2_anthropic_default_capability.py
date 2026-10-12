@@ -20,6 +20,14 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, parse_jsonrpc_response
+from daimon.testing.conformance.default_capability import (
+    MCP_TOOLS,
+    DefaultCapabilityAdapter,
+    DefaultCapabilityReplayEvents,
+    DefaultManifest,
+)
+from daimon.testing.conformance.recording import Audit, Recorder, Replay
+from daimon.testing.conformance.runner import replay_default_capability, run_default_capability
 from daimon.testing.qa_mcp_host import (
     QA_SESSION_ID,
     Manifest,
@@ -28,14 +36,6 @@ from daimon.testing.qa_mcp_host import (
     schema_exists,
     serve,
 )
-from mux.conformance.default_capability import (
-    MCP_TOOLS,
-    DefaultCapabilityAdapter,
-    DefaultCapabilityReplayEvents,
-    DefaultManifest,
-)
-from mux.conformance.recording import Audit, Recorder, Replay
-from mux.conformance.runner import replay_default_capability, run_default_capability
 from mux.contracts.actions import UserMessage
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, Scope

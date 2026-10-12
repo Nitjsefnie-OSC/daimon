@@ -337,13 +337,13 @@ The tests run in CI as the `pytest-mux` job (`uv run pytest packages/mux`).
 
 ## Conformance
 
-`mux.conformance` provides an offline C01–C18 runner. Drivers explicitly
+`daimon.testing.conformance` provides an offline C01–C18 runner. Drivers explicitly
 register a fresh fake-transport adapter per fixture; the existing pytest-mux
 job collects the runner's regression tests. Results distinguish pass, fail
 and pending with evidence. State-store and host seams that have not landed
 remain pending and prevent certification. The in-memory reference driver is
 a test oracle, not a backend. See
-`packages/mux/mux/conformance/README.md` for adapter
+`packages/testing/docs/conformance/README.md` for adapter
 requirements and the dependency matrix. No default runtime behavior changes.
 
 The conformance runner uses `mux.state.store.StateStore`. The memory oracle
@@ -758,7 +758,7 @@ certification; undeclared capability errors still fail their probes.
 
 ### Manual probe budgets
 
-`mux.conformance.budget` reserves worst-case spend before provider work and
+`daimon.testing.conformance.budget` reserves worst-case spend before provider work and
 persists admission and settlement receipts. Runs exceeding 80% of a configured
 provider line or total cap are refused. Missing, altered or rolled-back ledger
 state also refuses admission. An authorized caller supplies reviewed pricing
@@ -798,7 +798,7 @@ the first `.env` mount without fetching later pages and records the one add
 response identity without a retrieve. Session and file grants are checked before I/O.
 ### OpenAI offline conformance
 
-Explicit registration through `mux.drivers.openai.conformance.register` runs the
+Explicit registration through `daimon.testing.drivers.openai.conformance.register` runs the
 actual OpenAI driver and pinned SDK against synthetic HTTP/SSE records. Each
 shared fixture gets a fresh driver and independent request log. C05, C06, C09, C10,
 C15 and C16 pass; the other twelve entries declare typed pending reasons for
@@ -846,7 +846,7 @@ records, without adding a neutral outcome or a replay request.
 
 ## Manual conformance probes
 
-The standalone `mux.conformance.budget` guard reserves conservative spend before
+The standalone `daimon.testing.conformance.budget` guard reserves conservative spend before
 provider work and appends receipts. All callers share a pinned ledger, checkpoint
 and stable sequence lock; resets and paired snapshot rollbacks refuse admission.
 Runs exceeding 80% of provider or total caps are refused. Failed, cancelled and
@@ -862,7 +862,7 @@ A defense-in-depth credential audit covers
 written evidence and reconstructed normalized text before export and replay.
 Replay feeds a caller-supplied offline event fake and recomputes fixture checks;
 PENDING never certifies. Native HTTP/SSE codec certification is separate work.
-See `packages/mux/mux/conformance/README.md` for the APIs and limitations.
+See `packages/testing/docs/conformance/README.md` for the APIs and limitations.
 
 ## Persistent memory and resource identity reads
 
@@ -984,7 +984,7 @@ keys pass through in M0, without a second replay cache. Bundle existence probes
 use the Artifacts native metadata projection so unused reply fields remain
 optional. Offline ScriptedTransport proofs compare raw request body bytes and
 protocol headers, as well as SDK projections and call order.
-Gemini probe preparation uses `python -m mux.drivers.gemini.live_cert`, with an
+Gemini probe preparation uses `python -m daimon.testing.drivers.gemini.live_cert`, with an
 explicit model and empty output directory. Its default MockTransport command
 uses a private ledger and no real key. An authorized `--live` command additionally
 requires the pinned mode-0600 key file and reviewed model prices in the shared
@@ -1031,13 +1031,13 @@ Incomplete tool mappings are typed PENDING. Missing atomic session revision
 pinning is an explicit capability gap, while skill pins remain required.
 Replay retains omitted tool arguments and does not certify their contents.
 The standard eighteen-case matrix stays unchanged. See the package-local
-`packages/mux/mux/conformance/README.md` for the adapter contract.
+`packages/testing/docs/conformance/README.md` for the adapter contract.
 Responder identity uses the authorized row's tenant/account scope and the native
 `anthropic.session_reads@1` extension. It retains the SDK response for configuration
 snapshot backfill, including null channel and thread metadata, without an additional
 read or a generic provider-binding projection.
 The supplementary Gemini F1 adapter is explicitly selected from
-`mux.drivers.gemini.default_capability`. It returns typed ADAPTER_DEPENDENCY
+`daimon.testing.drivers.gemini.default_capability`. It returns typed ADAPTER_DEPENDENCY
 before I/O for the complete default's binary skill bundle and authenticated
 MCP/session seams. Tests load the actual default YAML and complete skill trees;
 supported text-only subsets cannot pass the full-default scenario. This offline
@@ -1333,7 +1333,7 @@ owned cleanup, and preparation does not resend it automatically.
 
 ### Discord multi-human host conformance
 
-`daimon.adapters.discord.conformance.multi_human_evidence` is an explicitly
+`daimon.testing.adapters.discord.conformance.multi_human_evidence` is an explicitly
 imported offline probe for a dedicated idle bot with a normally provisioned
 tenant. Every first and follow-up message passes through `bot.on_message`,
 including protection/liveness reads, busy-thread routing and tenant slots.
@@ -1349,8 +1349,8 @@ and default admission, queues and rendering are unchanged.
 
 ### Slack and Teams multi-human host conformance
 
-The explicitly imported `daimon.adapters.slack.conformance` and
-`daimon.adapters.teams.conformance` probes use dedicated idle apps and normal
+The explicitly imported `daimon.testing.adapters.slack.conformance` and
+`daimon.testing.adapters.teams.conformance` probes use dedicated idle apps and normal
 platform orchestration, including real host cap/protection/setup reads and
 queue settlement and final release; the probe does not clear production state.
 Completion/overlap are observed at the selected callback boundary. Mutation
@@ -1367,7 +1367,7 @@ An explicitly imported Gemini SDK conformance component checks cancellation/EOF
 occupancy and usage revision replay on MockTransport. Tool/mount updates, native
 vaults and deletion keep their typed limits; live certificates and exact-spend
 settlement are separate. See
-`packages/mux/mux/drivers/gemini/CONFORMANCE-SDK.md`.
+`packages/testing/docs/drivers/gemini/CONFORMANCE-SDK.md`.
 Explicit channel backend configuration resolves runtime dependencies separately
 for each admitted turn. Native preparation and execution use the same resolved
 runtime and authorized scope; runtime lookup does not cache one channel's native
@@ -1446,7 +1446,7 @@ directories at `.agents/skills/<skill-id>`. Existing text-only inline mounts
 remain the default. Missing authorized publication is a typed deployment
 dependency; offline compiler proofs do not promote live F1/QA parity. The host
 supplies GCS access/retention and authenticated MCP separately. See the Gemini
-`packages/mux/mux/drivers/gemini/DEFAULT-CAPABILITY.md`.
+`packages/testing/docs/drivers/gemini/DEFAULT-CAPABILITY.md`.
 
 Gemini accepts a neutral MCP toolset selector only when it names a declared
 server; the server’s auth and policy checks remain mandatory. The F2 offline
@@ -1859,7 +1859,7 @@ binds a local immutable bundle and host-supplied session before interaction-time
 deployment. Actual-SDK MockTransport tests retain exact request bytes and prove
 required-action occupancy. C04/C11 remain shared-fixture PENDING until complete
 host/provider envelopes are composed. See
-`packages/mux/mux/drivers/gemini/CONFORMANCE-HOOKS.md`
+`packages/testing/docs/drivers/gemini/CONFORMANCE-HOOKS.md`
 for the evidence boundary; no live calls or default selection changes.
 
 ### D11 native footer binding (offline QA)
@@ -2001,7 +2001,7 @@ empty tools, one/three native interactions and separately pinned financial and
 GO documents. Native terminal usage is fetched once before owned cleanup;
 missing or decreasing evidence preserves held spend and the original workflow
 verdict. The standard conformance registry and historical live certificates
-remain unchanged. See `packages/mux/mux/drivers/gemini/LIVE-ROUND.md` for the
+remain unchanged. See `packages/testing/docs/drivers/gemini/LIVE-ROUND.md` for the
 reviewed recipe, exact model-limit arithmetic and pending boundaries.
 
 

@@ -1,6 +1,6 @@
 # Teams host conformance
 
-Import `daimon.adapters.teams.conformance` explicitly from an offline
+Import `daimon.testing.adapters.teams.conformance` explicitly from an offline
 host envelope. The application does not import the module. Use a dedicated
 idle app, isolated database, authored inputs and an offline transport.
 

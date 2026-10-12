@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from mux.conformance.runner import require
+from daimon.testing.conformance.runner import require
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import (
     AgentMessagePayload,

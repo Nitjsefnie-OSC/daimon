@@ -17,8 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 import yaml
-from daimon.testing.isolated_sdk import build_gemini_client
-from mux.conformance.default_capability import (
+from daimon.testing.conformance.default_capability import (
     BASH_RESULT,
     FINAL_MESSAGE,
     MCP_TOOLS,
@@ -29,8 +28,12 @@ from mux.conformance.default_capability import (
     scenario,
     skill_text,
 )
-from mux.conformance.recording import Audit, Recorder, Replay, RequestMetadata
-from mux.conformance.runner import run_default_capability
+from daimon.testing.conformance.recording import Audit, Recorder, Replay, RequestMetadata
+from daimon.testing.conformance.runner import run_default_capability
+from daimon.testing.drivers.gemini.default_capability import BUILTIN_MAPPING
+from daimon.testing.drivers.gemini.fake import MemoryStorage
+from daimon.testing.drivers.gemini.live_cert import EvidenceAliases
+from daimon.testing.isolated_sdk import build_gemini_client
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import Event
 from mux.contracts.extensions import ExtensionConfig
@@ -45,9 +48,6 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import GeminiSessions
-from mux.drivers.gemini.default_capability import BUILTIN_MAPPING
-from mux.drivers.gemini.fake import MemoryStorage
-from mux.drivers.gemini.live_cert import EvidenceAliases
 from mux.drivers.gemini.skill_deployment import GCSBundleDeployment, file_manifest
 from mux.drivers.gemini.transport import Object, SDKTransport, object_value
 from mux.state.memory import MemoryStateStore

@@ -25,6 +25,7 @@ from daimon.core.turn.openai_deployment import OpenAIDeployment, build_openai_ru
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.testing import pytest_plugin as database_plugin
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.isolated_sdk import SDK_ENV_VARS, build_async_openai, build_gemini_client
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -32,7 +33,6 @@ from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope
 from mux.contracts.resources import Agent, AgentSpec, Environment, SkillUpload, SkillUploadFile
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.transport import SDKTransport as GeminiSDKTransport
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport

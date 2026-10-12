@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from mux.conformance.default_capability import (
+from daimon.testing.conformance.default_capability import (
     BASH_RESULT,
     DEFAULT_SKILLS,
     DEFAULT_TOOLS,
@@ -19,12 +19,18 @@ from mux.conformance.default_capability import (
     request_metadata,
     skill_text,
 )
-from mux.conformance.recording import Recorder, Replay, Tape
-from mux.conformance.runner import (
+from daimon.testing.conformance.recording import Recorder, Replay, Tape
+from daimon.testing.conformance.runner import (
     ConformanceFailure,
     PendingKind,
     replay_default_capability,
     run_default_capability,
+)
+from daimon.testing.drivers.gemini.default_capability import (
+    BUILTIN_MAPPING,
+    PENDING,
+    PendingTransport,
+    adapter,
 )
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart, ToolUsePayload
@@ -40,12 +46,6 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini.bundles import MAX_BUNDLE_BYTES
 from mux.drivers.gemini.core import compile_agent
-from mux.drivers.gemini.default_capability import (
-    BUILTIN_MAPPING,
-    PENDING,
-    PendingTransport,
-    adapter,
-)
 from mux.drivers.gemini.transport import Object
 from mux.errors import UnsupportedCapability
 from pydantic import BaseModel, JsonValue

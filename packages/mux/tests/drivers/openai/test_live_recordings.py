@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from mux.conformance.recording import RecordingError, Replay
+from daimon.testing.conformance.recording import RecordingError, Replay
 from mux.contracts.events import Event, NativeProvenance
 
 from .recording_checks import check

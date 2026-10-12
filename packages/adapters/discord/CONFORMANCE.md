@@ -1,6 +1,6 @@
 # Discord host conformance
 
-Import `daimon.adapters.discord.conformance` explicitly in an offline host
+Import `daimon.testing.adapters.discord.conformance` explicitly in an offline host
 envelope. The application does not import it. Use a dedicated idle `DaimonBot`;
 the probe temporarily captures its mention handler and restores it on success,
 callback failure, timeout or cancellation. It never attaches to a live gateway.

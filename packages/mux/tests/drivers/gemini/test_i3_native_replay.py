@@ -27,6 +27,7 @@ from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.testing.discord_surface import DiscordSurfaceCapture, DiscordSurfaceHarness
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.isolated_sdk import (
     build_async_anthropic,
     build_async_openai,
@@ -62,7 +63,6 @@ from mux.contracts.resources import (
     ToolSpec,
 )
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.transport import SDKTransport as GeminiSDKTransport
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.session_controls import SessionControls

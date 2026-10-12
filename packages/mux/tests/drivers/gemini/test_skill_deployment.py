@@ -11,6 +11,7 @@ from typing import NoReturn
 import httpx
 import pytest
 import yaml
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_gemini_client
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
@@ -19,7 +20,6 @@ from mux.contracts.ids import ModelRef, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, SessionSpec, SkillUpload, SkillUploadFile
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.bundles import MAX_BUNDLE_BYTES, validate_bundle, validate_targets
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.gemini.skill_deployment import (
     GCSBundleDeployment,
     file_manifest,

@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -20,7 +21,6 @@ from mux.contracts.resources import (
     WorkspaceSource,
 )
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.gemini.resources import parse_snapshot
 from mux.errors import (
     ContinuityLost,

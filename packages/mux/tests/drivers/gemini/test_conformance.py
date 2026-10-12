@@ -5,9 +5,9 @@ import sys
 from collections.abc import Sequence
 
 import pytest
-from mux.conformance.fixtures import FIXTURES
-from mux.conformance.gemini import PENDING_REASONS, GeminiScript, adapter, register
-from mux.conformance.runner import (
+from daimon.testing.conformance.fixtures import FIXTURES
+from daimon.testing.conformance.gemini import PENDING_REASONS, GeminiScript, adapter, register
+from daimon.testing.conformance.runner import (
     Adapter,
     ConformanceFailure,
     PendingKind,

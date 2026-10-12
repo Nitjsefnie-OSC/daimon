@@ -26,8 +26,7 @@ from daimon.core.turn.run import prepared_billing
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.usage_billing import ObservationBilled
-from daimon.testing.turn_fakes import RecordingLifecycle
-from mux.conformance.budget import (
+from daimon.testing.conformance.budget import (
     ActualSpend,
     BudgetConfig,
     BudgetGuard,
@@ -37,10 +36,11 @@ from mux.conformance.budget import (
     TokenLimits,
     TokenUsage,
 )
+from daimon.testing.drivers.gemini.live_cert import ReceiptGuard
+from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import Page, PageRequest, Provider, ResourceRef, Scope
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.flash import FLASH_PRIMARY
-from mux.drivers.gemini.live_cert import ReceiptGuard
 from mux.drivers.gemini.storage import Records
 from mux.errors import ProviderError, ProviderErrorCategory
 from sqlalchemy import text

@@ -7,11 +7,11 @@ from pathlib import Path
 
 import httpx
 import pytest
-from mux.conformance.budget import BudgetGuard, BudgetRefused, ProbePlan, TokenLimits
-from mux.conformance.live_probe import ProbeRunError
-from mux.conformance.recording import Tape
-from mux.drivers.gemini.fake import FakeTransport
-from mux.drivers.gemini.live_cert import (
+from daimon.testing.conformance.budget import BudgetGuard, BudgetRefused, ProbePlan, TokenLimits
+from daimon.testing.conformance.live_probe import ProbeRunError
+from daimon.testing.conformance.recording import Tape
+from daimon.testing.drivers.gemini.fake import FakeTransport
+from daimon.testing.drivers.gemini.live_cert import (
     GEMINI_STOP,
     LIVE_MODEL,
     MODEL_CHAIN,
@@ -34,8 +34,8 @@ from mux.errors import ProviderError
 def reviewed_gemini_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     # Offline composition with N9's required allowlist update; production stays
     # closed until that separately owned policy lands.
-    import mux.conformance.budget as shared
-    import mux.drivers.gemini.live_cert as cert
+    import daimon.testing.conformance.budget as shared
+    import daimon.testing.drivers.gemini.live_cert as cert
 
     policy = {**shared.LIVE_MODEL_ALLOWLIST, "gemini": frozenset(MODEL_CHAIN)}
     monkeypatch.setattr(shared, "LIVE_MODEL_ALLOWLIST", policy)
@@ -113,7 +113,7 @@ async def test_mock_sdk_and_recorded_matrix_never_read_real_key_or_shared_ledger
     def forbidden_key() -> str:
         raise AssertionError("mock run read a real credential")
 
-    monkeypatch.setattr("mux.drivers.gemini.live_cert.read_key", forbidden_key)
+    monkeypatch.setattr("daimon.testing.drivers.gemini.live_cert.read_key", forbidden_key)
     monkeypatch.setenv("GEMINI_API_KEY", "ambient-must-not-be-used")
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
     path = await run_prepared(tmp_path, SmokeSettings(model=LIVE_MODEL))
@@ -166,7 +166,7 @@ def test_unreviewed_price_refuses(tmp_path: Path) -> None:
 async def test_allowed_live_model_still_requires_prices_before_key_loading(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import mux.drivers.gemini.live_cert as cert
+    import daimon.testing.drivers.gemini.live_cert as cert
 
     guard = budget(tmp_path, priced=False)
     value = json.loads(guard.config_path.read_text())
@@ -189,7 +189,7 @@ async def test_allowed_live_model_still_requires_prices_before_key_loading(
 async def test_old_shared_policy_refuses_before_key_or_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import mux.drivers.gemini.live_cert as cert
+    import daimon.testing.drivers.gemini.live_cert as cert
 
     guard = budget(tmp_path)
     config = json.loads(guard.config_path.read_text())
@@ -338,7 +338,7 @@ async def test_wrong_saved_smoke_reply_is_not_a_success(tmp_path: Path) -> None:
 async def test_live_preparation_rejects_a_private_ledger_before_key_or_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import mux.drivers.gemini.live_cert as cert
+    import daimon.testing.drivers.gemini.live_cert as cert
 
     private = tmp_path / "private"
     private.mkdir()
@@ -382,8 +382,8 @@ async def test_live_preparation_rejects_a_private_ledger_before_key_or_dispatch(
 async def test_live_rejects_every_other_model_even_when_priced_before_key_or_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str, entry: str
 ) -> None:
+    import daimon.testing.drivers.gemini.live_cert as cert
     import httpx
-    import mux.drivers.gemini.live_cert as cert
 
     # Synthetic test prices deliberately admit the forbidden ID financially;
     # the model policy must refuse independently, before credentials or I/O.
@@ -427,7 +427,7 @@ async def test_live_sdk_entry_rejects_a_private_ledger_before_client_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import httpx
-    from mux.drivers.gemini.live_cert import run_sdk_smoke
+    from daimon.testing.drivers.gemini.live_cert import run_sdk_smoke
 
     guard = budget(tmp_path, model=LIVE_MODEL)
 
@@ -445,7 +445,7 @@ async def test_live_sdk_entry_rejects_a_private_ledger_before_client_creation(
 async def test_live_shared_ledger_gate_reaches_key_loading_without_ledger_io(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import mux.drivers.gemini.live_cert as cert
+    import daimon.testing.drivers.gemini.live_cert as cert
 
     guard = budget(tmp_path, model=LIVE_MODEL)
     value = json.loads(guard.config_path.read_text())
@@ -698,7 +698,10 @@ async def test_real_sdk_request_bytes_and_every_response_usage_remain_offline(
 async def test_dated_primary_price_settles_cached_and_thought_tokens_once(tmp_path: Path) -> None:
     guard = budget(tmp_path)
     config = json.loads(guard.config_path.read_text())
-    example = Path(__file__).parents[3] / "mux/drivers/gemini/live-budget.example.json"
+    example = (
+        Path(__file__).parents[5]
+        / "packages/testing/fixtures/drivers/gemini/live-budget.example.json"
+    )
     config["providers"]["gemini"]["models"] = json.loads(example.read_text())["providers"][
         "gemini"
     ]["models"]
@@ -838,7 +841,7 @@ async def test_missing_or_expired_dates_refuse_before_key(
     monkeypatch: pytest.MonkeyPatch,
     expired: bool,
 ) -> None:
-    import mux.drivers.gemini.live_cert as cert
+    import daimon.testing.drivers.gemini.live_cert as cert
 
     guard = budget(tmp_path)
     config = json.loads(guard.config_path.read_text())
@@ -873,9 +876,9 @@ def test_credential_identity_refuses_before_aliasing(
 ) -> None:
     from datetime import UTC, datetime
 
-    from mux.conformance.recording import Recorder, RecordingError, RequestMetadata
+    from daimon.testing.conformance.recording import Recorder, RecordingError, RequestMetadata
+    from daimon.testing.drivers.gemini.live_cert import EvidenceAliases
     from mux.contracts.events import Event, NativeProvenance
-    from mux.drivers.gemini.live_cert import EvidenceAliases
 
     aliases = EvidenceAliases(secrets=("exact-offline-key",))
     recorder = Recorder(secrets=("exact-offline-key",))
@@ -910,8 +913,8 @@ def test_credential_identity_refuses_before_aliasing(
 
 @pytest.mark.asyncio
 async def test_opaque_native_identity_is_aliased_before_unchanged_recorder(tmp_path: Path) -> None:
-    from mux.conformance.recording import Recorder, RecordingError, RequestMetadata
-    from mux.drivers.gemini.live_cert import EvidenceAliases
+    from daimon.testing.conformance.recording import Recorder, RecordingError, RequestMetadata
+    from daimon.testing.drivers.gemini.live_cert import EvidenceAliases
 
     opaque = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwx"
     aliases = EvidenceAliases()
@@ -941,7 +944,7 @@ async def test_opaque_native_identity_is_aliased_before_unchanged_recorder(tmp_p
 async def test_sdk_opaque_paths_preserve_routing_and_safe_recording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, export_failure: bool
 ) -> None:
-    from mux.conformance.recording import Recorder, RecordingError
+    from daimon.testing.conformance.recording import Recorder, RecordingError
 
     original = httpx.MockTransport
     opaque = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwx"

@@ -10,6 +10,8 @@ import httpx
 import pytest
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.core.turn.prepare import PreparedTurn
+from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
+from daimon.testing.drivers.openai.conformance import OpenAIScriptedTransport
 from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
@@ -17,9 +19,7 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProjectionSnapshot, SessionSpec
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.openai import OpenAIDriver
-from mux.drivers.openai.conformance import OpenAIScriptedTransport
 from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions

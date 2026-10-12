@@ -19,7 +19,6 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord import bot as platform_module
-from daimon.adapters.discord.backend_conformance import BackendTurnEnvelope, backend_selection_turn
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import (
@@ -38,6 +37,10 @@ from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.testing import ma_session
+from daimon.testing.adapters.discord.backend_conformance import (
+    BackendTurnEnvelope,
+    backend_selection_turn,
+)
 from daimon.testing.factories import make_tenant
 from daimon.testing.isolated_sdk import (
     SDK_ENV_VARS,

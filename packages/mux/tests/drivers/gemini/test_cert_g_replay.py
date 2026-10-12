@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Never
 
 import pytest
-from mux.conformance.budget import SpendReceipt
-from mux.conformance.recording import Replay, Tape
+from daimon.testing.conformance.budget import SpendReceipt
+from daimon.testing.conformance.recording import Replay, Tape
 from mux.contracts.events import AgentMessagePayload, Event, TextPart, TurnEndedPayload
 from pydantic import JsonValue, TypeAdapter
 
-ROOT = Path(__file__).parents[3] / "mux/drivers/gemini/certification/2026-10-10"
+ROOT = (
+    Path(__file__).parents[5] / "packages/testing/fixtures/drivers/gemini/certification/2026-10-10"
+)
 OBJECT = TypeAdapter(dict[str, JsonValue])
 
 

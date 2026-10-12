@@ -17,6 +17,7 @@ from daimon.core.turn.gemini import (
     gemini_backend,
 )
 from daimon.testing.admin_bindings import AdminBindings
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.outcome_oracle import TurnEvidence
 from daimon.testing.provider_fixtures import (
@@ -30,7 +31,6 @@ from daimon.testing.provider_replay import ProviderTape, WireReply, provider_rep
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, SessionSpec
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.flash import FlashAttempt
 from mux.drivers.gemini.transport import SDKTransport
 from mux.state.memory import MemoryStateStore

@@ -31,6 +31,7 @@ from daimon.core.turn.gemini import (
 from daimon.core.turn.prepare import PreparedTurn, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn_impl
 from daimon.core.usage_billing import ObservationRecorder
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedTransport
@@ -39,7 +40,6 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import AgentMessagePayload, TextPart
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.transport import Object
 from mux.errors import ScopeViolation

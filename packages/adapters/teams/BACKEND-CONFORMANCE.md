@@ -1,6 +1,6 @@
 # Backend-selection conformance callback
 
-Explicitly import `daimon.adapters.teams.backend_conformance` in an offline host
+Explicitly import `daimon.testing.adapters.teams.backend_conformance` in an offline host
 and call `backend_selection_turn(BackendTurnEnvelope(...))`. Supply a dedicated
 idle application, isolated database, scripted provider/platform transports, the
 native input and independently declared tenant/channel/thread/caller. The hook

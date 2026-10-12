@@ -7,9 +7,9 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from daimon.testing.conformance import Registry, run
+from daimon.testing.conformance.runner import Adapter, PendingKind, run_fixture
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
-from mux.conformance import Registry, run
-from mux.conformance.runner import Adapter, PendingKind, run_fixture
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ResolvedBackend
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import Session

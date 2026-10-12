@@ -34,6 +34,7 @@ from daimon.core.skills.ingest import SkillBundle, bundle_from_files, bundle_fro
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.isolated_sdk import (
     TLS_PROXY_ENV_VARS,
@@ -47,7 +48,6 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec, Session, SessionSpec, ToolSpec
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.transport import SDKTransport
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
