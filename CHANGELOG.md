@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Opening an expired, revoked or unknown notebook or report link in a browser now shows a plain "Link unavailable" page asking the sender to share a new link, instead of a raw JSON error. The status codes (404 for notebooks, 403 for reports) and the link checks are unchanged, and API clients still get JSON unless `DAIMON_NOTEBOOK__HTML_LINK_ERRORS` / `DAIMON_REPORT__HTML_LINK_ERRORS` is set to give every client the page.
 - Model calls an agent made while its chat worker was down (a deploy or crash mid-turn) are now billed when the next turn in that thread ends, at the same price and once only. Previously they went unbilled unless the usage sweep was switched on.
 - When your team's Daimon credit runs out, the reply now says how to fix it: "An admin can top up with `/billing`." on Discord and Slack, and `billing` in a 1:1 chat on Teams. Before, it only said "Ask an admin to top up." without naming where.
 - A routine that posts to a channel or thread now says so there when it fails, instead of posting nothing. The notice names the routine, says what went wrong in plain words (for example "The request to the AI model failed." or "Your team's Daimon credit has run out.") and that it will try again at its next scheduled time. It is posted once when a routine starts failing, not on every failed run, and again only after a run has succeeded.

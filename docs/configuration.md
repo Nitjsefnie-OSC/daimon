@@ -1437,6 +1437,15 @@ shared env file would set both.
 
 `str | None` · optional · default unset
 
+### `DAIMON_NOTEBOOK__HTML_LINK_ERRORS`
+
+`bool` · optional · default `False`
+
+Show the static HTML page for unavailable notebook document links (GET /n/{slug}/,
+status 404) to every client. Browsers (Accept: text/html) always get it; with this off,
+other clients keep the JSON error. Other routes and methods keep their existing
+responses.
+
 ### `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES`
 
 `int` · optional · default `1048576`
@@ -1602,6 +1611,14 @@ Cap on concurrently running turns across one report's threads.
 `int` · optional · default `90`
 
 How long a per-recipient link remains valid before expiring.
+
+### `DAIMON_REPORT__HTML_LINK_ERRORS`
+
+`bool` · optional · default `False`
+
+Show the static HTML page for refused report document links (GET /r/{slug}, status 403)
+to every client. Browsers (Accept: text/html) always get it; with this off, other
+clients keep the JSON error. API, file and admin routes keep their existing responses.
 
 ### `DAIMON_REPORT__THREAD_IDLE_ARCHIVE_HOURS`
 

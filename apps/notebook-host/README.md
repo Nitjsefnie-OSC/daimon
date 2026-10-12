@@ -54,7 +54,12 @@ token across re-publishes in the same mode; switching between read-only and
 editor mints a new one, and the editor is refused (409) on a published blog.
 A read-only notebook's token is persisted in `blogs.json` (0600, host-only) so
 its link survives stops and restarts. Deleting or expiring a slug invalidates
-its link. marimo runs
+its link. A browser (`Accept: text/html`) opening an unresolved
+`GET /n/{slug}/` link gets a static “Link unavailable” HTML page; other
+clients get the JSON error unless `DAIMON_NOTEBOOK__HTML_LINK_ERRORS=true`
+gives every client the page. The 404 status and token/expiry checks stay
+the same. Other proxy paths, methods and admin routes retain their existing
+responses. marimo runs
 with `-q`, so its startup banner (which prints the tokenized URL) never reaches
 the slug's log, and the host's logs redact `access_token=` (plain or
 url-encoded). marimo is pinned exactly in `pyproject.toml`, which the Docker

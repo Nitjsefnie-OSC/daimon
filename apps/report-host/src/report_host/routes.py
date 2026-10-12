@@ -12,6 +12,7 @@ Admin, upload-token-consuming and publish routes are NOT here — they land in
 later plans. This module owns only what a report's reader can reach.
 """
 
+import re
 import secrets
 import sqlite3
 from collections.abc import Awaitable, Callable
@@ -37,6 +38,12 @@ _VIEWER_DIR = Path(__file__).parent / "viewer"
 # token, revoked token, expired token. A reader whose link expired and a
 # stranger guessing tokens get the same answer (T-21-15-A).
 _RECIPIENT_INVALID_MESSAGE = "this link is not valid for this report"
+_LINK_UNAVAILABLE_HTML = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    "<title>Link unavailable</title></head><body><h1>Link unavailable</h1>"
+    "<p>This link is unavailable. Ask the sender to share a new link.</p></body></html>"
+)
+_ZERO_QUALITY = re.compile(r"(^|;)q=0(\.0*)?($|;)")
 _REPORT_UNAUTHORIZED_MESSAGE = (
     "this report's connection to daimon has expired; ask the publisher to re-publish it"
 )
@@ -114,6 +121,19 @@ def _validate_pdf_name(name: str) -> None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="invalid file name")
 
 
+def _browser_navigation(accept: str | None) -> bool:
+    """True when the `Accept` header lists `text/html` (a browser opening a link).
+
+    `*/*` alone (curl, httpx, `fetch`) is not a browser, so API clients keep JSON.
+    """
+    for item in (accept or "").split(","):
+        media, _, params = item.partition(";")
+        if media.strip().lower() != "text/html":
+            continue
+        return not _ZERO_QUALITY.search(params.replace(" ", "").lower())
+    return False
+
+
 def mount_viewer_assets(app: FastAPI) -> None:
     """Serve the viewer's CSS and JS at ``/viewer`` on the assembled app.
 
@@ -158,10 +178,24 @@ def build_reader_router(
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail=_RECIPIENT_INVALID_MESSAGE)
         return recipient
 
+    async def resolve_viewer_recipient(slug: str, request: Request) -> RecipientRow | None:
+        try:
+            return await resolve_recipient(slug, request)
+        except HTTPException as exc:
+            if (
+                (settings.html_link_errors or _browser_navigation(request.headers.get("accept")))
+                and exc.status_code == status.HTTP_403_FORBIDDEN
+                and exc.detail == _RECIPIENT_INVALID_MESSAGE
+            ):
+                return None
+            raise
+
     @router.get("/r/{slug}")
     async def get_viewer(  # pyright: ignore[reportUnusedFunction]
-        slug: str, recipient: Annotated[RecipientRow, Depends(resolve_recipient)]
+        slug: str, recipient: Annotated[RecipientRow | None, Depends(resolve_viewer_recipient)]
     ) -> HTMLResponse:
+        if recipient is None:
+            return HTMLResponse(_LINK_UNAVAILABLE_HTML, status_code=status.HTTP_403_FORBIDDEN)
         html = (_VIEWER_DIR / "index.html").read_text()
         response = HTMLResponse(html)
         response.set_cookie(
