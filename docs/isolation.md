@@ -35,7 +35,8 @@ scope uses the same one.
 | MA session and its transcript | own | own | own | **own** | own | own, private |
 | Sandbox working files | own | own | own | **own** (one sandbox per session) | own | own |
 | Session outputs (Files API) | own | own | own | **own** (listed by session) | own | own |
-| Chat attachments | n/a | visible to channel readers | **shared**: in every caller's context | posted by the caller | n/a | not delivered |
+| Chat attachments | n/a | visible to channel readers | **shared**: replayed history can carry them into other callers' context | posted by the caller | n/a | not delivered |
+| Published notebooks | own | shared by link | shared by link | managed by the publisher; opened by anyone with the link | n/a | shared by link |
 | Agent memory (`/mnt/memory`) | own | **shared** | **shared** | **shared** | **own** (one store per agent) | shared, optionally read-only |
 | Agent keys (`.env`) | own | shared | shared | **shared** | **own** | shared |
 | Token MCP credentials | own | shared | shared | **shared** | **own** | shared |
@@ -47,7 +48,7 @@ scope uses the same one.
 | Prepaid balance (ledger) | **own** | shared | shared | shared | shared | shared |
 | Channel budget | own | **own** | counts toward its channel | shared | shared | counts toward the source channel |
 | Per-member cap | own | shared | shared | **own** | shared | own |
-| Routines | own | visible from inside a `readers: own` channel only | n/a | **own** (creator or admin) | run the agent's shared keys and memory | n/a |
+| Routines | own | a `readers: own` channel's routines are visible only inside it | n/a | **own** (creator or admin) | run the agent's shared keys and memory | n/a |
 
 The rest of the page explains each row.
 
@@ -76,8 +77,10 @@ conversation, never a private DM and never to continue it.
 When a session is replaced (configuration change, recovery), the carried
 work comes only from the caller's own previous row: the replacement looks up
 the live row with the caller's account
-(`packages/core/daimon/core/session_preparation.py:562-568`) and bundles that
-session's files (`packages/core/daimon/core/workspace_transfer.py:301`).
+(`packages/core/daimon/core/session_preparation.py:677-683`), checkpoints that
+row's own session (`packages/core/daimon/core/session_preparation.py:394-404`)
+and bundles that session's files
+(`packages/core/daimon/core/workspace_transfer.py:301`).
 
 ## Sandbox working files
 
@@ -107,41 +110,67 @@ handle is a random bearer value
 (`packages/core/daimon/core/stores/file_uploads.py:57`), so only a session
 that was told the handle can post it.
 
-Notebooks published by an agent are namespaced by the caller's account
-(`packages/adapters/mcp/daimon/adapters/mcp/tools/notebook.py:203`).
+Published notebooks have two layers. *Managing* one (publishing under a
+slug, listing, deleting) is namespaced by the caller's account
+(`packages/adapters/mcp/daimon/adapters/mcp/tools/notebook.py:203`). *Opening*
+one is not: the URL carries an access token that is the notebook's only key
+(`packages/adapters/mcp/daimon/adapters/mcp/tools/notebook.py:184`,
+`apps/notebook-host/src/notebook_host/lifecycle.py:102-110`), and anyone
+holding an editable link can run code on the notebook host
+(`packages/adapters/mcp/daimon/adapters/mcp/tools/notebook.py:172`). A link
+posted in a thread is open to everyone who reads it.
 
 ## Chat attachments and thread history
 
-Daimon does not upload a person's attachments into a session. It writes them
-into the turn's text as URLs the agent can fetch:
+A person's attachments reach a session in two ways:
 
-- the triggering message's own attachments as `[attachment]` lines
-  (`packages/adapters/discord/daimon/adapters/discord/attachments.py:16-40`);
-- every earlier message in the thread, **from any author**, as `<message>`
-  elements with an `<attachment url=...>` per file. Discord uses its signed
-  CDN URL (`packages/adapters/discord/daimon/adapters/discord/context.py:297-301`),
-  Slack a signed proxy URL that fetches with the bot token
-  (`packages/adapters/slack/daimon/adapters/slack/context.py:100-113`), Teams a
-  short-lived download URL
+- **Trigger images** on Discord are downloaded and sent with the turn as
+  base64 image blocks
+  (`packages/adapters/discord/daimon/adapters/discord/bot.py:4433-4436`), with
+  a URL line as well. Only the triggering message's images are inlined.
+- **Everything else** is written into the turn's text as a URL the agent can
+  fetch: the triggering message's data files as `[attachment]` lines
+  (`packages/adapters/discord/daimon/adapters/discord/attachments.py:16-40`),
+  and files on earlier messages in the thread, **from any author**, as
+  `<attachment>` elements inside the replayed history.
+
+Replayed history is bounded, so it can carry other callers' files but does
+not always carry all of them:
+
+- **Discord.** A caller's first turn gets up to 100 messages
+  (`packages/adapters/discord/daimon/adapters/discord/bot.py:4398`). A later
+  turn gets the messages since that caller's own last turn
+  (`packages/adapters/discord/daimon/adapters/discord/bot.py:4375`), up to
+  discord.py's default of 100
+  (`packages/adapters/discord/daimon/adapters/discord/context.py:551`). Each
+  file carries its signed CDN URL, which expires after about a day
+  (`packages/adapters/discord/daimon/adapters/discord/context.py:297-301`).
+  Only the caller's own earlier answers are left out
+  (`packages/adapters/discord/daimon/adapters/discord/bot.py:4386`).
+- **Slack.** The first turn replays one page from the thread root and marks
+  the block `truncated` when the thread is longer
+  (`packages/adapters/slack/daimon/adapters/slack/context.py:151-184`). Files
+  carry a signed proxy URL that fetches with the bot token, and are left out
+  when no proxy is configured
+  (`packages/adapters/slack/daimon/adapters/slack/context.py:100-113`).
+- **Teams.** At most 10 history files are resolved
+  (`packages/adapters/teams/daimon/adapters/teams/context.py:41`,
+  `packages/adapters/teams/daimon/adapters/teams/context.py:325`), only when
+  the bot has file access
+  (`packages/adapters/teams/daimon/adapters/teams/thread_reader.py:134-144`).
+  A file without a download URL is listed as `fetchable="false"`
   (`packages/adapters/teams/daimon/adapters/teams/context.py:190-195`).
 
-A caller's first turn in a thread gets the last 100 messages
-(`packages/adapters/discord/daimon/adapters/discord/bot.py:4398`); a later turn
-gets every message since that caller's own last turn
-(`packages/adapters/discord/daimon/adapters/discord/bot.py:4375`), which
-includes other people's messages and the answers and files Daimon posted for
-them. Only the caller's own earlier answers are left out
-(`packages/adapters/discord/daimon/adapters/discord/bot.py:4386`).
-
-So attachments, like messages, are **per thread, by design**: the thread is
-a shared room, and the agent sees what any reader of the thread sees.
+Within those bounds, attachments are **per thread, by design**: the thread is
+a shared room, and the agent sees what a reader of the thread sees.
 
 ## Agent memory
 
 Memory is **one MA memory store per (tenant, agent)**
 (`packages/core/daimon/core/_models.py:1395-1398`,
 `packages/core/daimon/core/memory_resource.py:1-12`), mounted on every
-session of that agent (`packages/core/daimon/core/sessions.py:471-479`). It is
+chat, routine and DM session of that agent
+(`packages/core/daimon/core/sessions.py:471-479`). It is
 not split by caller, thread, channel or DM. The agent is told it is "your
 persistent memory across all conversations and channels"
 (`packages/core/daimon/core/memory_resource.py:37-44`).
@@ -157,13 +186,21 @@ What varies is only whether the mount is writable
 
 Read-only stops a turn from writing; it does not hide what others wrote.
 
+The exception is an isolated session, which an agent-chat turn started from
+an uploaded bundle uses
+(`packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py:516`):
+`create_isolated_session` mounts no vault, `.env`, memory store or repo, only
+the resources its caller passes
+(`packages/core/daimon/core/sessions.py:681-718`). "Every session" below means
+every ordinary session created by `create_session`.
+
 ## Keys and credentials
 
 | Credential | Keyed by | Shared with |
 | --- | --- | --- |
 | Agent keys, mounted as `.env` | (tenant, agent) (`packages/core/daimon/core/_models.py:1239-1246`) | every session of the agent (`packages/core/daimon/core/sessions.py:417-425`) |
 | Token MCP server credentials | (tenant, agent) (`packages/core/daimon/core/agent_mcp_credentials.py:170`) | mirrored into every caller's vault (`packages/core/daimon/core/sessions.py:390-411`) |
-| OAuth MCP server grants | (account, agent) vault | the person who signed in only; the server is hidden from everyone else's session (`packages/core/daimon/core/sessions.py:506`, `packages/core/daimon/core/mcp_personal_servers.py:63`) |
+| OAuth MCP server grants | (account, agent) vault | the person who signed in only. The server is hidden from everyone else's session unless the agent also holds a shared token for that URL, in which case others use the token (`packages/core/daimon/core/sessions.py:506`, `packages/core/daimon/core/mcp_personal_servers.py:63-90`) |
 | Daimon MCP vault (the sandbox's call-back JWT) | (account, agent) (`packages/core/daimon/core/mcp_vault.py:236`) | the caller only; a Slack private turn gets its own execution vault |
 | Per-agent GitHub PAT | the agent (`packages/core/daimon/core/sessions.py:338`) | every session of the agent |
 | GitHub App access | the requester (`packages/core/daimon/core/sessions.py:594-605`) | the caller only |
@@ -185,9 +222,17 @@ another agent changes the agent for everyone in that thread: the binding is
 one row per thread (`packages/core/daimon/core/_models.py:2229-2238`,
 `packages/core/daimon/core/thread_handoff.py:277`).
 
-A fork copies the prompt, model, tools, MCP definitions and skills, but no
-credentials (`packages/core/daimon/core/agent_fork.py:243`), and re-uploads the
-source's skills under the copy's name, so the two never share a skill id.
+A fork copies the prompt, model, tools and MCP definitions, but no
+credentials (`packages/core/daimon/core/agent_fork.py:243`). Its skills split
+three ways (`packages/core/daimon/core/agent_fork.py:115-133`):
+
+- skills owned by the source agent are uploaded again under the copy's name,
+  so the copy gets new ids for them;
+- tenant-library and built-in skills, which no agent owns, are kept by id
+  (`packages/core/daimon/core/agent_fork.py:126`,
+  `packages/core/daimon/core/agent_fork.py:259`), so source and copy share
+  them;
+- another agent's skills, and any that fail to copy, are left off and named.
 
 ## Skills
 
@@ -221,7 +266,12 @@ See [billing.md](billing.md).
 ## Routines
 
 A routine belongs to its creator: only the creator or an admin lists, reads,
-pauses or deletes it (`packages/core/daimon/core/routines.py:43-49`). Each fire
+pauses or deletes it (MCP read gate
+`packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:115-124`; panels
+`packages/core/daimon/core/routines.py:43-49`). A routine of a `readers: own`
+channel, or of that channel's own agent, is in addition visible only from
+inside that channel
+(`packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:340-343`). Each fire
 opens a fresh session on the creator's account with read-only memory
 (`packages/core/daimon/core/headless_runner.py:335`), and the session is
 stamped private so only its owner reads the transcript. A routine still runs
@@ -231,9 +281,12 @@ with its agent's shared keys, connectors, repo and memory. See
 ## DMs
 
 A DM is its own scope with its own per-account session, stamped
-`daimon_private_dm` (`packages/core/daimon/core/turn/admission.py:593`); the
-transcript tools refuse it to everyone without the matching execution grant,
-admins included. It shares the agent's memory (read-only if the tenant says
+`daimon_private_dm` (`packages/core/daimon/core/turn/admission.py:593`). The
+MCP session tools open it only with the matching execution grant, admins
+included (`packages/adapters/mcp/daimon/adapters/mcp/tools/_session_access.py:198-215`).
+A Slack private turn carries that grant, so its own owner can inspect it. A
+Discord private scope carries none, so nobody can inspect it through MCP, not
+even its owner. It shares the agent's memory (read-only if the tenant says
 so), keys and connectors, and its spend counts toward the channel it came
 from. Details are in
 [architecture.md](architecture.md#opt-in-dm-conversations).
@@ -244,9 +297,11 @@ Per-caller sessions are always on, so two people in one thread never share an
 MA session, sandbox, transcript or output listing. These are the paths by
 which something of one person's can still reach the other's turn:
 
-1. **Thread history.** Each turn's context carries the other person's
-   messages, Daimon's answers to them, and a fetchable URL for every file in
-   the thread, theirs and the ones Daimon delivered to them
+1. **Thread history.** Each turn's context can carry the other person's
+   messages, Daimon's answers to them, and fetchable URLs for files in the
+   thread, theirs and the ones Daimon delivered to them, within the history
+   window, configuration and URL expiry described
+   [above](#chat-attachments-and-thread-history)
    (`packages/adapters/discord/daimon/adapters/discord/context.py:297-301`,
    `packages/adapters/discord/daimon/adapters/discord/bot.py:4375-4410`;
    Slack `packages/adapters/slack/daimon/adapters/slack/context.py:100-113`;
@@ -258,25 +313,31 @@ which something of one person's can still reach the other's turn:
    (`packages/adapters/discord/daimon/adapters/discord/output_delivery.py:99-104`),
    so it is visible to both, and reaches the second person's session by
    path 1.
-3. **Agent memory.** Both sessions mount the same store
+3. **Published notebook links.** A notebook link Daimon posts for one person
+   carries its access token
+   (`apps/notebook-host/src/notebook_host/lifecycle.py:102-110`), so the
+   other person can open it, and run code in it if it is editable
+   (`packages/adapters/mcp/daimon/adapters/mcp/tools/notebook.py:172`).
+   Only listing and deleting stay with the publisher's account.
+4. **Agent memory.** Both sessions mount the same store
    (`packages/core/daimon/core/sessions.py:471-479`); what one writes the
    other reads, in this thread and every other.
-4. **Agent keys, token connectors and the repo.** Both sessions mount the
+5. **Agent keys, token connectors and the repo.** Both sessions mount the
    same `.env` (`packages/core/daimon/core/sessions.py:417-425`), the same
    token MCP credentials (`packages/core/daimon/core/sessions.py:390-411`) and
    clone the same bound repo (`packages/core/daimon/core/sessions.py:430-465`).
    A key one person adds is in the other's next session; a branch one session
    pushes is visible to the other's clone.
-5. **The thread's agent.** A handoff, or a Switch to agent click, rebinds the
+6. **The thread's agent.** A handoff, or a Switch to agent click, rebinds the
    thread for both (`packages/core/daimon/core/thread_handoff.py:277`).
-6. **Feedback and support attribution.** A down-vote or support request
+7. **Feedback and support attribution.** A down-vote or support request
    attaches the newest live session in the thread, whoever owns it
    (`packages/core/daimon/core/stores/thread_sessions.py:233-264`, used in
    `packages/adapters/discord/daimon/adapters/discord/support_escalation.py:237`
    and `packages/adapters/discord/daimon/adapters/discord/feedback_modal.py:114`).
    The operator who reads the report may be pointed at the other person's
    session.
-7. **The turn queue.** Mentions in a thread are serialised per thread, not
+8. **The turn queue.** Mentions in a thread are serialised per thread, not
    per session, so one person's turn waits for the other's to finish. The
    queued messages are still grouped by author
    (`packages/adapters/discord/daimon/adapters/discord/bot.py:2732`), so no
@@ -284,8 +345,8 @@ which something of one person's can still reach the other's turn:
 
 What does **not** cross: the session and its transcript, the sandbox, the
 Files API output listing, the carried work on a session replacement, OAuth
-connector grants, the Daimon MCP vault, published notebooks, the per-member
-cap and routines.
+connector grants, the Daimon MCP vault, notebook management (listing and
+deleting), the per-member cap and routines.
 
 ## Known gaps
 
@@ -311,3 +372,7 @@ These are places where the code and its own description disagree today.
   `packages/core/daimon/core/defaults/metadata.py:280`), a 32-bit prefix,
   while agents and environments carry the full tenant id. Two tenants on one
   deployment with the same prefix would see each other's skills.
+- The fork module's description says the copy and its source "never share a
+  skill id" (`packages/core/daimon/core/agent_fork.py:6-8`). Only the source's
+  own skills get new ids; library and built-in skills stay shared
+  (`packages/core/daimon/core/agent_fork.py:126`).
