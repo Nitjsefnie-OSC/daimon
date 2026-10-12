@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2604,
+  "files_scanned": 2606,
   "parse_errors": [],
   "calls": [
     {
@@ -12003,6 +12003,15 @@
       "category": "test"
     },
     {
+      "file": "packages/adapters/mcp/tests/tools/test_backend_switch.py",
+      "line": 321,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/adapters/mcp/tests/tools/test_channel_own_agents.py",
       "line": 21,
       "module": "anthropic",
@@ -13184,6 +13193,15 @@
       "module": "anthropic.types.beta.skill_list_response",
       "names": [
         "SkillListResponse"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/confirmation.py",
+      "line": 37,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "production"
     },
