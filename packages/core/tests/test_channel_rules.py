@@ -33,6 +33,8 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_READER_OF,
+    MA_METADATA_KEY_READER_SOURCE,
     tenant_scoped_display_title,
 )
 from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
@@ -1005,6 +1007,54 @@ async def test_anywhere_drops_the_rule_an_archived_agent_left_behind(
     with pytest.raises(ChannelRuleRefused) as typo:
         await _agent_rule(client, db_session_factory, tenant.id, "ghost", None)
     assert typo.value.reason == "agent_not_found", "a name with neither agent nor rule is unknown"
+
+
+@pytest.mark.parametrize(
+    ("metadata", "ma_name", "canonical", "alias"),
+    [
+        ({MA_METADATA_KEY_NAME: "local"}, "local-ma", "local", "local-ma"),
+        (
+            {
+                MA_METADATA_KEY_NAME: "source-reader",
+                MA_METADATA_KEY_READER_OF: "report",
+                MA_METADATA_KEY_READER_SOURCE: "source",
+            },
+            "source-reader",
+            "source-reader",
+            "source",
+        ),
+    ],
+    ids=["ma-name", "reader-source"],
+)
+async def test_anywhere_never_drops_a_rule_a_live_agent_answers_to(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    metadata: dict[str, str],
+    ma_name: str,
+    canonical: str,
+    alias: str,
+) -> None:
+    """A rule keyed by a live agent's other name (its MA name, or a report
+    reader's source) is that agent's: it is not left behind, so it stays, and
+    the agent's home channel with it."""
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    agent = ma_agent(id="ag_live", name=ma_name, tenant_id=tenant.id, metadata=metadata)
+    state.agents[agent.id] = agent.model_dump(mode="json")
+    client = build_fake_anthropic(make_fake_ma_handler(state))
+    policy = TenantAccessPolicy(
+        channel_rules={"c1": OWN}, agent_rules={alias: AgentRule(runs_in=("c1",))}
+    )
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+    await db_session.commit()
+
+    for name, reason in ((canonical, "agent_has_home"), (alias, "agent_not_found")):
+        with pytest.raises(ChannelRuleRefused) as refused:
+            await _agent_rule(client, db_session_factory, tenant.id, name, None)
+        assert refused.value.reason == reason, name
+
+    after = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert after.agent_rules == policy.agent_rules, "the live agent's rule is kept"
 
 
 async def test_an_agent_rule_naming_an_own_readers_channel_names_it_alone(

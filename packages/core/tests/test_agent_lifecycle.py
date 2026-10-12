@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
@@ -24,6 +26,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
+    PolicyBusyError,
     load_access_policy,
     set_access_policy,
 )
@@ -186,6 +189,9 @@ async def test_forget_archived_agent_drops_its_rules_and_scope_rows(
         "bystander": AgentRule(runs_in=("c3",)),
     }
     scope = await _seed_archived(db_session, tenant.id, rules)
+    ma_scope = ChannelScopeRef(tenant_id=tenant.id, channel_id="c2")
+    await set_fields(db_session, scope=ma_scope, tenant_id=tenant.id, agent_name="doomed-ma")
+    await db_session.commit()
     agent = ma_agent(
         id="ag_doomed",
         name="doomed-ma",
@@ -209,22 +215,34 @@ async def test_forget_archived_agent_drops_its_rules_and_scope_rows(
             "bystander": AgentRule(runs_in=("c3",)),
         }, "only the archived agent's own names lose their rule"
         assert await get_scope(s, scope=scope) is None, "scope rows naming it are cleared too"
+        assert await get_scope(s, scope=ma_scope) is None, "under each of its own names"
 
 
-async def test_forget_archived_agent_still_clears_scope_rows_when_the_policy_is_unreadable(
+@asynccontextmanager
+async def _busy(*_args: object, **_kwargs: object) -> AsyncIterator[AsyncSession]:
+    raise PolicyBusyError()
+    yield  # pyright: ignore[reportUnreachable]
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "busy"])
+async def test_forget_archived_agent_still_clears_scope_rows_when_the_policy_is_out_of_reach(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
-    """The agent is archived already; a policy that can't be read must not
-    leave channels resolving to it. The rule is left for an operator."""
+    """The agent is archived already; a policy that can't be read or locked
+    must not leave channels resolving to it. The rule is left for an operator."""
     tenant = await make_tenant(db_session)
     scope = await _seed_archived(db_session, tenant.id, {"doomed": AgentRule(runs_in=("c1",))})
 
     async def unreadable(_session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
         raise AccessPolicyUnreadable(tenant_id=tenant_id)
 
-    monkeypatch.setattr(agent_lifecycle, "load_access_policy", unreadable)
+    if failure == "unreadable":
+        monkeypatch.setattr(agent_lifecycle, "load_access_policy", unreadable)
+    else:
+        monkeypatch.setattr(agent_lifecycle, "policy_write_transaction", _busy)
     agent = ma_agent(id="ag_doomed", name="doomed", tenant_id=tenant.id)
 
     dropped = await forget_archived_agent(

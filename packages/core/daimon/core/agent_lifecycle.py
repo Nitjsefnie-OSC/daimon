@@ -178,7 +178,7 @@ async def forget_archived_agent(
     name: str,
     agent: BetaManagedAgentsAgent,
 ) -> tuple[str, ...]:
-    """Drop an archived agent's rules and clear every scope row naming it.
+    """Drop an archived agent's rules and clear every scope row naming it, by its own names.
 
     Called after the MA archive on every delete path. The rule goes on each of
     its own names (the one asked for, its MA name and its config name), never
@@ -200,10 +200,17 @@ async def forget_archived_agent(
             updated = without_agent_rules(policy, names)
             if updated != policy:
                 await set_access_policy(session, tenant_id=tenant_id, policy=updated)
-            await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
+            await _clear_references(session, tenant_id=tenant_id, names=names)
         return tuple(n for n in names if n in policy.agent_rules)
     except (AccessPolicyUnreadable, PolicyBusyError):
         _log.warning("agent_lifecycle.agent_rule_kept", exc_info=True, **log_fields)
     async with sessionmaker.begin() as session:
-        await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
+        await _clear_references(session, tenant_id=tenant_id, names=names)
     return ()
+
+
+async def _clear_references(
+    session: AsyncSession, *, tenant_id: uuid.UUID, names: tuple[str, ...]
+) -> None:
+    for each in names:
+        await clear_agent_references(session, tenant_id=tenant_id, agent_name=each)

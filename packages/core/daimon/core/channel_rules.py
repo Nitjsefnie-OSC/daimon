@@ -27,7 +27,7 @@ from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
 from daimon.core.agent_fork import fork_agent
-from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.agent_reach import load_agent_reach
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.channel_environments import limited_readers_network_warning
@@ -737,6 +737,7 @@ class AgentRuleChange:
 
 
 async def _drop_missing_agent_rule(
+    anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
@@ -745,9 +746,14 @@ async def _drop_missing_agent_rule(
 ) -> AgentRuleChange:
     """Drop the rule left by an agent that no longer exists, such as one archived out of band.
 
-    Refused as `agent_not_found` when the name has no rule either, so a typo
-    still says so.
+    The rule is left only when no live agent answers to `agent_name` under
+    any name a rule applies to (`agent_aliases`: its MA name, its config name,
+    a report reader's source names), so a live agent's rule is never dropped
+    here. Refused as `agent_not_found` otherwise, and when the name has no
+    rule either, so a typo still says so.
     """
+    if agent_name in agent_aliases(await list_agents_by_tenant(anthropic, tenant_id=tenant_id)):
+        raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
         await lock_access_policy(session, tenant_id=tenant_id)
@@ -791,7 +797,7 @@ async def set_agent_rule(
     if agent is None:
         if runs_in is None:
             return await _drop_missing_agent_rule(
-                sessionmaker, tenant_id=tenant_id, agent_name=agent_name, subject=subject
+                anthropic, sessionmaker, tenant_id=tenant_id, agent_name=agent_name, subject=subject
             )
         raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
     names = tuple(n for n in (agent_name, *agent_pin_names(agent.name, agent.metadata)) if n)
