@@ -101,8 +101,9 @@ reads the session of the turn it follows, and sweeps are serialised per
 session (`packages/adapters/discord/daimon/adapters/discord/bot.py:786-812`).
 A delivered file is then **posted into the thread**
 (`packages/adapters/discord/daimon/adapters/discord/output_delivery.py:99-104`),
-where everyone in the thread can see it and every later turn's context
-includes it (see the next section).
+where everyone in the thread can see it, and later turns, including other
+callers' turns, can receive it through replayed history, subject to the
+limits in the next section.
 
 Files staged with `create_file_upload_url` and posted by handle are keyed by
 tenant only (`packages/core/daimon/core/stores/file_uploads.py:99-118`). The
@@ -124,12 +125,23 @@ posted in a thread is open to everyone who reads it.
 
 A person's attachments reach a session in two ways:
 
-- **Trigger images** on Discord are downloaded and sent with the turn as
-  base64 image blocks
-  (`packages/adapters/discord/daimon/adapters/discord/bot.py:4433-4436`), with
-  a URL line as well. Only the triggering message's images are inlined.
-- **Everything else** is written into the turn's text as a URL the agent can
-  fetch: the triggering message's data files as `[attachment]` lines
+- **Inlined images** are downloaded and sent with the turn as image blocks:
+  - Discord: the triggering message's images, as base64 blocks with a URL
+    line as well
+    (`packages/adapters/discord/daimon/adapters/discord/bot.py:4433-4436`).
+  - Slack: the triggering message's images
+    (`packages/adapters/slack/daimon/adapters/slack/app.py:2608-2613`, passed
+    to the turn at `packages/adapters/slack/daimon/adapters/slack/app.py:2805`).
+  - Teams: the triggering message's images **and** up to four images from
+    earlier messages in the replayed history, from any author
+    (`packages/adapters/teams/daimon/adapters/teams/app.py:1164-1172`,
+    `packages/adapters/teams/daimon/adapters/teams/app.py:1231`,
+    `packages/adapters/teams/daimon/adapters/teams/context.py:40`,
+    `packages/adapters/teams/daimon/adapters/teams/context.py:315-325`).
+    On Teams another caller's image can therefore reach a turn as bytes, not
+    only as a URL.
+- **Attachments that are not inlined** are written into the turn's text as a
+  URL the agent can fetch: the triggering message's data files as `[attachment]` lines
   (`packages/adapters/discord/daimon/adapters/discord/attachments.py:16-40`),
   and files on earlier messages in the thread, **from any author**, as
   `<attachment>` elements inside the replayed history.
@@ -149,7 +161,9 @@ not always carry all of them:
   (`packages/adapters/discord/daimon/adapters/discord/bot.py:4386`).
 - **Slack.** The first turn replays one page from the thread root and marks
   the block `truncated` when the thread is longer
-  (`packages/adapters/slack/daimon/adapters/slack/context.py:151-184`). Files
+  (`packages/adapters/slack/daimon/adapters/slack/context.py:151-184`); a
+  later turn likewise fetches one page of messages since its watermark
+  (`packages/adapters/slack/daimon/adapters/slack/context.py:221-242`). Files
   carry a signed proxy URL that fetches with the bot token, and are left out
   when no proxy is configured
   (`packages/adapters/slack/daimon/adapters/slack/context.py:100-113`).
@@ -267,7 +281,8 @@ See [billing.md](billing.md).
 
 A routine belongs to its creator: only the creator or an admin lists, reads,
 pauses or deletes it (MCP read gate
-`packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:115-124`; panels
+`packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:115-124`, mutation
+gate `packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:93-112`; panels
 `packages/core/daimon/core/routines.py:43-49`). A routine of a `readers: own`
 channel, or of that channel's own agent, is in addition visible only from
 inside that channel
@@ -307,7 +322,9 @@ which something of one person's can still reach the other's turn:
    Slack `packages/adapters/slack/daimon/adapters/slack/context.py:100-113`;
    Teams `packages/adapters/teams/daimon/adapters/teams/context.py:190-195`).
    The second person's agent can fetch those files into its own sandbox and
-   send them again.
+   send them again. On Teams, up to four of the other person's history
+   images are also inlined into the turn as image blocks
+   (`packages/adapters/teams/daimon/adapters/teams/context.py:315-325`).
 2. **Delivered outputs.** A file the first person's session produced is
    posted into the thread
    (`packages/adapters/discord/daimon/adapters/discord/output_delivery.py:99-104`),
