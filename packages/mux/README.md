@@ -1,5 +1,9 @@
 # mux
 
+OpenAI session observations preserve native busy occupancy even when the active
+root is not visible yet. Accepted creation is not retried, and empty turn history
+does not admit a new turn or certify completion.
+
 The provider-neutral managed-agent contract: types, port protocols, errors,
 profiles and admission, the `StateStore` protocol and its in-memory test
 store (`mux.state`), with one driver package per provider under
