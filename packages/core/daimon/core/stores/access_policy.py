@@ -157,6 +157,8 @@ async def set_access_policy(
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     payload = policy.model_dump(mode="json")
+    if policy.enabled_backends == ("anthropic",):
+        payload.pop("enabled_backends", None)
     # Leave empty keys out, so a build from before them still reads a row
     # that sets none of them.
     for key in ("channel_rules", "category_rules", "agent_rules", "member_guest_ids"):

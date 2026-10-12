@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from mux.contracts.config import BackendConfig, ResolvedBackend, resolve_default
 from mux.contracts.errors import InvalidConfig
+from mux.contracts.ids import Provider
 from mux.contracts.profile import Profile
 from mux.profiles.anthropic import MANAGED_AGENTS
 from mux.profiles.gemini import INLINE_REUSE
@@ -36,3 +38,28 @@ __all__ = [
     "PROFILES",
     "get_profile",
 ]
+
+
+_BACKEND_SELECTIONS: Mapping[Provider, BackendConfig] = {
+    "anthropic": BackendConfig(),
+    "openai": BackendConfig(
+        backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"
+    ),
+    "gemini": BackendConfig(
+        backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"
+    ),
+}
+
+
+def backend_selection(backend: Provider) -> ResolvedBackend:
+    """The supported admin selection; provider choices stay in the profile seam."""
+    try:
+        config = _BACKEND_SELECTIONS[backend]
+    except KeyError:
+        raise InvalidConfig("unknown backend selection") from None
+    return resolve_default(config)
+
+
+def shared_threads_available(backend: Provider) -> bool:
+    """Thread-mode limits of the admitted profile, without host provider branches."""
+    return {"anthropic": True, "openai": False, "gemini": False}[backend]

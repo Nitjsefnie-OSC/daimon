@@ -2023,3 +2023,38 @@ authorized tenant, account, principal, authorization and provider workspace.
 Gemini catalog readback must also match the same declared profile and configured
 adapter. Default routing, missing grants and mismatch refusals keep their
 existing behavior; the CLI constructs no additional provider clients.
+
+## Agent backend preferences
+
+Admin backend preferences use the existing neutral-path flags: both
+`turn.path=mux` and `turn.channel_backends=true` must be set. No preference
+means the same Anthropic agent and model as before. An explicit channel
+configuration takes priority over the agent preference, which takes priority
+over that default. Clearing an agent preference restores inheritance; reverting
+appends a revision with the previous value. Existing threads retain their
+immutable configuration, rather than following a later preference change.
+
+The tenant access policy's `enabled_backends` allowlist defaults to Anthropic.
+Selections must be explicitly enabled before an admin can save them. Compatibility
+previews list unsupported attachments/capabilities, target thread-mode limits,
+existing model list prices, and an explicitly unknown whole-turn maximum where
+no complete bound is enforced. Preview digests bind the current agent facts,
+policy, price line and preference revision; stale confirmations refuse.
+
+Changes use a compare-and-set revision and record an existing security-audit
+event in the same transaction. Preferences do not store credentials or copy
+provider resources. Agent-derived effective configurations share the existing
+immutable channel revision namespace but never become channel overrides.
+
+Operator deployment manifests may keep their exact `config_digest` authorization
+or supply a closed `configuration_grant` with explicit `profiles`, `models`,
+`thread_modes`, and `requires`. Every tenant/account/channel constraint remains
+mandatory; bounds are not authorization to substitute an unrelated native agent.
+Agent-origin native preparation therefore refuses before manifest, credential
+or native I/O until independently authorized resource-counterpart proof is
+available. Channel-origin native deployments keep their existing behavior.
+
+Disable the feature through the existing flags to stop new preference selection;
+retain stored revisions and audit history. Destructive schema downgrade removes
+agent-origin materializations and preference history and must not be used while
+threads depend on those revisions. Default/channel-origin history survives.
