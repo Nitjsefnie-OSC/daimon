@@ -7,7 +7,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, fields, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import combinations
 from pathlib import Path
@@ -19,7 +19,6 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
-from daimon.core.turn.admission import Admission
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_deployment import GeminiPlan, build_gemini_runtime
 from daimon.core.turn.openai_deployment import OpenAIDeployment, build_openai_runtime
@@ -139,13 +138,6 @@ def test_complete_operator_pins_remain_separate_from_configuration_authority(pro
         )
 
 
-@dataclass(frozen=True)
-class AgentAdmission(Admission):
-    """The preparation owner's proposed trusted origin, without editing its API."""
-
-    backend_revision_origin: Literal["channel", "agent"] | None = "agent"
-
-
 class Wire:
     def __init__(self, provider: str) -> None:
         self.provider = provider
@@ -238,9 +230,7 @@ async def owned(
     async with application.deps.sessionmaker.begin() as db:
         tenant = await make_tenant(db, id=TENANT)
         await make_account(db, id=ACCOUNT, tenant=tenant)
-    selected = AgentAdmission(
-        **{f.name: getattr(application.admission, f.name) for f in fields(Admission)}
-    )
+    selected = replace(application.admission, backend_revision_origin="agent")
     assert selected.agent.version == 1
     request = replace(application, admission=selected)
     if provider == "gemini":
@@ -461,13 +451,16 @@ async def test_source_bounds_and_catalog_mismatches_refuse_before_native_io(
                 "skill_id": "skill_ids",
             }[defect]
         ] = {"catalog_id": "missing", "catalog_revision": 2, "skill_id": ["foreign-skill"]}[defect]
-    elif defect in ("origin", "unset_origin"):
+    elif defect == "origin":
         request = replace(
-            request,
-            admission=replace(
-                request.admission, backend_revision_origin="channel" if defect == "origin" else None
-            ),
+            request, admission=replace(request.admission, backend_revision_origin="channel")
         )
+    elif defect == "unset_origin":
+        with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+            replace(request.admission, backend_revision_origin=None)
+        damaged = replace(request.admission)
+        object.__setattr__(damaged, "backend_revision_origin", None)
+        request = replace(request, admission=damaged)
     elif defect in ("disabled", "legacy"):
         request = replace(
             request,
