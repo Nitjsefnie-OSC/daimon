@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.turn.protection import CategoryLookup, ProtectionState, protection_state
+from daimon.core.turn.protection import (
+    CategoryLookup,
+    ConfirmedProtection,
+    ProtectionState,
+    matched_writers_none,
+    protection_state,
+)
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -189,3 +195,49 @@ async def test_a_failed_category_lookup_is_unknown(
     )
 
     assert state is ProtectionState.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("policy", "thread_id", "category_id", "expected"),
+    [
+        (
+            TenantAccessPolicy(protected_channel_ids=("c1",)),
+            None,
+            None,
+            ConfirmedProtection(scope="channel", rule_id="c1"),
+        ),
+        (
+            TenantAccessPolicy(protected_channel_ids=("c1",)),
+            "t1",
+            None,
+            ConfirmedProtection(scope="channel", rule_id="c1"),
+        ),
+        (
+            TenantAccessPolicy(protected_category_ids=("cat",)),
+            None,
+            "cat",
+            ConfirmedProtection(scope="category", rule_id="cat"),
+        ),
+        (TenantAccessPolicy(protected_category_ids=("cat",)), "t1", None, None),
+        (TenantAccessPolicy(protected_category_ids=("other",)), None, "cat", None),
+        (TenantAccessPolicy(), None, "cat", None),
+    ],
+    ids=[
+        "channel-rule",
+        "thread-under-channel-rule",
+        "resolved-category-rule",
+        "unresolved-category-is-not-proof",
+        "unrelated-category",
+        "no-rule",
+    ],
+)
+def test_matched_writers_none_confirms_only_a_rule_that_matches(
+    policy: TenantAccessPolicy,
+    thread_id: str | None,
+    category_id: str | None,
+    expected: ConfirmedProtection | None,
+) -> None:
+    assert (
+        matched_writers_none(policy, channel_id="c1", thread_id=thread_id, category_id=category_id)
+        == expected
+    ), "fail-closed protection (an unresolved category) must never read as a matched rule"

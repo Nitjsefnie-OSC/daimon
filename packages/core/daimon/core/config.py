@@ -434,6 +434,17 @@ class DiscordSettings(BaseModel):
             "Kept in memory, so a restart allows one more."
         ),
     )
+    protected_channel_notice_cooldown_min: float = Field(
+        default=10.0,
+        gt=0,
+        description=(
+            "Minutes before the same person is told again that Daimon can't reply in a "
+            "channel whose Who can post rule is Nobody. Their mention gets a 🔒 reaction and "
+            "a direct message naming the rule and who can change it; nothing else is posted "
+            "and no turn runs. Kept in memory per person and channel, so a restart allows "
+            "one more."
+        ),
+    )
     max_concurrent_turns_per_tenant: int = Field(
         default=3,
         description=(

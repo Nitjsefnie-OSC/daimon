@@ -22,7 +22,26 @@ rules on two channels, a thread, a category and two agents with rules.
 | | `own` | only the channel's own agents, inside it |
 | `writers` | `any` | any agent answers and posts |
 | | `own` | only the channel's own agents answer and post |
-| | `none` | no turn starts and nothing posts, admins and Daimon's notices included |
+| | `none` | no turn starts and nothing posts, admins and Daimon's notices included (on Discord, a mention gets only a 🔒 reaction and a DM; see below) |
+
+On Discord there is one narrow exception, so that "not allowed here" doesn't
+look like "Daimon is down". A direct @mention of Daimon in a `writers: none`
+channel gets a 🔒 reaction, and its author a direct message naming the rule.
+For a channel rule, the message says a server admin can change it in
+`/agent-setup` → **Who answers where** → **Permissions**. For a category rule,
+it says whoever runs Daimon for the server can. The exception is bounded:
+
+- only a direct @mention, never a plain message or a reply without one;
+- at most one reaction per message, and at most one notice per person per
+  channel per `DAIMON_DISCORD__PROTECTED_CHANNEL_NOTICE_COOLDOWN_MIN` (10
+  minutes);
+- no text is ever posted in the channel, and no turn runs;
+- the DM is sent only if the person can receive DMs; when it fails, nothing
+  else happens;
+- only when a stored rule matches the channel or its resolved category. A
+  refusal that comes from failing closed (a category that couldn't be looked
+  up, or a policy that couldn't be read) stays silent, as do mentions replayed
+  at startup.
 
 A channel's **own agents** are those whose agent rule names it alone, while
 its readers are `own`: that channel is their **home**. `own` goes on both
