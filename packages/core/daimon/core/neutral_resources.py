@@ -7,14 +7,33 @@ CAS. Existing sessions keep their old native agent and workspace binding.
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import uuid
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
+from datetime import datetime
+from decimal import Decimal
+from pathlib import PurePosixPath
+from typing import Literal, Protocol
+from urllib.parse import urlsplit
 
 import structlog
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    DenyReason,
+    FleetFacts,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_agent_ref,
+)
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ISOLATED,
@@ -25,27 +44,35 @@ from daimon.core.defaults.metadata import (
     strip_tenant_prefix,
     tenant_scoped_display_title,
 )
+from daimon.core.errors import DaimonError
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_upload
 from daimon.core.skills.service import AddedSkill, StoredSkillUpload, UploadedSkill, add_skill
+from daimon.core.stores import security_audit
 from daimon.core.stores.neutral_catalog import (
     AgentRevision,
     CatalogConflict,
     PostgresNeutralCatalog,
     SkillVersion,
 )
-from mux.contracts.ids import Scope, SkillRef
+from mux.contracts._base import Contract
+from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
+from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.ports import Agents, ManagedAgents
 from mux.contracts.profile import SUPPORTED
 from mux.contracts.resources import (
     Agent,
+    AgentPatch,
     AgentSpec,
+    EnvironmentSpec,
     MCPConnection,
+    ResourceBinding,
     SkillUpload,
     SkillUploadFile,
     ToolSpec,
 )
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles import native_agent_tools, neutral_catalog_profile_for
+from mux.profiles import get_profile, native_agent_tools, neutral_catalog_profile_for
+from pydantic import Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 AgentGate = Callable[[Agent], Awaitable[None]]
@@ -619,3 +646,455 @@ class _NeutralSkillAddHost:
             key=self.host.operation_key + ":agent:attach",
         )
         return not present
+
+
+WorkerField = Literal[
+    "origin",
+    "scope",
+    "overrides",
+    "spec",
+    "backend",
+    "tools",
+    "mcp",
+    "skills",
+    "files",
+    "sandbox",
+    "effort",
+    "extensions",
+    "system",
+    "budget",
+    "deadline",
+    "max_turns",
+]
+WorkerReason = DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale"]
+
+
+class WorkerSpecRefused(ValueError):
+    """Closed permission refusal without spec values or credential material."""
+
+    def __init__(self, field: WorkerField, reason: WorkerReason) -> None:
+        self.field = field
+        self.reason = reason
+        super().__init__(f"worker {field}: {reason}")
+
+
+class WorkerLimits(Contract):
+    budget_usd: Decimal = Field(ge=0, allow_inf_nan=False, strict=True)
+    deadline: datetime
+    max_turns: int = Field(gt=0, strict=True)
+
+    @model_validator(mode="after")
+    def _aware_deadline(self) -> WorkerLimits:
+        if self.deadline.utcoffset() is None:
+            raise ValueError("worker deadline must be aware")
+        return self
+
+
+@dataclass(frozen=True)
+class WorkerPermissions:
+    """Actual root facts supplied by the host; never parsed from worker JSON."""
+
+    fleet: FleetFacts
+    subject: Subject
+    agent: AgentRef
+    spec: AgentSpec = dataclass_field(repr=False)
+    base_system: str = dataclass_field(repr=False)
+    backend_grants: tuple[ResolvedBackend, ...]
+    models: tuple[ModelRef, ...]
+    limits: WorkerLimits
+    resources: tuple[ResourceBinding, ...] = ()
+    environment: EnvironmentSpec | None = None
+    source_agents: tuple[ResourceRef, ...] = ()
+    source_revisions: tuple[tuple[ResourceRef, Revision], ...] = ()
+    seal_ids: frozenset[str] = frozenset()
+    memory_read_only: bool = True
+    agent_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedWorkerSpec:
+    spec: AgentSpec = dataclass_field(repr=False)
+    backend: ResolvedBackend
+    resources: tuple[ResourceBinding, ...]
+    environment: EnvironmentSpec | None
+    limits: WorkerLimits
+    permissions: WorkerPermissions = dataclass_field(repr=False)
+    digest: str
+
+
+def _worker_subset(
+    field: WorkerField, requested: tuple[Contract, ...], granted: tuple[Contract, ...]
+) -> None:
+    if any(item not in granted for item in requested):
+        raise WorkerSpecRefused(field, "not_subset")
+
+
+def _worker_tools(requested: AgentSpec, granted: AgentSpec) -> None:
+    available = {(tool.kind, tool.name): tool for tool in granted.tools or ()}
+    if len(available) != len(granted.tools or ()):
+        raise WorkerSpecRefused("tools", "ambiguous")
+    seen: set[tuple[str, str]] = set()
+    for tool in requested.tools or ():
+        key = tool.kind, tool.name
+        old = available.get(key)
+        if key in seen or old is None:
+            raise WorkerSpecRefused("tools", "not_subset")
+        seen.add(key)
+        if (
+            tool.input_schema != old.input_schema
+            or tool.description != old.description
+            or (old.permission == "ask" and tool.permission != "ask")
+        ):
+            raise WorkerSpecRefused("tools", "not_subset")
+
+
+def _worker_mcp(requested: AgentSpec, granted: AgentSpec) -> None:
+    available = {connection.name: connection for connection in granted.mcp_servers or ()}
+    if len(available) != len(granted.mcp_servers or ()):
+        raise WorkerSpecRefused("mcp", "ambiguous")
+    seen: set[str] = set()
+    for connection in requested.mcp_servers or ():
+        old = available.get(connection.name)
+        try:
+            url = urlsplit(connection.url)
+        except ValueError:
+            raise WorkerSpecRefused("mcp", "unsupported") from None
+        if (
+            old is None
+            or connection.name in seen
+            or url.scheme != "https"
+            or not url.hostname
+            or url.username is not None
+            or url.password is not None
+            or url.query
+            or url.fragment
+            or (connection.url, connection.transport, connection.credential_ref)
+            != (old.url, old.transport, old.credential_ref)
+        ):
+            raise WorkerSpecRefused("mcp", "unbound")
+        seen.add(connection.name)
+        # Policy semantics must be declared, not arbitrary SDK pass-through.
+        policy, allowed = dict(connection.tool_policy), dict(old.tool_policy)
+        if set(policy) - {"allowed_tools", "require_approval"}:
+            raise WorkerSpecRefused("mcp", "unsupported")
+        tools, ceiling = policy.get("allowed_tools"), allowed.get("allowed_tools")
+        if (
+            not isinstance(tools, list)
+            or not isinstance(ceiling, list)
+            or not all(isinstance(name, str) and name for name in tools + ceiling)
+            or not set(tools) <= set(ceiling)
+            or policy.get("require_approval") not in ("always", "never")
+            or allowed.get("require_approval") not in ("always", "never")
+            or (
+                allowed.get("require_approval") == "always"
+                and policy["require_approval"] != "always"
+            )
+        ):
+            raise WorkerSpecRefused("mcp", "not_subset")
+    servers = set(available)
+    for tool in requested.tools or ():
+        if tool.kind == "mcp_toolset" and (tool.name not in seen or tool.name not in servers):
+            raise WorkerSpecRefused("mcp", "unbound")
+
+
+def _worker_environment(requested: EnvironmentSpec | None, granted: EnvironmentSpec | None) -> None:
+    if requested is None:
+        return
+    if granted is None:
+        raise WorkerSpecRefused("sandbox", "not_subset")
+    if requested.native_config is not None or granted.native_config is not None:
+        raise WorkerSpecRefused("sandbox", "unsupported")
+    if requested.execution != granted.execution:
+        raise WorkerSpecRefused("sandbox", "unsupported")
+    if (
+        requested.scope != granted.scope
+        or requested.packages != granted.packages
+        or requested.metadata != granted.metadata
+    ):
+        raise WorkerSpecRefused("sandbox", "not_subset")
+    _worker_subset("files", tuple(requested.sources or ()), tuple(granted.sources or ()))
+    for source in requested.sources or ():
+        if source.repository_url is not None:
+            try:
+                url = urlsplit(source.repository_url)
+            except ValueError:
+                raise WorkerSpecRefused("files", "unsupported") from None
+            if url.username or url.password or url.query or url.fragment:
+                raise WorkerSpecRefused("files", "unbound")
+    network, ceiling = requested.network, granted.network
+    if network is None or ceiling is None:
+        if network != ceiling:
+            raise WorkerSpecRefused("sandbox", "unsupported")
+    elif (
+        ceiling.mode == "none"
+        and network.mode != "none"
+        or ceiling.mode == "limited"
+        and (
+            network.mode == "unrestricted"
+            or (
+                network.mode == "limited"
+                and not set(network.allowed_hosts) <= set(ceiling.allowed_hosts)
+            )
+        )
+    ):
+        raise WorkerSpecRefused("sandbox", "not_subset")
+
+
+def resolve_worker_spec(
+    parent: WorkerPermissions,
+    spec: AgentSpec | Agent,
+    *,
+    policy: TenantAccessPolicy,
+    now: datetime,
+    backend: BackendConfig | None = None,
+    overrides: AgentPatch | None = None,
+    resources: tuple[ResourceBinding, ...] = (),
+    environment: EnvironmentSpec | None = None,
+    limits: WorkerLimits | None = None,
+) -> ResolvedWorkerSpec:
+    """Resolve existing spec shapes against authentic, finite parent authority.
+
+    This does not reserve funds, create resources or authorize native execution.
+    Preparation must repeat against fresh host facts and apply the derived port
+    and tool grants; a persisted digest is an idempotency key, never authority.
+    """
+    from daimon.core.channel_backend import check_backend
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+
+    fleet = parent.fleet
+    place = Place(channel_id=fleet.root.thread_id, parent_channel_id=fleet.root.channel.channel_id)
+    decision = authorize(
+        policy,
+        subject=parent.subject,
+        action=Action.SPAWN_WORKER,
+        surface=Surface.FLEET,
+        agent=parent.agent,
+        place=place,
+        fleet=fleet,
+    )
+    if not decision:
+        raise WorkerSpecRefused("origin", decision.reason or "unbound")
+    if not parent.base_system.strip():
+        raise WorkerSpecRefused("system", "unbound")
+    if now.utcoffset() is None:
+        raise WorkerSpecRefused("deadline", "unsupported")
+    if isinstance(spec, Agent):
+        if (
+            spec.ref not in parent.source_agents
+            or spec.ref.kind != "agent"
+            or spec.ref.provider != spec.spec.model.provider
+            or spec.lifecycle != "active"
+            or spec.archived_at is not None
+        ):
+            raise WorkerSpecRefused("scope", "unbound")
+        if (
+            spec.ref.tenant_id != fleet.scope.tenant_id
+            or spec.ref.account_id != fleet.scope.account_id
+        ):
+            raise WorkerSpecRefused("scope", "not_subset")
+        if (spec.ref, spec.revision) not in parent.source_revisions:
+            raise WorkerSpecRefused("scope", "stale")
+        clone = authorize(
+            policy,
+            subject=parent.subject,
+            action=Action.RUN_AGENT,
+            surface=Surface.FLEET,
+            agent=build_agent_ref(spec.spec.name, spec.spec.metadata or {}),
+            place=place,
+        )
+        if not clone:
+            raise WorkerSpecRefused("scope", clone.reason or "unbound")
+        source = spec.spec
+    else:
+        if overrides is not None:
+            raise WorkerSpecRefused("overrides", "unsupported")
+        source = spec
+    data = source.model_dump(mode="json")
+    if overrides is not None:
+        if overrides.extensions:
+            raise WorkerSpecRefused("extensions", "unsupported")
+        data.update(overrides.model_dump(mode="json", exclude_unset=True))
+    try:
+        resolved = AgentSpec.model_validate(data)
+    except ValueError:
+        raise WorkerSpecRefused("spec", "unsupported") from None
+    if any(
+        (parent.spec.metadata or {}).get(key) != value
+        for key, value in (resolved.metadata or {}).items()
+    ):
+        raise WorkerSpecRefused("scope", "not_subset")
+    worker_run = authorize(
+        policy,
+        subject=parent.subject,
+        action=Action.RUN_AGENT,
+        surface=Surface.FLEET,
+        agent=build_agent_ref(resolved.name, resolved.metadata or {}),
+        place=place,
+    )
+    if not worker_run:
+        raise WorkerSpecRefused("scope", worker_run.reason or "unbound")
+    if resolved.model.options:
+        raise WorkerSpecRefused("effort", "unsupported")
+    if resolved.extensions:
+        raise WorkerSpecRefused("extensions", "unsupported")
+    choices = tuple(
+        grant
+        for grant in parent.backend_grants
+        if grant.backend == resolved.model.provider
+        and (grant.model is None or grant.model == resolved.model.id)
+    )
+    if backend is None and len(choices) != 1:
+        raise WorkerSpecRefused("backend", "ambiguous")
+    try:
+        selected = resolve_default(backend) if backend is not None else choices[0]
+    except ValueError:
+        raise WorkerSpecRefused("backend", "unsupported") from None
+    if selected not in parent.backend_grants:
+        raise WorkerSpecRefused("backend", "not_subset")
+    if (
+        selected.thread_mode != "per_caller"
+        or resolved.model.provider != selected.backend
+        or (selected.model is not None and selected.model != resolved.model.id)
+        or resolved.model not in parent.models
+    ):
+        raise WorkerSpecRefused("backend", "not_subset")
+    try:
+        check_backend(
+            ConfigRevision.create(fleet.root.channel, 1, selected),
+            enabled_backends=policy.enabled_backends,
+        )
+    except DaimonError:
+        raise WorkerSpecRefused("backend", "unsupported") from None
+    profile = get_profile(selected.profile)
+    if profile.implicit_execution and not any(
+        tool.kind == "builtin" and tool.name == profile.execution_tool
+        for tool in resolved.tools or ()
+    ):
+        resolved = resolved.model_copy(
+            update={
+                "tools": tuple(resolved.tools or ())
+                + (ToolSpec(name=profile.execution_tool, kind="builtin"),)
+            }
+        )
+    if (
+        any(tool.permission == "ask" for tool in resolved.tools or ())
+        and profile.support_for("tool_confirmation") not in SUPPORTED
+    ):
+        raise WorkerSpecRefused("tools", "unsupported")
+    _worker_tools(resolved, parent.spec)
+    _worker_mcp(resolved, parent.spec)
+    for pin in resolved.skills or ():
+        if pin.version is None:
+            raise WorkerSpecRefused("skills", "unbound")
+    _worker_subset("skills", tuple(resolved.skills or ()), tuple(parent.spec.skills or ()))
+    _worker_subset("files", resources, parent.resources)
+    for resource in resources:
+        if resource.native is not None:
+            raise WorkerSpecRefused("files", "unsupported")
+        ref = resource.resource
+        if ref is not None and (ref.tenant_id, ref.account_id) != (
+            fleet.scope.tenant_id,
+            fleet.scope.account_id,
+        ):
+            raise WorkerSpecRefused("scope", "not_subset")
+        if resource.target_path is not None and any(
+            part in ("..", "") for part in PurePosixPath(resource.target_path).parts
+        ):
+            raise WorkerSpecRefused("files", "unsupported")
+    environment = environment if environment is not None else parent.environment
+    _worker_environment(environment, parent.environment)
+    if environment is None and any(
+        tool.kind == "builtin" and tool.name == profile.execution_tool
+        for tool in resolved.tools or ()
+    ):
+        raise WorkerSpecRefused("sandbox", "unbound")
+    cap = limits or parent.limits
+    if cap.budget_usd <= 0 or cap.budget_usd > parent.limits.budget_usd:
+        raise WorkerSpecRefused("budget", "not_subset")
+    if (
+        cap.deadline <= now
+        or cap.deadline > parent.limits.deadline
+        or (cap.deadline - now).total_seconds() > TURN_CEILING_S
+    ):
+        raise WorkerSpecRefused("deadline", "not_subset")
+    if cap.max_turns > parent.limits.max_turns:
+        raise WorkerSpecRefused("max_turns", "not_subset")
+    system = resolved.system or ""
+    if not (system == parent.base_system or system.startswith(parent.base_system + "\n\n")):
+        system = parent.base_system + ("\n\n" + system if system else "")
+    resolved = resolved.model_copy(update={"system": system})
+    body = {
+        "spec": resolved.model_dump(mode="json"),
+        "backend": selected.model_dump(mode="json"),
+        "resources": [resource.model_dump(mode="json") for resource in resources],
+        "environment": environment.model_dump(mode="json") if environment is not None else None,
+        "limits": cap.model_dump(mode="json"),
+        "origin": str(fleet.origin_id),
+        "scope": fleet.scope.model_dump(mode="json"),
+        "seals": sorted(parent.seal_ids),
+        "memory_read_only": parent.memory_read_only,
+    }
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    child_scope = fleet.scope.model_copy(
+        update={"authorization_id": f"worker:{fleet.origin_id}:{digest}"}
+    )
+    child = replace(
+        parent,
+        fleet=replace(fleet, scope=child_scope, depth=1),
+        subject=replace(
+            parent.subject, is_admin=False, via_agent_key=True, administered_channel_ids=frozenset()
+        ),
+        spec=resolved,
+        backend_grants=(selected,),
+        models=(resolved.model,),
+        resources=resources,
+        environment=environment,
+        limits=cap,
+        source_agents=(),
+        source_revisions=(),
+    )
+    return ResolvedWorkerSpec(resolved, selected, resources, environment, cap, child, digest)
+
+
+async def audit_worker_action(
+    session: AsyncSession,
+    parent: WorkerPermissions,
+    *,
+    worker_id: uuid.UUID,
+    operation: Literal["spawn", "kill", "resume", "review"],
+    outcome: Literal["allowed", "denied", "error"],
+    reason: WorkerReason | Literal["authorized", "cancel_requested"],
+) -> security_audit.SecurityAuditRow | None:
+    """Append in the caller's fleet transition transaction, with no input data.
+
+    The caller verifies worker membership under its existing run/operation CAS.
+    Allowed means the transaction authorized a transition, not native completion.
+    """
+    fleet = parent.fleet
+    if (
+        fleet.scope.is_platform
+        or fleet.scope.is_legacy_host_authorized
+        or parent.agent_id is None
+        or fleet.scope.account_id != str(fleet.account_id)
+        or fleet.scope.tenant_id != fleet.root.channel.tenant_id
+    ):
+        raise WorkerSpecRefused("origin", "unbound")
+    row = await security_audit.append_event(
+        session,
+        tenant_id=uuid.UUID(fleet.scope.tenant_id),
+        account_id=fleet.account_id,
+        agent_id=parent.agent_id,
+        platform=fleet.root.channel.platform,
+        platform_user_id=parent.subject.platform_user_id,
+        tool_name="fleet",
+        operation=operation,
+        outcome=outcome,
+        reason=reason,
+        scope=f"fleet:{fleet.run_id}:worker:{worker_id}",
+        turn_ref=f"origin:{fleet.origin_id}",
+    )
+    # Account erasure redacts the existing audit row; it cannot authorize a new
+    # worker transition after its actor has disappeared.
+    return row if row is not None and row.account_id == fleet.account_id else None

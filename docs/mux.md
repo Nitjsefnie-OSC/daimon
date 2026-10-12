@@ -2286,3 +2286,26 @@ journal and usage are the store's existing ones. The worker's result is one
 journal entry of its own, with an id and source key derived from the worker
 (`fleet:<worker>:result`), so it never repeats an event the turn already
 journaled and a lease successor appending it again is a duplicate.
+### Worker permission derivation
+
+The core resource owner exposes one worker spec resolver over existing
+`AgentSpec` and sparse `AgentPatch` shapes. Host-supplied current root facts bind
+the real tenant, account, channel, thread and origin. Spawning uses the existing
+writer, invoker and agent policy on the fleet surface, with no private-admin
+exemption. Worker depth is one; workers cannot spawn more workers.
+
+The resolver preserves the protected root prompt and derives finite model,
+backend, exact skill version, tool schema, MCP endpoint and credential, resource,
+network, budget, deadline and turn-count subsets. A clone requires an authorized
+source reference and independently loaded current revision. Opaque native
+extensions, effort options and environment knobs refuse when their effect has
+no proven attenuation mapping. An implicit execution tool still counts toward
+authority when omitted from the requested tool list.
+
+This is an admission primitive, not a launch operation. The host must reload
+current authority at preparation and resume, retain the original ceiling, apply
+the derived grants at every resource/tool edge, and reserve funds with the worker
+transition in one transaction. Audit uses the existing scoped append-only store
+and contains identities and typed outcomes rather than prompts or credentials.
+A missing or erased actor cannot authorize launch. Existing turn paths do not
+call the resolver and remain unchanged.

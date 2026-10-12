@@ -82,6 +82,7 @@ class Profile(Contract):
     support: FrozenMap[Capability, Support]
     extensions: tuple[ExtensionRef, ...] = ()
     execution_tool: Literal["bash", "code_execution"] = "code_execution"
+    implicit_execution: bool = False
     skill_digest: Literal["version"] | None = None
     tool_readback: Literal["authored", "compiled"] = "authored"
     catalog_readback: Literal["retrieve", "verify"] = "retrieve"

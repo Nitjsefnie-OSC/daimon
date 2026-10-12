@@ -18,6 +18,7 @@ PERSISTENT_WORKSPACE = Profile(
     sdk_pin="openai>=2.54.0,<3",
     core=True,  # Nine mandatory capabilities have actual-driver evidence; see driver README.
     execution_tool="bash",
+    implicit_execution=True,
     tool_readback="compiled",
     support={
         "neutral_catalog": "native",

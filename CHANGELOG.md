@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the durable fleet store behind orchestrated worker fleets (off by default, `DAIMON_FLEET__*`): run and worker rows, a per-tenant and per-process worker pool separate from chat turns, worker results kept in each worker's own journal, and migration `0093_fleet_runs`.
 
 - Add read-only attribution of distinct host-worker usage and conservative token floors, preserving original debit identities and explicit pending revisions.
+- Add root-bound fleet worker authorization and a single spec attenuation resolver, with scoped transactional audit and explicit refusal of unproven native controls. Fleet execution remains unavailable until its host admission and driver bindings are installed.
 
 - Restrict scripted usage catch-up to main #824's exact query so caller-owned transcript and idle routes retain their replies; refresh the live recipe metadata for the main-attributed golden updates.
 
