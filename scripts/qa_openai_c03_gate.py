@@ -97,3 +97,65 @@ def verify_harness(checkout: Path, lane: Path):
     for name, expected in pinned["files"].items():
         if digest(lane / name) != expected:
             raise ValueError("C03 lane recipe differs from reviewed commit")
+
+
+def option_a_plan(envelope_path: Path):
+    """The signed three-request envelope replaces C03's old container/cutoff plan."""
+    from decimal import Decimal
+
+    from mux.conformance.budget import ProbePlan, TokenLimits
+
+    raw = envelope_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != ENVELOPE_SHA256:
+        raise ValueError("C03 financial envelope differs from lead signature")
+    envelope = json.loads(raw)
+    plan = ProbePlan.model_validate(envelope["probe_plan"])
+    if (
+        envelope.get("minimum_hold_usd") != "1.0755"
+        or envelope.get("maximum_hold_usd") != "1.0755"
+        or envelope.get("maximum_model_requests") != 3
+        or envelope.get("initial_create_turns") != 1
+        or envelope.get("distinct_C03_user_input_POSTs_authorized") != 2
+        or envelope.get("container_allowance") is not None
+        or envelope.get("native_session_configuration_required")
+        != {
+            "environment": {"type": "none"},
+            "agent": {
+                "model": "gpt-6-luna",
+                "tools": [],
+                "service_tier": "default",
+                "multi_agent": {"enabled": False},
+            },
+        }
+        or plan.fixture_id != "C03"
+        or plan.provider != "openai"
+        or plan.model != "gpt-6-luna"
+        or plan.container_allowance is not None
+        or plan.limits != TokenLimits(input_tokens=3150000, output_tokens=384000)
+        or envelope["guard_policy"]["expected_config_sha256"] != CONFIG_SHA256
+        or envelope["guard_policy"]["expected_ledger_id"] != LEDGER_ID
+        or Decimal(envelope["guard_policy"]["minimum_hold_usd"]) != Decimal("1.0755")
+        or Decimal(envelope["guard_policy"]["maximum_hold_usd"]) != Decimal("1.0755")
+    ):
+        raise ValueError("C03 OptionA signed execution or hold terms differ")
+    return plan
+
+
+def require_option_a_config(config_path: Path, envelope_path: Path):
+    """No credential/ledger access: bind config bytes and exact N=3 reservation."""
+    from decimal import Decimal
+
+    from mux.conformance.budget import BudgetConfig
+
+    if digest(config_path) != CONFIG_SHA256:
+        raise ValueError("C03 OptionA config differs from lead signature")
+    plan = option_a_plan(envelope_path)
+    config = BudgetConfig.load(config_path)
+    price = config.providers["openai"].models["gpt-6-luna"]
+    if (
+        config.providers["openai"].cap_usd != Decimal("50")
+        or price.actual_input_limit is not None
+        or price.reserve(plan.limits) != Decimal("1.0755")
+    ):
+        raise ValueError("C03 OptionA config differs from three-request hold bound")
+    return plan

@@ -676,3 +676,10 @@ container. The runner must observe the initial root completed and idle before
 entering the unchanged fixture. An ambiguous send consumes its admission and
 never licenses another POST. This policy supplies no live certification or
 financial authorization; those require separate source pins, an envelope and GO.
+
+C03 preparation and execution validate the signed Option A config/envelope pair
+against its three-request, no-container, $1.0755 hold terms. Its model
+`actual_input_limit` remains unset: the old 100k whole-run cutoff applies only
+to the other retained cases, and cannot gate this explicitly priced workload.
+Historical financial regressions keep their original rate validity windows
+and clocks; their stale prices are never installed or admitted for live C03.
