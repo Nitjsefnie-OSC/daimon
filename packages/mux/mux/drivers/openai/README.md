@@ -176,6 +176,14 @@ bill, so even Admin access alone does not establish per-session exact spend.
 The driver does not discover an Admin credential or call those endpoints.
 
 
+An `in_progress` session can temporarily have no visible active root in its turn
+listing. Create and retrieve preserve `state=running` and an unknown
+`active_root_turn` in that case; accepted creation is never retried. New-turn
+input remains refused while the native session is busy. Neither an empty turn
+listing nor a terminal turn implies idle; subsequent native session and saved
+turn observations establish occupancy and completion separately. Required
+actions still refuse when their active root is unavailable.
+
 ## Current boundaries
 
 Skills, artifacts and vault ports use the private SDK transport by default.

@@ -150,7 +150,11 @@ class OpenAISessions:
                 ):
                     active = text(turn["id"])
                     break
-            if active is None:
+            # Accepted work can precede its root in the turn listing (and a
+            # terminal root can precede the session's idle transition). Preserve
+            # native occupancy without inventing a root or retrying creation.
+            # Required actions still need a verified target.
+            if active is None and status == "requires_action":
                 raise ProviderError(
                     "upstream", retryable=True, native_code="active_root_unavailable"
                 )
