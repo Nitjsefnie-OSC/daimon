@@ -180,12 +180,13 @@ async def forget_archived_agent(
 ) -> tuple[str, ...]:
     """Drop an archived agent's rules and clear every scope row naming it, by its own names.
 
-    Called after the MA archive on every delete path. The rule goes on each of
-    its own names (the one asked for, its MA name and its config name), never
-    the source names a report reader also answers to, which are another
-    agent's. A rule left behind outlives the agent, and a later agent taking
-    the name (a channel copy, `channel_rules.copy_name`) inherits it. One transaction
-    under the policy lock. When the policy can't be read or its lock can't be
+    Called after the MA archive by the CLI, MCP and Slack archive actions.
+    The rule goes on each of its own names (the one asked for, its MA name
+    and its config name), never the source names a report reader also
+    answers to, which are another agent's. A rule left behind outlives the
+    agent, and a later agent taking the name (a channel copy,
+    `channel_rules.copy_name`) inherits it. One transaction under the policy
+    lock. When the policy can't be read or its lock can't be
     had, the scope rows are still cleared and the rule is left for
     `daimon agents rule set <name> --anywhere`; any other failure raises.
     Returns the names whose rule was dropped.

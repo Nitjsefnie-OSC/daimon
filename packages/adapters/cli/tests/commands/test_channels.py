@@ -657,7 +657,7 @@ async def test_agents_rule_set_anywhere_drops_an_archived_agents_leftover_rule(
     assert "There is no agent named ghost" in _out(console), _out(console)
     console = _console()
     await agents_rule_set(**args, console=console, anywhere=True)
-    assert "its leftover rule was dropped" in _out(console), _out(console)
+    assert "ghost's rule is cleared" in _out(console), _out(console)
     async with db_session_factory() as s:
         assert (await load_access_policy(s, tenant_id=tenant_id)).agent_rules == {}
 

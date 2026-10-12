@@ -404,8 +404,9 @@ async def agents_archive(
 ) -> None:
     """Archive an agent, its memory store, its rule and every scope row that names it.
 
-    Same three-step shape as the Discord and Slack panel deletes: archive the
-    MA agent, archive its memory store best-effort, then clear the scope rows.
+    Same three-step shape as the MCP archive tool and the Slack panel delete:
+    archive the MA agent, archive its memory store best-effort, then drop its
+    rule and clear the scope rows (`forget_archived_agent`).
     Without the clear, a channel or tenant default naming this agent survives
     the archive and turn resolution misses instead of falling through the
     cascade.

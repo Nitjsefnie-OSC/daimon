@@ -49,7 +49,6 @@ from daimon.core.permissions import (
     with_agent_rule,
     with_category_rule,
     with_channel_rule,
-    without_agent_rules,
 )
 from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
@@ -715,15 +714,11 @@ class AgentRuleChange:
     changed: bool
     answers_outside: bool = False
     """It is still set to answer outside its new rule, where every turn is refused."""
-    gone: bool = False
-    """No agent has the name any more; only its leftover rule was dropped."""
 
     @property
     def notes(self) -> tuple[str, ...]:
-        if self.gone:
-            return (f"There is no agent named {self.agent_name}; its leftover rule was dropped.",)
         if self.runs_in is None:
-            notes = [f"{self.agent_name} runs wherever it is set to answer."]
+            notes = [f"{self.agent_name}'s rule is cleared: it runs wherever it is set to answer."]
         elif not self.runs_in:
             notes = [f"{self.agent_name} runs nowhere."]
         else:
@@ -734,38 +729,6 @@ class AgentRuleChange:
                 "change those defaults too."
             )
         return tuple(notes)
-
-
-async def _drop_missing_agent_rule(
-    anthropic: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    tenant_id: uuid.UUID,
-    agent_name: str,
-    subject: Subject,
-) -> AgentRuleChange:
-    """Drop the rule left by an agent that no longer exists, such as one archived out of band.
-
-    The rule is left only when no live agent answers to `agent_name` under
-    any name a rule applies to (`agent_aliases`: its MA name, its config name,
-    a report reader's source names), so a live agent's rule is never dropped
-    here. Refused as `agent_not_found` otherwise, and when the name has no
-    rule either, so a typo still says so.
-    """
-    if agent_name in agent_aliases(await list_agents_by_tenant(anthropic, tenant_id=tenant_id)):
-        raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
-    async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
-        await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
-        await lock_access_policy(session, tenant_id=tenant_id)
-        policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not authorize(policy, subject=subject, action=Action.SET_AGENT_RULE):
-            raise ChannelRuleRefused("admin_required")
-        if agent_name not in policy.agent_rules:
-            raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
-        await set_access_policy(
-            session, tenant_id=tenant_id, policy=without_agent_rules(policy, (agent_name,))
-        )
-    return AgentRuleChange(agent_name, None, True, gone=True)
 
 
 async def set_agent_rule(
@@ -784,9 +747,12 @@ async def set_agent_rule(
     The rule replaces any on the agent's other names. A channel's own agent
     keeps its rule until that channel's readers change; a rule naming a
     channel only its own agents read names it alone, and makes the agent one
-    of its own only if it could be (`_own_agent_refusal`). With no agent of
-    that name, None drops a rule its name still has (`_drop_missing_agent_rule`).
-    Raise `ChannelRuleRefused` if refused.
+    of its own only if it could be (`_own_agent_refusal`). None also clears
+    the rule an archived agent left behind, but only when no live agent
+    answers to `agent_name` under any name a rule applies to (`agent_aliases`:
+    its MA name, its config name, a report reader's source names), so a live
+    agent's rule is never dropped by another name. Raise `ChannelRuleRefused`
+    if refused.
     """
     # Checked first too, so whether an agent exists is no one else's to learn.
     async with sessionmaker() as session:
@@ -794,13 +760,13 @@ async def set_agent_rule(
     if not authorize(policy, subject=subject, action=Action.SET_AGENT_RULE):
         raise ChannelRuleRefused("admin_required")
     agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
-    if agent is None:
-        if runs_in is None:
-            return await _drop_missing_agent_rule(
-                anthropic, sessionmaker, tenant_id=tenant_id, agent_name=agent_name, subject=subject
-            )
+    if agent is None and (
+        runs_in is not None
+        or agent_name in agent_aliases(await list_agents_by_tenant(anthropic, tenant_id=tenant_id))
+    ):
         raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
-    names = tuple(n for n in (agent_name, *agent_pin_names(agent.name, agent.metadata)) if n)
+    pins = agent_pin_names(agent.name, agent.metadata) if agent is not None else ()
+    names = tuple(n for n in (agent_name, *pins) if n)
     target = tuple(dict.fromkeys(runs_in)) if runs_in is not None else None
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
@@ -808,13 +774,16 @@ async def set_agent_rule(
         policy = await load_access_policy(session, tenant_id=tenant_id)
         if not authorize(policy, subject=subject, action=Action.SET_AGENT_RULE):
             raise ChannelRuleRefused("admin_required")
-        home = agent_permissions(policy, names).home
+        if agent is None and agent_name not in policy.agent_rules:
+            raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
+        # A missing agent has no channel of its own left to keep.
+        home = agent_permissions(policy, names).home if agent is not None else None
         if home is not None and target != (home,):
             raise ChannelRuleRefused("agent_has_home", agent_name=agent_name, channel_id=home)
         own = [c for c in target or () if channel_rule(policy, c).readers == "own"]
         if own and len(target or ()) > 1:
             raise ChannelRuleRefused("own_channel_alone", channel_id=own[0])
-        if own and home is None:
+        if own and home is None and agent is not None:
             refusal = await _own_agent_refusal(
                 session,
                 tenant_id=tenant_id,
@@ -835,7 +804,7 @@ async def set_agent_rule(
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)
         answers_outside = False
-        if target is not None:
+        if target is not None and agent is not None:
             reach = await load_agent_reach(
                 session,
                 tenant_id=tenant_id,

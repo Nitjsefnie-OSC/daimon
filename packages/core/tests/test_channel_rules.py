@@ -1000,8 +1000,8 @@ async def test_anywhere_drops_the_rule_an_archived_agent_left_behind(
         default=DEFAULT,
     )
 
-    assert (change.changed, change.gone) == (True, True)
-    assert change.notes == ("There is no agent named ghost; its leftover rule was dropped.",)
+    assert change.changed
+    assert change.notes == ("ghost's rule is cleared: it runs wherever it is set to answer.",)
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.agent_rules == {"local": AgentRule(runs_in=("c1",))}
     with pytest.raises(ChannelRuleRefused) as typo:
