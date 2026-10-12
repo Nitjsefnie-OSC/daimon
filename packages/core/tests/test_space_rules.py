@@ -1,0 +1,158 @@
+"""Changing Spaces under the policy lock: member rules written, agents kept or refused."""
+
+from __future__ import annotations
+
+import pytest
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.authz import Subject
+from daimon.core.permissions import agent_permissions, channel_rule, with_channel_rule
+from daimon.core.space_rules import (
+    SpaceRefused,
+    add_space_channel,
+    create_space,
+    delete_space,
+    remove_space_channel,
+)
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.stores.spaces import space_key
+from daimon.testing.factories import make_tenant
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+ADMIN = Subject(is_admin=True)
+OWN = ChannelRule(readers="own", writers="own")
+
+
+async def test_create_writes_the_space_rule_onto_each_member_and_not_the_space(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_rules={"x": AgentRule(runs_in=("c1", "c2"))}),
+    )
+    await db_session.commit()
+
+    change = await create_space(
+        db_session_factory,
+        tenant_id=tenant.id,
+        name="client",
+        rule=OWN,
+        channel_ids=["c1", "c2"],
+        subject=ADMIN,
+    )
+
+    stored = (
+        await db_session.execute(text("SELECT policy FROM tenant_access_policies"))
+    ).scalar_one()
+    assert "spaces" not in stored, "an older build must still read the row"
+    assert stored["channel_rules"] == {
+        "c1": {"readers": "own", "writers": "own"},
+        "c2": {"readers": "own", "writers": "own"},
+    }, "each member's own rule holds the Space's, so an older build keeps it contained"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert agent_permissions(policy, ("x",)).home == space_key(change.space.id), (
+        "the agent naming both members has the Space as its home"
+    )
+    with pytest.raises(SpaceRefused, match="admin"):
+        await delete_space(
+            db_session_factory, tenant_id=tenant.id, name="client", subject=Subject()
+        )
+
+
+async def test_space_rule_wins_over_a_member_rule_that_drifted(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    await create_space(
+        db_session_factory,
+        tenant_id=tenant.id,
+        name="s",
+        rule=OWN,
+        channel_ids=["c1"],
+        subject=ADMIN,
+    )
+    loaded = await load_access_policy(db_session, tenant_id=tenant.id)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=with_channel_rule(loaded, "c1", ChannelRule())
+    )
+
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert channel_rule(policy, "c1") == OWN, "the Space's rule is the member's, whatever is stored"
+
+
+async def test_add_extends_the_spaces_agents_and_refuses_a_second_own_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            channel_rules={"c4": OWN},
+            agent_rules={"x": AgentRule(runs_in=("c1",)), "y": AgentRule(runs_in=("c4",))},
+        ),
+    )
+    await db_session.commit()
+    await create_space(
+        db_session_factory,
+        tenant_id=tenant.id,
+        name="s",
+        rule=OWN,
+        channel_ids=["c1"],
+        subject=ADMIN,
+    )
+
+    change = await add_space_channel(
+        db_session_factory,
+        tenant_id=tenant.id,
+        name="s",
+        channel_id="c3",
+        subject=ADMIN,
+        extend_agents=True,
+    )
+    assert change.agents == ("x",), "the Space's own agent is extended"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.agent_rules["x"].runs_in == ("c1", "c3"), "x now runs in the new member too"
+    with pytest.raises(SpaceRefused, match="keeps its own agents"):
+        await add_space_channel(
+            db_session_factory, tenant_id=tenant.id, name="s", channel_id="c4", subject=ADMIN
+        )
+
+
+async def test_remove_and_delete_leave_members_contained(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_rules={"x": AgentRule(runs_in=("c1", "c2", "c3"))}),
+    )
+    await db_session.commit()
+    await create_space(
+        db_session_factory,
+        tenant_id=tenant.id,
+        name="s",
+        rule=OWN,
+        channel_ids=["c1", "c2", "c3"],
+        subject=ADMIN,
+    )
+
+    removed = await remove_space_channel(
+        db_session_factory, tenant_id=tenant.id, name="s", channel_id="c3", subject=ADMIN
+    )
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert removed.agents == ("x",) and policy.agent_rules["x"].runs_in == ("c1", "c2"), (
+        "the Space's agent drops the channel, keeping the Space as its home"
+    )
+    assert channel_rule(policy, "c3") == OWN, "the channel that left stays contained"
+    assert agent_permissions(policy, ("x",)).home is not None, "x still has a home"
+
+    deleted = await delete_space(db_session_factory, tenant_id=tenant.id, name="s", subject=ADMIN)
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert deleted.agents == ("x",), "x names two former members: it is reported stranded"
+    assert policy.spaces == {} and channel_rule(policy, "c1") == OWN, "members keep the rule"
+    assert agent_permissions(policy, ("x",)).home is None, "and x has no home left: runs nowhere"

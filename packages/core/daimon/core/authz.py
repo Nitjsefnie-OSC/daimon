@@ -225,6 +225,8 @@ class Action(StrEnum):
     SET_CHANNEL_RULE = "set_channel_rule"
     # Set one agent's rule.
     SET_AGENT_RULE = "set_agent_rule"
+    # Create, change or delete a Space, or add or remove one of its channels.
+    SET_SPACE = "set_space"
     # Archive the copy a channel kept to its own agents was given, as it opens.
     ARCHIVE_CHANNEL_COPY = "archive_channel_copy"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
@@ -785,6 +787,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         Action.ARCHIVE_CHANNEL_COPY,
         Action.SET_CHANNEL_RULE,
         Action.SET_AGENT_RULE,
+        Action.SET_SPACE,
     ):
         # The rules guard what a server admin owns, so a channel admin changes
         # none, even on their own channel.

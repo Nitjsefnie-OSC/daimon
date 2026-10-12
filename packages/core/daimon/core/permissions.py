@@ -6,6 +6,9 @@ and who may write in it (`writers`: ``any``, its ``own`` agents, or ``none``).
 An agent rule (`AgentRule.runs_in`) says the only channels an agent runs in.
 A channel's own agents are those whose rule names that channel alone; they
 are its own only while its readers are ``own``, which makes it their home.
+A Space (`SpaceRule`) is channels sharing one audience and one rule: inside
+it, ``inside`` and ``own`` range over all its channels, and an own Space is
+one home, keyed `space:<id>`, for agents whose rules name only its channels.
 
 Every other limit is defined here once: what holds at a place
 (`ChannelPermissions`), what an agent may do (`AgentPermissions`), and the
@@ -25,10 +28,12 @@ from typing import Literal
 
 from daimon.core.access_policy import (
     OPEN_RULE,
+    SPACE_KEY_PREFIX,
     AgentRule,
     ChannelReaders,
     ChannelRule,
     ChannelWriters,
+    SpaceRule,
     TenantAccessPolicy,
 )
 from daimon.core.errors import DaimonError
@@ -55,7 +60,43 @@ def channel_rule(policy: TenantAccessPolicy, channel_id: str) -> ChannelRule:
 
 def _rebuilt(policy: TenantAccessPolicy, **changes: object) -> TenantAccessPolicy:
     # Validated, never model_copy: the policy's own invariants must hold.
-    return TenantAccessPolicy.model_validate({**policy.model_dump(), **changes})
+    # Spaces are left out of a dump, so they are carried over by hand.
+    return TenantAccessPolicy.model_validate(
+        {**policy.model_dump(), "spaces": policy.spaces, **changes}
+    )
+
+
+def space_of(policy: TenantAccessPolicy, channel_id: str | None) -> SpaceRule | None:
+    """The Space `channel_id` belongs to, or None."""
+    if channel_id is None:
+        return None
+    return next((s for s in policy.spaces.values() if channel_id in s.channel_ids), None)
+
+
+def is_space_key(home: str | None) -> bool:
+    return home is not None and home.startswith(SPACE_KEY_PREFIX)
+
+
+def home_key(policy: TenantAccessPolicy, channel_id: str) -> str:
+    """The key `channel_id` counts as for a home: its own Space's, else itself."""
+    space = space_of(policy, channel_id)
+    return space.key if space is not None and space.rule.readers == "own" else channel_id
+
+
+def space_reach(policy: TenantAccessPolicy, origin_ids: Collection[str]) -> frozenset[str]:
+    """`origin_ids` plus every channel of a Space one of them belongs to: a turn
+    in one channel of a Space is inside all of them."""
+    reach = set(origin_ids)
+    for space in policy.spaces.values():
+        if not space.channel_ids.isdisjoint(origin_ids):
+            reach |= space.channel_ids
+    return frozenset(reach)
+
+
+def describe_home(policy: TenantAccessPolicy, home: str) -> str:
+    """A home as a person reads it: `Space <name>` for a Space, else the channel id."""
+    space = policy.spaces.get(home)
+    return f"Space {space.name}" if space is not None else home
 
 
 def _with(rules: dict[str, ChannelRule], key: str, rule: ChannelRule) -> dict[str, ChannelRule]:
@@ -78,6 +119,19 @@ def with_channel_rule(
     """
     check_channel_rule(channel_id, rule)
     return _rebuilt(policy, channel_rules=_with(policy.channel_rules, channel_id, rule))
+
+
+def with_space(policy: TenantAccessPolicy, key: str, space: SpaceRule | None) -> TenantAccessPolicy:
+    """The policy with `space` under `key` (None: no such Space) and its rule on
+    each of its channels; a channel that leaves keeps the rule it had."""
+    spaces = {k: v for k, v in policy.spaces.items() if k != key}
+    rules = policy.channel_rules
+    if space is not None:
+        spaces[key] = space
+        for channel_id in space.channel_ids:
+            check_channel_rule(channel_id, space.rule)
+            rules = _with(rules, channel_id, space.rule)
+    return _rebuilt(policy, channel_rules=rules, spaces=spaces)
 
 
 def thread_rule_key(platform: str, raw: str) -> str:
@@ -137,10 +191,16 @@ def without_agent_rules(policy: TenantAccessPolicy, names: Iterable[str]) -> Ten
 
 
 def runs_only_in(policy: TenantAccessPolicy, channel_id: str) -> tuple[str, ...]:
-    """Names whose rule runs them in `channel_id` alone, sorted: its own agents
-    while its readers are own."""
-    rules = policy.agent_rules.items()
-    return tuple(sorted(name for name, rule in rules if set(rule.runs_in or ()) == {channel_id}))
+    """Names whose rule runs them in `channel_id` alone (in an own Space: in its
+    channels alone), sorted: its own agents while its readers are own."""
+    key = home_key(policy, channel_id)
+    return tuple(
+        sorted(
+            name
+            for name, rule in policy.agent_rules.items()
+            if rule.runs_in and {home_key(policy, c) for c in rule.runs_in} == {key}
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -157,8 +217,8 @@ class ChannelPermissions:
     readers: ChannelReaders = "any"
     writers: ChannelWriters = "any"
     home: str | None = None
-    """The channel kept to its own agents (readers own) the place lies in; a
-    thread counts as its channel."""
+    """The channel kept to its own agents (readers own) the place lies in, or
+    its own Space's key; a thread counts as its channel."""
     home_unknown: bool = False
     """A thread whose channel isn't known while some channel's readers are
     own: it may lie in one, so it is treated as one with no own agents."""
@@ -213,10 +273,10 @@ def home_of(
     policy: TenantAccessPolicy, channel_id: str | None, parent_channel_id: str | None = None
 ) -> str | None:
     """The channel kept to its own agents a place lies in (a thread counts as its
-    channel), or None."""
+    channel), its Space's key when that channel is in an own Space, or None."""
     for candidate in (parent_channel_id, channel_id):
         if candidate is not None and channel_rule(policy, candidate).readers == "own":
-            return candidate
+            return home_key(policy, candidate)
     return None
 
 
@@ -352,7 +412,7 @@ class AgentPermissions:
     """The rule on each of its names; it runs only where each one allows.
     Empty when it has none."""
     home: str | None = None
-    """The channel kept to its own agents it is one of the own agents of."""
+    """The channel kept to its own agents (or own Space key) it is one of the own agents of."""
 
     def direct_messages(self, origin: ChannelPermissions | None = None) -> Recipients:
         """Whom a call running as it, from a turn at `origin`, may send a direct message."""
@@ -378,8 +438,8 @@ class AgentPermissions:
     @property
     def budget_channel(self) -> str | None:
         """The channel whose budget every run is charged to; None charges the
-        channel the run is in."""
-        return self.home
+        channel the run is in, as a Space has no budget of its own."""
+        return None if is_space_key(self.home) else self.home
 
     def runs_within(self, channel_ids: Collection[str]) -> bool:
         """Whether every rule on it names only `channel_ids`; False with no rule
@@ -395,18 +455,19 @@ def agent_permissions(
     """The permissions of the agent carrying `agent_names` (`daimon.core.authz.agent_names`).
 
     It is one of channel C's own agents when its rules, on every name, name C
-    alone and C's readers are own.
+    alone and C's readers are own; one of an own Space's when they name only
+    channels of that Space.
     """
     rules = tuple(
         frozenset(policy.agent_rules[name].runs_in or ())
         for name in agent_names
         if name is not None and name in policy.agent_rules
     )
-    channels = {channel for rule in rules for channel in rule}
+    keys = {home_key(policy, channel) for rule in rules for channel in rule}
     home = None
-    if len(channels) == 1:
-        (channel,) = channels
-        home = channel if channel_rule(policy, channel).readers == "own" else None
+    if len(keys) == 1:
+        (key,) = keys
+        home = key if is_space_key(key) or channel_rule(policy, key).readers == "own" else None
     return AgentPermissions(runs_in=rules, home=home)
 
 
@@ -531,7 +592,9 @@ def readable_from(
     parent_channel_id: str | None = None,
 ) -> bool:
     """Whether a channel (or a thread under it) is readable from a turn whose ids
-    are `origin_ids`: one whose readers are limited only from inside it."""
+    are `origin_ids`: one whose readers are limited only from inside it (or
+    from inside its Space)."""
+    origin_ids = space_reach(policy, origin_ids)
     limited = _limited(policy)
     if channel_id in limited:
         return channel_id in origin_ids
@@ -555,8 +618,9 @@ def session_readable_from(
     policy, and stays inside every id that limited it when it ran, even once
     that id is open again. An unstamped session a thread ran on reads only
     inside that thread while the tenant limits any readers; one no thread ran
-    on is headless.
+    on is headless. A turn in a Space is inside every channel of it.
     """
+    origin_ids = space_reach(policy, origin_ids)
     if channel is not None:
         if not set(seal_ids) <= set(origin_ids):
             return False
@@ -614,6 +678,11 @@ __all__ = [
     "check_channel_rule",
     "thread_rule_key",
     "crosses_home",
+    "describe_home",
+    "home_key",
+    "is_space_key",
+    "space_of",
+    "space_reach",
     "dm_source_limited",
     "held_to",
     "home_of",
@@ -638,4 +707,5 @@ __all__ = [
     "without_agent_rules",
     "with_category_rule",
     "with_channel_rule",
+    "with_space",
 ]

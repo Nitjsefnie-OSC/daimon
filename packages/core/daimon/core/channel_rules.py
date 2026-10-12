@@ -45,7 +45,10 @@ from daimon.core.permissions import (
     agent_permissions,
     channel_rule,
     check_channel_rule,
+    describe_home,
+    home_key,
     runs_only_in,
+    space_of,
     with_agent_rule,
     with_category_rule,
     with_channel_rule,
@@ -79,6 +82,7 @@ RuleRefusal = Literal[
     "agent_not_found",
     "agent_has_home",
     "own_channel_alone",
+    "in_space",
 ]
 
 READERS_LABELS: Mapping[ChannelReaders, str] = {
@@ -182,6 +186,10 @@ def render_rule_refusal(
             )
         case "own_channel_alone":
             return f"{channel_id} is set to Own agents only, so an agent rule names it alone."
+        case "in_space":
+            return (
+                "This channel is in a Space, which sets its rule; change it with `daimon spaces`."
+            )
 
 
 class ChannelRuleRefused(DaimonError):
@@ -340,16 +348,19 @@ async def _own_agent_refusal(
     name: str,
     agent: BetaManagedAgentsAgent,
     replacing_rule: bool = False,
+    within: Collection[str] = (),
 ) -> RuleRefusal | None:
     """Why `agent` can't be `channel_id`'s own agent; None when it can.
 
     `replacing_rule`: its own rule is being replaced, so only where it answers counts.
+    `within`: the channels of the own Space it would be one of, `channel_id` among them.
     """
+    inside = set(within) | {channel_id}
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
         return "managed_channel_agent"
     names = tuple(n for n in (name, *agent_pin_names(agent.name, agent.metadata)) if n)
     rules = () if replacing_rule else agent_permissions(policy, names).runs_in
-    if any(rule - {channel_id} for rule in rules):
+    if any(rule - inside for rule in rules):
         return "agent_runs_elsewhere"
     reach = await load_agent_reach(
         session,
@@ -359,7 +370,7 @@ async def _own_agent_refusal(
         ma_agent_id=agent.id,
         default=default,
     )
-    if not reach.stays_inside({channel_id}):
+    if not reach.stays_inside(inside):
         return "shared_ruled_agent" if rules else "shared_channel_agent"
     return None
 
@@ -470,6 +481,12 @@ async def _write_rule(
         place=Place(channel_id=ask.channel_id),
     ):
         raise ChannelRuleRefused("admin_required")
+    if (space := space_of(policy, ask.channel_id)) is not None:
+        raise ChannelRuleRefused(
+            "in_space",
+            message=f"This channel is in Space {space.name}, which sets its rule. "
+            "A deployment operator changes it with `daimon spaces`.",
+        )
     before = channel_rule(policy, ask.channel_id)
     rule = resolve_rule(before, readers=ask.readers, writers=ask.writers)
     try:
@@ -778,10 +795,14 @@ async def set_agent_rule(
             raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
         # A missing agent has no channel of its own left to keep.
         home = agent_permissions(policy, names).home if agent is not None else None
-        if home is not None and target != (home,):
-            raise ChannelRuleRefused("agent_has_home", agent_name=agent_name, channel_id=home)
+        # An own Space counts as one home: a rule may name any of its channels.
+        keys = {home_key(policy, c) for c in target or ()}
+        if home is not None and keys != {home}:
+            raise ChannelRuleRefused(
+                "agent_has_home", agent_name=agent_name, channel_id=describe_home(policy, home)
+            )
         own = [c for c in target or () if channel_rule(policy, c).readers == "own"]
-        if own and len(target or ()) > 1:
+        if own and len(keys) > 1:
             raise ChannelRuleRefused("own_channel_alone", channel_id=own[0])
         if own and home is None and agent is not None:
             refusal = await _own_agent_refusal(
@@ -794,6 +815,7 @@ async def set_agent_rule(
                 name=agent_name,
                 agent=agent,
                 replacing_rule=True,
+                within=target or (),
             )
             if refusal is not None:
                 raise ChannelRuleRefused(refusal, agent_name=agent_name)
