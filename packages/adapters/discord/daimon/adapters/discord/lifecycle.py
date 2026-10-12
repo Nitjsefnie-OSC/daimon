@@ -22,7 +22,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from anthropic.types import RawMessageStreamEvent
@@ -67,6 +67,9 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
+
+if TYPE_CHECKING:
+    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
 
 log = structlog.get_logger()
 
@@ -351,10 +354,12 @@ class DiscordTurnLifecycle:
         alert_webhook_url: SecretStr | None = None,
         waiting_for_tenant_slot: Callable[[], bool] | None = None,
         thread_stopped: Callable[[], bool] | None = None,
+        fleet_card: DiscordFleetCard | None = None,
     ) -> None:
         # Once the turn's thread is gone or closed (#809) nothing more is written:
         # no progress edit, no terminal card, no replacement for a missing card.
         self._thread_stopped = thread_stopped or (lambda: False)
+        self._fleet_card = fleet_card
         self._requester_id = requester_id
         self._turn_id = turn_id
         self._trigger_message = trigger_message
@@ -1124,6 +1129,9 @@ class DiscordTurnLifecycle:
             if self._thread_stopped():
                 self._skip_terminal()
                 return
+            if self._fleet_card is not None and not await self._fleet_card.allow_summary():
+                self._terminal = True
+                return
             await self._deliver_success(state)
         finally:
             self._mark_ended()
@@ -1131,7 +1139,8 @@ class DiscordTurnLifecycle:
 
     async def _deliver_success(self, state: TurnState) -> None:
         self._state = update_activity(self._state, state)
-        await self._persist_sealed_responses(state)
+        if self._fleet_card is None:
+            await self._persist_sealed_responses(state)
         if self._unprompted and not extract_final_response(state.content):
             # No final answer on a turn nobody asked for: leave the thread as
             # it was. A tool trail with nothing to say is noise here, not a
@@ -1429,6 +1438,9 @@ class DiscordTurnLifecycle:
         # flush -- matches on_terminal_success's existing order, so a sealed
         # answer never trails behind an embed that already moved past it.
         if self._terminal or self._thread_stopped():
+            return
+        if self._fleet_card is not None:
+            await self._fleet_card.refresh()
             return
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)

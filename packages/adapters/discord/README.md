@@ -46,3 +46,18 @@ controls available, while accepted writes retire the old controls. This uses
 the existing Stop guard and missing-message boundary. Calls without controls
 retain their existing serialized components. Fleet status and Resume service
 binding are separate from this rendering seam.
+
+`DiscordFleetCard` reads canonical fleet rows through the shared
+`FleetOrchestrator.read_snapshot` operation. Its host-injected parent loader
+reloads current permissions on each control click; the card cannot supply root
+facts. Stop and Resume use the same core operation, scoped versions and stable
+operation keys as the tools. An accepted write retires the old controls and
+draws the current rows; it does not claim native termination or completed cost.
+
+The runtime's optional `fleet_card_factory` is consulted only when fleet
+settings are explicitly enabled. Missing factories leave ordinary turns
+unchanged. The existing render loop updates the fleet card, and its normal
+final-answer path waits for authoritative collection and required reviews.
+Pending or refused results never become an answer from worker excerpts.
+Native execution, durable atomic control, root loading and usage accounting
+remain their existing owners' ports; absent ports refuse rather than succeed.

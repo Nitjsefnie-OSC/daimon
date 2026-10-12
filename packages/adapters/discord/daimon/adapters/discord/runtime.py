@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from secrets import randbits
+from typing import TYPE_CHECKING
 
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
@@ -39,6 +40,16 @@ from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.adapters.discord.lifecycle import EditFn, SendFn
+    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
+
+    import discord
+
+type FleetCardFactory = Callable[
+    ["discord.abc.Messageable", int, "SendFn", "EditFn"], "DiscordFleetCard | None"
+]
 
 log = structlog.get_logger()
 
@@ -237,6 +248,8 @@ class DiscordRuntime:
     # Decides which Discord process may hold the gateway during a deploy overlap.
     # None means "no lease to take" (tests, tools that never connect).
     gateway_lease: GatewayLease | None = None
+    # Host-built current-root service binding; ordinary construction discovers nothing.
+    fleet_card_factory: FleetCardFactory | None = None
 
 
 @asynccontextmanager
