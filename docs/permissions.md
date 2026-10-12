@@ -115,6 +115,31 @@ allow.
 | Memory writable | where `readers` is `any` | the same | also in its home |
 | Charged to | the channel it runs in | the same | its home |
 
+## Spaces
+
+A **Space** is channels of one workspace sharing one audience and one rule,
+`readers: own` or `readers: inside`. Each member takes the Space's rule, and
+a turn in any member counts as inside every other: it reads and posts there,
+and reads sessions run there. An agent whose rule names only members of an
+own Space has the Space as its home, so it runs, posts and writes memory in
+every member and nowhere else. `/here` names a member's Space.
+
+A member's rule is changed through its Space, never by `set_channel_rule`
+or a panel. Spaces are a deployment operator's, from the CLI:
+
+- `daimon spaces create PLATFORM WORKSPACE_ID NAME --channel C ...`;
+- `daimon spaces add|remove PLATFORM WORKSPACE_ID NAME CHANNEL_ID`;
+- `daimon spaces delete PLATFORM WORKSPACE_ID NAME` and `daimon spaces list`.
+
+Daimon cannot see who reads a channel, so joining two channels needs
+`--confirm`; first it shows how many external accounts it has answered in
+each. `add --extend-agents` lets the Space's own agents answer in the new
+channel. A channel that leaves, or whose Space is deleted, keeps the rule on
+its own; the Space's agents drop it from their rule. The rule is also stored
+on each member, so a process on a build without Spaces keeps every member
+contained. Channel admins administer channels, not Spaces: an agent whose
+home is a Space needs a server or workspace admin to change its setup.
+
 ## Changing agent setup
 
 Server or workspace admins may change an agent's setup. A non-admin must
