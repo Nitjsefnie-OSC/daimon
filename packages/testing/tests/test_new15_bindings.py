@@ -26,6 +26,11 @@ from daimon.core.mux_backend import TurnRuntime
 from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import identity
+from daimon.core.stores.access_policy import (
+    load_access_policy,
+    policy_write_transaction,
+    set_access_policy,
+)
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import AdmissionObserver, admit
 from daimon.core.turn.deps import TurnDeps
@@ -296,6 +301,20 @@ async def admin(
         channels=frozenset({"101"}),
         trace=ScriptedTransport(),
     )
+    tenant_id = uuid.UUID(bound.scope.tenant_id)
+    async with policy_write_transaction(db_session_factory, tenant_id=tenant_id) as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        if bound.backend not in policy.enabled_backends:
+            await set_access_policy(
+                session,
+                tenant_id=tenant_id,
+                policy=type(policy).model_validate(
+                    {
+                        **policy.model_dump(),
+                        "enabled_backends": (*policy.enabled_backends, bound.backend),
+                    }
+                ),
+            )
     bound.default = DeploymentDefault(agent_name="test-agent", environment_name="test-env")
     try:
         yield bound
