@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -377,6 +378,73 @@ async def test_sixteen_workers_fit_with_all_statuses_and_run_level_controls(term
         item.run_id == RUN and item.expected_version == run().version for item in all_controls
     )
     assert text.count("status only") == (0 if terminal else 4)
+
+
+@pytest.mark.parametrize("size", [16, 50, 200])
+@pytest.mark.parametrize(
+    "collected,status", [(False, "running"), (False, "failed"), (True, "completed")]
+)
+@pytest.mark.parametrize("long_labels", [False, True])
+async def test_large_fleet_text_keeps_the_maximum_complete_rows(
+    size, collected, status, long_labels
+):
+    rows = tuple(
+        worker(
+            ordinal=index,
+            role="**@everyone🙂" * 20 if long_labels else f"worker {index}",
+            model="model_*🙂" * 20 if long_labels else "fixture-model",
+        )
+        for index in range(1, size + 1)
+    )
+    view = build_fleet_view(
+        replace(run(), max_workers=size, status=status), rows, collected=collected
+    )
+    displays = [
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    ]
+    body = displays[1]
+    facts = [line.removeprefix("-# ") for line in body.split("\n\n")]
+    summaries = [fact for fact in facts if re.fullmatch(r"\+\d+ more", fact)]
+    status_rows = [fact for fact in facts if re.match(r"\d+\. \*\*", fact)]
+    retained = len(status_rows)
+    assert [int(fact.split(".", 1)[0]) for fact in status_rows] == list(range(1, retained + 1))
+    assert all(" — pending" in fact for fact in status_rows)
+    assert all("model" in fact for fact in status_rows)
+    assert view.content_length() == sum(map(len, displays)) <= 4000
+    assert view.total_children_count <= 40
+    assert view.to_components()
+    assert "@everyone" not in body
+    if size == 16 or (size == 50 and not long_labels):
+        assert retained == size
+        assert summaries == []
+    else:
+        assert 0 < retained < size
+        assert summaries == [f"+{size - retained} more"]
+        assert facts[-1] == summaries[0]
+        # One more complete row must exceed the limit, even after reducing
+        # the omitted count. Rows that fit must not be silently discarded.
+        next_row = status_rows[-1].replace(f"{retained}.", f"{retained + 1}.", 1)
+        if not long_labels:
+            next_row = next_row.replace(f"worker {retained}", f"worker {retained + 1}")
+        next_body = "\n\n".join(
+            f"-# {fact}" for fact in status_rows + [next_row, f"+{size - retained - 1} more"]
+        )
+        assert len(displays[0]) + len(next_body) + len(displays[-1]) > 4000
+    all_controls = [
+        item
+        for item in view.walk_children()
+        if isinstance(item, FleetControl) and item.worker_id is None
+    ]
+    assert {item.item.label for item in all_controls} == (
+        {"Stop all", "Resume all"} if status == "running" else set()
+    )
+
+
+async def test_unrenderable_fleet_metadata_refuses_instead_of_exceeding_the_text_limit():
+    from daimon.core.fleet_orchestration import FleetRefused
+
+    with pytest.raises(FleetRefused, match="invalid_card"):
+        build_fleet_view(replace(run(), total_budget_usd=Decimal("1" + "0" * 4000)), ())
 
 
 @pytest.mark.parametrize("action", ["kill", "resume"])

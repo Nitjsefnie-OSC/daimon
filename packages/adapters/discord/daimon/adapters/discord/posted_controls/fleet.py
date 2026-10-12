@@ -33,6 +33,8 @@ type ParentLoader = Callable[
 type Send = Callable[..., Awaitable[discord.Message]]
 type Edit = Callable[..., Awaitable[discord.Message | None]]
 
+_MESSAGE_TEXT_LIMIT = 4000
+
 
 def _literal(value: str, limit: int) -> str:
     return (
@@ -99,30 +101,31 @@ def build_fleet_view(
         ),
     )
     view = build_card_view(card, button_factory=FleetControl.from_button)
-    if not buttons:
-        return view
-    # Keep every status row. Newer active workers receive individual controls
+    # Newer active workers receive individual controls
     # first; the run-level pair always remains available for the rest.
     individually_controlled: set[uuid.UUID] = set()
-    for worker in sorted(workers, key=lambda row: row.ordinal, reverse=True):
-        if worker.status in TERMINAL:
-            continue
-        candidate_buttons = buttons + controls(worker.id.hex, worker.version, str(worker.ordinal))
-        try:
-            candidate = build_card_view(
-                card.model_copy(update={"buttons": candidate_buttons}),
-                button_factory=FleetControl.from_button,
+    if buttons:
+        for worker in sorted(workers, key=lambda row: row.ordinal, reverse=True):
+            if worker.status in TERMINAL:
+                continue
+            candidate_buttons = buttons + controls(
+                worker.id.hex, worker.version, str(worker.ordinal)
             )
-        except ValueError as error:
-            # The base card and typed control IDs are valid. Only the SDK's
-            # layout capacity may stop adding this pair; owner refusals escape.
-            if type(error) is not ValueError:
-                raise
-            break
-        view.stop()
-        view, buttons = candidate, candidate_buttons
-        individually_controlled.add(worker.id)
-    if any(
+            try:
+                candidate = build_card_view(
+                    card.model_copy(update={"buttons": candidate_buttons}),
+                    button_factory=FleetControl.from_button,
+                )
+            except ValueError as error:
+                # The base card and typed control IDs are valid. Only the SDK's
+                # layout capacity may stop adding this pair; owner refusals escape.
+                if type(error) is not ValueError:
+                    raise
+                break
+            view.stop()
+            view, buttons = candidate, candidate_buttons
+            individually_controlled.add(worker.id)
+    if buttons and any(
         worker.status not in TERMINAL and worker.id not in individually_controlled
         for worker in workers
     ):
@@ -138,10 +141,26 @@ def build_fleet_view(
                 sorted(workers, key=lambda row: row.ordinal), facts, strict=True
             )
         )
-        return build_card_view(
+        view = build_card_view(
             card.model_copy(update={"buttons": buttons, "facts": facts}),
             button_factory=FleetControl.from_button,
         )
+    card = card.model_copy(update={"buttons": buttons, "facts": facts})
+    retained = len(facts)
+    # Count the actual SDK text, including Markdown, status labels and the footer.
+    # Keep complete rows in canonical order and count every omitted row.
+    while retained and view.content_length() > _MESSAGE_TEXT_LIMIT:
+        retained -= 1
+        view.stop()
+        view = build_card_view(
+            card.model_copy(
+                update={"facts": facts[:retained] + (f"+{len(facts) - retained} more",)}
+            ),
+            button_factory=FleetControl.from_button,
+        )
+    if view.content_length() > _MESSAGE_TEXT_LIMIT:
+        view.stop()
+        raise FleetRefused("invalid_card")
     return view
 
 

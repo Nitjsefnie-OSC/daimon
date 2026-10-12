@@ -52,7 +52,10 @@ owner decides whether that subject may control the orchestrator's run.
 Stop and Resume use the same core operation, scoped versions and stable
 operation keys as the tools. An accepted write retires the old controls and
 draws the current rows; it does not claim native termination or completed cost.
-Every worker keeps its status row. Within Discord's component limit, individual
+Complete status rows stay in ordinal order while they fit within Discord's
+4,000-character total text limit, including the headline and budget footer.
+Larger fleets end with one `+N more` line counting the omitted rows. Admission
+and run-level controls cover the whole fleet. Within the component limit, individual
 controls favor the newest active workers; remaining active rows are marked
 status only. One Stop all and Resume all pair uses the run's own version and
 the same shared operation, so admission does not depend on display capacity.
