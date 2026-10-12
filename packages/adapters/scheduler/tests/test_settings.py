@@ -82,10 +82,10 @@ def test_default_environment_id_field_removed() -> None:
     assert "default_environment_id" not in SchedulerSettings.model_fields
 
 
-def test_usage_sweep_is_off_by_default() -> None:
-    assert SchedulerSettings().usage_sweep_enabled is False, "the usage sweep is off unless enabled"
+def test_usage_sweep_is_on_by_default() -> None:
+    assert SchedulerSettings().usage_sweep_enabled is True, "the usage sweep runs unless disabled"
 
 
-def test_usage_sweep_can_be_enabled_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED", "true")
-    assert SchedulerSettings().usage_sweep_enabled is True
+def test_usage_sweep_can_be_disabled_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED", "false")
+    assert SchedulerSettings().usage_sweep_enabled is False

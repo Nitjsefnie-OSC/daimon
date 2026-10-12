@@ -1,281 +1,303 @@
-"""Headless MCP turn metering backfill.
+"""Settle a Managed Agents session's usage: debit every model call it has no ledger row for.
 
-Agent-chat `start_turn` (over MCP) creates an MA session and sends a
-user.message but never drives the SSE stream, so the live `record_turn_usage`
-hook in the turn driver / headless runner never fires — those sessions produce
-no usage_events / tenant_ledger rows even though the real Anthropic cost hit
-the operator's shared key. This sweep closes that gap out of band: it lists MA
-sessions, folds each session's `span.model_request_end` events, and replays
-them through `record_turn_usage`.
+A turn's live recorder only meters the `span.model_request_end` events its own
+stream delivers. Calls made while no stream was attached (a worker that died
+mid-turn, a ceiling, an interrupt) and every call of a headless agent-chat
+turn (MCP `start_turn`/`continue_turn`/`ask`, which never drive a stream)
+reach no recorder. `settle_session` is the one path that bills them: it lists
+the session's model calls newest first, skips those already in `usage_events`
+(written in the same transaction as the ledger debit, so "has a usage row"
+means "has a debit"), and replays the rest through `record_turn_usage`. That
+recorder is idempotent on the `turn:<session>:<event>` key, so a call recorded
+concurrently by a live stream or another settle is debited once.
 
-`record_turn_usage` is idempotent on (managed_session_id, event_id) — the same
-grain the live paths write. A process-local watermark skips event reads for
-sessions unchanged since the previous successful pass (with a 15-minute
-overlap); startup and hourly passes read all stamped sessions. Only
-`span.model_request_end` events are requested, and events already in
-usage_events are skipped before any write, so a pass over metered sessions
-costs one query per session, not one transaction per event.
-No need to distinguish "headless-only" sessions.
+Callers:
+
+- a chat turn's end (`turn.run`), with the turn's own recorder;
+- the MCP status and transcript reads, once they see a headless turn ended
+  (`settle_finished_turn`), with the recorder `session_billing` derives from
+  the session's metadata stamps;
+- `sweep_headless_usage`, the scheduler drain of headless sends nobody read
+  to the end (on unless `DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=false`);
+- `settle_backlog` (`daimon usage settle-backlog`), the operator settle of
+  calls made before this path was deployed: debited for an explicit internal
+  tenant allow-list, waived for everyone else, a dry run unless applied.
+
+There is no stored scan progress. A settle reads the session's calls (within
+a page bound) and debits those without a usage row; one cut short simply
+leaves the next settle to read again. No automatic settle reads a call made
+before the backlog cutoff, the time this path was deployed; the operator's
+backlog settle reads only those.
 
 Attribution comes off the metadata `create_session` stamps on every session:
-`daimon_tenant` is the billed tenant (the tenant_ledger debit keys on it) and
-`daimon_account` resolves to the owning human's platform_user_id for per-member
-usage reporting. `daimon_budget_channel`, when present, is the channel whose
-budget the replayed spend counts toward.
+`daimon_tenant` is the billed tenant, `daimon_account` resolves to the owning
+human's platform user, `daimon_budget_channel` is the channel whose budget the
+spend counts toward. A session stamped `daimon_billing_exempt` is absorbed by
+the operator: it is never debited, and its would-be charge is logged
+(`usage_sweep.exempt_skipped`) when it is settled.
 
-A session stamped `daimon_billing_exempt` was created for a `BillingExempt`
-caller (a headless run with no recorder, an MCP caller with no platform user).
-Its usage is absorbed by the operator, not debited to the tenant, so the sweep
-does not replay it. It still reads the session's events and logs what the
-tenant would have been charged (`usage_sweep.exempt_skipped`), and the pass
-summary (`usage_sweep.completed`) totals it, so the absorbed spend is visible.
-The stamp is written once, at session creation, so the creator's posture
-covers every turn on the session: a billed caller continuing an exempt session
-is absorbed too, and an exempt caller acting on a billed session is debited.
-
-Per `guideline:architecture` Error Propagation: this does not swallow
-exceptions — the scheduler's sweep loop is the boundary that decides a sweep
-failure must not kill the process.
+Per `guideline:architecture` Error Propagation: these functions do not swallow
+exceptions, except `settle_finished_turn`, which runs inside a caller's read
+and must never fail it.
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING, Literal
 
+import anthropic as _anthropic
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, omit
 from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
-from daimon.core.pricing import MODEL_PRICING, cost_of
-from daimon.core.stores import usage_events
+from daimon.core.pricing import MODEL_PRICING, ModelRates, cost_of
+from daimon.core.stores import session_settle_state, turn_outcomes, usage_events
 from daimon.core.stores.accounts import get_account_with_tenant
-from daimon.core.stores.tenants import list_all_tenant_ids
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import record_turn_usage
+from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    # `daimon.core.turn` imports this module for the turn-end settle.
+    from daimon.core.turn.posture import UsageRecorder
 
 log = structlog.get_logger(__name__)
 
-_OVERLAP = timedelta(minutes=15)
-_FULL_PASS_INTERVAL = timedelta(hours=1)
-# Filtered server-side: a session's other events (messages, tool results) are
-# most of its history and the sweep never reads them.
-_SWEPT_EVENT_TYPES = ["span.model_request_end"]
-
-
-@dataclass
-class UsageSweepWatermark:
-    """Successful pass starts retained for the scheduler process lifetime."""
-
-    last_successful_start: datetime | None = None
-    last_full_start: datetime | None = None
+# Bounds for a settle on a caller's path (a chat turn's end, an MCP read).
+SETTLE_MAX_PAGES = 10
+SETTLE_BUDGET_S = 5.0
+_PAGE_SIZE = 100
+# The drain settles a whole session: a larger bound than a caller's path.
+DRAIN_MAX_PAGES = 100
+# An unnamed request this young may belong to a send still in flight.
+_SEND_IN_FLIGHT = timedelta(minutes=10)
+# Marked sessions one drain pass settles.
+_DRAIN_BATCH = 50
 
 
 @dataclass(frozen=True)
-class _AbsorbedUsage:
-    """What one exempt session would have cost the tenant."""
+class SettleResult:
+    """What one settle read and wrote.
 
-    model_calls: int
-    cost: Decimal
-    debit: Decimal
+    `unbilled` are the calls with no usage row when their page was read (all
+    of them reported, none written, for a read-only settle). `debited` and
+    `debit_usd` count only the ledger rows this settle inserted. `complete`
+    means the listing was read to its end within the page and time bounds.
+    """
+
+    scanned: int
+    unbilled: tuple[BetaManagedAgentsSpanModelRequestEndEvent, ...]
+    debited: int
+    debit_usd: Decimal
+    complete: bool
 
 
-async def sweep_headless_usage(
-    client: AsyncAnthropic,
+async def settle_session(
+    anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
+    session_id: str,
     *,
-    markup: Decimal,
-    watermark: UsageSweepWatermark | None = None,
-    now: datetime | None = None,
-) -> int:
-    """Fold span.model_request_end events from all tagged MA sessions into usage.
+    record: UsageRecorder | None,
+    max_pages: int | None = SETTLE_MAX_PAGES,
+    deadline: float | None = None,
+    backlog: bool = False,
+) -> SettleResult:
+    """Debit the session's model calls that have no ledger row yet, newest first.
 
-    Returns the number of events replayed through `record_turn_usage`: those
-    not yet in usage_events when the session was read (a live writer racing the
-    sweep can still make one an idempotent no-op). Sessions with no
-    `daimon_tenant` tag are skipped — they aren't billable Daimon turns (e.g.
-    DMs or foreign sessions). Sessions stamped `daimon_billing_exempt` are
-    skipped too, after logging their would-be cost (see the module docstring).
+    `record` must be the recorder bound to this session (`turn.prepare.
+    bind_recorder` or `SessionBilling.recorder`), so the calls are priced at
+    the session's frozen model and the deployment markup, exactly as a live
+    stream would have. `record=None` reads only: it reports the unbilled calls
+    and writes nothing.
 
-    Session listing remains complete. After a successful pass, event reads skip
-    sessions last updated before its start minus 15 minutes. Startup and hourly
-    passes read all stamped sessions; failed passes do not advance the watermark.
+    Reads the calls made at or after the backlog cutoff, or with `backlog`
+    only those before it (the operator's backlog settle), at most `max_pages`
+    pages of 100 (None: no bound) and no later than `deadline` (a
+    `time.monotonic()` reading, covering the database work too). There is no
+    stored progress: a settle cut short keeps every debit it wrote and reports
+    itself incomplete, and the next settle reads the listing again, which is
+    safe because a call with a usage row is never recorded twice.
     """
-    started_at = now or datetime.now(UTC)
-    full = (
-        watermark is None
-        or watermark.last_full_start is None
-        or started_at - watermark.last_full_start >= _FULL_PASS_INTERVAL
-    )
-    cutoff = (
-        None
-        if full or watermark is None or watermark.last_successful_start is None
-        else watermark.last_successful_start - _OVERLAP
-    )
-    recorded = 0
-    exempt_sessions = 0
-    exempt_model_calls = 0
-    exempt_cost = Decimal("0")
-    exempt_debit = Decimal("0")
-    async with sessionmaker() as s:
-        known_tenants = await list_all_tenant_ids(s)
-    async for session in client.beta.sessions.list():
-        tenant_raw = session.metadata.get(MA_METADATA_KEY_TENANT)
-        if tenant_raw is None:
-            continue
-        try:
-            tenant_id = uuid.UUID(tenant_raw)
-        except ValueError:
-            # An invalid tenant tag cannot be attributed safely; skip only this
-            # session so it cannot prevent later sessions from being swept.
-            log.warning(
-                "usage_sweep.session_skipped",
-                session_id=session.id,
-                reason="invalid_tenant_metadata",
+    scanned = 0
+    unbilled: list[BetaManagedAgentsSpanModelRequestEndEvent] = []
+    debited = 0
+    debit_usd = Decimal(0)
+    complete = False
+    timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+    try:
+        async with asyncio.timeout(timeout):
+            async with sessionmaker() as s:
+                cutoff = await session_settle_state.backlog_cutoff(s)
+            page = await anthropic.beta.sessions.events.list(
+                session_id,
+                order="desc",
+                limit=_PAGE_SIZE,
+                types=["span.model_request_end"],
+                created_at_gte=cutoff if cutoff is not None and not backlog else omit,
+                created_at_lt=cutoff if cutoff is not None and backlog else omit,
             )
-            continue
-        if tenant_id not in known_tenants:
-            # Session belongs to a tenant this deployment doesn't own. A shared MA
-            # workspace holds sessions from other deployments/evals whose tenant_ids
-            # are absent from this DB; recording them violates usage_events' FK and
-            # is meaningless (not our tenant to bill). Skip.
-            continue
-        if cutoff is not None and session.updated_at < cutoff:
-            continue
-        exempt_reason = session.metadata.get(MA_METADATA_KEY_BILLING_EXEMPT)
-        if exempt_reason is not None:
-            absorbed = await _log_absorbed_usage(
-                client, session, tenant_id=tenant_id, reason=exempt_reason, markup=markup
-            )
-            exempt_sessions += 1
-            exempt_model_calls += absorbed.model_calls
-            exempt_cost += absorbed.cost
-            exempt_debit += absorbed.debit
-            continue
-        platform_user_id = await _resolve_platform_user_id(
-            sessionmaker,
-            session.metadata,
-            session_id=session.id,
-            expected_tenant_id=tenant_id,
+            pages = 1
+            while True:
+                calls = [
+                    e for e in page.data if isinstance(e, BetaManagedAgentsSpanModelRequestEndEvent)
+                ]
+                scanned += len(calls)
+                async with sessionmaker() as s:
+                    recorded = await usage_events.recorded_among(
+                        s, managed_session_id=session_id, event_ids=[e.id for e in calls]
+                    )
+                for event in calls:
+                    if event.id in recorded:
+                        continue
+                    unbilled.append(event)
+                    if record is not None and (debit := await record(event=event)) is not None:
+                        debited += 1
+                        debit_usd += debit
+                if not page.has_next_page():
+                    complete = True
+                    break
+                if max_pages is not None and pages >= max_pages:
+                    break
+                page = await page.get_next_page()
+                pages += 1
+    except TimeoutError:
+        complete = False  # every debit written so far stands
+    if unbilled or not complete:
+        log.info(
+            "billing.settled",
+            managed_session_id=session_id,
+            scanned=scanned,
+            unbilled=len(unbilled),
+            debited=debited,
+            debit_usd=str(debit_usd),
+            complete=complete,
+            read_only=record is None,
         )
-        model_id = session.agent.model.id
-        pricing = MODEL_PRICING.get(model_id)
-        channel_id = session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
-        async with sessionmaker() as s:
-            recorded_ids = await usage_events.list_event_ids_for_session(
-                s, managed_session_id=session.id
-            )
-
-        async for event in client.beta.sessions.events.list(
-            session.id, order="asc", types=_SWEPT_EVENT_TYPES
-        ):
-            if event.type != "span.model_request_end" or event.id in recorded_ids:
-                continue
-            await record_turn_usage(
-                sessionmaker=sessionmaker,
-                tenant_id=tenant_id,
-                platform_user_id=platform_user_id,
-                managed_session_id=session.id,
-                model_id=model_id,
-                event=event,
-                markup=markup,
-                pricing=pricing,
-                channel_id=channel_id,
-            )
-            recorded += 1
-    if watermark is not None:
-        watermark.last_successful_start = started_at
-        if full:
-            watermark.last_full_start = started_at
-    log.info(
-        "usage_sweep.completed",
-        recorded=recorded,
-        exempt_sessions=exempt_sessions,
-        exempt_model_calls=exempt_model_calls,
-        exempt_cost_usd=str(exempt_cost),
-        exempt_would_be_debit_usd=str(exempt_debit),
+    return SettleResult(
+        scanned=scanned,
+        unbilled=tuple(unbilled),
+        debited=debited,
+        debit_usd=debit_usd,
+        complete=complete,
     )
-    return recorded
 
 
-async def _log_absorbed_usage(
-    client: AsyncAnthropic,
-    session: BetaManagedAgentsSession,
+def price(
+    calls: Sequence[BetaManagedAgentsSpanModelRequestEndEvent],
     *,
-    tenant_id: uuid.UUID,
-    reason: str,
+    pricing: ModelRates | None,
     markup: Decimal,
-) -> _AbsorbedUsage:
-    """Price an exempt session's model calls without recording them, and log it.
-
-    Prices exactly as `record_turn_usage` would (`cost_of` at the session's
-    model, then `debit_amount` with the deployment markup), so `cost_usd` and
-    `would_be_debit_usd` are the figures the tenant would have been debited.
-    An unknown model prices at zero, as the recorder does; `priced` says so.
-    The log is emitted on every pass that reads the session's events: sum it
-    per session id, not per line.
-    """
-    model_id = session.agent.model.id
-    pricing = MODEL_PRICING.get(model_id)
-    model_calls = 0
-    input_tokens = 0
-    output_tokens = 0
-    cache_creation_input_tokens = 0
-    cache_read_input_tokens = 0
-    cost = Decimal("0")
-    debit = Decimal("0")
-    async for event in client.beta.sessions.events.list(
-        session.id, order="asc", types=_SWEPT_EVENT_TYPES
-    ):
-        if event.type != "span.model_request_end":
-            continue
-        usage = event.model_usage
-        model_calls += 1
-        input_tokens += usage.input_tokens
-        output_tokens += usage.output_tokens
-        cache_creation_input_tokens += usage.cache_creation_input_tokens
-        cache_read_input_tokens += usage.cache_read_input_tokens
-        event_cost = cost_of(usage, pricing)
-        cost += debit_amount(event_cost, markup=Decimal("1"))
+) -> tuple[Decimal, Decimal]:
+    """(provider cost, ledger debit) of `calls`, priced as `record_turn_usage` would."""
+    cost = Decimal(0)
+    debit = Decimal(0)
+    for event in calls:
+        event_cost = cost_of(event.model_usage, pricing)
+        cost += debit_amount(event_cost, markup=Decimal(1))
         debit += debit_amount(event_cost, markup=markup)
-    log.info(
-        "usage_sweep.exempt_skipped",
-        tenant_id=str(tenant_id),
-        managed_session_id=session.id,
-        reason=reason,
-        model_id=model_id,
-        priced=pricing is not None,
-        model_calls=model_calls,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_creation_input_tokens=cache_creation_input_tokens,
-        cache_read_input_tokens=cache_read_input_tokens,
-        cost_usd=str(cost),
-        would_be_debit_usd=str(debit),
+    return cost, debit
+
+
+@dataclass(frozen=True)
+class SessionBilling:
+    """Who a session's model calls are billed to, read off its metadata stamps."""
+
+    tenant_id: uuid.UUID
+    platform_user_id: str | None
+    model_id: str
+    channel_id: str | None
+    exempt_reason: str | None
+
+    @property
+    def pricing(self) -> ModelRates | None:
+        return MODEL_PRICING.get(self.model_id)
+
+    def recorder(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        session_id: str,
+        *,
+        markup: Decimal,
+    ) -> UsageRecorder:
+        """The recorder a chat turn on this session would bind."""
+        if self.pricing is None:
+            log.warning("billing.unpriced_model", model_id=self.model_id, ma_session_id=session_id)
+        return functools.partial(
+            record_turn_usage,
+            sessionmaker=sessionmaker,
+            tenant_id=self.tenant_id,
+            platform_user_id=self.platform_user_id,
+            managed_session_id=session_id,
+            model_id=self.model_id,
+            markup=markup,
+            pricing=self.pricing,
+            channel_id=self.channel_id,
+        )
+
+
+async def session_billing(
+    sessionmaker: async_sessionmaker[AsyncSession], session: BetaManagedAgentsSession
+) -> SessionBilling | None:
+    """The session's billing, or None if it is not a session this deployment bills.
+
+    None for a session with no `daimon_tenant` stamp (not a Daimon turn), an
+    invalid one, or one naming a tenant this database does not hold (a shared
+    workspace holds other deployments' sessions; recording them would violate
+    `usage_events`' foreign key and bill no one of ours).
+    """
+    tenant_raw = session.metadata.get(MA_METADATA_KEY_TENANT)
+    if tenant_raw is None:
+        return None
+    try:
+        tenant_id = uuid.UUID(tenant_raw)
+    except ValueError:
+        log.warning(
+            "usage_sweep.session_skipped", session_id=session.id, reason="invalid_tenant_metadata"
+        )
+        return None
+    async with sessionmaker() as s:
+        if await get_tenant(s, tenant_id) is None:
+            return None
+    return SessionBilling(
+        tenant_id=tenant_id,
+        platform_user_id=await _platform_user_id(
+            sessionmaker, session.metadata, session_id=session.id, tenant_id=tenant_id
+        ),
+        model_id=session.agent.model.id,
+        channel_id=session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL),
+        exempt_reason=session.metadata.get(MA_METADATA_KEY_BILLING_EXEMPT),
     )
-    return _AbsorbedUsage(model_calls=model_calls, cost=cost, debit=debit)
 
 
-async def _resolve_platform_user_id(
+async def _platform_user_id(
     sessionmaker: async_sessionmaker[AsyncSession],
     metadata: dict[str, str],
     *,
     session_id: str,
-    expected_tenant_id: uuid.UUID,
+    tenant_id: uuid.UUID,
 ) -> str | None:
-    """Resolve the owning human's platform_user_id from the session's daimon_account.
+    """The owning human's platform user, from the session's `daimon_account` stamp.
 
-    Returns None when the session has no account tag or the account has no
-    discord principal — the tenant_ledger debit still fires on tenant_id alone,
-    so billing stays correct; only per-member reporting attribution is absent.
+    None when the session has no account stamp or the account has no platform
+    principal: the ledger debit still lands on the tenant; only per-member
+    reporting attribution is absent.
     """
     account_raw = metadata.get(MA_METADATA_KEY_ACCOUNT)
     if account_raw is None:
@@ -283,7 +305,6 @@ async def _resolve_platform_user_id(
     try:
         account_id = uuid.UUID(account_raw)
     except ValueError:
-        # Account attribution is optional; keep tenant usage billing intact.
         log.warning(
             "usage_sweep.member_attribution_omitted",
             session_id=session_id,
@@ -294,7 +315,7 @@ async def _resolve_platform_user_id(
         identity = await get_account_with_tenant(s, account_id=account_id)
     if identity is None:
         return None
-    if identity.tenant_id != expected_tenant_id:
+    if identity.tenant_id != tenant_id:
         log.warning(
             "usage_sweep.member_attribution_omitted",
             session_id=session_id,
@@ -302,3 +323,320 @@ async def _resolve_platform_user_id(
         )
         return None
     return identity.platform_user_id
+
+
+async def settle_stamped_session(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+    *,
+    markup: Decimal,
+    max_pages: int | None = SETTLE_MAX_PAGES,
+    deadline: float | None = None,
+) -> SettleResult | None:
+    """Settle a session billed by its metadata stamps; None if it is not ours to bill.
+
+    An exempt session is read only and its would-be charge logged.
+    """
+    billing = await session_billing(sessionmaker, session)
+    if billing is None:
+        return None
+    if billing.exempt_reason is None:
+        return await settle_session(
+            anthropic,
+            sessionmaker,
+            session.id,
+            record=billing.recorder(sessionmaker, session.id, markup=markup),
+            max_pages=max_pages,
+            deadline=deadline,
+        )
+    result = await settle_session(
+        anthropic, sessionmaker, session.id, record=None, max_pages=max_pages, deadline=deadline
+    )
+    cost, debit = price(result.unbilled, pricing=billing.pricing, markup=markup)
+    log.info(
+        "usage_sweep.exempt_skipped",
+        tenant_id=str(billing.tenant_id),
+        managed_session_id=session.id,
+        reason=billing.exempt_reason,
+        model_id=billing.model_id,
+        priced=billing.pricing is not None,
+        model_calls=len(result.unbilled),
+        cost_usd=str(cost),
+        would_be_debit_usd=str(debit),
+    )
+    return result
+
+
+async def turn_ended(
+    anthropic: AsyncAnthropic, session_id: str, request: session_settle_state.PendingSettle
+) -> bool:
+    """Whether the turn a settle request waits on is listed as ended.
+
+    True only when the turn's own `user.message` is listed and a
+    `session.status_idle` or `session.status_terminated` event is listed after
+    it; while the message is not listed yet, False. A bare `idle` status read
+    right after a send is the previous turn's, so the status alone is never
+    trusted. A request whose send could not name its message (the write after
+    the send failed) waits on the first message processed at or after the
+    request was written. Walks newest first, at most 10 pages.
+    """
+    page = await anthropic.beta.sessions.events.list(
+        session_id,
+        order="desc",
+        limit=_PAGE_SIZE,
+        types=["user.message", "session.status_idle", "session.status_terminated"],
+    )
+    ended_after = False  # an end event is listed after the current position
+    unnamed_turn: bool | None = None  # for an unnamed request: the oldest candidate's answer
+    for _ in range(SETTLE_MAX_PAGES):
+        for event in page.data:
+            if event.type != "user.message":
+                ended_after = True
+            elif request.turn_event_id is not None:
+                if event.id == request.turn_event_id:
+                    return ended_after
+            elif event.processed_at is None or event.processed_at >= request.requested_at:
+                unnamed_turn = ended_after
+            else:
+                return bool(unnamed_turn)
+        if not page.has_next_page():
+            break
+        page = await page.get_next_page()
+    return bool(unnamed_turn)
+
+
+async def settle_finished_turn(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+    *,
+    markup: Decimal,
+    max_pages: int | None = SETTLE_MAX_PAGES,
+    budget_s: float | None = SETTLE_BUDGET_S,
+) -> SettleResult | None:
+    """Settle a headless send's session once its turn has ended, then clear the request.
+
+    Does nothing unless a settle request is pending and `session` (a status
+    read just made) is terminated, or idle with the requested turn listed as
+    ended. A request not yet named by its send and younger than ten minutes
+    is left alone: its send may still be in flight. The request is cleared
+    only when the settle read to the end, and only if it is still the very
+    request this call verified (a newer send replaces it), so a settle cut
+    short, or one racing a send, leaves it for the next read or the drain.
+    `budget_s` bounds the whole call, database work included; on expiry the
+    request stays.
+
+    Named boundary: an upstream or database error is logged and the request
+    kept, except a rate limit, which propagates so the drain stops its pass
+    (the MCP read hook swallows it).
+    """
+    if session.status not in ("idle", "terminated"):
+        return None
+    deadline = None if budget_s is None else time.monotonic() + budget_s
+    try:
+        async with asyncio.timeout(budget_s):
+            async with sessionmaker() as s:
+                request = await session_settle_state.settle_request(
+                    s, managed_session_id=session.id
+                )
+            if request is None:
+                return None
+            if (
+                request.turn_event_id is None
+                and datetime.now(UTC) - request.requested_at < _SEND_IN_FLIGHT
+            ):
+                return None
+            if session.status == "idle" and not await turn_ended(anthropic, session.id, request):
+                return None
+            result = await settle_stamped_session(
+                anthropic,
+                sessionmaker,
+                session,
+                markup=markup,
+                max_pages=max_pages,
+                deadline=deadline,
+            )
+            if result is None or result.complete:
+                async with sessionmaker() as s, s.begin():
+                    await session_settle_state.clear_settle_request(
+                        s, managed_session_id=session.id, request=request
+                    )
+            return result
+    except TimeoutError:
+        return None  # out of budget; the request stays for the next read or the drain
+    except _anthropic.RateLimitError:
+        raise
+    except (_anthropic.APIError, SQLAlchemyError):
+        log.exception("billing.settle_failed", managed_session_id=session.id)
+        return None
+
+
+async def sweep_headless_usage(
+    client: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    markup: Decimal,
+) -> int:
+    """Settle the headless sends nobody read to the end. Returns the calls debited.
+
+    Visits up to 50 sessions with a pending settle request, least recently
+    visited first, and settles each whose turn has ended, reading up to 100
+    pages (10,000 calls) a session; one larger than that is logged
+    (`usage_sweep.session_incomplete`) and keeps its request. A request left
+    in place (a session still running, or one whose read failed) goes to the
+    back of the queue, so it never blocks the others; a deleted session's
+    request is cleared. Any rate limit ends the pass, for the scheduler to
+    retry after its interval.
+    """
+    async with sessionmaker() as s:
+        pending = await session_settle_state.list_settle_requests(s, limit=_DRAIN_BATCH)
+    debited = 0
+    for session_id in pending:
+        try:
+            session = await client.beta.sessions.retrieve(session_id)
+        except _anthropic.NotFoundError:
+            async with sessionmaker() as s, s.begin():
+                request = await session_settle_state.settle_request(
+                    s, managed_session_id=session_id
+                )
+                if request is not None:
+                    await session_settle_state.clear_settle_request(
+                        s, managed_session_id=session_id, request=request
+                    )
+            continue
+        except _anthropic.RateLimitError:
+            raise
+        except _anthropic.APIError:
+            log.exception("usage_sweep.session_failed", managed_session_id=session_id)
+        else:
+            result = await settle_finished_turn(
+                client,
+                sessionmaker,
+                session,
+                markup=markup,
+                max_pages=DRAIN_MAX_PAGES,
+                budget_s=None,
+            )
+            if result is not None:
+                debited += result.debited
+                if not result.complete:
+                    log.warning("usage_sweep.session_incomplete", managed_session_id=session_id)
+        async with sessionmaker() as s, s.begin():
+            await session_settle_state.touch_settle_request(s, managed_session_id=session_id)
+    log.info("usage_sweep.completed", pending=len(pending), recorded=debited)
+    return debited
+
+
+class BacklogTotal(BaseModel):
+    """One tenant's backlog: debited (an internal tenant) or waived (any other).
+
+    `would_debit_usd` is what the calls cost with markup. `debited_usd` is set
+    for an internal tenant when applied (the ledger rows written);
+    `waived_usd` for any other tenant, dry run or applied.
+    """
+
+    model_config = {"frozen": True}
+
+    tenant_id: uuid.UUID
+    kind: Literal["internal", "external"]
+    sessions: int = 0
+    calls: int = 0
+    cost_usd: Decimal = Decimal(0)
+    would_debit_usd: Decimal = Decimal(0)
+    debited_usd: Decimal | None = None
+    waived_usd: Decimal | None = None
+
+
+class BacklogReceipt(BaseModel):
+    """What one backlog settle covered: the cutoff, the mode, and each tenant."""
+
+    model_config = {"frozen": True}
+
+    cutoff: datetime | None
+    mode: Literal["dry_run", "apply"]
+    tenants: list[BacklogTotal]
+
+
+async def settle_backlog(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    internal: frozenset[uuid.UUID],
+    markup: Decimal,
+    session_ids: Sequence[str] = (),
+    apply: bool = False,
+) -> BacklogReceipt:
+    """Settle the backlog: calls made before the cutoff that no ledger row covers.
+
+    Reads the sessions named in `session_ids`, or else every MCP agent-chat
+    session a turn outcome names, each from the start of its history up to the
+    cutoff, so applying writes exactly the calls a dry run reports; calls after
+    the cutoff are ordinary billing. A session of an `internal` tenant is
+    debited; any other tenant's backlog is waived: no automatic settle reads
+    before the cutoff, so its would-be charge is logged
+    (`billing.backlog_waived`) and nothing is debited. A re-run reports waived
+    calls again, still charging nothing. Exempt sessions are skipped. Without
+    `apply` nothing is written; the totals say what applying would debit and
+    waive, per tenant. Returns the receipt the operator keeps as evidence.
+    """
+    async with sessionmaker() as s:
+        cutoff = await session_settle_state.backlog_cutoff(s)
+        if not session_ids:
+            session_ids = await turn_outcomes.session_ids_for_platform(s, "mcp")
+    totals: dict[uuid.UUID, BacklogTotal] = {}
+    for session_id in session_ids:
+        try:
+            session = await anthropic.beta.sessions.retrieve(session_id)
+        except _anthropic.NotFoundError:
+            continue
+        billing = await session_billing(sessionmaker, session)
+        if billing is None or billing.exempt_reason is not None:
+            continue
+        debit = billing.tenant_id in internal and apply
+        result = await settle_session(
+            anthropic,
+            sessionmaker,
+            session_id,
+            record=billing.recorder(sessionmaker, session_id, markup=markup) if debit else None,
+            max_pages=None,
+            backlog=True,
+        )
+        backlog = result.unbilled
+        if not backlog:
+            continue
+        cost, would_debit = price(backlog, pricing=billing.pricing, markup=markup)
+        kind = "internal" if billing.tenant_id in internal else "external"
+        total = totals.get(billing.tenant_id) or BacklogTotal(
+            tenant_id=billing.tenant_id,
+            kind=kind,
+            debited_usd=Decimal(0) if debit else None,
+            waived_usd=Decimal(0) if kind == "external" else None,
+        )
+        totals[billing.tenant_id] = total.model_copy(
+            update={
+                "sessions": total.sessions + 1,
+                "calls": total.calls + len(backlog),
+                "cost_usd": total.cost_usd + cost,
+                "would_debit_usd": total.would_debit_usd + would_debit,
+                "debited_usd": None
+                if total.debited_usd is None
+                else total.debited_usd + result.debit_usd,
+                "waived_usd": None if total.waived_usd is None else total.waived_usd + would_debit,
+            }
+        )
+    if apply:
+        for total in totals.values():
+            if total.kind == "external":
+                log.info(
+                    "billing.backlog_waived",
+                    tenant_id=str(total.tenant_id),
+                    sessions=total.sessions,
+                    calls=total.calls,
+                    would_be_debit_usd=str(total.waived_usd),
+                )
+    return BacklogReceipt(
+        cutoff=cutoff,
+        mode="apply" if apply else "dry_run",
+        tenants=sorted(totals.values(), key=lambda t: (t.kind, str(t.tenant_id))),
+    )

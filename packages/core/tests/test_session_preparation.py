@@ -88,7 +88,7 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_fresh_session,
 )
-from daimon.core.usage_sweep import sweep_headless_usage
+from daimon.core.usage_sweep import settle_stamped_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     FakeMAState,
@@ -246,6 +246,19 @@ class _Transport:
                 make_fake_ma_handler(self.state.ma),
             )
         )
+
+
+async def _settle_every_session(
+    deps: TurnDeps, transport: Any, sessionmaker: async_sessionmaker[AsyncSession]
+) -> int:
+    """Settle every session the fake holds by its stamps; the calls debited."""
+    debited = 0
+    for session in list(transport.state.sessions.values()):
+        result = await settle_stamped_session(
+            deps.anthropic, sessionmaker, session, markup=Decimal("1"), max_pages=None
+        )
+        debited += result.debited if result is not None else 0
+    return debited
 
 
 def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport) -> TurnDeps:
@@ -584,7 +597,7 @@ async def test_missed_usage_after_budget_channel_change_is_recovered_to_current_
     )
     # The MA event exists, but the live recorder never saw it.
     transport.state.events[second.ma_session_id].append(event.model_dump(mode="json"))
-    assert await sweep_headless_usage(deps.anthropic, db_session_factory, markup=Decimal("1")) == 1
+    assert await _settle_every_session(deps, transport, db_session_factory) == 1
     async with db_session_factory() as session:
         usage = (await session.scalars(select(UsageEvent))).one()
         debit = (await session.scalars(select(TenantLedger))).one()
@@ -815,11 +828,7 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
     await second._record(event=new_event)
     transport.state.events[second.ma_session_id].append(new_event.model_dump(mode="json"))
     assert observation._samples[(second.ma_session_id, new_event.id)].cost is not None
-    # The fake list endpoint excludes archived sessions by default. Expose the
-    # predecessor to exercise the sweep's attribution when its log is listed.
-    old = transport.state.sessions[first.ma_session_id]
-    transport.state.sessions[first.ma_session_id] = old.model_copy(update={"archived_at": None})
-    assert await sweep_headless_usage(deps.anthropic, db_session_factory, markup=Decimal("1")) == 1
+    assert await _settle_every_session(deps, transport, db_session_factory) == 1
     async with db_session_factory() as session:
         rows = (await session.scalars(select(UsageEvent).order_by(UsageEvent.id))).all()
         debits = (await session.scalars(select(TenantLedger).order_by(TenantLedger.id))).all()

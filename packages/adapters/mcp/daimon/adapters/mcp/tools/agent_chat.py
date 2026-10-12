@@ -9,7 +9,7 @@ Agent identity is read SERVER-SIDE from ``auth.agent_id`` (the verified
 derived UUID). No tool accepts ``agent_id`` as a parameter — this prevents
 confused-deputy attacks where a caller claims to be a different agent. Every
 session-handle tool re-derives the session agent's UUID and rejects handles
-that aren't this agent's (cross-tenant AND same-tenant cross-agent, WR-03).
+that aren't this agent's (cross-tenant AND same-tenant cross-agent).
 
 Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``start_turn`` creates a persistent MA session (via
@@ -97,21 +97,27 @@ from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
+from daimon.core.stores import session_settle_state
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
+from sqlalchemy.exc import SQLAlchemyError
 
 from mcp.types import ImageContent, TextContent
 
 log = structlog.get_logger(__name__)
+
+OnRead = Callable[[BetaManagedAgentsSession], Awaitable[None]]
+"""Sees a session the tool just read (`_settle_when_finished`)."""
 
 # Each transcript page costs two upstream calls (ownership retrieve + events
 # list), so an uncapped walk on a long session can outlast any client timeout.
@@ -135,6 +141,70 @@ def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
     if not sent.data:
         raise ToolError("send returned no accepted event")
     return sent.data[0].id
+
+
+async def _send_billed(runtime: McpRuntime, session_id: str, message: str) -> str:
+    """Send a headless turn's message with its settle request written first.
+
+    Nothing meters a headless turn live, so its calls are billed by
+    `usage_sweep.settle_finished_turn` once a status or transcript read sees
+    the turn ended, or by the scheduler drain of the requests no read cleared.
+    The request is committed before the send, so an accepted send always has
+    one. A send Managed Agents rejected (a 4xx, or nothing accepted) withdraws
+    it, restoring any request it replaced; after an error that may hide an
+    accepted send (a timeout, a 5xx) it stays. Naming the accepted message is
+    best effort: an unnamed request waits on the first message processed after
+    it was written. Returns the message's event id (the turn boundary).
+    """
+    async with runtime.session_factory.begin() as db:
+        previous, requested_at = await session_settle_state.request_settle(
+            db, managed_session_id=session_id
+        )
+    try:
+        sent = await runtime.client.beta.sessions.events.send(
+            session_id,
+            events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],
+        )
+        turn_event_id = _turn_boundary(sent)
+    except (ToolError, anthropic.APIStatusError) as err:
+        if isinstance(err, anthropic.APIStatusError) and err.status_code >= 500:
+            raise
+        async with runtime.session_factory.begin() as db:
+            await session_settle_state.withdraw_settle_request(
+                db, managed_session_id=session_id, requested_at=requested_at, previous=previous
+            )
+        raise
+    try:
+        async with runtime.session_factory.begin() as db:
+            await session_settle_state.name_settle_turn(
+                db,
+                managed_session_id=session_id,
+                requested_at=requested_at,
+                turn_event_id=turn_event_id,
+            )
+    except SQLAlchemyError:
+        # Named boundary: the turn is running and its request stands.
+        log.exception("billing.settle_request_unnamed", managed_session_id=session_id)
+    return turn_event_id
+
+
+def _settle_when_finished(runtime: McpRuntime) -> OnRead:
+    """Bill a headless turn the moment a read sees it ended (bounded, synchronous)."""
+
+    async def on_read(session: BetaManagedAgentsSession) -> None:
+        try:
+            await settle_finished_turn(
+                runtime.client,
+                runtime.session_factory,
+                session,
+                markup=runtime.settings.billing.markup,
+            )
+        except Exception:
+            # Named boundary: the caller asked for status or a transcript, which
+            # billing must never fail. The settle request stays for the next read.
+            log.exception("billing.settle_failed", managed_session_id=session.id)
+
+    return on_read
 
 
 class AgentDescription(BaseModel):
@@ -230,8 +300,8 @@ async def _resolve_environment_name(
     An MCP call has no channel of its own, so the cascade falls through
     tenant -> ``runtime.deployment_default``, except for an agent key minted
     in a channel (``token_channel_id``), which resolves as a turn there does.
-    This is the same shared ``resolve()`` the Discord adapter uses (parity
-    fix, MPP-01) — no second tenant-row-only resolution path.
+    This is the same shared ``resolve()`` the Discord adapter uses, so there is
+    no second tenant-row-only resolution path.
     """
     async with runtime.session_factory() as session:
         resolved = await resolve(
@@ -307,8 +377,8 @@ async def _verify_agent_owns_session(
 
     Stricter than ``_verify_tenant_owns_session``: re-derives the session
     agent's UUID and compares it to ``auth.agent_id`` (the verified derived
-    per-agent UUID), rejecting sibling-agent handles within the same tenant
-    (WR-03). It also requires the session's ``daimon_account`` tag to be the
+    per-agent UUID), rejecting sibling-agent handles within the same tenant.
+    It also requires the session's ``daimon_account`` tag to be the
     caller's account: every member of a workspace talks to the same agent, and
     a member's session runs with that member's vault, so an agent match alone
     would let one member read, drive or stop another's conversation. Raises
@@ -435,14 +505,14 @@ async def _start_turn_impl(
 
     Environment resolution (fail-closed):
     - Resolve ``environment_name`` via the shared channel/tenant/deployment
-      cascade (``resolve()``, MPP-01 — same as Discord).
+      cascade (``resolve()``, the same as Discord).
     - Look it up on MA via ``find_environment_by_daimon_tag``.
     - Raise ``ToolError("environment not found")`` if either step fails.
 
     When ``bundle`` is given, the session is created on the isolated path
     (``create_isolated_session``) with the bundle mounted as its only
     resource, instead of the normal vault/repo/env-mounted ``create_session``
-    path. See ``bundle_handle`` and SPEC §1.1 for the verification steps.
+    path. See ``bundle_handle`` for the verification steps.
 
     A caller with no platform user (an internal or CLI token, which ``_admit``
     lets through ungated and unbilled) gets a session stamped
@@ -595,16 +665,7 @@ async def _start_turn_impl(
     if recheck is not None:
         await recheck()
     turn_started_at = now()
-    sent = await runtime.client.beta.sessions.events.send(
-        session.id,
-        events=[
-            {
-                "type": "user.message",
-                "content": [{"type": "text", "text": message}],
-            }
-        ],
-    )
-    turn_event_id = _turn_boundary(sent)
+    turn_event_id = await _send_billed(runtime, session.id, message)
 
     return {
         "handle": session.id,
@@ -631,7 +692,7 @@ async def _continue_turn_impl(
     events; ``turn_started_at`` is ``now()`` captured immediately BEFORE that
     send (see ``_start_turn_impl`` for why the echo's own timestamp isn't
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
-    same-tenant cross-agent handles (Tampering threat mitigation, WR-03). A
+    same-tenant cross-agent handles (Tampering threat mitigation). A
     chat turn's own credential is refused (``_require_outside_chat_turn``).
     ``recheck`` runs the access decision again immediately before the send.
 
@@ -681,16 +742,8 @@ async def _continue_turn_impl(
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
                 raise ToolError("This session is closed.")
-        sent = await runtime.client.beta.sessions.events.send(
-            handle,
-            events=[
-                {
-                    "type": "user.message",
-                    "content": [{"type": "text", "text": message}],
-                }
-            ],
-        )
-    turn_event_id = _turn_boundary(sent)
+        # Inside the fence, so settle requests follow the order of the sends.
+        turn_event_id = await _send_billed(runtime, handle, message)
     return {
         "handle": handle,
         "turn_event_id": turn_event_id,
@@ -721,13 +774,18 @@ async def _get_session_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     handle: str,
+    *,
+    on_read: OnRead | None = None,
 ) -> SessionInfo:
-    """Return one session's status/metadata (no reply text, no side effects).
+    """Return one session's status/metadata (no reply text).
 
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03).
+    cross-agent handles. ``on_read`` (the tool's
+    ``_settle_when_finished``) sees the session read.
     """
     s = await _verify_agent_owns_session(runtime, auth, handle)
+    if on_read is not None:
+        await on_read(s)
     return SessionInfo.from_ma(s)
 
 
@@ -742,7 +800,7 @@ async def _archive_my_session_impl(
     the usage sweep re-reads all of them on every tick. Not a cancel — a
     running turn is stopped with the cancel tool, not this one.
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03).
+    cross-agent handles.
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
@@ -783,7 +841,7 @@ async def _cancel_turn_impl(
     not refunded. The report host surfaces that to the reader.
 
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03) before any send.
+    cross-agent handles before any send.
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
@@ -823,7 +881,7 @@ async def _get_turn_cost_impl(
     real zero cost, distinguishable from the unpriced ``None`` case.
 
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03); the session it returns is reused for the
+    cross-agent handles; the session it returns is reused for the
     pricing lookup rather than retrieved twice.
     """
     session = await _verify_agent_owns_session(runtime, auth, handle)
@@ -875,20 +933,24 @@ async def _list_events_impl(
     order: Literal["asc", "desc"] | None,
     created_at_gte: str | None = None,
     types: list[str] | None = None,
+    *,
+    on_read: OnRead | None = None,
 ) -> Page[SessionEventOut]:
     """List a session's events (the transcript) for the caller to read.
 
     This is how a primitives-only caller reads the agent's reply: fold the
     ``agent.message`` events client-side. ``_verify_agent_owns_session``
-    guards cross-tenant AND same-tenant cross-agent handles (WR-03).
+    guards cross-tenant AND same-tenant cross-agent handles.
 
     ``created_at_gte`` and ``types`` let a poller read one turn instead of
     the whole transcript: pass the ``turn_started_at`` from ``start_turn``/
     ``continue_turn`` as ``created_at_gte`` and
     ``types=["agent.message", "session.status_idle"]`` to see only this
-    turn's reply and completion signal.
+    turn's reply and completion signal. ``on_read`` is as for ``_get_session_impl``.
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    session = await _verify_agent_owns_session(runtime, auth, handle)
+    if on_read is not None:
+        await on_read(session)
     list_kwargs: dict[str, Any] = {}
     if page is not None:
         list_kwargs["page"] = page
@@ -1015,6 +1077,7 @@ async def _ask_impl(
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
     personal_memory: bool = False,
+    on_read: OnRead | None = None,
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
@@ -1041,7 +1104,7 @@ async def _ask_impl(
     deadline = clock() + timeout_seconds
 
     while True:
-        current = await _get_session_impl(runtime, auth, handle)
+        current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
         # Only terminated is treated as terminal: the status value set is
         # upstream-controlled (see SessionInfo.status), so an unmodeled
         # transient status keeps polling until the deadline instead of
@@ -1232,7 +1295,14 @@ def register_agent_chat_tools(
             agent_names=pin_names,
         )
         return _ask_tool_result(  # type: ignore[return-value]
-            await _ask_impl(runtime, auth, message, handle=handle, recheck=recheck_for(auth, "ask"))
+            await _ask_impl(
+                runtime,
+                auth,
+                message,
+                handle=handle,
+                recheck=recheck_for(auth, "ask"),
+                on_read=_settle_when_finished(runtime),
+            )
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1266,7 +1336,9 @@ def register_agent_chat_tools(
         ``idle``/``terminated``) before reading the transcript with
         ``list_events``.
         """
-        return await _get_session_impl(runtime, await _auth(ctx), handle)
+        return await _get_session_impl(
+            runtime, await _auth(ctx), handle, on_read=_settle_when_finished(runtime)
+        )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def archive_my_session(ctx: Context, handle: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
@@ -1343,7 +1415,15 @@ def register_agent_chat_tools(
         state and must not be trusted. ``rescheduling`` counts as running.
         """
         return await _list_events_impl(
-            runtime, await _auth(ctx), handle, page, limit, order, created_at_gte, types
+            runtime,
+            await _auth(ctx),
+            handle,
+            page,
+            limit,
+            order,
+            created_at_gte,
+            types,
+            on_read=_settle_when_finished(runtime),
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]

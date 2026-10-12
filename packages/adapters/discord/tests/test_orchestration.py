@@ -107,7 +107,7 @@ def _make_runtime(
     # "'async for' requires an object with __aiter__ method". Empty history
     # degrades it to the history-only rung, same as before that rescue path
     # existed.
-    # The turn-end billing catch-up (`daimon.core.usage_reconcile`) awaits the
+    # The turn-end settle (`daimon.core.usage_sweep.settle_session`) awaits the
     # same call for its first page, as the SDK's paginator allows.
     anthropic.beta.sessions.events.list = MagicMock(side_effect=lambda *a, **k: _EmptyEventList())
     from daimon.core.ma_resolver import new_resolver_cache
