@@ -2080,3 +2080,32 @@ for native profiles. Events and resource references carry only the provider;
 `mux.profiles.emits_legacy_events_for` reads the registered profiles and refuses
 missing or conflicting declarations. This routing capability does not admit a
 backend or change channel configuration.
+
+### Native counterpart readback
+
+OpenAI and Gemini deployments may explicitly pin `source_agent_id` (the scoped
+source UUID), `source_agent_version`, `counterpart_catalog_id`, and
+`counterpart_catalog_revision`. All four pins are required together. They do not
+replace the deployment's tenant, account, channel, project, or exact/bounded
+configuration authorization. Names and caller-provided digests cannot establish
+a counterpart.
+
+One shared manifest selector, pin validator, and readback helper check the
+admitted source identity/version and retained catalog revision before native
+requests, then use the existing
+resource host and driver to read the native agent. OpenAI also checks its
+provisioned hosted environment; Gemini requires an explicitly enabled named-agent
+catalog and checks the compiled native definition, explicit tools, system
+instructions, and every concrete skill bundle file. Gemini counterpart rows
+require a native `agent_id`; a display name does not identify a resource.
+Unproven environment policy refuses. Missing, foreign, stale, or changed
+resources refuse. A final catalog read detects
+changes during native readback; it does not claim an atomic provider revision
+pin. This component returns the existing retained catalog revision.
+
+Agent-origin execution remains refused. Matching a retained native agent does
+not prove preservation of source files, credentials, repositories, memory,
+vaults, channel skills, or tool and approval policy. Complete authorized source
+context and checked preparation are required before a native session can run.
+Channel-origin deployments and the default Anthropic path retain their existing
+behavior.

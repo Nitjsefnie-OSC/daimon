@@ -7,8 +7,12 @@ import os
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
+from uuid import UUID
 
 from daimon.core.mux_backend import TurnRuntime
+from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.stores.domain import BackendAgent
+from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import (
     PROFILE,
@@ -23,11 +27,14 @@ from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
     fixed_plan_origin_allowed,
-    manifest_configuration_matches,
+    read_counterpart,
+    select_runtime_manifest,
+    validate_counterpart_pins,
 )
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
+from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.core import compile_agent, compile_environment
 from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.errors import ScopeViolation
@@ -35,9 +42,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    JsonValue,
-    TypeAdapter,
-    ValidationError,
     model_validator,
 )
 
@@ -65,50 +69,62 @@ class GeminiPlan(BaseModel):
     # REQUIRED: [] means no tools. Never use the provider's implicit paid tools.
     tools: tuple[ToolSpec, ...]
     environment: EnvironmentSpec
+    agent_id: Nonblank | None = None
+    skill_ids: tuple[Nonblank, ...] = ()
+    source_agent_id: UUID | None = None
+    source_agent_version: Annotated[int, Field(gt=0, strict=True)] | None = None
+    counterpart_catalog_id: Nonblank | None = None
+    counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> GeminiPlan:
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
+        validate_counterpart_pins(self)
+        if (
+            not self.records_path.is_absolute()
+            or not self.holds_path.is_absolute()
+            or self.records_path.resolve() == self.holds_path.resolve()
+            or self.hold_usd > self.cap_usd
+        ):
+            raise ValueError(
+                "a deployment requires distinct absolute accounting paths and a bounded hold"
+            )
         return self
+
+    async def read_counterpart(
+        self,
+        request: ProviderPreparationRequest,
+        *,
+        source: BackendAgent,
+        resources: NeutralResourceHost,
+    ) -> AgentRevision:
+        """Read native named-agent intent; no full source or execution proof is implied."""
+
+        async def verify_native(checked: AgentRevision) -> None:
+            adapter = resources.backend.agents
+            if (
+                not isinstance(adapter, GeminiCatalogAdapter)
+                or not adapter.enabled
+                or adapter.account_scope_id != self.project
+                or compile_environment(self.environment) != {"type": "remote", "sources": []}
+                or checked.agent.spec.system != self.system
+                or checked.agent.spec.tools != self.tools
+            ):
+                raise AdmissionDenied(reason="backend_unsupported")
+
+        return await read_counterpart(
+            self, request, source=source, resources=resources, verify_native=verify_native
+        )
 
 
 def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
     revision = request.admission.backend_revision
     if not fixed_plan_origin_allowed(getattr(request.admission, "backend_revision_origin", None)):
         raise AdmissionDenied(reason="backend_unsupported")
-    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if revision is None or revision.profile != PROFILE or not path:
+    if revision is None or revision.profile != PROFILE:
         raise AdmissionDenied(reason="backend_unsupported")
-    try:
-        with Path(path).open("rb") as manifest:
-            raw = manifest.read(1_048_577)
-        if len(raw) > 1_048_576:
-            raise AdmissionDenied(reason="backend_unsupported")
-        rows = TypeAdapter(list[dict[str, JsonValue]]).validate_json(raw)
-        selected = [
-            row
-            for row in rows
-            if row.get("profile") == PROFILE
-            and row.get("tenant_id") == request.scope.tenant_id
-            and row.get("account_id") == request.scope.account_id
-            and row.get("platform") == revision.channel.platform
-            and row.get("channel_id") == revision.channel.channel_id
-            and manifest_configuration_matches(row, revision)
-        ]
-        if len(selected) != 1:
-            raise AdmissionDenied(reason="backend_unsupported")
-        plan = GeminiPlan.model_validate(selected[0])
-        if (
-            not plan.records_path.is_absolute()
-            or not plan.holds_path.is_absolute()
-            or plan.records_path.resolve() == plan.holds_path.resolve()
-            or plan.hold_usd > plan.cap_usd
-        ):
-            raise AdmissionDenied(reason="backend_unsupported")
-        return plan
-    except (OSError, ValidationError):
-        raise AdmissionDenied(reason="backend_unsupported") from None
+    return select_runtime_manifest(request, GeminiPlan)
 
 
 def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
