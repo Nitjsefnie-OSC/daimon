@@ -1,12 +1,12 @@
 """Record which Managed Agents sessions a headless send left to be settled.
 
-`usage_reconcile_progress` becomes the per-session settle state: its
-`covered_through` watermark stays in use, and the two new columns hold the
-pending settle request a headless send writes. The forward/repair cursor
-columns (`covered_ids`, `forward_since`, `forward_page`, `repair_lt`,
-`repair_since`, `repair_page`, `repair_starved`) are no longer read or
-written; they stay so a rollback to the previous release keeps working and
-are dropped in a later migration.
+`usage_reconcile_progress` gets the two columns of the pending settle request
+a headless send writes. The former catch-up's progress columns
+(`covered_through` on session rows, `covered_ids`, `forward_since`,
+`forward_page`, `repair_lt`, `repair_since`, `repair_page`, `repair_starved`)
+are no longer read or written; the release before this one still uses them,
+so they stay until a later migration, after which a rollback no longer needs
+them.
 
 It also records when it ran, as the `covered_through` of the reserved row
 `backlog-cutoff`: calls made before it are the backlog, which automatic

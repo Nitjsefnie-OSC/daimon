@@ -9,7 +9,7 @@ Agent identity is read SERVER-SIDE from ``auth.agent_id`` (the verified
 derived UUID). No tool accepts ``agent_id`` as a parameter — this prevents
 confused-deputy attacks where a caller claims to be a different agent. Every
 session-handle tool re-derives the session agent's UUID and rejects handles
-that aren't this agent's (cross-tenant AND same-tenant cross-agent, WR-03).
+that aren't this agent's (cross-tenant AND same-tenant cross-agent).
 
 Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``start_turn`` creates a persistent MA session (via
@@ -300,8 +300,8 @@ async def _resolve_environment_name(
     An MCP call has no channel of its own, so the cascade falls through
     tenant -> ``runtime.deployment_default``, except for an agent key minted
     in a channel (``token_channel_id``), which resolves as a turn there does.
-    This is the same shared ``resolve()`` the Discord adapter uses (parity
-    fix, MPP-01) — no second tenant-row-only resolution path.
+    This is the same shared ``resolve()`` the Discord adapter uses, so there is
+    no second tenant-row-only resolution path.
     """
     async with runtime.session_factory() as session:
         resolved = await resolve(
@@ -377,8 +377,8 @@ async def _verify_agent_owns_session(
 
     Stricter than ``_verify_tenant_owns_session``: re-derives the session
     agent's UUID and compares it to ``auth.agent_id`` (the verified derived
-    per-agent UUID), rejecting sibling-agent handles within the same tenant
-    (WR-03). It also requires the session's ``daimon_account`` tag to be the
+    per-agent UUID), rejecting sibling-agent handles within the same tenant.
+    It also requires the session's ``daimon_account`` tag to be the
     caller's account: every member of a workspace talks to the same agent, and
     a member's session runs with that member's vault, so an agent match alone
     would let one member read, drive or stop another's conversation. Raises
@@ -505,14 +505,14 @@ async def _start_turn_impl(
 
     Environment resolution (fail-closed):
     - Resolve ``environment_name`` via the shared channel/tenant/deployment
-      cascade (``resolve()``, MPP-01 — same as Discord).
+      cascade (``resolve()``, the same as Discord).
     - Look it up on MA via ``find_environment_by_daimon_tag``.
     - Raise ``ToolError("environment not found")`` if either step fails.
 
     When ``bundle`` is given, the session is created on the isolated path
     (``create_isolated_session``) with the bundle mounted as its only
     resource, instead of the normal vault/repo/env-mounted ``create_session``
-    path. See ``bundle_handle`` and SPEC §1.1 for the verification steps.
+    path. See ``bundle_handle`` for the verification steps.
 
     A caller with no platform user (an internal or CLI token, which ``_admit``
     lets through ungated and unbilled) gets a session stamped
@@ -692,7 +692,7 @@ async def _continue_turn_impl(
     events; ``turn_started_at`` is ``now()`` captured immediately BEFORE that
     send (see ``_start_turn_impl`` for why the echo's own timestamp isn't
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
-    same-tenant cross-agent handles (Tampering threat mitigation, WR-03). A
+    same-tenant cross-agent handles (Tampering threat mitigation). A
     chat turn's own credential is refused (``_require_outside_chat_turn``).
     ``recheck`` runs the access decision again immediately before the send.
 
@@ -800,7 +800,7 @@ async def _archive_my_session_impl(
     the usage sweep re-reads all of them on every tick. Not a cancel — a
     running turn is stopped with the cancel tool, not this one.
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03).
+    cross-agent handles.
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
@@ -841,7 +841,7 @@ async def _cancel_turn_impl(
     not refunded. The report host surfaces that to the reader.
 
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03) before any send.
+    cross-agent handles before any send.
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
@@ -881,7 +881,7 @@ async def _get_turn_cost_impl(
     real zero cost, distinguishable from the unpriced ``None`` case.
 
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
-    cross-agent handles (WR-03); the session it returns is reused for the
+    cross-agent handles; the session it returns is reused for the
     pricing lookup rather than retrieved twice.
     """
     session = await _verify_agent_owns_session(runtime, auth, handle)
@@ -940,7 +940,7 @@ async def _list_events_impl(
 
     This is how a primitives-only caller reads the agent's reply: fold the
     ``agent.message`` events client-side. ``_verify_agent_owns_session``
-    guards cross-tenant AND same-tenant cross-agent handles (WR-03).
+    guards cross-tenant AND same-tenant cross-agent handles.
 
     ``created_at_gte`` and ``types`` let a poller read one turn instead of
     the whole transcript: pass the ``turn_started_at`` from ``start_turn``/

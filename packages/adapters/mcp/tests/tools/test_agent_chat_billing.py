@@ -61,6 +61,7 @@ from daimon.testing.ma import (
     list_response,
 )
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -382,6 +383,16 @@ async def test_a_send_whose_turn_could_not_be_named_is_still_billed(
     started = await world.start()
     monkeypatch.undo()
     assert await world.pending() == "unnamed", "the request written before the send stands"
+    # Ten minutes on, the send is no longer in flight.
+    async with world.sessionmaker() as s, s.begin():
+        await s.execute(
+            text(
+                "UPDATE usage_reconcile_progress "
+                "SET settle_requested_at = settle_requested_at - interval '11 minutes' "
+                "WHERE managed_session_id = :sid"
+            ),
+            {"sid": world.sid},
+        )
 
     # The turn's own message is listed after the request: the fake's echo has no
     # processed time yet, as Managed Agents echoes a send.

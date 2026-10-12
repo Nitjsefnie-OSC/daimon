@@ -1,4 +1,4 @@
-"""Store for per-session settle state: the billing watermark and pending settle requests.
+"""Store for per-session settle state: pending settle requests and the backlog cutoff.
 
 Per `guideline:architecture`: this module does NOT swallow exceptions.
 """
@@ -22,55 +22,15 @@ the operator's backlog settle does.
 """
 
 
-async def covered_through(session: AsyncSession, *, managed_session_id: str) -> datetime | None:
-    """The newest call time a completed settle of the session read, if any."""
+async def backlog_cutoff(session: AsyncSession) -> datetime | None:
+    """When this settle path was deployed (None on a database that never ran it)."""
     return (
         await session.execute(
             select(SessionSettleState.covered_through).where(
-                SessionSettleState.managed_session_id == managed_session_id
+                SessionSettleState.managed_session_id == BACKLOG_CUTOFF_ID
             )
         )
     ).scalar_one_or_none()
-
-
-async def backlog_cutoff(session: AsyncSession) -> datetime | None:
-    """When this settle path was deployed (None on a database that never ran it)."""
-    return await covered_through(session, managed_session_id=BACKLOG_CUTOFF_ID)
-
-
-async def set_watermark(
-    session: AsyncSession, *, managed_session_id: str, through: datetime
-) -> None:
-    """Set where the session's next settle starts listing."""
-    stmt = insert(SessionSettleState).values(
-        managed_session_id=managed_session_id, covered_through=through
-    )
-    await session.execute(
-        stmt.on_conflict_do_update(
-            index_elements=[SessionSettleState.managed_session_id],
-            set_={"covered_through": stmt.excluded.covered_through, "updated_at": func.now()},
-        )
-    )
-
-
-async def mark_settled_through(
-    session: AsyncSession, *, managed_session_id: str, through: datetime
-) -> None:
-    """Raise the watermark to at least `through` (never lowering it)."""
-    stmt = insert(SessionSettleState).values(
-        managed_session_id=managed_session_id, covered_through=through
-    )
-    await session.execute(
-        stmt.on_conflict_do_update(
-            index_elements=[SessionSettleState.managed_session_id],
-            set_={
-                "covered_through": func.greatest(
-                    SessionSettleState.covered_through, stmt.excluded.covered_through
-                ),
-                "updated_at": func.now(),
-            },
-        )
-    )
 
 
 @dataclass(frozen=True)
@@ -166,14 +126,18 @@ async def withdraw_settle_request(
 
 
 async def clear_settle_request(
-    session: AsyncSession, *, managed_session_id: str, requested_at: datetime
+    session: AsyncSession, *, managed_session_id: str, request: PendingSettle
 ) -> None:
-    """Clear the request written at `requested_at`; a newer send's request is kept."""
+    """Clear `request` only if it is still the session's request, unchanged.
+
+    A newer send's request (or the naming of this one) leaves it in place.
+    """
     await session.execute(
         update(SessionSettleState)
         .where(
             SessionSettleState.managed_session_id == managed_session_id,
-            SessionSettleState.settle_requested_at == requested_at,
+            SessionSettleState.settle_requested_at == request.requested_at,
+            SessionSettleState.settle_turn_event_id.is_not_distinct_from(request.turn_event_id),
         )
         .values(settle_turn_event_id=None, settle_requested_at=None, updated_at=func.now())
     )

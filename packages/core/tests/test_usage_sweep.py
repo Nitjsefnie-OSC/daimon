@@ -59,7 +59,7 @@ from daimon.core.usage_sweep import (
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, not_found_response
 from daimon.testing.ma_models import ma_model_usage, ma_session, ma_session_agent
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 10, 12, 9, 0, 0, tzinfo=UTC)
@@ -253,27 +253,24 @@ async def test_every_unbilled_call_is_debited_once_at_the_chat_price(
     assert [e["debited"] for e in logs if e["event"] == "billing.settled"] == [2]
 
 
-async def test_a_completed_settle_moves_the_watermark_and_the_next_reads_from_it(
+async def test_a_call_listed_after_a_complete_settle_is_billed_by_the_next(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """No stored progress: every settle reads the listing, a late call included."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
     ma = _MA(_session(tenant.id))
-    ma.turn("evt_a")
+    ma.turn("evt_a", "evt_b")
     record = _chat_recorder(db_session_factory, tenant.id, ma)
 
     await settle_session(ma.client, db_session_factory, SESSION, record=record)
-    ma.events[SESSION].append(_call("evt_late", at=NOW + timedelta(minutes=5)))
+    ma.events[SESSION].append(_call("evt_late", at=NOW))  # older than evt_b, listed late
     second = await settle_session(ma.client, db_session_factory, SESSION, record=record)
 
-    async with db_session_factory() as s:
-        through = await session_settle_state.covered_through(s, managed_session_id=SESSION)
-    assert through == NOW + timedelta(minutes=5) - timedelta(minutes=10)
-    floor = ma.listings[-1].get("created_at[gte]")
-    assert floor is not None, "the second settle lists from the watermark"
-    assert datetime.fromisoformat(floor) == NOW + timedelta(seconds=1) - timedelta(minutes=10)
-    assert second.debited == 1, "a call listed late inside the overlap is still billed"
+    assert "created_at[gte]" not in ma.listings[-1], "no floor but the backlog cutoff"
+    assert [e.id for e in second.unbilled] == ["evt_late"]
+    assert len(await _ledger(db_session)) == 3
 
 
 async def test_calls_the_live_stream_already_debited_are_skipped(
@@ -301,7 +298,7 @@ async def test_calls_the_live_stream_already_debited_are_skipped(
     assert len(await _ledger(db_session)) == 2
 
 
-async def test_a_page_bound_leaves_the_watermark_for_the_next_settle(
+async def test_a_page_bound_reads_the_newest_calls_and_reports_incomplete(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -312,13 +309,11 @@ async def test_a_page_bound_leaves_the_watermark_for_the_next_settle(
     record = _chat_recorder(db_session_factory, tenant.id, ma)
 
     first = await settle_session(ma.client, db_session_factory, SESSION, record=record, max_pages=1)
-    async with db_session_factory() as s:
-        through = await session_settle_state.covered_through(s, managed_session_id=SESSION)
-    rest = await settle_session(ma.client, db_session_factory, SESSION, record=record)
+    rest = await settle_session(ma.client, db_session_factory, SESSION, record=record, max_pages=2)
 
     assert (first.debited, first.complete) == (100, False)
-    assert through == NOW + timedelta(seconds=99), "the watermark is saved after every page"
-    assert (rest.debited, rest.complete) == (50, True)
+    assert {e.id for e in first.unbilled} == {f"evt_{i:03d}" for i in range(50, 150)}
+    assert (rest.debited, rest.complete) == (50, True), "a larger bound reads it all again"
     assert len(await _ledger(db_session)) == 150
 
 
@@ -357,8 +352,6 @@ async def test_a_read_only_settle_reports_and_writes_nothing(
 
     assert [e.id for e in result.unbilled] == ["evt_a"]
     assert await _ledger(db_session) == {}
-    async with db_session_factory() as s:
-        assert await session_settle_state.covered_through(s, managed_session_id=SESSION) is None
 
 
 # ---------------------------------------------------------------------------
@@ -565,11 +558,13 @@ async def test_a_newer_send_keeps_its_own_request(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    first = await _request(db_session_factory)
+    await _request(db_session_factory)
+    first = await _pending_request(db_session_factory)
     await _request(db_session_factory, "evt_turn_b")
+    assert first is not None
     async with db_session_factory() as s, s.begin():
         await session_settle_state.clear_settle_request(
-            s, managed_session_id=SESSION, requested_at=first
+            s, managed_session_id=SESSION, request=first
         )
     assert await _pending(db_session_factory) == "evt_turn_b"
 
@@ -618,8 +613,12 @@ async def test_the_drain_settles_finished_sends_and_leaves_running_ones(
 
 async def _cutoff(sessionmaker: async_sessionmaker[AsyncSession], at: datetime) -> None:
     async with sessionmaker() as s, s.begin():
-        await session_settle_state.set_watermark(
-            s, managed_session_id=session_settle_state.BACKLOG_CUTOFF_ID, through=at
+        await s.execute(
+            text(
+                "INSERT INTO usage_reconcile_progress (managed_session_id, covered_through) "
+                "VALUES (:id, :at)"
+            ),
+            {"id": session_settle_state.BACKLOG_CUTOFF_ID, "at": at},
         )
 
 
@@ -686,9 +685,6 @@ async def test_the_backlog_is_debited_for_internal_tenants_and_waived_for_the_re
     assert not [e for e in dry_logs if e["event"] == "billing.backlog_waived"]
     (waived,) = [e for e in logs if e["event"] == "billing.backlog_waived"]
     assert waived["tenant_id"] == str(customer.id)
-    async with db_session_factory() as s:
-        marked = await session_settle_state.covered_through(s, managed_session_id="sesn_customer")
-    assert marked == NOW - timedelta(hours=1), "the waived session is marked settled"
     # The customer's post-cutoff call is ordinary billing, settled as usual.
     later = await settle_stamped_session(ma.client, db_session_factory, theirs, markup=MARKUP)
     assert later is not None and [e.id for e in later.unbilled] == ["evt_after"]
@@ -793,25 +789,121 @@ async def test_an_unnamed_request_waits_on_the_first_message_after_it(
     assert await turn_ended(ma.client, SESSION, request) is True
 
 
-@pytest.mark.parametrize(("max_pages", "count"), [(1, 150), (10, 1001)])
-async def test_repeated_bounded_settles_make_forward_progress(
+@pytest.mark.parametrize("shape", ["equal-timestamps", "late-call"])
+async def test_the_drain_completes_what_a_bounded_read_could_not(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    max_pages: int,
-    count: int,
+    shape: str,
+) -> None:
+    """A session too big for a read's ten pages keeps its request, and the drain's
+    larger bound settles it whole: calls sharing one timestamp, or one listed late
+    behind newer calls, included."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    ma = _MA(session)
+    calls = [
+        _call(
+            f"call_{i:04d}",
+            at=NOW + (timedelta(0) if shape == "equal-timestamps" else timedelta(seconds=i)),
+        )
+        for i in range(1001)
+    ]
+    ma.events[SESSION] = [_message(BOUNDARY, at=NOW - timedelta(seconds=1)), *calls]
+    ma.events[SESSION].append(_idle("evt_idle", at=NOW + timedelta(hours=1)))
+    await _request(db_session_factory)
+
+    read = await settle_finished_turn(ma.client, db_session_factory, session, markup=MARKUP)
+    assert read is not None and not read.complete
+    assert await _pending(db_session_factory) == BOUNDARY
+    if shape == "late-call":
+        ma.events[SESSION].append(_call("late", at=NOW + timedelta(seconds=997)))
+    await sweep_headless_usage(ma.client, db_session_factory, markup=MARKUP)
+
+    assert len(await _ledger(db_session)) == 1001 + (shape == "late-call")
+    assert await _pending(db_session_factory) is None
+
+
+async def test_a_young_unnamed_request_is_left_to_its_send(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A read while the next send is in flight never consumes that send's request."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    ma = _MA(session)
+    ma.turn("evt_a")  # the previous turn, finished
+    await _request(db_session_factory, turn=None)  # the next send's request, not named yet
+
+    assert await settle_finished_turn(ma.client, db_session_factory, session, markup=MARKUP) is None
+    assert await _pending(db_session_factory) == "unnamed"
+    assert ma.listings == [], "nothing is read for it"
+
+
+async def test_a_settle_never_clears_a_request_written_after_it_read(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    ma = _MA(_session(tenant.id))
-    ma.events[SESSION] = [_call(f"call_{i}", at=NOW + timedelta(seconds=i)) for i in range(count)]
-    record = _chat_recorder(db_session_factory, tenant.id, ma)
+    session = _session(tenant.id)
+    ma = _MA(session)
+    ma.turn("evt_a")
+    await _request(db_session_factory)
+    real = usage_sweep.settle_stamped_session
 
-    for _ in range(3):
-        await settle_session(
-            ma.client, db_session_factory, SESSION, record=record, max_pages=max_pages
-        )
+    async def next_send_meanwhile(*args: Any, **kwargs: Any) -> Any:
+        result = await real(*args, **kwargs)
+        await _request(db_session_factory, "evt_turn_b")
+        return result
 
-    assert len(await _ledger(db_session)) == count
+    monkeypatch.setattr(usage_sweep, "settle_stamped_session", next_send_meanwhile)
+    await settle_finished_turn(ma.client, db_session_factory, session, markup=MARKUP)
+
+    assert await _pending(db_session_factory) == "evt_turn_b"
+
+
+@pytest.mark.parametrize("stage", ["turn-check", "settle"])
+async def test_any_rate_limit_ends_the_drain_pass(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stage: str,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    first = _session(tenant.id, session_id="sesn_first")
+    second = _session(tenant.id)
+    ma = _MA(first, second)
+    ma.turn("evt_1", session_id="sesn_first")
+    ma.turn("evt_2")
+    await _request(db_session_factory, session_id="sesn_first")
+    await _request(db_session_factory)
+    real = ma._list  # pyright: ignore[reportPrivateUsage]
+    limited_type = "user.message" if stage == "turn-check" else "span.model_request_end"
+
+    async def limited(request: httpx.Request, match: Any) -> httpx.Response:
+        if "sesn_first" in request.url.path and limited_type in request.url.params.get_list(
+            "types[]"
+        ):
+            return httpx.Response(
+                429,
+                headers={"retry-after": "60"},
+                json={"type": "error", "error": {"type": "rate_limit_error", "message": "slow"}},
+            )
+        return await real(request, match)
+
+    ma._list = limited  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+    router = MARouter()
+    router.add("GET", r"/v1/sessions/(?P<sid>[^/]+)/events", cast(Any, limited))
+    router.add("GET", r"/v1/sessions/(?P<sid>[^/]+)", cast(Any, ma._retrieve))  # pyright: ignore[reportPrivateUsage]
+    client = build_fake_anthropic(router.dispatch).with_options(max_retries=0)
+
+    with pytest.raises(anthropic.RateLimitError):
+        await sweep_headless_usage(client, db_session_factory, markup=MARKUP)
+
+    assert await _ledger(db_session) == {}, "the pass stopped before the next session"
 
 
 async def test_the_read_budget_covers_the_database_work(

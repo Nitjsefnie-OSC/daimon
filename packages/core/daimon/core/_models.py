@@ -3363,18 +3363,17 @@ class DiscordGatewayLease(Base):
 
 
 class SessionSettleState(Base):
-    """How far billing has settled one MA session, and whether a settle is pending.
+    """Whether a headless send left one MA session to be settled.
 
-    `covered_through` is the newest `span.model_request_end` time a completed
-    settle read (`daimon.core.usage_sweep.settle_session`); the next one lists
-    from a short overlap before it. `settle_turn_event_id`/`settle_requested_at`
-    are set by a headless send (the turn's own `user.message`) and cleared once
-    that turn has been settled.
+    `settle_requested_at` is written before the send and `settle_turn_event_id`
+    (the send's own `user.message`) once it is accepted; both are cleared when
+    that turn has been settled (`daimon.core.usage_sweep`). `covered_through`
+    is read only on the reserved `backlog-cutoff` row, where it records when
+    this settle path was deployed.
 
-    The table keeps its original name; its cursor columns from the former
-    forward/repair catch-up are no longer mapped and are dropped later.
-    A missing row means "never settled". Private to `daimon.core.stores.**`
-    per the import-linter ORM contract.
+    The table keeps its original name; the former catch-up's cursor columns
+    are no longer mapped and are dropped later. Private to
+    `daimon.core.stores.**` per the import-linter ORM contract.
     """
 
     __tablename__ = "usage_reconcile_progress"

@@ -23,12 +23,11 @@ Callers:
   calls made before this path was deployed: debited for an explicit internal
   tenant allow-list, waived for everyone else, a dry run unless applied.
 
-Progress is a per-session watermark (`covered_through`). A settle lists oldest
-first from it and moves it after every page, so one cut short resumes where it
-stopped; one that reads to the end leaves it ten minutes before the newest
-call, so a call Managed Agents lists a little late is still read. No automatic
-settle reads a call made before the backlog cutoff, the time this path was
-deployed; the operator's backlog settle reads only those.
+There is no stored scan progress. A settle reads the session's calls (within
+a page bound) and debits those without a usage row; one cut short simply
+leaves the next settle to read again. No automatic settle reads a call made
+before the backlog cutoff, the time this path was deployed; the operator's
+backlog settle reads only those.
 
 Attribution comes off the metadata `create_session` stamps on every session:
 `daimon_tenant` is the billed tenant, `daimon_account` resolves to the owning
@@ -50,7 +49,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
 
@@ -85,8 +84,10 @@ log = structlog.get_logger(__name__)
 SETTLE_MAX_PAGES = 10
 SETTLE_BUDGET_S = 5.0
 _PAGE_SIZE = 100
-# How far before the watermark the next settle starts listing.
-_OVERLAP = timedelta(minutes=10)
+# The drain settles a whole session: a larger bound than a caller's path.
+DRAIN_MAX_PAGES = 100
+# An unnamed request this young may belong to a send still in flight.
+_SEND_IN_FLIGHT = timedelta(minutes=10)
 # Marked sessions one drain pass settles.
 _DRAIN_BATCH = 50
 
@@ -98,7 +99,7 @@ class SettleResult:
     `unbilled` are the calls with no usage row when their page was read (all
     of them reported, none written, for a read-only settle). `debited` and
     `debit_usd` count only the ledger rows this settle inserted. `complete`
-    means the listing was read to its end (or to the watermark).
+    means the listing was read to its end within the page and time bounds.
     """
 
     scanned: int
@@ -116,55 +117,41 @@ async def settle_session(
     record: UsageRecorder | None,
     max_pages: int | None = SETTLE_MAX_PAGES,
     deadline: float | None = None,
-    full: bool = False,
-    until: datetime | None = None,
+    backlog: bool = False,
 ) -> SettleResult:
-    """Debit the session's model calls that have no ledger row yet, oldest first.
+    """Debit the session's model calls that have no ledger row yet, newest first.
 
     `record` must be the recorder bound to this session (`turn.prepare.
     bind_recorder` or `SessionBilling.recorder`), so the calls are priced at
     the session's frozen model and the deployment markup, exactly as a live
     stream would have. `record=None` reads only: it reports the unbilled calls
-    and writes nothing, not even the watermark.
+    and writes nothing.
 
-    Lists from the watermark (never before the backlog cutoff) and moves the
-    watermark to each page's newest call as soon as the page is billed, so a
-    settle cut short by `max_pages` pages of 100 calls (None: no bound) or by
-    `deadline` (a `time.monotonic()` reading, covering the database work too)
-    is resumed where it stopped. One that reads to the end sets the watermark
-    ten minutes before the newest call, so a call listed late is still read.
-
-    `full` reads from the start of the history and `until` stops before a
-    time, without touching the watermark: the operator's backlog settle, which
-    must bill exactly the calls before the cutoff it reported.
+    Reads the calls made at or after the backlog cutoff, or with `backlog`
+    only those before it (the operator's backlog settle), at most `max_pages`
+    pages of 100 (None: no bound) and no later than `deadline` (a
+    `time.monotonic()` reading, covering the database work too). There is no
+    stored progress: a settle cut short keeps every debit it wrote and reports
+    itself incomplete, and the next settle reads the listing again, which is
+    safe because a call with a usage row is never recorded twice.
     """
     scanned = 0
     unbilled: list[BetaManagedAgentsSpanModelRequestEndEvent] = []
     debited = 0
     debit_usd = Decimal(0)
-    newest: datetime | None = None
     complete = False
-    track = record is not None and not full
     timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
     try:
         async with asyncio.timeout(timeout):
-            since = None
-            if not full:
-                async with sessionmaker() as s:
-                    floors = [
-                        await session_settle_state.covered_through(
-                            s, managed_session_id=session_id
-                        ),
-                        await session_settle_state.backlog_cutoff(s),
-                    ]
-                since = max((f for f in floors if f is not None), default=None)
+            async with sessionmaker() as s:
+                cutoff = await session_settle_state.backlog_cutoff(s)
             page = await anthropic.beta.sessions.events.list(
                 session_id,
-                order="asc",
+                order="desc",
                 limit=_PAGE_SIZE,
                 types=["span.model_request_end"],
-                created_at_gte=since if since is not None else omit,
-                created_at_lt=until if until is not None else omit,
+                created_at_gte=cutoff if cutoff is not None and not backlog else omit,
+                created_at_lt=cutoff if cutoff is not None and backlog else omit,
             )
             pages = 1
             while True:
@@ -183,27 +170,15 @@ async def settle_session(
                     if record is not None and (debit := await record(event=event)) is not None:
                         debited += 1
                         debit_usd += debit
-                if calls:
-                    newest = calls[-1].processed_at
                 if not page.has_next_page():
                     complete = True
                     break
-                if track and newest is not None:
-                    async with sessionmaker() as s, s.begin():
-                        await session_settle_state.set_watermark(
-                            s, managed_session_id=session_id, through=newest
-                        )
                 if max_pages is not None and pages >= max_pages:
                     break
                 page = await page.get_next_page()
                 pages += 1
-            if complete and track and newest is not None:  # read to the end
-                async with sessionmaker() as s, s.begin():
-                    await session_settle_state.set_watermark(
-                        s, managed_session_id=session_id, through=newest - _OVERLAP
-                    )
     except TimeoutError:
-        complete = False  # every debit and page written so far stands
+        complete = False  # every debit written so far stands
     if unbilled or not complete:
         log.info(
             "billing.settled",
@@ -444,12 +419,17 @@ async def settle_finished_turn(
 
     Does nothing unless a settle request is pending and `session` (a status
     read just made) is terminated, or idle with the requested turn listed as
-    ended. The request is cleared only when the settle read to the end, so a
-    settle cut short is retried by the next read or the drain. `budget_s`
-    bounds the whole call, database work included; on expiry the request stays.
+    ended. A request not yet named by its send and younger than ten minutes
+    is left alone: its send may still be in flight. The request is cleared
+    only when the settle read to the end, and only if it is still the very
+    request this call verified (a newer send replaces it), so a settle cut
+    short, or one racing a send, leaves it for the next read or the drain.
+    `budget_s` bounds the whole call, database work included; on expiry the
+    request stays.
 
     Named boundary: an upstream or database error is logged and the request
-    kept; the caller's read is never failed by billing.
+    kept, except a rate limit, which propagates so the drain stops its pass
+    (the MCP read hook swallows it).
     """
     if session.status not in ("idle", "terminated"):
         return None
@@ -461,6 +441,11 @@ async def settle_finished_turn(
                     s, managed_session_id=session.id
                 )
             if request is None:
+                return None
+            if (
+                request.turn_event_id is None
+                and datetime.now(UTC) - request.requested_at < _SEND_IN_FLIGHT
+            ):
                 return None
             if session.status == "idle" and not await turn_ended(anthropic, session.id, request):
                 return None
@@ -475,11 +460,13 @@ async def settle_finished_turn(
             if result is None or result.complete:
                 async with sessionmaker() as s, s.begin():
                     await session_settle_state.clear_settle_request(
-                        s, managed_session_id=session.id, requested_at=request.requested_at
+                        s, managed_session_id=session.id, request=request
                     )
             return result
     except TimeoutError:
         return None  # out of budget; the request stays for the next read or the drain
+    except _anthropic.RateLimitError:
+        raise
     except (_anthropic.APIError, SQLAlchemyError):
         log.exception("billing.settle_failed", managed_session_id=session.id)
         return None
@@ -494,11 +481,13 @@ async def sweep_headless_usage(
     """Settle the headless sends nobody read to the end. Returns the calls debited.
 
     Visits up to 50 sessions with a pending settle request, least recently
-    visited first, and settles each whose turn has ended, with no page or time
-    bound. A request left in place (a session still running, or one whose
-    read failed) goes to the back of the queue, so it never blocks the others;
-    a deleted session's request is cleared. A rate limit ends the pass, for
-    the scheduler to retry after its interval.
+    visited first, and settles each whose turn has ended, reading up to 100
+    pages (10,000 calls) a session; one larger than that is logged
+    (`usage_sweep.session_incomplete`) and keeps its request. A request left
+    in place (a session still running, or one whose read failed) goes to the
+    back of the queue, so it never blocks the others; a deleted session's
+    request is cleared. Any rate limit ends the pass, for the scheduler to
+    retry after its interval.
     """
     async with sessionmaker() as s:
         pending = await session_settle_state.list_settle_requests(s, limit=_DRAIN_BATCH)
@@ -513,7 +502,7 @@ async def sweep_headless_usage(
                 )
                 if request is not None:
                     await session_settle_state.clear_settle_request(
-                        s, managed_session_id=session_id, requested_at=request.requested_at
+                        s, managed_session_id=session_id, request=request
                     )
             continue
         except _anthropic.RateLimitError:
@@ -522,10 +511,17 @@ async def sweep_headless_usage(
             log.exception("usage_sweep.session_failed", managed_session_id=session_id)
         else:
             result = await settle_finished_turn(
-                client, sessionmaker, session, markup=markup, max_pages=None, budget_s=None
+                client,
+                sessionmaker,
+                session,
+                markup=markup,
+                max_pages=DRAIN_MAX_PAGES,
+                budget_s=None,
             )
             if result is not None:
                 debited += result.debited
+                if not result.complete:
+                    log.warning("usage_sweep.session_incomplete", managed_session_id=session_id)
         async with sessionmaker() as s, s.begin():
             await session_settle_state.touch_settle_request(s, managed_session_id=session_id)
     log.info("usage_sweep.completed", pending=len(pending), recorded=debited)
@@ -560,16 +556,15 @@ async def settle_backlog(
     session a turn outcome names, each from the start of its history up to the
     cutoff, so applying writes exactly the calls a dry run reports; calls after
     the cutoff are ordinary billing. A session of an `internal` tenant is
-    debited; any other tenant's backlog is waived: its watermark is raised to
-    the cutoff, so it is marked settled, and its would-be charge is logged
-    (`billing.backlog_waived`) but nothing is debited. A re-run reports waived
+    debited; any other tenant's backlog is waived: no automatic settle reads
+    before the cutoff, so its would-be charge is logged
+    (`billing.backlog_waived`) and nothing is debited. A re-run reports waived
     calls again, still charging nothing. Exempt sessions are skipped. Without
     `apply` nothing is written; the totals say what applying would debit and
     waive, per tenant.
     """
-    async with sessionmaker() as s:
-        cutoff = await session_settle_state.backlog_cutoff(s)
-        if not session_ids:
+    if not session_ids:
+        async with sessionmaker() as s:
             session_ids = await turn_outcomes.session_ids_for_platform(s, "mcp")
     totals: dict[uuid.UUID, BacklogTotal] = {}
     for session_id in session_ids:
@@ -587,19 +582,13 @@ async def settle_backlog(
             session_id,
             record=billing.recorder(sessionmaker, session_id, markup=markup) if debit else None,
             max_pages=None,
-            full=True,
-            until=cutoff,
+            backlog=True,
         )
         backlog = result.unbilled
         if not backlog:
             continue
         cost, would_debit = price(backlog, pricing=billing.pricing, markup=markup)
         action = "debit" if billing.tenant_id in internal else "waive"
-        if apply and action == "waive" and cutoff is not None:
-            async with sessionmaker() as s, s.begin():
-                await session_settle_state.mark_settled_through(
-                    s, managed_session_id=session_id, through=cutoff
-                )
         total = totals.get(billing.tenant_id) or BacklogTotal(
             tenant_id=billing.tenant_id, action=action
         )
