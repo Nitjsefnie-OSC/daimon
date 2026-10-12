@@ -65,13 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compose the signed backend selector, host conformance evidence and explicitly configured Gemini runtime; deployment clients refuse ambient routing and TLS settings without changing default Anthropic behavior.
 
 - Support explicit manual-probe cash hold floors and single settlement of disjoint Anthropic session pairs, preserving incomplete usage holds and exact decimal arithmetic.
+- Update the offline Anthropic unbound-agent edit observation for main #505: both member mutations refuse with independent unchanged revision readback and zero native writes.
 - Deliver neutral provider lifecycle records by their own event identity across reconnects, so media revisions sharing a compatibility display ID reach the optional tap once while native delivery stays unchanged.
 - Add explicit offline Discord, Slack and Teams callbacks that expose actual
   admission and session binding for backend-selection conformance.
 - Preserve whole-column measured spend under low caller decimal precision, including fractional dated rates and persisted-ledger validation.
 - Use the shared schema-aware database preflight for offline Discord ingress and Forbidden conformance fixtures, retaining connection-trap controls and contributor skips.
+- Revalidate NEW15 outcome coverage, observation windows and independently joined attempt identity when decoding captured receipts.
+- Add explicit scoped Gemini operator CLI copy/readback bindings with offline native SDK evidence; retain honest failed table checks and unsupported fixture/cleanup gaps.
+- Keep unconfigured channels and tenants on their existing CLI dispatch when a scoped Gemini operator factory is installed.
 
 - Keep shared database preflight admission separate for each resolved schema fixture when running multiple test packages together; document owned local databases and skipped shared fixtures on plain local `daimon_test`.
+- Compose the signed resource admin operations on shared database preflight, preserving native service behavior and contributor isolation.
 
 - Add an opt-in, rate-limited Discord stop reaction for explicit mentions denied by a confirmed writers=none rule; default denial behavior stays silent.
 
@@ -84,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep Gemini offline outcome evidence on admitted database routes across callback reconfiguration, with shared fixture preflight.
 - Preserve Gemini's finalized rate-limit failure when its final usage fetch is also rate-limited; retain validated unknown usage for reconciliation. Completed and reconnected turns retain fail-closed final-meter fetches.
 - Add an explicit offline Gemini host-termination evidence hook; partial native and committed-outcome coverage remains PENDING.
+- Add an owned offline metered-turn seam with controlled prices and independent channel ledger/budget readback through the real host billing path.
+- Bind literal positive QA tenant credits through the product ledger with replay-safe CLI identities and independent readback; reject mismatched budget readback and preserve typed pending invalid depletion setup.
+- Bind offline Anthropic catalog forks and fixture edits to unchanged CLI/MCP paths with independent native revision readback, retaining actual failures and typed pending host assertions.
+- Add a default-off native attached-skill deletion refusal over scoped catalog history and channel references, with an offline admin binding and read-only Anthropic observation.
 
 - Add an owned offline metered-turn seam with controlled prices and independent channel ledger/budget readback through the real host billing path.
 - Document the clean provider/TLS environment required by isolated SDK tests and the local `AmbientSDKConfigurationError` refusal.
@@ -102,14 +111,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prove OpenAI C04 offline with real SDK delivery, fenced intent/ack crashes and restart recovery that retains unknown input identity without resending.
 - Prove OpenAI interaction preparation offline across skill upload/pinning, MCP and input-file binding, retaining typed unavailable execution and the canonical C11 gaps.
 - Skip offline admin proof fixtures on a contributor's plain local database while retaining strict isolated CI and routed-bind checks.
+- Isolate resource admin fixture SDK clones and TLS/proxy construction with the shared factories; keep model routing coverage in the testing package.
 
 - Use the shared isolated SDK factory in offline admin bindings and move their ORM routing tests into the permitted testing package.
+- Refuse ambient SDK overrides and foreign per-model database routes in offline resource admin proofs.
 
 - Check every QA admin per-model database bind before provisioning or authorization.
 
 - Refuse ambient Anthropic SDK configuration in offline QA admin clients and copies before allocation or I/O; retain explicit fixture credentials and unchanged production clients.
 
 - Permit QA admin bindings on the CI test database only with registered current-process schema isolation; refuse remote destinations, URL overrides and local shared/operator databases before connection.
+- Added offline catalog resource admin callbacks with actual SDK fork/skill proofs and explicit unsupported cleanup boundaries.
 - Bind common QA catalog admin operations through product APIs on disposable lane databases, preserving scoped readback and typed pending resource/platform gaps across all three backends.
 
 - Refresh offline QA Gemini tapes for explicit interaction tools on current integration, retaining strict wire equality and separate expected-failure reporting.
@@ -141,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add opt-in in-process Discord gateway ingress with explicit HTTP/clock dependencies and real admission, queue, title-request and history observations; validate nested admission dependencies at the real callback while ordinary construction remains unchanged.
 - Add explicit offline Discord Forbidden-path conformance observation with real ingress, serialized parent notices, configured backend readback and mutation-sensitive provider-turn write checks that retain default host naming.
 
+- Add an opt-in passive host admission observer and owned offline evidence hook for actual gate decisions, adapter refusal effects and independently counted native sends; incomplete capture remains pending without fabricated provider turns.
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.
 - Add an explicitly imported Discord C01 conformance probe over the existing per-thread mention queue and caller batching, with owner-controlled root barriers and raw platform evidence.
@@ -197,6 +210,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
 
 - Reject unbound authentication on every native OpenAI MCP tool before credential resolution or session POST, including secondary and anonymous-only servers; verify secret-free actual SDK DEBUG logs.
+- Support explicit Gemini inline resource hosts for skill-preserving channel copies and Add-skill edits, retaining concrete inline versions and existing session pins while refusing binary inline sources and unsupported native deletion.
+
 - Retain alternate native agent identities on catalog publication failures, including same-key committed winners and historical pins; compare optional tool fields after native normalization without changing authored intent.
 
 - Add explicit scoped OpenAI host resource edges for skill-preserving channel copies and Add-skill, retaining checked bundles before attachment and publishing immutable native agents under local catalog CAS; preserve Anthropic request bytes.

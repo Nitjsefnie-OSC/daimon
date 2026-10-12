@@ -158,3 +158,31 @@ remote hosts and URL overrides refuse before connection or native requests.
 Resource fixtures refuse provider SDK environment overrides by name rather than erasing them, and construct explicit offline SDK clients. Direct resource callbacks also reject late Anthropic overrides and foreign per-model routes before I/O.
 
 Resource fixtures use shared OpenAI/Gemini factories, with complete owned sync/async/TLS transports and SDK reconstruction guards. Actual fixture-constructor value traps cover SSL_CERT_FILE, SSL_CERT_DIR and HTTPS_PROXY; late OpenAI settings are rejected by copy, with_options and the product SDKTransport constructor before native I/O. Both admin API test modules now live in packages/testing/tests.
+
+## Policy, budget and credit mutation slice (C4)
+
+Only these literal shapes execute for this slice; tokens are parsed in process:
+
+| CLI shape | Receipt operation and actual readback |
+|---|---|
+| `daimon channels rule set discord WORKSPACE CHANNEL --writers none` (restore with `any`) | `channel_rule_set`; real access policy and writers denial decision |
+| `daimon channels budget set discord WORKSPACE CHANNEL USD --window total` | `channel_budget_set`; committed full budget equals the service write result |
+| `daimon channels budget clear discord WORKSPACE CHANNEL` | `channel_budget_clear`; independent lookup must return no budget |
+| `daimon tenants credit discord WORKSPACE USD --note NOTE [--id ID]` | `tenant_credit`; finite positive USD with at most two decimal places, actual ledger row and balance |
+| `daimon tenants turn-cap discord WORKSPACE POSITIVE_INTEGER_OR_DEFAULT` | `tenant_turn-cap`; actual tenant override and effective product cap |
+
+All destinations must belong to the explicitly scoped run. These operations
+make zero native provider requests on every backend. Budget and credit readback
+failures cannot issue an executed receipt. Invalid credit amounts or notes
+remain `ADMIN_CREDIT_SOURCE_NOT_EXECUTABLE` before ledger mutation.
+
+| Frozen scenario | Anthropic | OpenAI | Gemini | Remaining evidence |
+|---|---|---|---|---|
+| NEW13-WRITERS-NONE | PENDING | PENDING | PENDING | Admin set/restore ready; N4 actual host denial/log/visible signal |
+| NEW14-MISSING-THREAD-PERMISSION | PENDING | PENDING | PENDING | `ADMIN_PLATFORM_EDGE_UNBOUND`; N7 actual Forbidden gateway and parent notice |
+| NEW15-CHANNEL-BUDGET | PENDING | PENDING | PENDING | Admin set/clear ready; N4 denial plus C5 actual metered turn and independent debit join |
+| NEW16-TENANT-CREDIT | PENDING | PENDING | PENDING | `ADMIN_CREDIT_SOURCE_NOT_EXECUTABLE` for frozen negative placeholder, then N4 credit refusal/copy |
+
+Six of twelve admin prerequisites are bound; none of the twelve full cells is
+certified by this mutation slice. Host denial and Discord permission hooks are
+separate owner interfaces and cannot manufacture a provider turn identity.

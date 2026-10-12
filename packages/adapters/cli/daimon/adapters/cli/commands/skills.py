@@ -22,6 +22,7 @@ from daimon.adapters.cli.tenant import (
 )
 from daimon.core.agent_pins import pin_refusal
 from daimon.core.authz import Place, Subject
+from daimon.core.channel_skills import NativeSkillDeleteGuard, refuse_native_skill_delete
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -53,6 +54,7 @@ from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
+from mux.errors import ScopeViolation
 from rich.console import Console
 from rich.table import Table
 
@@ -421,7 +423,20 @@ async def delete_skill(
     name: str,
     yes: bool,
     selector: TenantSelector | None = None,
+    native_guard: NativeSkillDeleteGuard | None = None,
 ) -> None:
+    if native_guard is not None:
+        native_guard.require_enabled()
+        async with rt.sessionmaker() as session:
+            override = await resolve_tenant_override(session, selector)
+            tenant_id = await discover_tenant(session, override=override)
+            if str(tenant_id) != native_guard.scope.tenant_id:
+                raise ScopeViolation(
+                    "skill-delete", "CLI destination differs from the authorized native tenant"
+                )
+            tenant_label = await resolve_tenant_display(session, tenant_id)
+            confirm_or_abort(console, f"delete skill {name!r} in {tenant_label}?", yes=yes)
+        await refuse_native_skill_delete(rt.sessionmaker, guard=native_guard, skill=name)
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)

@@ -753,3 +753,117 @@ clock to the fixture's validity window. The Anthropic live-entry tests use a
 fixture-scoped 2026-10-11 clock; admission expiry and stale-price negative cases
 advance that clock or pass an explicit expired timestamp. Monotonic deadlines,
 immutable signed JSON and the runtime expiry checks remain unchanged.
+
+`AdminBindings` executes owned writers rules, budget set/clear, positive tenant
+credits and turn-cap overrides through real product APIs, with independent
+readback. Credits retain the CLI note/request-id identity and replay behavior;
+invalid frozen negative credit setup remains typed pending. Host admission and
+Discord permission-denial evidence are separate hooks. See
+`tests/judge/ADMIN-BINDINGS.md` for literal command shapes and the per-cell gaps.
+
+## Anthropic catalog admin observations (C6)
+
+Explicitly import `daimon.testing.anthropic_admin.AnthropicAdminBindings` and
+assign an instance to `AdminBindings.resource_edge`. Supply a `CliRuntime` sharing
+the binding's isolated SDK client, owned sessionmaker and deployment defaults,
+with Discord, Slack and public MCP integrations disabled. Creation accepts only
+an explicitly supplied `AgentFixture` manifest of files beneath `fixture_root`,
+with exact SHA256 hashes. No shell, environment discovery or backend conversion
+is involved. Other providers and unsupported shapes return typed pending receipts.
+
+The edge runs the existing Anthropic `agents create/get/archive` and
+`channels rule set ... --readers own --copy-from ...` CLI functions. Fork and
+archive receipts come from independent service/SDK reads. `readback_cli()` accepts
+the literal agent-get assertion command; `AgentReadback.cli_text` captures the default CLI table and
+`AgentReadback.cli_json` preserves its native JSON, including custom skill IDs. A copied own skill receives a new native
+ID; no names are substituted to satisfy source assertions. An intervening revision
+change between CLI listing and SDK retrieval refuses the observation.
+
+For D5, call `attempt_member_edit(MemberAgentEdit(member_scope, fixture_name))`
+with a real owned local platform member account and matching principal. It runs
+the actual MCP description update and server attachment with the native identity
+selected by independent readback. Receipts retain full before/after payloads,
+revisions and actual refusal errors. An error does not establish unchanged state.
+After main #505, the unbound-agent probe observes both edits refused with the
+admin handoff. Independent SDK/CLI readback keeps revision 1 and the payload
+unchanged. This observation changes no product permissions and does not assert
+a completed model turn or a whole-cell pass.
+
+Whole D14/D5 cells still require the original runner assertions and actual host
+turn/log/text evidence where authored. Omitted callbacks stay pending. A1 native
+create conversion remains unsupported by this Anthropic-only edge.
+
+The composed resource admin proofs use the shared database preflight before
+engine/session setup. Plain contributor databases skip before allocation;
+owned lane and registered isolated-CI schemas retain the real service/SDK
+readback paths. This composition adds no local ownership policy or fixture
+shortcut and leaves the signed resource operations unchanged.
+
+## Metered NEW15 admission join
+
+`daimon.testing.new15_bindings.New15Bindings` joins the original frozen channel
+budget scenario to an owned offline host. Supply `AdminBindings`, its exact
+`TurnDeps`, the actual member `Scope`, channel/thread/user identity, an explicit
+`ControlledTurnPricing`, a first-turn `DiscordSurfaceHarness` factory, and the
+second attempt's real adapter invocation, passive observer, platform effects
+and cumulative native-work counter. Its `run(source, evidence_id=...)` checks the
+pinned original source bytes and owned collaborators before mutation.
+
+The join calls real `admit`, public `bind_session`, and
+`ChannelAccounting.run_turn`; callers never construct an admission or prepared
+turn. Native runtimes, SDK clients and HTTP fixtures are explicitly supplied.
+Use the shared `isolated_sdk` builders and owned `MockTransport` boundaries.
+The original literal USD0.01 total budget is set before the first turn. The same
+real setter is repeated after the actual debit, before the second admission;
+no zero budget, direct ledger insertion or synthetic exhaustion is used.
+
+The first Discord lifecycle captures actual serialized posts. Its root metadata
+is joined only to a single completed record in the actual PostgreSQL native
+journal; absent or ambiguous terminals stay pending. The budget denial uses the
+unchanged real adapter refusal handler and `admission_edge`, including the
+source's twenty-second observation window. Its receipt has no native turn or
+session identity. Separate read-only accounting snapshots query the genuine
+channel debit and exceeded budget, then confirm budget cleanup without removing
+the debit. The `New15Run.outcome` property recalculates the pinned authored
+checks; a copied PASS or matching caller-supplied hash pair is never consulted.
+Foreign capture identities, mismatched roots, missing usage/coverage, extra
+native sends and silence cannot earn a pass.
+
+The included actual-SDK/Postgres proofs exercise Anthropic, OpenAI and Gemini.
+Their explicitly **mock** tariff is USD100 per million input/output tokens,
+markup one and zero offline native infrastructure; 100 input plus 50 output
+produces USD0.015 of test ledger debit. This is neither live price evidence nor
+provider spend. Gemini's driver record store is same-process only. Catalog-wide
+assertions, real Discord gateway timing and durable/restart certification remain
+separate evidence; the scoped authored outcome does not certify those domains.
+
+New DB proofs request the shared `db_preflight` before session setup. For a stale
+local editable installation, set `PYTEST_PLUGINS=daimon.testing.pytest_plugin`
+until its pytest entry point is refreshed; the environment setting also reaches
+the immutable golden runner's child processes. No production SDK builder or
+pytest runner source needs changing for this local installation detail.
+
+NEW15 outcomes revalidate current evidence at decode time: complete adapter and
+native-send coverage, the authored 20-second observation, finite effect timestamps
+inside the capture window, the 15-second notice deadline, and matching receipt /
+decision identity joined to the first Discord thread and persisted usage caller.
+Stored pending gaps cannot certify an incomplete or altered capture. Late answers
+are still checked across the full observation window. Contradictory identities or
+out-of-window effects refuse; missing coverage/duration remains typed pending.
+
+Gemini's C6 operator profile is explicit: `opt_in_gemini_operator_profile` installs
+`GeminiCliResourceEdge` over an enabled native A1 catalog adapter and the same
+owned `AdminBindings` sessionmaker. Its immutable CLI grants bind tenant,
+account, channel, current config digest and provider workspace; native copy/get
+validate the returned host before catalog/provider access. Missing opt-in keeps
+the default paths unchanged. An installed Gemini factory leaves unconfigured
+neighboring channels and tenants on the existing dispatch; a configured Gemini
+channel still requires its exact current grant. Mixed-runtime controls compare
+the existing Anthropic agent-get SDK request bytes and output with factory-off.
+The edge runs the literal channel-copy and agent-get
+CLI functions and returns their actual table output. Independent native catalog
+readback cannot replace the frozen CLI assertion: D14 currently fails its two
+skill/model checks because the table omits those fields, despite retained copied
+skill bytes/model. Native archive and D5's authored Claude YAML conversion remain
+explicitly pending; no member edit or native turn is manufactured. All proofs
+are offline actual SDK HTTP requests with owned Postgres readback.

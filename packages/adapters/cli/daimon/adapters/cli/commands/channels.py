@@ -495,6 +495,31 @@ async def _copy_resource_host(
     channel keeps the existing path; a channel on another non-Anthropic backend
     cannot be copied yet.
     """
+    if rt.gemini_resource_hosts is not None:
+        from daimon.adapters.cli.runtime import request_gemini_resource_host
+
+        async with rt.sessionmaker() as session:
+            selected = await current_backend(session, channel_ref(tenant_id, platform, channel))
+        if selected is not None and selected.profile == "gemini.inline_reuse":
+            candidates = [
+                g
+                for g in rt.gemini_resource_grants
+                if g.tenant_id == tenant_id and g.platform == platform and g.channel_id == channel
+            ]
+            if not candidates:
+                raise ChannelRuleRefused(
+                    "invalid", message="No exact Gemini resource grant is configured."
+                )
+            if len(candidates) != 1:
+                raise ChannelRuleRefused("invalid", message="Gemini resource grant is ambiguous.")
+            grant = candidates[0]
+            if selected.digest != grant.config_digest:
+                raise ChannelRuleRefused("invalid", message="Gemini resource grant is stale.")
+            try:
+                native = request_gemini_resource_host(rt, grant)
+            except ResourceHostMismatch as exc:
+                raise ChannelRuleRefused("invalid", message=str(exc)) from exc
+            return native, grant.account_id
     factory = rt.resource_hosts
     if factory is None:
         return None

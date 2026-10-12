@@ -1242,7 +1242,7 @@ This store requires additive migration `0089_neutral_catalog`. It supplies stora
 
 ### Scoped host resource helpers
 
-For an explicitly provisioned OpenAI catalog, `NeutralResourceHost` constructs
+For an explicitly provisioned OpenAI or Gemini catalog, `NeutralResourceHost` constructs
 the store from the authorized tenant/account/project routing tuple and calls
 only the injected resource ports. `add_host_agent_skill` requires the caller's
 fresh policy gate. It retains each native uploaded version and checked bundle
@@ -1263,7 +1263,12 @@ foreign-agent skills. Passing this host to `set_channel_rule` exercises the same
 locked channel write and repeat-request behavior. Missing catalog ownership or
 bytes refuses before mutation. An owned unversioned pin requires an injected
 scoped native-default resolver; no latest-version or lexical fallback is used.
-Gemini resource hosts remain pending G2. Runtime provisioning, remote MCP
+Gemini inline resource edits retain concrete UTF-8 versions and their digests.
+Forks clone owned skill ids and add `code_execution`; SDK interactions mount the
+retained files while existing sessions preserve their old definition and pins.
+Binary inline sources and native agent deletion remain typed unsupported, and
+failed cleanup keeps the catalog identity rather than publishing a false tombstone.
+Runtime provisioning, remote MCP
 authentication and live turns are separate gates. Unconfigured Anthropic paths
 retain their existing requests, storage and policy.
 
@@ -1893,3 +1898,53 @@ factories. Applied settings are configuration receipts, not source outcome
 proof. Missing administration, reaction, scheduler or measured footer bindings
 stay PENDING. Opt-in successes are reported as `PASS under opt-in profile` and
 never increase default-profile PASS counts.
+
+### Offline Anthropic C6 admin/readback edge
+
+`daimon.testing.anthropic_admin` binds the frozen D14 fork and D5 fixture
+operations to unchanged Anthropic CLI functions on an owned test tenant. Its
+member probe executes the real MCP update/attach paths with the independently
+selected native agent identity and a real local user account. Independent CLI
+JSON and SDK revision reads preserve provider skill IDs and refuse interleaved
+revision changes. After main #505 (`bfaffd2a`), both attempted member edits of an
+unbound agent refuse with an admin handoff. Independent actual-SDK reads prove
+the payload and revision are unchanged, and the captured trace has zero native
+mutation POSTs. This is a bound refusal observation, not a whole-scenario PASS.
+Host message/log assertions remain separate runner obligations.
+Explicit fixture manifests and isolated SDK/database guards are required;
+unsupported providers/shapes remain typed pending. No product behavior or native
+create conversion changes.
+
+### Native attached-skill deletion refusal
+
+`NativeSkillDeleteGuard` is an explicit operator capability. It defaults to
+`operator_enabled=False`; its tenant/account Scope and provider workspace must
+be supplied by the already-authorized host. `delete_skill(..., native_guard=...)`
+selects the native CLI function branch. Existing command wiring and the
+Anthropic deletion path remain unchanged. An absent guard preserves that path;
+a supplied disabled guard refuses before database or SDK access.
+
+When enabled for OpenAI or Gemini, `refuse_native_skill_delete` resolves the
+skill from the real scoped catalog and checks retained agent revisions plus
+the tenant's channel-skill rows. Retained revisions matter because an existing
+session can still use an earlier native agent. A stale expected revision,
+missing history or a changed catalog/channel observation refuses without a
+mutation. An attached skill raises `NativeSkillStillAttached` with the actual
+reference identities and the CLI renders it as exit 1.
+
+This capability authorizes inspection and refusal only. It issues no provider
+DELETE. A stable unattached observation cannot fence a later attachment, so
+unattached deletion remains `unattached_delete_unbound` until all attachment
+writers participate in a catalog deletion fence. OpenAI's driver DELETE is not
+invoked; Gemini's local skill-record deletion is not represented as a provider
+resource deletion. Channel rows have no provider/workspace column: matching
+tenant channel references are retained conservatively.
+
+The offline `daimon.testing.skill_delete_bindings.SkillDeleteAdminBindings`
+attaches to `AdminBindings.resource_edge`, optionally delegating other resource
+operations. It accepts the literal `skills --guild <owned> delete <name> --yes`
+shape and reports the native attached refusal with real service readback.
+Anthropic returns only `ADMIN_ANTHROPIC_SKILL_DELETE_OBSERVATION_ONLY`, after
+actual SDK reads and scoped channel observation; it never changes that
+backend's deletion behavior. A bound refusal predicate is not a full NEW19
+scenario pass: setup, host turn and teardown evidence remain separate.

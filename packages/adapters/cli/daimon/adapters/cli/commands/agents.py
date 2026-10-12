@@ -212,6 +212,34 @@ async def _hosted_agent(
     The readback retrieves the provider's agent and refuses one that differs
     from the catalog row.
     """
+    if rt.gemini_resource_hosts is not None:
+        from daimon.adapters.cli.runtime import ResourceHostMismatch, request_gemini_resource_host
+        from daimon.core.channel_backend import channel_ref, current_backend
+
+        selected_grants = [g for g in rt.gemini_resource_grants if g.tenant_id == tenant_id]
+        for grant in selected_grants:
+            async with rt.sessionmaker() as session:
+                selected = await current_backend(
+                    session, channel_ref(tenant_id, grant.platform, grant.channel_id)
+                )
+            if selected is None or selected.profile != "gemini.inline_reuse":
+                continue
+            if selected.digest != grant.config_digest:
+                raise ResourceHostMismatch("Gemini resource grant is stale")
+            host = request_gemini_resource_host(rt, grant)
+            view = await host.find(name)
+            if view is None:
+                continue
+            fresh = await host.read(view.revision.catalog_id)
+            spec = fresh.agent.spec
+            return _HostedAgentRow(
+                name=name,
+                id=fresh.agent.ref.id,
+                description=spec.description,
+                created_at=fresh.agent.created_at,
+                model=spec.model.id,
+                skills=tuple(skill.id for skill in spec.skills or ()),
+            )
     factory = rt.resource_hosts
     if factory is None:
         return None
