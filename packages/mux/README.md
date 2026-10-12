@@ -899,3 +899,11 @@ native cancel/EOF occupancy, ambiguous-delivery recovery, all fenced store
 boundaries and monotonic terminal settlement. Historical certificates and
 standard pending declarations are unchanged; see
 [money and scenario boundaries](mux/drivers/gemini/LIVE-ROUND.md).
+
+
+Explicit native credential offers share one profile-bound host adapter and MCP grant
+check. The returned resource host's complete scope and native catalog authority are
+verified before catalog access. OpenAI's existing agent port exposes its provider,
+profile, account scope and enabled native catalog state for this same binder; no SDK
+handle crosses the port. Provider constructors preserve their existing control prefixes
+and remain disabled without an operator delivery grant.

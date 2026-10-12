@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2571,
+  "files_scanned": 2574,
   "parse_errors": [],
   "calls": [
     {
@@ -11131,7 +11131,7 @@
     },
     {
       "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/_openai_resources.py",
-      "line": 26,
+      "line": 35,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
