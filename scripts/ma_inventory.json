@@ -19309,7 +19309,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_fixtures.py",
-      "line": 16,
+      "line": 17,
       "module": "anthropic",
       "names": [
         "APIConnectionError"
@@ -19318,7 +19318,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_fixtures.py",
-      "line": 17,
+      "line": 18,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"

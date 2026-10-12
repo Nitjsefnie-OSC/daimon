@@ -36,3 +36,7 @@ C7 currently excludes alternate native runtimes. D1's replay text
 file survived the follow-up, or that the follow-up read the same workspace.
 No `TurnEvidence`, native root, complete catalog PASS or generation proof is
 created here. Frozen catalog sources, native fixtures and goldens are unchanged.
+
+Offline download/mount controls still run when optional `qpdf` is absent.
+The PDF parse verdict then remains `PENDING` (`PDF_PARSER_UNAVAILABLE`);
+successful byte transport supplies neither PDF validation nor cell credit.

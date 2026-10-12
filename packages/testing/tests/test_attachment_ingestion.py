@@ -6,6 +6,7 @@ These controls do not award catalog completion or native workspace execution.
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -225,7 +226,10 @@ def native() -> tuple[ScriptedTransport, FakeSessionsState]:
 @pytest.mark.parametrize("name", SCENARIOS)
 async def test_real_frozen_pdf_through_discord_download_and_sdk_mount(name: str) -> None:
     attachment = await downloaded(name)
-    assert check_pdf(attachment.downloaded.content).status == "PASS"
+    pdf = check_pdf(attachment.downloaded.content)
+    assert (pdf.status, pdf.code) == (
+        ("PASS", "PARSED_PDF") if shutil.which("qpdf") else ("PENDING", "PDF_PARSER_UNAVAILABLE")
+    )
     transport, state = native()
     observed = await mount(transport, state, attachment)
     assert observed.workspace_bytes.content == attachment.source.read(CATALOG)
@@ -235,6 +239,15 @@ async def test_real_frozen_pdf_through_discord_download_and_sdk_mount(name: str)
     upload = next(r for r in transport.requests if r.path == "/v1/files" and r.method == "POST")
     assert attachment.downloaded.content in upload.body
     assert not transport.violations
+
+
+@pytest.mark.parametrize("name", SCENARIOS)
+async def test_missing_pdf_parser_preserves_pending_and_real_mount_controls(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    await test_real_frozen_pdf_through_discord_download_and_sdk_mount(name)
 
 
 @pytest.mark.parametrize("mutation", ["foreign_bytes", "foreign_url", "source_changed_during_read"])

@@ -378,3 +378,7 @@ index and Anthropic input-manifest hashes derived from those actual bytes.
 Frozen scenario content, assertions, native requests/results, literal spelling,
 and Anthropic replay bytes stay unchanged. A source pin refresh provides no
 new scenario outcome credit; missing product hooks and artifacts remain PENDING.
+
+Anthropic regeneration verifies the checked-out codec against its reviewed SHA256.
+The recorded codec commit remains provenance; the generator requires no historical
+local Git object. Changed codec bytes refuse before any replay output is written.

@@ -9,7 +9,7 @@
   },
   "native_index": {
     "path": "packages/testing/fixtures/target53/anthropic/index.json",
-    "sha256": "a2af288000f44f514e237d5db416af5b1de900a23046618a5b35e8d72d3ed879"
+    "sha256": "d8879e8f488da82e6f5ae7a60fa52bc4e22778039c56bbfcdd3fb81101d6428f"
   },
   "cells": [
     {

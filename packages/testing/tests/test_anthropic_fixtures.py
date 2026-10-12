@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -445,10 +446,28 @@ async def test_unexpected_sdk_request_cannot_fall_back_to_network_or_hide_violat
         assert len(replay.wire.requests) == 1
 
 
+def test_regeneration_refuses_changed_reviewed_codec_before_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reviewed = tmp_path / generator.CODEC
+    reviewed.parent.mkdir(parents=True)
+    reviewed.write_bytes((ROOT / generator.CODEC).read_bytes() + b"\n# changed codec\n")
+    monkeypatch.setattr(generator, "ROOT", tmp_path)
+    output = tmp_path / "replay"
+    with pytest.raises(ValueError, match="source pin changed"):
+        generate(DATA, output)
+    assert not output.exists()
+
+
 def test_replay_regenerates_byte_identically_without_consulting_assertions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    def unavailable_git(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("regeneration depended on historical Git objects")
+
+    monkeypatch.setattr(subprocess, "check_output", unavailable_git)
     first, second = tmp_path / "first", tmp_path / "second"
     generate(DATA, first)
     # Poison every outcome predicate. The recipe inputs remain identical.

@@ -11,7 +11,7 @@
   "codec_commit": "ac1b72f0adb1aba7b5ed99b879bcab51f359e777",
   "authoring": {
     "path": "scripts/qa_anthropic_fixtures.py",
-    "sha256": "1beaa538802a8d00dd7263ef87ddaa1904452887bc04f9ce55c7927fd0a800a5"
+    "sha256": "0c0ba1dbdd5918a67175ba9798506e66a60a7d983ef8605555afe70d4f5009d7"
   },
   "input_index": {
     "path": "index.json",

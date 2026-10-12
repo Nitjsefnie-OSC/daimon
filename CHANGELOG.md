@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Pin historical Anthropic financial fixtures to fixed offline test clocks while preserving expired-envelope and stale-price refusals.
+- Make offline Anthropic replay regeneration independent of local Git history, and retain pending PDF validation when optional parser tooling is unavailable.
+
 - Add explicitly injected Gemini conformance recovery and pinned inline-skill preparation hooks, with isolated actual-SDK offline crash/deployment proofs and honest shared-fixture PENDING boundaries.
 
 - Restack the signed offline QA replay, artifact, preparation and credential bindings with current ingress and separate product-profile reporting; frozen catalog assertions and goldens stay unchanged.

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import runpy
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -32,6 +31,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "packages/testing/fixtures/target53"
 CODEC_COMMIT = "ac1b72f0adb1aba7b5ed99b879bcab51f359e777"
 CODEC = "packages/mux/mux/drivers/anthropic/transport.py"
+# The commit identifies reviewed provenance; regeneration verifies checkout bytes.
+CODEC_SHA256 = "34a56b293e3cfbe641125c37e142eebda5df1ab1859ba94da609c4e0afcdd457"
 STAMP = "2026-10-10T00:00:00Z"
 _OBJECT = TypeAdapter[Object](Object)
 # Same authored artifact commands/content as QA-PROVIDER-ARTIFACTS 64b971b.
@@ -182,7 +183,8 @@ def artifact_turn(source: ScenarioFixture, invocation: Object, index: int) -> Na
 
 def generate(data: Path, output: Path) -> AnthropicIndex:
     pack = load_provider_fixtures(data / "index.json", catalog_root=data / "catalog")
-    codec = subprocess.check_output(["git", "show", f"{CODEC_COMMIT}:{CODEC}"], cwd=ROOT)
+    codec = SourcePin(path=CODEC, sha256=CODEC_SHA256)
+    codec.verify(ROOT)
     entries: list[AnthropicEntry] = []
     output.mkdir(parents=True, exist_ok=True)
     for source in pack.scenarios:
@@ -241,7 +243,7 @@ def generate(data: Path, output: Path) -> AnthropicIndex:
             )
         )
     manifest = AnthropicIndex(
-        codec=pin(CODEC, codec),
+        codec=codec,
         codec_commit=CODEC_COMMIT,
         authoring=pin("scripts/qa_anthropic_fixtures.py", Path(__file__).read_bytes()),
         input_index=pin("index.json", (data / "index.json").read_bytes()),
