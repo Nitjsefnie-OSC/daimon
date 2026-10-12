@@ -57,10 +57,12 @@ from daimon.core.stores.platform_names import (
     upsert_channel_names,
     upsert_user_names,
 )
+from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_channel_budget, make_usage_event
 from pydantic import SecretStr
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -253,6 +255,40 @@ async def test_a_member_redeems_a_channel_code_into_the_channel_they_typed_in(
         balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
     assert budget is not None and budget.limit_usd == Decimal("15"), "the limit rose by $10"
     assert balance >= Decimal("10"), "the credit is in the ledger"
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=tenant_id)
+    assert [(e.outcome, e.reason, e.target_channel_id) for e in events] == [
+        ("allowed", "completed", CHANNEL_ID),
+        ("denied", "promo:already_redeemed_in_channel", CHANNEL_ID),
+        ("denied", "promo:needs_channel", None),
+    ], "every attempt is audited with the channel it was made in"
+    assert {e.platform_user_id for e in events} == {member}
+
+
+async def test_a_redeem_that_fails_or_is_empty_is_audited(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty code and an operational failure each leave an audit row, like a refusal."""
+
+    async def lost(*_args: object, **_kwargs: object) -> None:
+        raise OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+
+    async with _running(db_session_factory, teams_api_fake) as service:
+        await _command(service, teams_api_fake, AAD_OBJECT_ID)
+        empty = await post_activity(service, _click("redeem", code=" "))
+        monkeypatch.setattr(billing_panel, "redeem_promo_code", lost)
+        failed = await post_activity(service, _click("redeem", code="SPRING-2026"))
+
+    assert empty["value"] == ENTER_CODE and isinstance(failed["value"], str)
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=tenant_id)
+    assert [(e.outcome, e.reason) for e in events] == [
+        ("denied", "empty_code"),
+        ("error", "failed"),
+    ]
 
 
 def _budget_status(channel_id: str, spent: str) -> ChannelBudgetStatus:

@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
-# Refused attempts a tenant may make per window before redemption pauses.
+# Refused attempts one person may make per window before their redemption pauses.
 # Generated codes carry 100 bits, so this is defence in depth for short
 # operator-chosen codes rather than the only thing standing in the way.
 REDEEM_FAILURE_LIMIT = 5
@@ -118,15 +118,17 @@ async def redeem_promo_code(
     admin, who alone may redeem a server-wide code. A channel code lands in
     ``channel`` for anyone, admin or not, and is refused without one.
 
-    The tenant's attempts are serialized first, so concurrent guesses cannot
-    all pass the throttle on the same count. The code row is then locked, so
+    The redeemer's attempts are serialized first, so concurrent guesses cannot
+    all pass the throttle on the same count. Refusals are counted per person
+    (``account_id``) within the tenant: one member's refusals never pause
+    another member's, or an admin's, redemptions. The code row is then locked, so
     the per-code limit and the one-per-tenant rule are applied serially too.
     """
     since = now - REDEEM_FAILURE_WINDOW
     async with session_factory() as session, session.begin():
-        await promo_store.lock_tenant_redemptions(session, tenant_id=tenant_id)
+        await promo_store.lock_redeemer(session, tenant_id=tenant_id, account_id=account_id)
         failures = await promo_store.count_redeem_failures(
-            session, tenant_id=tenant_id, since=since
+            session, tenant_id=tenant_id, account_id=account_id, since=since
         )
         if failures >= REDEEM_FAILURE_LIMIT:
             log.warning("promo_code.redeem_throttled", tenant_id=str(tenant_id))
@@ -142,7 +144,11 @@ async def redeem_promo_code(
         )
         if isinstance(result, PromoRedeemRefused):
             await promo_store.record_redeem_failure(
-                session, tenant_id=tenant_id, now=now, prune_before=since
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                now=now,
+                prune_before=since,
             )
             log.info("promo_code.redeem_refused", tenant_id=str(tenant_id), reason=result.reason)
         else:
@@ -241,14 +247,13 @@ async def _redeem_into_channel(
     refusal = channel_cap_refusal(row, channel_redeemed_usd=row.amount_usd * taken)
     if refusal is not None:
         return PromoRedeemRefused(reason=refusal)
-    if not await promo_store.insert_redemption(
+    if not await promo_store.insert_channel_redemption(
         session,
         promo_code_id=row.id,
         tenant_id=tenant_id,
+        channel_id=channel_id,
         account_id=account_id,
         now=now,
-        granted=True,
-        channel_id=channel_id,
     ):
         return PromoRedeemRefused(reason="already_redeemed_in_channel")
     await tenant_ledger.insert_entry(

@@ -118,9 +118,8 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
                 else PromoChannel(platform="discord", channel_id=channel_id),
                 is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
             )
-            await interaction.followup.send(redeem_result_text(result), ephemeral=True)
-        except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:
-            # Deferred already, so the admin gets an answer whatever failed.
+        except (DaimonError, SQLAlchemyError) as exc:
+            # Deferred already, so the person gets an answer whatever failed.
             request_id = generate_request_id()
             _log.error(
                 "billing_redeem.failed",
@@ -129,19 +128,31 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
                 exc_info=exc,
             )
             capture_exception_with_scope(exc)
+            await audit(outcome="error", reason="failed")
             await interaction.followup.send(
                 render_error(exc, request_id=request_id), ephemeral=True
             )
-            await audit(outcome="error", reason="failed")
             return
-        if isinstance(result, PromoRedeemRefused):
-            await audit(outcome="denied", reason=f"promo:{result.reason}")
+        # The redemption has committed: audit what it did before any reply,
+        # so a failed reply is never recorded as a failed redemption.
+        refused = isinstance(result, PromoRedeemRefused)
+        await audit(
+            outcome="denied" if refused else "allowed",
+            reason=f"promo:{result.reason}"
+            if isinstance(result, PromoRedeemRefused)
+            else "completed",
+        )
+        try:
+            await interaction.followup.send(redeem_result_text(result), ephemeral=True)
+        except discord.HTTPException as exc:
+            _log.warning("billing_redeem.reply_failed", guild_id=interaction.guild_id, exc_info=exc)
+            capture_exception_with_scope(exc)
+        if refused:
             return
-        await audit(outcome="allowed", reason="completed")
         try:
             await self.rerender(interaction)
         except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:
-            # The credit landed and the reply said so; only the panel is stale.
+            # The credit landed; only the panel is stale.
             _log.warning(
                 "billing_redeem.rerender_failed", guild_id=interaction.guild_id, exc_info=exc
             )

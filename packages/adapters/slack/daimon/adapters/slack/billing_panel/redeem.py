@@ -5,7 +5,8 @@
 error; anything else acks with a "Redeeming…" update), then the background
 side reads admin rights live and redeems through ``daimon.core.promo_credit``:
 a server-wide code needs a workspace admin, a channel code credits the channel
-/billing ran in for anyone (never a DM). It either shows the result and
+/billing ran in for anyone (never a DM or group DM, read from Slack's own
+description of the conversation). It either shows the result and
 refreshes the panel underneath, or reopens the form with the refusal so the
 person can retry.
 """
@@ -18,6 +19,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import aiohttp
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.billing_panel.names import name_shown_spenders
@@ -175,9 +177,26 @@ def evaluate_redeem_submission(payload: dict[str, Any]) -> RedeemDecision:
     )
 
 
-def promo_channel(channel_id: str) -> PromoChannel | None:
-    """The channel a member's channel code credits; None for a DM or no channel."""
+async def promo_channel(client: AsyncWebClient, channel_id: str) -> PromoChannel | None:
+    """The channel a channel code credits, or None for a DM, a group DM or no channel.
+
+    The conversation's type comes from Slack (``conversations.info``), not its
+    id: a group DM can carry a ``G`` id like a private channel. Anything Slack
+    won't describe as a public or private channel is refused (fail closed),
+    which never affects a server-wide code.
+    """
     if not channel_id or channel_id.startswith("D"):
+        return None
+    try:
+        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
+    except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+        # Unknown is not a channel; a server-wide code never needs one.
+        log.info("slack.billing_redeem.channel_unreadable", channel_id=channel_id, exc_info=exc)
+        return None
+    channel = cast("dict[str, Any]", info.get("channel") or {})
+    if channel.get("is_im") or channel.get("is_mpim"):
+        return None
+    if not (channel.get("is_channel") or channel.get("is_group")):
         return None
     return PromoChannel(platform="slack", channel_id=channel_id)
 
@@ -277,7 +296,7 @@ async def run_redeem_submission(
             account_id=principal.account_id,
             code=decision.code,
             now=now,
-            channel=promo_channel(decision.channel_id),
+            channel=await promo_channel(client, decision.channel_id),
             is_admin=is_admin,
         )
         if isinstance(result, PromoRedeemRefused):

@@ -520,7 +520,19 @@ at most once.
   with no budget has no limit to raise: the credit adds to the tenant's
   balance, which that channel already spends from. Budgets only count
   debits, so the credit entry never lowers a channel's spend. A channel code
-  cannot be redeemed in a DM or a Teams 1:1 chat, or with the MCP tool.
+  cannot be redeemed in a DM, a Slack group DM or a Teams 1:1 chat, or with
+  the MCP tool. On Slack the conversation's type comes from
+  `conversations.info`, not its id (a group DM can have a `G` id like a
+  private channel), and a conversation Slack won't describe as a channel is
+  refused for a channel code.
+- **Rolling out channel codes.** Migration `0088_channel_promo_codes` only
+  adds: a nullable `promo_codes.channel_cap_usd`, the
+  `promo_channel_redemptions` table and a nullable
+  `promo_redeem_failures.account_id`, so workers of the previous release keep
+  redeeming server-wide codes during the rollout and after an
+  application-only rollback. Those workers don't know channel codes and would
+  credit one server-wide, so create channel codes only once every worker
+  runs this release.
 - **Timed** codes grant their amount only between `--starts` and `--ends`.
   Redemption stays open until `--ends` unless `--redeem-until` is earlier. A
   code redeemed before its start is granted by the scheduler when the window
@@ -559,8 +571,9 @@ server-wide code), `needs_channel` (a channel code outside a channel),
 `already_redeemed_in_channel` and `channel_cap_reached`, each shown as one
 plain sentence. Every attempt, allowed or refused, writes a
 `panel:promo_redeem` security audit row with the channel it was made in.
-Five refusals in 15 minutes pause a tenant's attempts, members' and admins'
-alike, which are serialized per tenant so parallel guesses cannot slip past. Revoking stops new redemptions only: redeemed credit,
+Five refusals in 15 minutes pause that person's attempts, and only theirs:
+another member's, or an admin's, are unaffected. One person's attempts are
+serialized so parallel guesses cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
 
 An integration can issue codes over MCP with an operator token holding
@@ -583,8 +596,9 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
 | `promo_codes` | deployment-wide codes, by hash, with their amount, windows, redemption limit and, for a channel code, `channel_cap_usd`. |
-| `promo_redemptions` | one row per code and tenant for a server-wide code, or per code, channel and person for a channel code (`channel_id`), with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
-| `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
+| `promo_redemptions` | one row per server-wide code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
+| `promo_channel_redemptions` | one row per channel code, channel and person, for the per-person rule and the channel cap. |
+| `promo_redeem_failures` | refused redemption attempts per person (`account_id`), for the throttle. |
 | `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
 | `platform_user_names`, `platform_channel_names` | the last name each platform sent for a person (display name and handle) or a channel, so `/billing` can name them when the platform does not answer; see [What you can see](#what-you-can-see). |
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -12,10 +13,10 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from daimon.adapters.slack.billing_panel import redeem
 from daimon.adapters.slack.billing_panel.redeem import (
     evaluate_redeem_submission,
     handle_redeem_open,
+    promo_channel,
     redeem_result_text,
     run_redeem_submission,
 )
@@ -26,6 +27,7 @@ from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRede
 from daimon.core.stores import channel_budgets as budget_store
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_channel_budget, make_tenant
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -271,23 +273,46 @@ async def test_submission_keeps_the_success_reply_when_the_panel_refresh_fails(
     )
 
 
-async def test_a_member_redeems_a_channel_code_into_their_channel_only(
+def _conversations(fake: Any, **kinds: dict[str, bool]) -> None:
+    """Answer conversations.info for each channel id with its Slack type flags."""
+    for channel_id, flags in kinds.items():
+        fake.mock.get(
+            re.compile(rf"https://slack\.com/api/conversations\.info\?.*channel={channel_id}.*"),
+            payload={"ok": True, "channel": {"id": channel_id, **flags}},
+            repeat=True,
+        )
+
+
+async def test_a_member_redeems_a_channel_code_into_a_real_channel_only(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """A member's channel code raises their channel's budget; a server code and a DM are refused."""
+    """Public and private channels take a member's channel code; a DM and a group DM never do.
+
+    The conversation type is Slack's own (conversations.info): the group DM
+    here uses Slack's documented MPIM id, a ``G`` id like a private channel's.
+    A member's server-wide code is refused; an admin's still lands server-wide
+    from a group DM. Every attempt is audited with the actor and the channel.
+    """
     tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
-    await make_channel_budget(db_session, tenant=tenant, platform="slack", channel_id="C1")
-    await make_channel_budget(db_session, tenant=tenant, platform="slack", channel_id="C2")
+    for channel_id in ("C1", "G0PRIVATE"):
+        await make_channel_budget(
+            db_session, tenant=tenant, platform="slack", channel_id=channel_id
+        )
     for code, cap in (("TEAM-ROOM-2026", Decimal("20")), ("WELCOME-2026", None)):
         terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False, channel_cap_usd=cap)
         await promo_store.insert_promo_code(
             db_session, code_hash=hash_promo_code(normalize_promo_code(code)), terms=terms
         )
+    _conversations(
+        fake_slack_web_client,
+        C1={"is_channel": True},
+        G0PRIVATE={"is_group": True, "is_private": True},
+        G024BE91L={"is_group": True, "is_mpim": True},
+    )
     runtime = MagicMock()
     runtime.sessionmaker = db_session_factory
-    audit = AsyncMock()
 
     def submission(code: str, channel_id: str) -> Any:
         payload = _submission(code)
@@ -296,38 +321,61 @@ async def test_a_member_redeems_a_channel_code_into_their_channel_only(
         )
         return evaluate_redeem_submission(payload)
 
-    with (
-        _slack(fake_slack_web_client, admin=False),
-        patch.object(redeem, "record_panel_write", audit),
-    ):
-        for code, channel_id in (
-            ("team-room-2026", "C1"),
-            ("WELCOME-2026", "C1"),
-            ("TEAM-ROOM-2026", "D1"),
-        ):
+    async def submit(code: str, channel_id: str, *, admin: bool = False) -> None:
+        with _slack(fake_slack_web_client, admin=admin):
             await run_redeem_submission(
                 runtime,
                 fake_slack_web_client.client,
                 team_id=_TEAM,
-                user_id="U_MEMBER",
+                user_id=_USER if admin else "U_MEMBER",
                 decision=submission(code, channel_id),
             )
 
-    added, server_code, in_dm = _bodies(fake_slack_web_client, "views.update")
-    assert "Added *$10.00* to <#C1>'s budget" in _texts(added["view"]["blocks"])
-    assert "*$15.00*" in _texts(added["view"]["blocks"]), "the new limit is named"
-    assert "Only an admin can redeem that code" in _texts(server_code["view"]["blocks"])
-    assert "not a DM" in _texts(in_dm["view"]["blocks"]), "a DM has no channel to credit"
+    await submit("team-room-2026", "C1")
+    await submit("TEAM-ROOM-2026", "G0PRIVATE")
+    await submit("TEAM-ROOM-2026", "G024BE91L")
+    await submit("TEAM-ROOM-2026", "D1")
+    await submit("WELCOME-2026", "C1")
+    await submit("WELCOME-2026", "G024BE91L", admin=True)
+
+    public, private, group_dm, dm, server_code, admin = (
+        _texts(body["view"]["blocks"]) for body in _bodies(fake_slack_web_client, "views.update")
+    )
+    assert "Added *$10.00* to <#C1>'s budget" in public and "*$15.00*" in public
+    assert "Added *$10.00* to <#G0PRIVATE>'s budget" in private, "a private channel counts"
+    assert "not a DM" in group_dm, "a group DM has no channel to credit"
+    assert "not a DM" in dm
+    assert "Only an admin can redeem that code" in server_code
+    assert "Added *$10.00* of credit" in admin, "an admin's server-wide code still lands"
     db_session.expire_all()
     limits = {
-        channel_id: (
-            await budget_store.get_channel_budget(
-                db_session, tenant_id=tenant.id, platform="slack", channel_id=channel_id
-            )
-        )
-        for channel_id in ("C1", "C2")
+        b.channel_id: b.limit_usd
+        for b in await budget_store.list_channel_budgets(db_session, tenant_id=tenant.id)
     }
-    assert limits["C1"] is not None and limits["C1"].limit_usd == Decimal("15")
-    assert limits["C2"] is not None and limits["C2"].limit_usd == Decimal("5"), "only C1"
-    assert [c.kwargs["outcome"] for c in audit.await_args_list] == ["allowed", "denied", "denied"]
-    assert audit.await_args_list[0].kwargs["target_channel_id"] == "C1", "audited to the channel"
+    assert limits == {"C1": Decimal("15"), "G0PRIVATE": Decimal("15")}
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("30"), (
+        "two channel credits and one server-wide credit, nothing for the DMs"
+    )
+    events = await list_events(db_session, tenant_id=tenant.id)
+    assert [(e.outcome, e.reason, e.target_channel_id) for e in events] == [
+        ("allowed", "completed", "C1"),
+        ("allowed", "completed", "G0PRIVATE"),
+        ("denied", "promo:needs_channel", "G024BE91L"),
+        ("denied", "promo:needs_channel", "D1"),
+        ("denied", "promo:admin_only", "C1"),
+        ("allowed", "completed", "G024BE91L"),
+    ]
+    assert {e.platform_user_id for e in events} == {"U_MEMBER", _USER}, "each actor is named"
+
+
+async def test_a_channel_slack_will_not_describe_is_refused_for_a_channel_code(
+    fake_slack_web_client: Any,
+) -> None:
+    """Fail closed: an unreadable conversation is not treated as a channel."""
+    fake_slack_web_client.mock.get(
+        re.compile(r"https://slack\.com/api/conversations\.info.*"),
+        payload={"ok": False, "error": "missing_scope"},
+        repeat=True,
+    )
+    assert await promo_channel(fake_slack_web_client.client, "G024BE91L") is None
+    assert await promo_channel(fake_slack_web_client.client, "") is None

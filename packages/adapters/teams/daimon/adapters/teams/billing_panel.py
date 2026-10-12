@@ -144,6 +144,7 @@ from microsoft_teams.cards import (
     TextInput,
     ToggleVisibilityAction,
 )
+from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
@@ -756,18 +757,24 @@ class BillingPanel:
             target_channel_id=channel_id,
         )
         if not code.strip():
+            await audit(outcome="denied", reason="empty_code")
             return toast(ENTER_CODE)
-        result = await redeem_promo_code(
-            self._runtime.sessionmaker,
-            tenant_id=actor.tenant_id,
-            account_id=await get_or_create_account(self._runtime, actor),
-            code=code,
-            now=datetime.now(UTC),
-            channel=None
-            if channel_id is None
-            else PromoChannel(platform="teams", channel_id=channel_id),
-            is_admin=actor.is_admin,
-        )
+        try:
+            result = await redeem_promo_code(
+                self._runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                account_id=await get_or_create_account(self._runtime, actor),
+                code=code,
+                now=datetime.now(UTC),
+                channel=None
+                if channel_id is None
+                else PromoChannel(platform="teams", channel_id=channel_id),
+                is_admin=actor.is_admin,
+            )
+        except (DaimonError, SQLAlchemyError):
+            # `guarded` answers the click; the audit trail records the failure.
+            await audit(outcome="error", reason="failed")
+            raise
         if isinstance(result, PromoRedeemRefused):
             await audit(outcome="denied", reason=f"promo:{result.reason}")
             return toast(describe_refusal(result.reason))

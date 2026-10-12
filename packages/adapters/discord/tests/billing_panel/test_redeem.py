@@ -36,6 +36,7 @@ from daimon.core.stores import channel_budgets as budget_store
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_channel_budget, make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -295,6 +296,37 @@ async def test_modal_submit_redeems_rerenders_and_replies(
         "a second redemption should be refused"
     )
     assert rerender.await_count == 1, "a refused repeat should not rerender the panel"
+
+
+async def test_a_failed_reply_after_a_redemption_is_audited_as_the_redemption(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The credit committed, so the audit row says allowed even when Discord drops the reply."""
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
+    tenant = await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant_id, platform="discord", external_id="42"
+    )
+    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
+    await promo_store.insert_promo_code(
+        db_session, code_hash=hash_promo_code(normalize_promo_code("WELCOME-2026")), terms=terms
+    )
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.sessionmaker = db_session_factory
+    rerender = AsyncMock()
+    modal = RedeemCodeModal(runtime=runtime, account_id=principal.account_id, rerender=rerender)
+    modal.code_in._value = "WELCOME-2026"
+    interaction = _interaction(admin=True)
+    interaction.followup.send.side_effect = discord.HTTPException(MagicMock(), "unknown webhook")
+
+    await modal.on_submit(interaction)
+
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("10")
+    events = await list_events(db_session, tenant_id=tenant_id)
+    assert [(e.outcome, e.reason, e.target_channel_id, e.account_id) for e in events] == [
+        ("allowed", "completed", str(CHANNEL_ID), principal.account_id)
+    ], "one row, for what the redemption did, not for the lost reply"
+    rerender.assert_awaited_once_with(interaction)
 
 
 async def test_modal_submit_keeps_the_success_reply_when_the_rerender_fails(
