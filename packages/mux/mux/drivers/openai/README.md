@@ -176,6 +176,14 @@ bill, so even Admin access alone does not establish per-session exact spend.
 The driver does not discover an Admin credential or call those endpoints.
 
 
+An `in_progress` session can temporarily have no visible active root in its turn
+listing. Create and retrieve preserve `state=running` and an unknown
+`active_root_turn` in that case; accepted creation is never retried. New-turn
+input remains refused while the native session is busy. Neither an empty turn
+listing nor a terminal turn implies idle; subsequent native session and saved
+turn observations establish occupancy and completion separately. Required
+actions still refuse when their active root is unavailable.
+
 ## Current boundaries
 
 Skills, artifacts and vault ports use the private SDK transport by default.
@@ -657,3 +665,46 @@ OpenAI identities into `target_ma_agent_id`, execute the source SQL template,
 invent a request row, or change consume/probe ordering to earn this assertion.
 When native MCP offers become available, the current diagnostic refuses until
 that submit/probe/readback binding exists. No default runtime installs this hook.
+
+### C03 tool-free QA envelope
+
+`conformance_c03.C03Policy` is an explicit runner policy, never a default driver
+setting. It pins `gpt-6-luna`, `tools=[]`, `service_tier=default` and
+`multi_agent.enabled=false` in agent/session create requests and refuses missing
+or changed values in native create responses and subsequent readbacks. Session
+creation requires `environment.type=none`; an empty agent tool list cannot
+disable the implicit Bash/apply-patch tools of a hosted sandbox.
+
+The [Agents architecture](https://developers.openai.com/api/docs/guides/agents-api/architecture)
+and [session-create reference](https://developers.openai.com/api/reference/resources/beta/subresources/agents/subresources/sessions/methods/create)
+were fetched 2026-10-12. A no-environment session requires initial input. The C03
+arrangement therefore uses `openai.conversation_only`, one initial create turn,
+and the canonical fixture's two distinct event POSTs: three model requests, no
+container. The runner must observe the initial root completed and idle before
+entering the unchanged fixture. An ambiguous send consumes its admission and
+never licenses another POST. This policy supplies no live certification or
+financial authorization; those require separate source pins, an envelope and GO.
+
+C03 preparation and execution validate the signed Option A config/envelope pair
+against its three-request, no-container, $1.0755 hold terms. Its model
+`actual_input_limit` remains unset: the old 100k whole-run cutoff applies only
+to the other retained cases, and cannot gate this explicitly priced workload.
+Historical financial regressions keep their original rate validity windows
+and clocks; their stale prices are never installed or admitted for live C03.
+
+Every C03 live entry requires its reviewed runner pin and separate pinned GO,
+including direct one-case invocation. The legacy/default-pin runner refuses
+C03 before file, budget, key or database access. Financial preparation also
+checks the signed envelope's own aware expiry; a newer GO cannot extend it.
+
+
+C03 QA admission lives in `scripts/qa_openai_c03_gate.py`, outside the provider
+wheel. The attempt identity and financial envelope path/hash come from the GO.
+Execution requires its canonical sorted JSON hash on a `LEAD PIN` line in the
+QA lane's operator notes, plus matching envelope identity, unchanged financial
+terms, source/config/recipe scope, binding and expiry. The existing exclusive
+attempt marker is keyed by identity across output directories; receipts also
+carry that identity. Legacy source-only markers are joined to their retained GO
+before admission, so moving output or reformatting a consumed GO cannot retry it.
+Read-only preparation takes `--go-draft` to validate financial terms and create
+source/recipe pins; it does not grant execution authority.

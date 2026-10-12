@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "purpose": "Reviewed conversation-only runner recipe; financial envelope and identity come from the separately pinned GO",
+  "files": {
+    "live_pending.py": "46e0dd0e667108aa9a69c67e75d2882e87f6ade3df515a91a4c60549885f73f3",
+    "live_smoke.py": "7e4efd267fd5d45123e9c5f0e19aade6aa2c9a6b6df72a44d092f2fe28434400",
+    "live_c03.sh": "b0ed65724f9e7328f66d4112acdee5167337fd81a46c3b772b9db9fa9c995a57",
+    "prepare_live_c03.py": "9095be4dd1bf12651e11a99d90bb37450cbc1be7d8d27da10f49cac699c1ed7f",
+    "offline_live_pending_test.py": "6600b8dad98bc88af3402b08104c7f143d0666f49de42a5ae57a8fac1126a8a8",
+    "offline_live_c03_test.py": "737cab7a5a4fe4cae9c3c51fe31e6434c5cc6ca5b8bbc6864b51682d1736a42b"
+  }
+}

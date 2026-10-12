@@ -15,6 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prove offline that a shared Anthropic thread keeps its provider after an OpenAI channel switch, while new threads run OpenAI and an unavailable original backend refuses explicitly.
 - Preserve oversized output files and main's notice deduplication while following every delivery listing page through the scoped output port.
+- Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
+- Derive live OpenAI probe authorization from a registered canonical GO pin, matching financial envelope and unused attempt identity instead of fixing one attempt in the runner.
+
+- Preserve OpenAI session occupancy when accepted work has no visible active root yet, allowing observation to continue without retrying creation or admitting a new turn.
+
+- Require the reviewed C03 runner pin and separate GO on every live entry, and reject expired signed envelopes during preparation and admission.
+
+- Validate C03 QA preparation and execution against the signed three-request envelope instead of the legacy 100k cutoff, with separate historical financial test clocks.
+- Route every Gemini live-round response and SSE meter through one accumulator, retain terminal GET evidence across cancel/cleanup contradictions, and refuse conformance PASS on any native model drift.
+
+- Preserve independently valid Gemini live-round usage floors when sibling counters are malformed, retaining unknown actual spend while latching observed overruns before SDK decoding.
+
+- Add explicitly invoked Gemini C06/C04 conformance runners with separately pinned financial/GO admission, bounded native sends, private usage audit, terminal reconciliation and offline SDK proofs; backend defaults and live certificates stay unchanged.
+
+- Prove offline that a shared Anthropic thread keeps its provider after an OpenAI channel switch, while new threads run OpenAI and an unavailable original backend refuses explicitly.
+- Add an explicitly installed C03 QA policy for tool-free OpenAI conversation sessions, with native readback checks and three model-request admission.
 
 - Pin historical Anthropic financial fixtures to fixed offline test clocks while preserving expired-envelope and stale-price refusals.
 - Make offline Anthropic replay regeneration independent of local Git history, and retain pending PDF validation when optional parser tooling is unavailable.

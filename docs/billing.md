@@ -1037,3 +1037,15 @@ markup and follows the ledger's per-charge rounding. Unknown measurement shows
 subtotal. This option supplies no rates and starts no reconciliation timer.
 With the option off, native footers keep their previous appearance. Anthropic
 footers keep their existing appearance and arithmetic with either value.
+
+
+Admin backend cost previews use `pricing.list_price_preview(model, rates)` with
+rates from the existing pricing table or the explicitly supplied native runtime
+tariff. The selected model, checked date and any supplied request tier remain
+visible. Anthropic prompt-length tiers and five-minute cache-write rates use the
+existing table. Missing or unverified prices stay unknown or unverified; no
+fallback model or free turn is inferred. These are token list prices, excluding
+billing markup, hosted runtime, external tools and cache storage. The worst-case
+per-turn cost remains explicitly unknown: token limits on one request do not
+bound a turn's request count or other charges. A preview neither reserves spend
+nor establishes a financial cap.

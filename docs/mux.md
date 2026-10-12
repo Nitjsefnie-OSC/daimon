@@ -1985,6 +1985,15 @@ OpenAI. An unavailable retained backend produces the typed
 `backend_unsupported` refusal before provider I/O, without changing either
 binding. This does not certify live provider behavior or OpenAI shared threads.
 
+Gemini's conformance round entry is an explicit testing surface, independent of
+backend selection. Only C06 and C04 are selectable, with the primary model,
+empty tools, one/three native interactions and separately pinned financial and
+GO documents. Native terminal usage is fetched once before owned cleanup;
+missing or decreasing evidence preserves held spend and the original workflow
+verdict. The standard conformance registry and historical live certificates
+remain unchanged. See `packages/mux/mux/drivers/gemini/LIVE-ROUND.md` for the
+reviewed recipe, exact model-limit arithmetic and pending boundaries.
+
 ### Output delivery pagination
 
 Delivery follows every Files API page through the authorized output port, so
