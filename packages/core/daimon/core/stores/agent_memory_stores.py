@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import uuid
 
-from daimon.core._models import AgentMemoryStore, AgentPersonalMemoryStore
+from daimon.core._models import Account, AgentMemoryStore, AgentPersonalMemoryStore
 from daimon.core.errors import StoreError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,9 +105,12 @@ async def get_personal_memory_store_id(
     agent_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> str | None:
-    """Return the person's bound memstore_... id for this agent, or None when unbound."""
+    """Return the person's mountable memstore_... id for this agent, or None.
+
+    An archived row (the agent was archived) is never mounted: None.
+    """
     orm = await session.get(AgentPersonalMemoryStore, (tenant_id, agent_id, account_id))
-    return None if orm is None else orm.memory_store_id
+    return None if orm is None or orm.archived_at is not None else orm.memory_store_id
 
 
 async def insert_personal_memory_store(
@@ -154,11 +157,12 @@ async def list_personal_memory_stores_for_agent(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
 ) -> list[tuple[uuid.UUID, str]]:
-    """Every `(account_id, memory_store_id)` bound for one agent."""
+    """Every `(account_id, memory_store_id)` bound for one agent and not yet archived."""
     rows = await session.execute(
         select(AgentPersonalMemoryStore.account_id, AgentPersonalMemoryStore.memory_store_id).where(
             AgentPersonalMemoryStore.tenant_id == tenant_id,
             AgentPersonalMemoryStore.agent_id == agent_id,
+            AgentPersonalMemoryStore.archived_at.is_(None),
         )
     )
     return [(account_id, store_id) for account_id, store_id in rows.tuples()]
@@ -169,7 +173,8 @@ async def list_personal_memory_stores_for_account(
     *,
     account_id: uuid.UUID,
 ) -> list[tuple[uuid.UUID, uuid.UUID, str]]:
-    """Every `(tenant_id, agent_id, memory_store_id)` one person has, across tenants."""
+    """Every `(tenant_id, agent_id, memory_store_id)` one person has, across tenants,
+    archived ones included: this is the erasure inventory."""
     rows = await session.execute(
         select(
             AgentPersonalMemoryStore.tenant_id,
@@ -178,6 +183,40 @@ async def list_personal_memory_stores_for_account(
         ).where(AgentPersonalMemoryStore.account_id == account_id)
     )
     return [(tenant_id, agent_id, store_id) for tenant_id, agent_id, store_id in rows.tuples()]
+
+
+async def mark_personal_memory_store_archived(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+) -> None:
+    """Stamp a binding archived: never mounted again, still found by erasure."""
+    await session.execute(
+        update(AgentPersonalMemoryStore)
+        .where(
+            AgentPersonalMemoryStore.tenant_id == tenant_id,
+            AgentPersonalMemoryStore.agent_id == agent_id,
+            AgentPersonalMemoryStore.account_id == account_id,
+        )
+        .values(archived_at=func.now())
+    )
+    await session.flush()
+
+
+async def list_erased_accounts_with_personal_memory(session: AsyncSession) -> list[uuid.UUID]:
+    """Accounts whose row is gone but who still have personal stores to delete.
+
+    The bindings carry no FK to `accounts`, so an erasure whose upstream delete
+    failed, or ran without an Anthropic client, leaves exactly these behind.
+    """
+    rows = await session.execute(
+        select(AgentPersonalMemoryStore.account_id)
+        .where(~exists().where(Account.id == AgentPersonalMemoryStore.account_id))
+        .distinct()
+    )
+    return list(rows.scalars())
 
 
 async def clear_personal_memory_store(
@@ -196,3 +235,16 @@ async def clear_personal_memory_store(
         )
     )
     await session.flush()
+
+
+async def list_memory_stores(
+    session: AsyncSession, *, tenant_id: uuid.UUID | None = None
+) -> list[tuple[uuid.UUID, uuid.UUID, str]]:
+    """Every shared `(tenant_id, agent_id, memory_store_id)`, optionally for one tenant."""
+    stmt = select(
+        AgentMemoryStore.tenant_id, AgentMemoryStore.agent_id, AgentMemoryStore.memory_store_id
+    ).order_by(AgentMemoryStore.tenant_id, AgentMemoryStore.agent_id)
+    if tenant_id is not None:
+        stmt = stmt.where(AgentMemoryStore.tenant_id == tenant_id)
+    rows = await session.execute(stmt)
+    return [(t, a, s) for t, a, s in rows.tuples()]

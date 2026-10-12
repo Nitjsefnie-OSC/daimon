@@ -154,3 +154,73 @@ async def test_memory_typed_in_a_limited_readers_channel_stays_out_of_the_chat(
 
     assert json.dumps(KEPT_INSIDE)[1:-1] in card, "the 1:1 chat is told why nothing is shown"
     assert "/secret.md" not in card, "no path leaves the channel"
+
+
+async def _seed_personal(
+    db_factory: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    *,
+    aad_object_id: str,
+    files: dict[str, str],
+) -> str:
+    """Bind a personal store for the Teams user, as their first chat session would."""
+    from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+    from daimon.core.stores.agent_memory_stores import insert_personal_memory_store
+    from daimon.core.stores.identity import get_or_create_platform_principal
+
+    agent = await find_agent_by_daimon_tag(anthropic, tenant_id=TENANT, name="daimon")
+    assert agent is not None
+    store = await anthropic.beta.memory_stores.create(name=f"personal {aad_object_id}")
+    for path, content in files.items():
+        await anthropic.beta.memory_stores.memories.create(store.id, path=path, content=content)
+    async with db_factory.begin() as session:
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=TENANT, platform="teams", external_id=aad_object_id
+        )
+        await insert_personal_memory_store(
+            session,
+            tenant_id=TENANT,
+            agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=str(agent.id)),
+            account_id=principal.account_id,
+            memory_store_id=store.id,
+        )
+    return store.id
+
+
+async def test_memory_mine_shows_and_clears_only_the_senders_own_after_confirming(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    from daimon.core.memory_view import forget_code
+
+    from .conftest import AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID
+
+    anthropic = await _anthropic(db_session_factory, {"/team.md": "fridays"})
+    mine = await _seed_personal(
+        db_session_factory, anthropic, aad_object_id=AAD_OBJECT_ID, files={"/style.md": "tabs"}
+    )
+    theirs = await _seed_personal(
+        db_session_factory,
+        anthropic,
+        aad_object_id=OTHER_AAD_OBJECT_ID,
+        files={"/secret-pref.md": "someone else's"},
+    )
+    code = forget_code(mine, ["/style.md"])
+    texts = ["memory mine", "memory forget-mine", f"memory forget-mine {code}", "memory"]
+    listing, asked, done, shared = await _replies(
+        db_session_factory, teams_api_fake, anthropic, texts
+    )
+
+    assert "/style.md" in listing and "/secret-pref.md" not in listing
+    assert code in asked, "the first step only shows the code"
+    assert "Deleted 1 file " in done
+    remaining = [
+        item.path
+        async for item in await anthropic.beta.memory_stores.memories.list(mine, path_prefix="/")
+    ]
+    assert remaining == []
+    kept = [
+        item.path
+        async for item in await anthropic.beta.memory_stores.memories.list(theirs, path_prefix="/")
+    ]
+    assert kept == ["/secret-pref.md"], "another person's store is never touched"
+    assert "/team.md" in shared, "the shared memory is untouched"

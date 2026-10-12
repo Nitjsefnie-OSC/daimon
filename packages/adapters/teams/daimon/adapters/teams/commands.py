@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.continuity.messages import render_fresh_start
+from daimon.core.memory_view import is_strict_memory_args
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -46,10 +47,11 @@ CommandHandler = Callable[[CommandContext], Awaitable[None]]
 
 
 def parse_command(text: str, names: Mapping[str, CommandHandler]) -> tuple[str, str] | None:
-    """`(name, args)` for a bare command word or `memory /<path>`; other prose is a turn."""
+    """`(name, args)` for a bare command word or `memory` with its arguments
+    (`memory /<path>`, `memory mine`, `memory forget-mine <code>`); other prose is a turn."""
     word, _, args = text.strip().partition(" ")
     name, args = word.lower().lstrip("/"), args.strip()
-    if name in names and (not args or (name == "memory" and args.startswith("/"))):
+    if name in names and (not args or (name == "memory" and is_strict_memory_args(args))):
         return name, args
     return None
 

@@ -7,7 +7,9 @@ backfilled and the shared `agent_memory_store` is untouched.
 
 `account_id` has no foreign key on purpose: account erasure deletes the account
 row before the upstream store, and the binding is what records the store still
-to delete. Downgrading drops the bindings; the MA stores themselves remain.
+to delete. Archiving the agent stamps `archived_at` instead of dropping the
+row, for the same reason. Downgrading drops the bindings; the MA stores
+themselves remain.
 
 downgrade: destructive
 """
@@ -37,6 +39,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("now()"),
         ),
+        sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint(
             "tenant_id", "agent_id", "account_id", name="pk_agent_personal_memory_store"
         ),

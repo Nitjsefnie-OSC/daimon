@@ -1545,11 +1545,14 @@ async def test_memory_access_per_headless_origin(
     assert memory["access"] == ("read_only" if origin == "routine" else "read_write")
 
 
-async def test_a_routine_never_mounts_its_owners_personal_memory(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+@pytest.mark.parametrize("answers_only_owner", [False, True])
+async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
+    answers_only_owner: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A routine posts where others read it and nobody is there to ask, so it
-    runs on the shared store alone even when its owner has a personal one."""
+    """A routine that posts where others read runs on the shared store alone; one
+    whose result reaches only its owner also reads the owner's store, read-only."""
     from daimon.core.stores.agent_memory_stores import (
         insert_memory_store,
         insert_personal_memory_store,
@@ -1582,6 +1585,14 @@ async def test_a_routine_never_mounts_its_owners_personal_memory(
         agent_uuid=agent_id,
         session_factory=db_session_factory,
         origin="routine",
+        personal_memory=answers_only_owner,
     )
-    mounted = [r["memory_store_id"] for r in bodies[0]["resources"] if r["type"] == "memory_store"]
-    assert mounted == ["memstore_shared"]
+    mounts = {
+        r["memory_store_id"]: r["access"]
+        for r in bodies[0]["resources"]
+        if r["type"] == "memory_store"
+    }
+    expected = {"memstore_shared": "read_only"}
+    if answers_only_owner:
+        expected["memstore_owner"] = "read_only"
+    assert mounts == expected

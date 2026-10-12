@@ -284,8 +284,8 @@ def _snapshot_from_session(
     repo_branch: str | None = None
     repo_mount_path: str | None = None
     memory_store_id: str | None = None
-    memory_read_only = False
     personal_memory_store_id: str | None = None
+    memory_accesses: list[str | None] = []
 
     for resource in session.resources:
         if isinstance(resource, BetaManagedAgentsFileResource):
@@ -302,12 +302,18 @@ def _snapshot_from_session(
             repo_mount_path = resource.mount_path
             if isinstance(resource.checkout, BetaManagedAgentsBranchCheckout):
                 repo_branch = resource.checkout.name
-        elif resource.memory_store_id in personal_memory_store_ids:
-            personal_memory_store_id = resource.memory_store_id
         else:
-            memory_store_id = resource.memory_store_id
-            memory_read_only = resource.access == "read_only"
+            if resource.memory_store_id in personal_memory_store_ids:
+                personal_memory_store_id = resource.memory_store_id
+            else:
+                memory_store_id = resource.memory_store_id
+            memory_accesses.append(resource.access)
 
+    # Read-only only when every memory mount is: one writable mount, shared or
+    # personal, is writable memory, and a turn that must be read-only replaces it.
+    memory_read_only = bool(memory_accesses) and all(
+        access == "read_only" for access in memory_accesses
+    )
     agent = session.agent
     return SessionSnapshot(
         ma_agent_id=agent.id,
@@ -441,8 +447,11 @@ def desired_snapshot(
         repo_branch=repo_branch,
         memory_store_id=memory_store_id,
         # No mount has no writable memory. Match the observed snapshot so a
-        # provisioning outage does not cause a replacement on every turn.
-        memory_read_only=memory_read_only and memory_store_id is not None,
+        # provisioning outage does not cause a replacement on every turn. Either
+        # store counts: a session holding only a personal mount (the shared
+        # provisioning failed) still has memory a read-only turn must not write.
+        memory_read_only=memory_read_only
+        and (memory_store_id is not None or personal_memory_store_id is not None),
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id,
         tools_sha256=hash_tools(

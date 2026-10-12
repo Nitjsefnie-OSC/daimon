@@ -146,3 +146,68 @@ async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_
         await handle_memory_command(runtime, _payload())
     text = web.chat_postEphemeral.call_args.kwargs["text"]
     assert "no memory to show here." in text.lower(), "the deployment default answers elsewhere too"
+
+
+async def _seed_personal(db_session, runtime, *, user_id: str, files: dict[str, str]) -> str:
+    """Bind a personal store for the Slack user, as their first chat session would."""
+    from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+    from daimon.core.stores.agent_memory_stores import insert_personal_memory_store
+    from daimon.core.stores.identity import get_or_create_platform_principal
+
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=TEAM_ID)
+    agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name="daimon")
+    assert agent is not None
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant_id, platform="slack", external_id=user_id
+    )
+    store = await runtime.anthropic.beta.memory_stores.create(name=f"personal {user_id}")
+    for path, content in files.items():
+        await runtime.anthropic.beta.memory_stores.memories.create(
+            store.id, path=path, content=content
+        )
+    await insert_personal_memory_store(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
+        account_id=principal.account_id,
+        memory_store_id=store.id,
+    )
+    await db_session.commit()
+    return store.id
+
+
+async def test_memory_mine_and_forget_act_only_on_the_invokers_own_store(
+    db_session, db_session_factory
+) -> None:
+    from daimon.core.memory_view import forget_code
+
+    runtime, web = await _setup(db_session, db_session_factory, seed={"/team.md": "fridays"})
+    mine = await _seed_personal(db_session, runtime, user_id="U1", files={"/style.md": "tabs"})
+    theirs = await _seed_personal(db_session, runtime, user_id="U2", files={"/x.md": "private"})
+
+    async def say(user_id: str, text: str) -> str:
+        payload = {**_payload(text), "user_id": user_id}
+        with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+            await handle_memory_command(runtime, payload)
+        kwargs = web.chat_postEphemeral.call_args.kwargs
+        assert kwargs["user"] == user_id, "ephemeral, to the invoker only"
+        return kwargs["text"]
+
+    async def paths(store_id: str) -> list[str]:
+        page = await runtime.anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
+        return [item.path async for item in page]
+
+    listing = await say("U2", "mine")
+    assert "/x.md" in listing and "/style.md" not in listing
+
+    asked = await say("U1", "forget-mine")
+    code = forget_code(mine, ["/style.md"])
+    assert code in asked and await paths(mine) == ["/style.md"], "asking deletes nothing"
+
+    await say("U2", f"forget-mine {code}")
+    assert await paths(mine) == ["/style.md"], "U1's code does nothing for U2"
+    assert await paths(theirs) == ["/x.md"]
+
+    done = await say("U1", f"forget-mine {code}")
+    assert "Deleted 1 file " in done
+    assert await paths(mine) == [] and await paths(theirs) == ["/x.md"]

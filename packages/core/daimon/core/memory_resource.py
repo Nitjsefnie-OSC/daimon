@@ -41,8 +41,10 @@ from daimon.core.stores.agent_memory_stores import (
     get_personal_memory_store_id,
     insert_memory_store,
     insert_personal_memory_store,
+    list_erased_accounts_with_personal_memory,
     list_personal_memory_stores_for_account,
     list_personal_memory_stores_for_agent,
+    mark_personal_memory_store_archived,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -97,8 +99,9 @@ PERSONAL_MEMORY_INSTRUCTIONS = (
 READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS = (
     "This is the personal memory of the person you are talking with, mounted "
     "read-only for this conversation. Consult it to follow their preferences, "
-    "but do not create, update, rename, or delete files in it, and never copy "
-    "anything from it into another memory."
+    "but do not create, update, rename, or delete files in it, never copy "
+    "anything from it into another memory, and do not quote it anywhere other "
+    "people will read it."
 )
 
 _STORE_DESCRIPTION = (
@@ -277,39 +280,58 @@ async def archive_memory_store_for_agent(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
 ) -> None:
-    """Archive the agent's stores (audit trail preserved) and drop the bindings.
+    """Archive the agent's stores (audit trail preserved) and retire their bindings.
 
     The shared store and every person's personal store for the agent go
     together: a personal store belongs to its agent and is never mounted once
-    the agent is gone.
+    the agent is gone. The shared binding is dropped as before. A personal
+    binding is only stamped archived: the archived store still holds that
+    person's memories, and account erasure finds it by that row.
 
+    Each store is archived on its own, so one failure does not leave the rest
+    live; the first API error is re-raised once every store has been tried.
     Idempotent: unbound agent → no-op; already-archived/missing store on the
-    MA side → binding still cleared.
+    MA side → binding still retired.
     """
     async with session_factory() as session:
         store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
         personal = await list_personal_memory_stores_for_agent(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
+    failure: anthropic_errors.APIError | None = None
     for account_id, personal_id in personal:
         try:
             await anthropic.beta.memory_stores.archive(personal_id)
         except anthropic_errors.NotFoundError:
             _log.info("memory_store.archive_missing", memory_store_id=personal_id)
+        except anthropic_errors.APIError as error:
+            _log.warning(
+                "memory_store.personal_archive_failed",
+                memory_store_id=personal_id,
+                error=type(error).__name__,
+            )
+            failure = failure or error
+            continue
         async with session_factory() as session, session.begin():
-            await clear_personal_memory_store(
+            await mark_personal_memory_store_archived(
                 session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
             )
         _log.info("memory_store.personal_archived", memory_store_id=personal_id)
-    if store_id is None:
-        return
-    try:
-        await anthropic.beta.memory_stores.archive(store_id)
-    except anthropic_errors.NotFoundError:
-        _log.info("memory_store.archive_missing", memory_store_id=store_id)
-    async with session_factory() as session, session.begin():
-        await clear_memory_store(session, tenant_id=tenant_id, agent_id=agent_id)
-    _log.info("memory_store.archived", memory_store_id=store_id)
+    if store_id is not None:
+        shared_archived = True
+        try:
+            await anthropic.beta.memory_stores.archive(store_id)
+        except anthropic_errors.NotFoundError:
+            _log.info("memory_store.archive_missing", memory_store_id=store_id)
+        except anthropic_errors.APIError as error:
+            failure = failure or error
+            shared_archived = False
+        if shared_archived:
+            async with session_factory() as session, session.begin():
+                await clear_memory_store(session, tenant_id=tenant_id, agent_id=agent_id)
+            _log.info("memory_store.archived", memory_store_id=store_id)
+    if failure is not None:
+        raise failure
 
 
 async def delete_personal_memory_stores_for_account(
@@ -320,8 +342,9 @@ async def delete_personal_memory_stores_for_account(
 ) -> bool:
     """Delete every personal store one person has, for account erasure.
 
-    Deleted, not archived: an archived store keeps its memories and versions,
-    and erasure has to remove them. Each binding is dropped only after its
+    Archived stores (their agent was archived) included. Deleted, not archived:
+    an archived store keeps its memories and versions, and erasure has to
+    remove them. Each binding is dropped only after its
     store is gone (or already missing), so a failure leaves the binding as the
     record of what is still to delete and a retry picks it up. Returns True
     when nothing is left.
@@ -348,3 +371,21 @@ async def delete_personal_memory_stores_for_account(
             )
         _log.info("memory_store.personal_deleted", memory_store_id=store_id)
     return complete
+
+
+async def sweep_erased_personal_memory(
+    anthropic: AsyncAnthropic, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Finish deleting the personal stores of accounts already erased.
+
+    Independent of the session-deletion work item, so an account erased with
+    no principal left, without an Anthropic client, or whose upstream delete
+    failed is still cleaned up: its bindings outlive the account row.
+    """
+    async with session_factory() as session:
+        accounts = await list_erased_accounts_with_personal_memory(session)
+    for account_id in accounts:
+        if not await delete_personal_memory_stores_for_account(
+            anthropic, session_factory, account_id=account_id
+        ):
+            _log.warning("memory_store.personal_erasure_pending", account_id=str(account_id))

@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import anthropic
 import httpx
 import pytest
 from daimon.core.memory_resource import (
@@ -440,3 +441,55 @@ async def test_account_erasure_keeps_the_binding_of_a_store_it_could_not_delete(
             )
             == "memstore_STUCK"
         ), "the binding is the record of the store still to delete"
+
+
+async def test_one_failed_personal_archive_does_not_leave_the_others_live(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores.agent_memory_stores import list_personal_memory_stores_for_account
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    alice, bob = uuid.uuid4(), uuid.uuid4()
+    state = FakeMemoryStoreState()
+    handler = make_fake_memory_store_handler(state)
+    stuck: set[str] = set()
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and any(
+            request.url.path == f"/v1/memory_stores/{sid}/archive" for sid in stuck
+        ):
+            return httpx.Response(400, json={"type": "error", "error": {"type": "api_error"}})
+        return handler(request)
+
+    client = build_fake_anthropic(flaky)
+    shared = await ensure_memory_store_and_mount(
+        client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon"
+    )
+    mounts = {}
+    for account_id in (alice, bob):
+        mounts[account_id] = await ensure_personal_memory_store_and_mount(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            account_id=account_id,
+            agent_name="daimon",
+        )
+    stuck.add(mounts[alice]["memory_store_id"])
+
+    with pytest.raises(anthropic.APIError):
+        await archive_memory_store_for_agent(
+            client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id
+        )
+
+    assert state.stores[mounts[bob]["memory_store_id"]]["archived_at"] is not None
+    assert state.stores[shared["memory_store_id"]]["archived_at"] is not None
+    async with db_session_factory() as s:
+        assert await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_id) is None
+        for account_id in (alice, bob):
+            inventory = await list_personal_memory_stores_for_account(s, account_id=account_id)
+            assert [store for _, _, store in inventory] == [
+                mounts[account_id]["memory_store_id"]
+            ], "every personal store stays in the erasure inventory"

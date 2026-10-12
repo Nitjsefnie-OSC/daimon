@@ -1864,19 +1864,62 @@ the separation does not depend on the agent following its instructions. Only the
 choice of which store a fact is written to depends on the instructions.
 
 The personal mount has the same access as the shared one: read-only in channels with
-limited readers and in DMs under `dm_memory_read_only`. Routines, MCP `start_turn`
-and CLI sessions mount the shared store alone, and its instructions then say that no
-personal memory is mounted and nothing personal is to be recorded. A routine posts
-where other people read it and runs with nobody there, so it never sees its owner's
-personal store.
+limited readers and in DMs under `dm_memory_read_only`. A session without a personal
+store gets shared-store instructions saying that no personal memory is mounted and
+nothing personal is to be recorded. Who else gets one:
+
+- **Routines**: only a routine whose result reaches nobody but its owner
+  (`rule_views.routine_answers_only_owner`: no destination and no channel, so made in a
+  DM or with no origin) mounts its owner's personal store, read-only like all routine
+  memory. Any routine with a destination posts where others read it and gets the shared
+  store alone. The scheduler decides this from the routine row at every fire, so adding
+  a destination stops it at the next run. The agent can still call a posting tool itself;
+  its instructions say not to quote personal memory where others will read it.
+- **MCP**: the hub's `ask` and `start_turn` mount the caller's personal store. A hub
+  caller is a person: the hub token comes from Daimon's OAuth proxy after a Discord or
+  Slack sign-in, `HubIdentityMiddleware` checks its signature, issuer, audience and
+  platform, `_auth_for` builds the identity for that person's own account in the tenant
+  (re-reading the account and tenant), and only that account can use the session handle.
+  A per-agent key, an operator or CLI token and an internal caller get the shared store
+  alone: a key is the agent, its sessions are the agent's, and whoever holds it is not
+  established as one person.
+- **CLI**: `daimon sessions create` identifies the operator by `$USER`
+  (`cli.local_user`), which is configuration rather than a verified person, so it gets
+  no personal store.
 
 MA attaches memory stores only when a session is created. A live session recorded
 without a personal store is reused, not replaced, after the caller's store exists
 (`session_compat`); the store is mounted on the caller's next new session. A session
 whose recorded personal store differs from the caller's current one is replaced.
-Existing shared memory is never moved or split. Deleting an agent archives its shared
-store and every personal store. Account deletion deletes the person's personal stores
-at Anthropic, and the scheduler's privacy sweep retries a delete that failed.
+Existing shared memory is never moved or split.
+`daimon memory personal-report [--platform P --workspace W]` scans every shared store
+for entries that look personal (a mention or a name with a preference word, first-person
+preferences, per-person paths; `daimon.core.memory_personal_scan`) and prints per agent
+the number of memories, how many look personal and a few redacted examples (preference
+words kept, names, mentions, e-mail addresses and every other word masked). It only lists
+and reads memories; deciding what to do with them is left to the operator.
+
+`/memory` (Discord, Slack) and `memory` (Teams) still show the shared store read-only.
+`mine` lists the caller's own personal store and `mine /<path>` shows one file;
+`forget-mine` shows what would be deleted and a six-character code, and
+`forget-mine <code>` deletes every memory in that store. The store is always the one of
+the person who typed the command, resolved from their own account; no argument names
+an account. The code is a hash of the store and its current paths, so it only deletes
+what the person was shown, and a store that changed since needs a new code. Deleted
+memories keep their MA version history for MA's retention period (30 days); account
+deletion deletes the whole store.
+
+Deleting an agent archives its shared store and every personal store, each on its own so
+one failure leaves the rest archived. A personal binding is then only stamped
+`archived_at`, never dropped: an archived store still holds that person's memories, and
+the row is how account deletion finds it. Account deletion deletes every personal store
+the person has at Anthropic, archived ones included, and drops each binding once its store
+is gone. The bindings have no foreign key to `accounts`, so they outlive the account row:
+the scheduler's privacy sweep (`sweep_erased_personal_memory`) deletes the stores of any
+erased account that still has bindings. That covers a failed upstream delete, an erasure
+run without an Anthropic client, and an account with no principal left to queue session
+deletion.
+
 ### Platform table rendering
 
 Enable per tenant with `DAIMON_TABLE_RENDERING`, a JSON map of tenant UUIDs to

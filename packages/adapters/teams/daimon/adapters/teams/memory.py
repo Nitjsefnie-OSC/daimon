@@ -1,6 +1,9 @@
-"""The `memory` command: a read-only look at what the agent where it was typed remembers.
+"""The `memory` command: what the agent where it was typed remembers.
 
-`memory` lists the paths; `memory <path>` shows one memory. Mirrors Slack's
+`memory` lists the shared memory's paths; `memory <path>` shows one memory.
+`memory mine`, `memory mine <path>` and `memory forget-mine [code]` act on the
+sender's own personal memory only, never anyone else's
+(`daimon.core.memory_view`). Mirrors Slack's
 `/memory`, resolved for the place it was typed the way a turn there resolves
 its agent: a channel post's thread, or the 1:1 chat. Typed in a channel it is
 answered in the 1:1 chat, so a channel whose readers are limited gets a refusal
@@ -20,7 +23,11 @@ from daimon.core.errors import DaimonError
 from daimon.core.memory_view import (
     get_channel_memory_store,
     get_memory_content,
+    get_own_personal_memory_store,
     list_memory_paths,
+    parse_memory_args,
+    personal_memory_reply,
+    resolve_channel_agent,
 )
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import load_access_policy
@@ -60,11 +67,39 @@ async def _kept_inside(context: CommandContext, asked: TeamsInbound) -> bool:
     return readers_limited_at(policy, channel_id=asked.channel_id, thread_id=asked.thread_id)
 
 
+async def _personal_card(context: CommandContext, asked: TeamsInbound) -> AdaptiveCard:
+    """The sender's own personal memory: resolved from their account, never an argument."""
+    agent = await resolve_channel_agent(
+        context.runtime.sessionmaker,
+        context.runtime.anthropic,
+        tenant_id=context.tenant_id,
+        platform="teams",
+        user_id=asked.user_id,
+        channel_id=asked.channel_id,
+        default=context.runtime.deployment_default,
+        thread_id=asked.thread_id if asked.thread_id != asked.channel_id else None,
+    )
+    if agent is None:
+        return _card(EMPTY)
+    reply = await personal_memory_reply(
+        context.runtime.anthropic,
+        agent_name=agent.agent_name,
+        store_id=await get_own_personal_memory_store(context.runtime.sessionmaker, agent),
+        request=parse_memory_args(context.args),
+        command="memory",
+    )
+    if reply.content is not None:
+        return _card(reply.title, reply.content)
+    return _card(reply.title, "\n".join(reply.paths) if reply.paths else None, reply.hint)
+
+
 async def _memory_card(context: CommandContext) -> AdaptiveCard:
     runtime, path = context.runtime, context.args
     asked = context.asked_in or context.inbound
     if await _kept_inside(context, asked):
         return _card(KEPT_INSIDE)
+    if parse_memory_args(path).kind not in ("shared_list", "shared_show"):
+        return await _personal_card(context, asked)
     resolved = await get_channel_memory_store(
         runtime.sessionmaker,
         runtime.anthropic,

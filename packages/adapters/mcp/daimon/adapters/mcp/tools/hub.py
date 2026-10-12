@@ -355,7 +355,15 @@ def register_hub_tools(
             if handle is not None:
                 await _verify_account_owns_session(runtime, auth, handle)
             return _ask_tool_result(
-                await _ask_impl(runtime, auth, message, handle=handle, recheck=recheck)
+                await _ask_impl(
+                    runtime,
+                    auth,
+                    message,
+                    handle=handle,
+                    recheck=recheck,
+                    # A hub caller is a person, verified by their platform login.
+                    personal_memory=True,
+                )
             )
 
     @mcp.tool
@@ -367,7 +375,8 @@ def register_hub_tools(
         Returns ``{"handle": ...}`` for polling with ``get_session``.
         """
         auth, _, recheck = await _admitted(ctx, daimon_id, "start_turn")
-        return await _start_turn_impl(runtime, auth, message, recheck=recheck)
+        # A hub caller is a person, verified by their platform login.
+        return await _start_turn_impl(runtime, auth, message, recheck=recheck, personal_memory=True)
 
     @mcp.tool
     async def continue_turn(  # pyright: ignore[reportUnusedFunction]

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
+import pytest
 from anthropic.types.beta import (
     BetaManagedAgentsAgent,
     BetaManagedAgentsSession,
@@ -651,7 +653,74 @@ def test_the_personal_store_is_told_apart_by_id_whatever_the_mount_order() -> No
         )
         assert snapshot.memory_store_id == "memstore_shared"
         assert snapshot.personal_memory_store_id == "memstore_alice"
-        assert snapshot.memory_read_only, "access is read off the shared mount"
+        assert not snapshot.memory_read_only, "one writable mount is writable memory"
+
+
+@pytest.mark.parametrize(
+    ("shared", "personal", "read_only"),
+    [
+        (None, None, False),
+        ("read_only", None, True),
+        ("read_write", None, False),
+        (None, "read_only", True),
+        (None, "read_write", False),
+        ("read_only", "read_only", True),
+        ("read_write", "read_write", False),
+    ],
+    ids=[
+        "neither",
+        "shared-ro",
+        "shared-rw",
+        "personal-ro",
+        "personal-rw",
+        "both-ro",
+        "both-rw",
+    ],
+)
+def test_memory_access_covers_every_mounted_store(
+    shared: Literal["read_only", "read_write"] | None,
+    personal: Literal["read_only", "read_write"] | None,
+    read_only: bool,
+) -> None:
+    """A session holding only a personal mount (the shared store failed to
+    provision) still has memory a read-only turn must not write."""
+    mounts = [
+        BetaManagedAgentsMemoryStoreResource(
+            memory_store_id=store, type="memory_store", access=access
+        )
+        for store, access in (("memstore_shared", shared), ("memstore_alice", personal))
+        if access is not None
+    ]
+    observed = snapshot_from_created_session(
+        _session_with_memory(*mounts),
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id=None,
+        sent_skills=[],
+        personal_memory_store_ids=("memstore_alice",),
+    )
+    desired_read_only = desired_snapshot(
+        _agent(),
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id="memstore_shared" if shared else None,
+        personal_memory_store_id="memstore_alice" if personal else None,
+        memory_read_only=True,
+        vault_id=None,
+    )
+
+    assert observed.memory_read_only is read_only
+    assert desired_read_only.memory_read_only is (shared is not None or personal is not None), (
+        "a read-only turn wants read-only memory wherever any store is mounted"
+    )
+    if shared is not None or personal is not None:
+        assert ("memory_access" in identity_change_reasons(observed, desired_read_only)) is (
+            not read_only
+        ), "a writable mount of either store is replaced for a read-only turn"
 
 
 def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() -> None:

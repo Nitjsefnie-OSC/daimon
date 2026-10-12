@@ -2458,9 +2458,13 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "budget_channel_id",
         "origin_channel_id",
         "origin_seal_ids",
+        "personal_memory",
         "before_create",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
     assert call_kwargs["app_session_unmapped"] is True
+    assert call_kwargs["personal_memory"] is False, (
+        "an agent key is the agent, not a verified person: shared memory only"
+    )
 
 
 @pytest.mark.parametrize("billed", [True, False], ids=["billed", "unbilled"])

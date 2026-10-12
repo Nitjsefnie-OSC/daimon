@@ -1983,3 +1983,73 @@ async def test_account_erasure_deletes_the_persons_own_memory_stores_and_retries
             await get_memory_store_id(session, tenant_id=tenant.id, agent_id=agent_id)
             == "memstore_shared"
         )
+
+
+@pytest.mark.parametrize("before", ["agent_archived", "principal_purged", "no_client"])
+async def test_personal_memory_erasure_survives_agent_archive_and_missing_principals(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    before: str,
+) -> None:
+    """Account erasure deletes a person's personal store even when its agent was
+    archived first (the store still holds their memories), when no principal is
+    left to queue session work, or when it ran without an Anthropic client: the
+    privacy sweep finds the bindings the account left behind."""
+    from daimon.core.memory_resource import (
+        archive_memory_store_for_agent,
+        ensure_personal_memory_store_and_mount,
+    )
+    from daimon.testing.ma import (
+        FakeMemoryStoreState,
+        NotHandled,
+        combine_handlers,
+        make_fake_memory_store_handler,
+    )
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    principal = await make_cli_principal(
+        db_session, os_user="cli-personal-erasure", tenant=tenant, account=account
+    )
+    await db_session.commit()
+    state = FakeMemoryStoreState()
+
+    def no_agents(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            return list_response([])
+        raise NotHandled
+
+    client = build_fake_anthropic(
+        combine_handlers(no_agents, make_fake_memory_store_handler(state))
+    )
+    agent_id = uuid.uuid4()
+    mount = await ensure_personal_memory_store_and_mount(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        account_id=account.id,
+        agent_name="daimon",
+    )
+    store_id = mount["memory_store_id"]
+    await client.beta.memory_stores.memories.create(
+        store_id, path="/pref.md", content="private preference"
+    )
+
+    if before == "agent_archived":
+        await archive_memory_store_for_agent(
+            client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id
+        )
+        assert state.stores[store_id]["archived_at"] is not None, "archived, not yet deleted"
+    elif before == "principal_purged":
+        await purge_principal(sm=db_session_factory, principal_id=principal.id, kind="cli")
+
+    result = await purge_account(
+        sm=db_session_factory,
+        account_id=account.id,
+        anthropic=None if before == "no_client" else client,
+    )
+    assert result.db.accounts == 1
+    await sweep_privacy_session_deletes(client, db_session_factory)
+
+    assert store_id not in state.stores, "the personal store and its memories are deleted"

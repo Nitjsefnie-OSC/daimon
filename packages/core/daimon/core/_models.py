@@ -1473,6 +1473,9 @@ class AgentPersonalMemoryStore(Base):
     `account_id` deliberately has no foreign key. Account erasure deletes the
     account row first and the MA store afterwards (`purge`), so the binding has
     to outlive the account: it is the record of which store is still to delete.
+    For the same reason archiving the agent keeps the row and only stamps
+    `archived_at`: an archived store still holds the person's memories, and
+    the row is what erasure deletes it by. An archived row is never mounted.
     """
 
     __tablename__ = "agent_personal_memory_store"
@@ -1494,6 +1497,7 @@ class AgentPersonalMemoryStore(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GitHubAppInstallation(Base):

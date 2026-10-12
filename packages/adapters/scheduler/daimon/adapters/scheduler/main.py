@@ -91,6 +91,7 @@ from daimon.core.routine_delivery import (
     render_routine_controls,
 )
 from daimon.core.rule_views import (
+    routine_answers_only_owner,
     routine_destination_channel,
     routine_destination_place,
     routine_origin,
@@ -514,6 +515,9 @@ async def _build_fire(
                 if fire_policy is not None
                 else None
             ),
+            # The owner's personal memory, read-only, only for a routine whose
+            # result goes to nobody else; decided again from the row each fire.
+            personal_memory=routine_answers_only_owner(row),
         )
 
         if row.destination_kind is None:

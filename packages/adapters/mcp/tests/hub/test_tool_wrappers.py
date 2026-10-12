@@ -367,3 +367,25 @@ async def test_billed_tools_are_refused_for_a_member_outside_the_invoker_allowli
         f"{tool} must be refused for a caller outside the allowlist, got {payload!r}"
     )
     assert "list of people" in str(payload.get("content")), f"got {payload!r}"
+
+
+@pytest.mark.parametrize("tool", ["ask", "start_turn"])
+async def test_a_hub_turn_mounts_the_callers_personal_memory(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tool: str
+) -> None:
+    """A hub caller is a person, verified by their platform login, and only their
+    account can use the handle: their new session carries their personal memory."""
+    from unittest.mock import AsyncMock, patch
+
+    mcp, daimon_id, _hub_tenant = await _hub_app(db_session, db_session_factory)
+    app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+    target = "_ask_impl" if tool == "ask" else "_start_turn_impl"
+    impl = AsyncMock(side_effect=RuntimeError("stop after the call"))
+
+    with patch(f"daimon.adapters.mcp.tools.hub.{target}", new=impl):
+        await _call_tool(
+            app, "/mcp", _TOKEN, name=tool, arguments={"daimon_id": daimon_id, "message": "hi"}
+        )
+
+    assert impl.await_args is not None, f"{tool} reached the turn implementation"
+    assert impl.await_args.kwargs["personal_memory"] is True

@@ -175,6 +175,7 @@ class _Transport:
         self.updates: list[dict[str, Any]] = []
         self.fail_session_create = False
         self.fail_message = "boom"
+        self.fail_shared_memory_create = False
         self.retrieve_error: int | None = None
         _register(self.state, _agent())
 
@@ -207,6 +208,18 @@ class _Transport:
                 and path.count("/") == 3
             ):
                 self.updates.append(json.loads(request.content))
+            if (
+                self.fail_shared_memory_create
+                and (request.method, path) == ("POST", "/v1/memory_stores")
+                and not json.loads(request.content)["name"].startswith("personal ")
+            ):
+                return httpx.Response(
+                    400,
+                    json={
+                        "type": "error",
+                        "error": {"type": "invalid_request_error", "message": "outage"},
+                    },
+                )
             if self.fail_session_create and (request.method, request.url.path) == (
                 "POST",
                 "/v1/sessions",
@@ -4074,3 +4087,42 @@ async def test_a_session_from_before_personal_memory_is_reused_not_replaced(
     assert second.ma_session_id == first.ma_session_id and second.reused
     assert second.continuity == ContinuityOutcome()
     assert transport.calls[before:] == []
+
+
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "active"])
+async def test_a_writable_personal_only_mount_is_not_reused_for_a_read_only_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    active: bool,
+) -> None:
+    """The shared store failed to provision, so the session holds only the caller's
+    writable personal store. Once the caller's turn must be read-only (a seal, or
+    the DM policy), an idle session is replaced and an active one refuses the
+    turn, exactly as for a writable shared mount."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    transport.fail_shared_memory_create = True
+    deps = _deps(db_session_factory, transport)
+    admission = _admission(account=account)
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    mounted = transport.state.sessions[first.ma_session_id].resources
+    assert [r.access for r in mounted if r.type == "memory_store"] == ["read_write"]
+    if active:
+        row = await _live_row(db_session_factory, tenant=tenant, account=account)
+        assert row is not None
+        async with db_session_factory.begin() as session:
+            await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
+
+    second = await _prepare(
+        deps, replace(admission, memory_read_only=True), tenant=tenant, account=account
+    )
+
+    if active:
+        assert isinstance(second, PreparationBusy), "never run it on writable personal memory"
+    else:
+        assert isinstance(second, PreparedTurn) and second.ma_session_id != first.ma_session_id
+        fresh = transport.state.sessions[second.ma_session_id].resources
+        assert [r.access for r in fresh if r.type == "memory_store"] == ["read_only"]
