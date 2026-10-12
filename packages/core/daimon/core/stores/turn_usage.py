@@ -5,9 +5,9 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from daimon.core._models import AccountingOutbox, TurnOutcome, UsageObservation
+from daimon.core._models import AccountingOutbox, TenantLedger, TurnOutcome, UsageObservation
 from daimon.core.context_prompt import TurnContext
-from daimon.core.stores import mux_state, tenant_ledger
+from daimon.core.stores import mux_state
 from daimon.core.stores.domain import TenantLedgerRow
 from mux.contracts.resources import ProviderBinding
 from mux.state.store import binding_slot
@@ -93,10 +93,18 @@ async def _read_accounting_revisions(
         else f"adjust:{binding.id}:{item.row.observation_id}:{item.row.revision}"
         for item in outbox
     }
-    ledger = tuple(
-        row
-        for row in await tenant_ledger.list_for_tenant(session, tenant_id=tenant_id)
-        if row.idempotency_key in keys
+    ledger = (
+        tuple(
+            TenantLedgerRow.model_validate(row, from_attributes=True)
+            for row in await session.scalars(
+                select(TenantLedger).where(
+                    TenantLedger.tenant_id == tenant_id,
+                    TenantLedger.idempotency_key.in_(keys),
+                )
+            )
+        )
+        if keys
+        else ()
     )
     return UsageAccountingRows(current, tuple(revisions), tuple(outbox), ledger)
 

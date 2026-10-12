@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep Discord conformance tests on the adapter's shared database fixture lifetime so switching modules does not trigger premature schema teardown.
 - Build turn-test dependencies from the real TurnDeps bundle and validate replay behavior against recorded payloads instead of freezing implementation source bytes.
 
+- Add read-only attribution of distinct host-worker usage and conservative token floors, preserving original debit identities and explicit pending revisions.
+
 - Restrict scripted usage catch-up to main #824's exact query so caller-owned transcript and idle routes retain their replies; refresh the live recipe metadata for the main-attributed golden updates.
 
 - Add an exact opt-in Anthropic first-turn usage catch-up tape for main #824 and retarget the DM delivery sensitivity probe after main #823's helper move.
