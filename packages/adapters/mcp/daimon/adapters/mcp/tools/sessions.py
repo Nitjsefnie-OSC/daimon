@@ -46,7 +46,7 @@ class SessionInfo(BaseModel):
     agent_name: str
     title: str | None
     # Plain str, NOT Literal[...] — MA is free to ship a status value the
-    # pinned SDK does not model (#214 class; upstream-controlled value set).
+    # pinned SDK does not model (upstream-controlled value set).
     status: str
     created_at: datetime.datetime
     updated_at: datetime.datetime

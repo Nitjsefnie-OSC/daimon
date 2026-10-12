@@ -1,4 +1,4 @@
-"""Explicit C03 QA policy; never installed by a product driver or default runtime."""
+"""Explicit offline QA policy; never installed by a product driver or default runtime."""
 
 from __future__ import annotations
 

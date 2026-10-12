@@ -174,7 +174,7 @@ def build_app_jwt(private_key_pem: str, app_id: str, *, now: int) -> str:
 def verify_signature(secret: str, body: bytes, header: str) -> bool:
     """Verify a GitHub webhook X-Hub-Signature-256 header (constant-time).
 
-    Uses hmac.compare_digest to avoid timing oracles (T-56-06).
+    Uses hmac.compare_digest to avoid timing oracles.
 
     Args:
         secret: The webhook secret configured in the GitHub App settings.

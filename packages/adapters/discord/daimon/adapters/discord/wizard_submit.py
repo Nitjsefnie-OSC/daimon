@@ -466,7 +466,7 @@ async def run_wizard_submit_turn_observed(
             await channel.send(_OVER_CAP)
             return
 
-        # --- Stage one: admission -- D-01 admit(). Same four branches
+        # --- Stage one: admission -- admission admit(). Same four branches
         # _orchestrate has, prefixed with a sentence saying the answers were
         # already recorded (the claim committed before this runs). ---
         # The live role, read from the interaction before admission: the
@@ -659,7 +659,7 @@ async def run_wizard_submit_turn_observed(
             )
             return
 
-        # D-03 boundary, mirroring bot.py's mention path: the per-turn
+        # preparation boundary, mirroring bot.py's mention path: the per-turn
         # ceiling clock starts here, once admission has passed and the turn
         # holds its slot, and covers session bind (bind_session) plus the
         # driver pump (run_prepared_turn) as ONE shared budget. This call
@@ -668,7 +668,7 @@ async def run_wizard_submit_turn_observed(
         # wizard-submit turn could hang forever.
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
-        # --- Stage two: bind_session -- D-01 bind_session(). Always reuses
+        # --- Stage two: bind_session -- admission bind_session(). Always reuses
         # the thread's existing session: the form lives in the conversation
         # the turn should continue, so the agent resumes with the history of
         # having asked. A bind failure ends the card before the error

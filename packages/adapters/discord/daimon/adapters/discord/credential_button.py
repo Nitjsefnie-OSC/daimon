@@ -38,7 +38,7 @@ The repo kind's non-admin branch bounds that pre-filter with
 That is sound only because `RepoBindModal.on_submit` repeats the identical
 gate before the consume — this pre-filter is advisory, not authoritative, so
 falling through never grants a write the submit-time check would not also
-grant. What a timeout costs is `T-18-18` reverting to its pre-revision shape
+grant. A timeout reverts this advisory check to its unfiltered shape
 for that one click: a member who will still be refused briefly sees the
 token field before the submit-time gate turns them away. Never confuse
 `is_done()`, used below to pick which half of the response already fired,

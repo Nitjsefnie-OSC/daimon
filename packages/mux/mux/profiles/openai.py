@@ -31,7 +31,7 @@ PERSISTENT_WORKSPACE = Profile(
         # test_skill_workflow proves the installed version survives two turns.
         "skills_bundle": "native",
         "skills_versions": "native",
-        # C09 plus test_resources: all pages, exact binary bytes, typed truncation
+        # Resource coverage: all pages, exact binary bytes, typed truncation
         # and scoped input/session artifact deletion through the actual SDK.
         "artifacts": "native",
         "usage_observations": "native",
@@ -43,7 +43,7 @@ PERSISTENT_WORKSPACE = Profile(
         # Actual-SDK tests verify owned metadata, host-resolved MCP credentials
         # and redacted debug logs; archive/conditional writes refuse explicitly.
         "vaults": "native",
-        # Initial file mounts exist; conditional replacement does not (C08).
+        # Initial file mounts exist; conditional replacement does not.
         "session_resources": "unsupported",
         # Child event/usage decoding does not provision a multiagent roster;
         # drivers/openai/agents.py refuses that configuration (2026-10-09).

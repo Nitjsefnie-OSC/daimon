@@ -392,7 +392,7 @@ def create_mcp_app(
     )
     mcp.add_middleware(identity_middleware)
     # Tool-dispatch error boundary: convert upstream anthropic.APIError into a
-    # structured ToolError instead of an opaque internal error (issue #14).
+    # structured ToolError instead of an opaque internal error.
     mcp.add_middleware(MaErrorMiddleware())
 
     # A tool tagged both "admin" and "channel-admin" is hidden until either tag
@@ -519,7 +519,11 @@ def create_mcp_app(
     )
     app.state.mcp = mcp
     app.add_route("/web/daimon-face.png", _web_face, methods=["GET", "HEAD"])
-    app.mount("/web", _WebStaticFiles(directory=STATIC_DIR), name="web")
+    app.mount(
+        "/web",
+        _WebStaticFiles(directory=STATIC_DIR, packages=[("daimon.core", "fonts")]),
+        name="web",
+    )
     app.add_route(
         "/uploads/{token}",
         build_upload_route(effective_sessionmaker),

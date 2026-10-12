@@ -299,7 +299,7 @@ async def run_turn_impl(
     return the bound ``usage_record`` callable. The returned callable is
     awaited for each ``span.model_request_end`` event with kwarg
     ``event=event`` (no ``session_id`` — the recorder binds session/tenant
-    context itself via ``functools.partial``, per D-06). The factory shape
+    context itself via ``functools.partial``, per inline I/O). The factory shape
     exists because ``model_id`` is only known after ``create_session``
     returns, but adapter callers want to preset their own routine context
     (platform, user, guild) via ``functools.partial`` before fire time.

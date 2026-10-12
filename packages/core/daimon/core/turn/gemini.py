@@ -433,7 +433,7 @@ class GeminiTurnIO:
     async def replay(
         self, *, timeout_s: float = REPLAY_TIMEOUT_S
     ) -> list[BetaManagedAgentsSessionEvent]:
-        # N8's host dispatch separately requires replay_usage before send and
+        # Host accounting dispatch separately requires replay_usage before send and
         # consumes it after replay and every pump exit, including corrections.
         frames = await self.replay_turn_events(timeout_s=timeout_s)
         for frame in frames:

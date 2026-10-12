@@ -1014,7 +1014,7 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
-            # FEAT-085: post routine results to their destinations. Same
+            # post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
             self._spawn(
                 run_delivery_poller(
@@ -2697,10 +2697,7 @@ class DaimonBot(commands.Bot):
                 # registered in self._processing at creation time (inside
                 # _orchestrate, immediately after create_thread), so an in-thread
                 # follow-up mention that arrives during the *same* originating turn
-                # queues instead of racing a second turn onto that thread's session —
-                # this is the actual fix for the in-thread queue race. The earlier closure of
-                # #163 was documentation-only; its regression test covered parallel
-                # channel mentions, not the channel→in-thread sequence this closes.
+                # queues instead of racing a second turn onto that thread's session.
                 #
                 # Only follow-up mentions *within an existing thread* are queued and
                 # coalesced: a thread is one conversation on one MA session, and
@@ -2875,7 +2872,7 @@ class DaimonBot(commands.Bot):
         *,
         post_state: ProtectionState,
     ) -> None:
-        """Best-effort error render for on_message prologue failures (#170 backstop).
+        """Best-effort error render for on_message prologue failures.
 
         Never raises — a failure here would defeat the whole point of the
         boundary it's called from. Mirrors _flip_failed_best_effort's
@@ -3241,7 +3238,7 @@ class DaimonBot(commands.Bot):
             return False
 
     async def open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
-        """A DM with a human member of `guild_id` (FEAT-085's delivery fallback).
+        """A DM with a human member of `guild_id` (routine delivery fallback).
 
         Same membership rule as the direct-message tool: the recipient must be
         a current, non-bot member of the tenant's guild.
@@ -4046,7 +4043,7 @@ class DaimonBot(commands.Bot):
         category_id, category_unresolved = await _resolve_category(message.channel, fetch=False)
 
         # --- Stage one: admission (identity, config cascade, missing-config
-        # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
+        # bail, MA resolve/retrieve, balance gate, cap gate) -- admission admit(). ---
         try:
             admission = await admit(
                 self.runtime.turn_deps,
@@ -4413,7 +4410,7 @@ class DaimonBot(commands.Bot):
         if self.runtime.settings.discord.tenant_cap_waiting_card:
             await lifecycle.on_slot_started()
 
-        # D-03 boundary: the per-turn ceiling clock starts here, once admission
+        # preparation boundary: the per-turn ceiling clock starts here, once admission
         # has passed and the turn holds its slot, and covers session
         # bind/create (bind_session) plus the driver pump (run_prepared_turn)
         # as ONE shared budget -- admit() and the queue wait are outside it.
@@ -4426,11 +4423,11 @@ class DaimonBot(commands.Bot):
             "_orchestrate called without discord settings — entrypoint must validate at boot"
         )
         # Each caller in a thread keys their own session on their own account,
-        # so nobody reuses another caller's session identity (#162).
+        # so nobody reuses another caller's session identity.
         session_account_id = admission.account_id
 
         # --- Stage two: bind_session (find-or-create, mapping write,
-        # recorder binding) -- D-01 bind_session(). ---
+        # recorder binding) -- admission bind_session(). ---
         try:
             prepared = await bind_session(
                 self.runtime.turn_deps,
@@ -4741,7 +4738,7 @@ class DaimonBot(commands.Bot):
                 + ", ".join(f"`{att.filename}` ({r})" for att, r in images_skipped)
             )
 
-        # --- Run the turn (D-08/D-09/D-10: run_prepared_turn owns the driver
+        # --- Run the turn (run_prepared_turn owns the driver
         # call and the one-shot dead-session recovery cycle). ---
 
         async def _reseed_user_message() -> str:

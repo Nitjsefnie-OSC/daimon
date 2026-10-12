@@ -892,7 +892,7 @@ class McpCredentialModal(discord.ui.Modal):
             )
             # Ask the server first. A token it rejects would otherwise be stored,
             # mirrored into every caller's vault and attached, and every turn from
-            # then on would carry a failed MCP init (#79). A server that cannot be
+            # then on would carry a failed MCP init. A server that cannot be
             # reached is not a verdict: the save proceeds and MA reports later.
             rejection = await check_token(
                 self._runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=token_value

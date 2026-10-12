@@ -29,7 +29,6 @@ import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.adapters.teams import card
 from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
-from daimon.adapters.teams.provider_events import ProviderDraft
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.message_split import split_fenced
@@ -41,6 +40,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,

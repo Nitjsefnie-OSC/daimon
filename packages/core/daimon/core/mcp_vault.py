@@ -289,14 +289,14 @@ async def ensure_agent_mcp_vault(
 
     The long-lived credential is always non-admin and never carries the ``internal``
     discriminator claim — admin is resolved live from the DB ``role`` by the verifier
-    on each request (ADMIN-01). A Discord vault token's baked ``is_admin`` claim alone
-    never elevates a non-admin caller at the MCP gate (#162 escalation closed).
+    on each request. A Discord vault token's baked ``is_admin`` claim alone
+    never elevates a non-admin caller at the MCP gate.
 
-    Per-turn delete+recreate (the old re-stamp limb) is intentionally removed (Phase
-    88-03 T-88-03-02): the credential is identity-stable (``sub`` = account,
+    Per-turn delete+recreate (the old re-stamp limb) is intentionally removed: the credential
+    is identity-stable (``sub`` = account,
     ``chat_agent_id`` = agent, no ``is_admin``, no ``internal``), so nothing per-turn
     needs to mutate it. Removing the re-stamp limb eliminates the cross-thread race
-    where an in-flight session re-reads its shared vault credential mid-turn (A3).
+    where an in-flight session re-reads its shared vault credential mid-turn.
     The one-time legacy upgrade is an exception: an active session may observe
     the new chat identity during the upgrade. Subsequent warm calls stay stable.
 

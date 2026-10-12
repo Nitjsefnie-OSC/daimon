@@ -202,7 +202,7 @@ async def _is_live_environment(client: AsyncAnthropic, env_id: str, tenant_id: u
         if err.status_code in (400, 404):
             return False
         raise
-    # Same ownership check as _is_live_agent (issue #198).
+    # Same ownership check as _is_live_agent.
     return obj.archived_at is None and obj.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
 
 

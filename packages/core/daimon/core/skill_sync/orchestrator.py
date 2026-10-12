@@ -21,7 +21,7 @@ boundary records in `report.failed_uploads`.
 
 Recovery namespace check: before pushing a version onto a recovered skill, we
 verify the recovered skill's display_title carries this tenant's prefix
-(see #138). If it does not, the push is refused with a `DefaultsError`.
+. If it does not, the push is refused with a `DefaultsError`.
 
 Final step attaches uploaded skills (and any pre-existing user_skills rows)
 onto the MA agent via `client.beta.agents.update(agent_id, skills=...)`.
@@ -633,7 +633,7 @@ async def sync_agent_skills(
             fallback_pat=None,
         )
 
-    # CR-01: user_skills is a per-AGENT ledger, not a per-user one. Both the panel
+    # user_skills is a per-AGENT ledger, not a per-user one. Both the panel
     # sync (Discord-user account principal) and the webhook resync (synthetic webhook
     # principal) target the SAME (tenant, agent). Keying the ledger on the agent's
     # stable derived identity makes both paths share one ledger — so dedup and
@@ -844,8 +844,7 @@ async def sync_agent_skills(
         report.deleted += 1
 
     # 5. Attach step: patch agent.skills to (existing ∪ user_skill anthropic_ids).
-    # Fixes #40 — the Discord Add Skill modal previously uploaded skills but
-    # never bound them to the agent.
+    # Bind uploaded skills to the agent so they are available to its turns.
     #
     # Short-circuit when there are no tracked user_skills for this agent: the
     # union with [] equals on-MA state by construction, so neither the agent
@@ -898,7 +897,7 @@ async def sync_agent_skills(
 
     # Retry closure: recomputes skills union from `fresh` so a concurrent update
     # doesn't cause us to clobber a skill added between our initial read and now
-    # (#144-2). `row_ids` (DB state) stays outside the closure — it doesn't change.
+    # `row_ids` (DB state) stays outside the closure — it doesn't change.
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         if target_ma_agent_id is not None and (
             fresh.archived_at is not None
@@ -923,7 +922,7 @@ async def sync_agent_skills(
         if collision is not None:
             raise DefaultsError(collision)
 
-        # #141 guard: if the agent lacks a base agent_toolset, attach it now so
+        # If the agent lacks a base agent_toolset, attach it now so
         # skills remain usable. MA rejects session creation on an agent with skills
         # but no agent_toolset_20260401 entry providing the read tool.
         has_base_toolset = any(
