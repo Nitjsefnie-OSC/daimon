@@ -947,15 +947,23 @@ outside the selected tenant. Chat has no force.
 Deleting and attaching are serialized per skill
 (`packages/core/daimon/core/skills/reference_lock.py`): a delete takes a
 Postgres advisory lock on the skill id exclusively and holds it from its final
-reference check through the provider delete (`delete_skill_unless_attached`,
-used by the CLI, MCP, the defaults sweep and the skills backfill). Every path
-that adds a skill reference takes the same lock shared and checks the skill
-still exists before writing: a channel rule (`add_skill_to_channel`, held until
-the row commits), and an agent update that adds a skill
-(`guarded_agent_update`: skill add, repo sync attach, the skill-repo credential
-forms, `update_agent`, and fork). An attach that waited for a delete is refused
-("was deleted just now"); a delete that waited for an attach sees the new
-reference. If a session is still
+reference check through the provider delete (`delete_skill_unless_attached`).
+Every delete goes through it: the CLI, MCP, the defaults sweep, the defaults
+duplicate cleanup (a same-title duplicate still in use is kept), the skill-repo
+sync's orphan cleanup (the synced agent's own pin is retired with the skill;
+any other agent or channel rule keeps the skill and its registry row), and the
+skills backfill. Every write that adds a skill reference takes the same lock
+shared and checks the skill still exists first: a channel rule
+(`add_skill_to_channel`, held until the row commits) and any agent create or
+update that adds a skill (`guarded_agent_update` / `skill_attach_guard`: skill
+add, repo sync attach, the skill-repo credential forms, `update_agent`, fork,
+`reconcile_agent` — defaults, `daimon agents create`/`update`, the panels and
+`create_agent` — the report reader variant, and the backfill re-pin).
+`reconcile_agent` and `ensure_reader_variant` take the lock scope as a
+required argument; the defaults reconcile passes its own lock session. An
+attach that waited for a delete is refused ("was deleted just now"; a reader
+variant is rebuilt once from its source as it is now); a delete that waited for
+an attach sees the new reference. If a session is still
 refused for a missing skill (`Could not resolve one or more skills`),
 `create_session` raises `SkillUnavailable`, a `UserFacingError` that names the
 skill and says to remove it from the agent or channel, instead of the generic

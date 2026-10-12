@@ -470,14 +470,14 @@ async def delete_skill(
     if preview and not force:
         raise _refusal(preview)
     question = f"delete skill {name!r} in {tenant_label}?"
-    if preview:
+    if force:
         agents_out, channels_out = preview.outside(tenant_id)
         # --tenant/--guild picks the skill's namespace; references are workspace-wide.
         question = (
             f"delete skill {name!r} in {tenant_label} and first detach it from "
             f"{len(preview.agents)} agent(s) and {len(preview.channels)} channel rule(s) "
             f"across ALL tenants ({agents_out} agent(s) and {channels_out} channel rule(s) "
-            f"outside {tenant_label})?"
+            f"outside {tenant_label}), plus any attached before the delete runs?"
         )
     confirm_or_abort(console, question, yes=yes)
     async with rt.sessionmaker() as session, session.begin():

@@ -81,6 +81,7 @@ from daimon.core.skill_sync.fetcher import (
     TarballTooLarge,
 )
 from daimon.core.skill_zip import canonical_zip_bytes
+from daimon.core.skills.attachments import delete_skill_unless_attached
 from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.specs import SkillRepo, merge_default_agent_toolset
 from daimon.core.stores.agent_repo_binding import get_tenant_repo_proof_kind
@@ -770,17 +771,37 @@ async def sync_agent_skills(
             principal_id=ledger_principal_id,
             agent_name=agent_name,
         )
-    for row in existing_rows:
-        if row.source_repo_url not in successfully_fetched:
-            continue
-        if row.name in pending:
-            continue
+    orphans = [
+        row
+        for row in existing_rows
+        if row.source_repo_url in successfully_fetched and row.name not in pending
+    ]
+    own_agent_ids: tuple[str, ...] = ()
+    if any(row.anthropic_id is not None for row in orphans):
+        owner = await _get_sync_target_agent(
+            anthropic_client=anthropic_client,
+            tenant_id=tenant_id,
+            agent_name=agent_name,
+            target_ma_agent_id=target_ma_agent_id,
+        )
+        own_agent_ids = (owner.id,) if owner is not None else ()
+    for row in orphans:
         # MA delete must succeed before the local row is removed: the row
         # intentionally survives an MA-delete failure so it is re-selected as
         # an orphan on the next sync (convergent retry, no new state).
+        # The delete runs under the skill's reference lock: this agent's own
+        # pin goes with it, but another agent or a channel rule still using
+        # the skill keeps it (and its row) so their turns don't fail.
         if row.anthropic_id is not None:
             try:
-                await anthropic_client.beta.skills.delete(row.anthropic_id)
+                async with sessionmaker() as session, session.begin():
+                    outcome = await delete_skill_unless_attached(
+                        anthropic_client,
+                        session,
+                        skill_id=row.anthropic_id,
+                        detach=False,
+                        own_agent_ids=own_agent_ids,
+                    )
             except anthropic.APIStatusError as err:
                 if err.status_code == 404:
                     # Already gone upstream — converges exactly like a
@@ -801,6 +822,16 @@ async def sync_agent_skills(
                     async with report_lock:
                         report.failed_uploads.append((row.name, str(err)))
                         report.retryable_failure |= _is_retryable_error(err)
+                    continue
+            else:
+                if not outcome.deleted:
+                    _log.info(
+                        "skill_sync.orphan_kept_in_use",
+                        name=row.name,
+                        anthropic_id=row.anthropic_id,
+                        agents=len(outcome.attachments.agents),
+                        channels=len(outcome.attachments.channels),
+                    )
                     continue
         async with sessionmaker() as session, session.begin():
             await delete_user_skill(

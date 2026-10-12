@@ -246,6 +246,9 @@ async def _reconcile_core(
                     account_id=account_id,
                     public_url=public_url,
                     skills_view=skills_view if dry_run else None,
+                    # The lock session: a second checkout could starve a
+                    # one-connection pool. A dry run writes nothing.
+                    references=skill_session,
                 ),
                 kind="agent",
                 name=spec.name,

@@ -73,21 +73,33 @@ async def lock_skills_for_attach(
             raise SkillDeletedWhileAttaching(skill_id) from err
 
 
+ReferenceScope = async_sessionmaker[AsyncSession] | AsyncSession
+"""Where an attach takes its shared lock: a sessionmaker opens a short transaction
+around the write; an open session (the defaults reconcile's lock session, so a
+one-connection pool is never checked out twice) holds it until that session's
+transaction ends."""
+
+
 @asynccontextmanager
 async def skill_attach_guard(
-    sessionmaker: async_sessionmaker[AsyncSession] | None,
+    scope: ReferenceScope | None,
     client: AsyncAnthropic,
     skill_ids: Iterable[str],
 ) -> AsyncIterator[None]:
     """Hold the shared lock on `skill_ids`, checked to exist, around a reference write.
 
-    No ids (or no database, as in the read-only defaults dry run) is a no-op.
+    No ids is a no-op. `scope=None` is only for a caller with no database
+    (unit tests); every production writer passes one.
     """
     ids = sorted(set(skill_ids))
-    if not ids or sessionmaker is None:
+    if not ids or scope is None:
         yield
         return
-    async with sessionmaker() as session, session.begin():
+    if isinstance(scope, AsyncSession):
+        await lock_skills_for_attach(scope, client, ids)
+        yield
+        return
+    async with scope() as session, session.begin():
         await lock_skills_for_attach(session, client, ids)
         yield
 
@@ -117,7 +129,7 @@ def added_custom_skill_ids(*, before: Sequence[Any], after: Iterable[Any]) -> se
 
 async def guarded_agent_update(
     client: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession] | None,
+    scope: ReferenceScope | None,
     fresh: BetaManagedAgentsAgent,
     **fields: Any,  # noqa: ANN401
 ) -> BetaManagedAgentsAgent:
@@ -127,11 +139,12 @@ async def guarded_agent_update(
     update that adds none touches no database.
     """
     added = added_custom_skill_ids(before=fresh.skills, after=fields.get("skills") or [])
-    async with skill_attach_guard(sessionmaker, client, added):
+    async with skill_attach_guard(scope, client, added):
         return await client.beta.agents.update(fresh.id, version=fresh.version, **fields)
 
 
 __all__ = [
+    "ReferenceScope",
     "SkillDeletedWhileAttaching",
     "added_custom_skill_ids",
     "guarded_agent_update",

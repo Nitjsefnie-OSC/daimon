@@ -50,6 +50,7 @@ async def test_new_agent_metadata_roundtrips_to_ma(anthropic_client: AsyncAnthro
             dry_run=False,
             account_id=ACCOUNT_ID,
             public_url=None,
+            references=None,
         )
         agents = await anthropic_client.beta.agents.list()  # pyright: ignore[reportUnknownMemberType]
         match = next((a for a in agents.data if a.name == name), None)
@@ -88,6 +89,7 @@ async def test_fork_agent_creates_distinct_ma_agents_with_same_system_prompt(
             dry_run=False,
             account_id=ACCOUNT_ID,
             public_url=None,
+            references=None,
         )
         await reconcile_agent(
             anthropic_client,
@@ -96,6 +98,7 @@ async def test_fork_agent_creates_distinct_ma_agents_with_same_system_prompt(
             dry_run=False,
             account_id=ACCOUNT_ID,
             public_url=None,
+            references=None,
         )
         agents = await anthropic_client.beta.agents.list()  # pyright: ignore[reportUnknownMemberType]
         names = {a.name for a in agents.data}
@@ -144,6 +147,7 @@ async def test_mcp_modal_path_roundtrips_after_bug_25_03_fix(
             dry_run=False,
             account_id=ACCOUNT_ID,
             public_url=None,
+            references=None,
         )
         agents = await anthropic_client.beta.agents.list()  # pyright: ignore[reportUnknownMemberType]
         match = next((a for a in agents.data if a.name == name), None)

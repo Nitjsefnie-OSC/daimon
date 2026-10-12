@@ -65,6 +65,8 @@ async def create_blank_agent(
         account_id=account_id,
         public_url=public_url,
         managed=False,
+        # A blank agent's spec names no skills, so the write adds none to lock.
+        references=None,
     )
 
 

@@ -17,6 +17,7 @@ it writes a reference, so nothing can be attached between them.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import cast
 
@@ -102,6 +103,7 @@ async def delete_skill_unless_attached(
     *,
     skill_id: str,
     detach: bool,
+    own_agent_ids: Collection[str] = (),
 ) -> GuardedDelete:
     """Delete `skill_id` unless something references it, or detach it first.
 
@@ -110,11 +112,19 @@ async def delete_skill_unless_attached(
     commit with it), then deletes every version and the skill. The lock is
     held until the caller's transaction ends, so an attach waiting on it sees
     the skill gone and refuses.
+
+    `own_agent_ids` are agents whose pin the caller is retiring with the skill
+    (a skill sync's orphan on the agent being synced): their pins are detached
+    and never refuse the delete; any other reference still does.
     """
     await lock_skill_for_delete(session, skill_id)
     attachments = await find_skill_attachments(client, session, skill_id=skill_id)
-    if attachments and not detach:
-        return GuardedDelete(deleted=False, attachments=attachments)
+    others = SkillAttachments(
+        agents=tuple(a for a in attachments.agents if a.agent_id not in own_agent_ids),
+        channels=attachments.channels,
+    )
+    if others and not detach:
+        return GuardedDelete(deleted=False, attachments=others)
     if attachments:
         await _detach_agents(client, skill_id=skill_id, attachments=attachments)
         await remove_skill_from_every_channel(session, skill_id=skill_id)

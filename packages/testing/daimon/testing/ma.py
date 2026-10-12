@@ -71,6 +71,7 @@ class NotHandled(Exception):
 
 Handler = Callable[[httpx.Request, re.Match[str]], httpx.Response]
 _SKILL_RETRIEVE = re.compile(r"/v1/skills/([^/]+)")
+_SKILL_VERSIONS = re.compile(r"/v1/skills/[^/]+/versions")
 
 
 @dataclass
@@ -135,6 +136,9 @@ class MARouter:
             if match is None:
                 continue
             return handler(request, match)
+        if request.method == "GET" and _SKILL_VERSIONS.fullmatch(request.url.path):
+            # A guarded delete lists versions before deleting; none by default.
+            return list_response([])
         skill = _SKILL_RETRIEVE.fullmatch(request.url.path)
         if request.method == "GET" and skill is not None:
             # Attach paths check a skill still exists under its reference lock
@@ -587,6 +591,13 @@ def make_fake_ma_handler(
         # create/attach; tests that need real rows layer their own handler on top)
         if method == "GET" and path == "/v1/skills":
             return httpx.Response(200, json={"data": [], "next_page": None})
+
+        # GET /v1/skills/{id}/versions — a guarded delete lists versions first
+        m = re.match(r"^/v1/skills/(?P<id>[^/]+)/versions$", path)
+        if m and method == "GET":
+            if m.group("id") in st.deleted_skills:
+                return not_found_response(f"skill {m.group('id')} not found")
+            return httpx.Response(200, json={"data": [], "has_more": False})
 
         # GET /v1/skills/{id} — retrieve: every skill exists unless marked deleted
         # (the attach paths check a skill still exists under its reference lock)

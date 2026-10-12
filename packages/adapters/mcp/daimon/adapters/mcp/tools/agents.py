@@ -498,6 +498,7 @@ async def _create_agent_impl(
         # sweep-eligible, so the next defaults apply (every boot/deploy)
         # archives them because they aren't in the seeded spec list.
         managed=False,
+        references=runtime.session_factory,
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")

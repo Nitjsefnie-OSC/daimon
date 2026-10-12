@@ -1100,3 +1100,30 @@ def test_skills_list_with_guild_override_lists_that_guilds_skills(
     assert "guild-only-skill" in with_override.stdout, (
         "--guild must resolve to that guild's tenant and list its skills"
     )
+
+
+@pytest.mark.asyncio
+async def test_skills_delete_force_with_nothing_attached_still_names_all_tenants(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #857 re-review: --force reaches references added after the preview, in any tenant."""
+    tenant_id = await _cli_tenant(db_session_factory)
+    canonical = tenant_scoped_display_title(tenant_id=tenant_id, name="my-skill")
+    deletes: list[httpx.Request] = []
+    router = _attached_delete_router(canonical, agents=[], deletes=deletes, updates=[])
+    questions: list[str] = []
+
+    def _confirm(_console: Console, question: str, *, yes: bool) -> None:
+        questions.append(question)
+
+    monkeypatch.setattr(skills_cmd, "confirm_or_abort", _confirm)
+    rt = _build_rt_with_router(db_session_factory, router)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+
+    await delete_skill(rt, console, name="my-skill", yes=False, force=True)
+
+    assert len(questions) == 1
+    assert "0 agent(s) and 0 channel rule(s) across ALL tenants" in questions[0]
+    assert "plus any attached before the delete runs" in questions[0]
+    assert len(deletes) == 1
