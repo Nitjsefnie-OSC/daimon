@@ -145,7 +145,11 @@ def interaction(user_id=123, guild=60, thread=70, card=None):
 
 
 def buttons(view):
-    return [item for item in view.walk_children() if isinstance(item, FleetControl)]
+    return [
+        item
+        for item in view.walk_children()
+        if isinstance(item, FleetControl) and item.worker_id is not None
+    ]
 
 
 def setup(provider="anthropic"):
@@ -156,7 +160,7 @@ def setup(provider="anthropic"):
     async def control(_parent, fleet, target, **kwargs):
         return {
             "run_id": str(fleet.id),
-            "worker_id": str(target.id),
+            "worker_id": str(target.id) if target is not None else None,
             "accepted": True,
             "version": kwargs["expected_version"] + 1,
             "action": kwargs["action"],
@@ -342,6 +346,54 @@ async def test_the_default_maximum_fleet_keeps_every_worker_and_control():
     assert len(buttons(view)) == 16
     assert view.total_children_count <= 40
     assert view.content_length() <= 4000
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_sixteen_workers_fit_with_all_statuses_and_run_level_controls(terminal):
+    rows = tuple(
+        worker(ordinal=index, status="succeeded" if terminal and index > 12 else "pending")
+        for index in range(1, 17)
+    )
+    view = build_fleet_view(replace(run(), max_workers=16), rows)
+    text = "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert all(f"{index}. **" in text for index in range(1, 17))
+    assert view.total_children_count <= 40
+    assert view.content_length() <= 4000
+    individual = buttons(view)
+    assert len(individual) == 24
+    expected = range(1, 13) if terminal else range(5, 17)
+    assert {item.worker_id for item in individual} == {
+        worker(ordinal=index).id for index in expected
+    }
+    all_controls = [
+        item
+        for item in view.walk_children()
+        if isinstance(item, FleetControl) and item.worker_id is None
+    ]
+    assert {item.item.label for item in all_controls} == {"Stop all", "Resume all"}
+    assert all(
+        item.run_id == RUN and item.expected_version == run().version for item in all_controls
+    )
+    assert text.count("status only") == (0 if terminal else 4)
+
+
+@pytest.mark.parametrize("action", ["kill", "resume"])
+async def test_run_level_control_uses_the_same_owner_and_run_compare_and_set(action):
+    card, owner, _, send, _ = setup()
+    await card.refresh()
+    view = send.call_args.kwargs["view"]
+    control = next(
+        item
+        for item in view.walk_children()
+        if isinstance(item, FleetControl) and item.worker_id is None and item.action == action
+    )
+    await control.callback(interaction(card=card))
+    owner.control.assert_awaited_once()
+    assert owner.control.call_args.args[2] is None
+    assert owner.control.call_args.kwargs["expected_version"] == run().version
+    assert owner.control.call_args.kwargs["operation_key"] == f"discord:fleet:{RUN}:all:2:{action}"
 
 
 @pytest.mark.parametrize("enabled", [False, True])

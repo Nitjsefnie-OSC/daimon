@@ -39,7 +39,7 @@ def _literal(value: str, limit: int) -> str:
         discord.utils.escape_markdown(value[:limit])
         .replace("@", "@\u200b")
         .replace("<#", "<\u200b#")
-    )
+    )[:limit]
 
 
 def build_fleet_view(
@@ -63,42 +63,91 @@ def build_fleet_view(
         if run.status in ("cancelled", "failed")
         else "received"
     )
-    buttons: list[CardButton] = []
-    facts: list[str] = []
-    for worker in sorted(workers, key=lambda row: row.ordinal):
-        facts.append(
-            f"{worker.ordinal}. **{_literal(worker.role, 60)}** · "
-            f"{_literal(worker.backend, 20)} / {_literal(worker.model, 40)} — "
-            f"{worker.status.replace('_', ' ')}"
-        )
-        if collected or run.status not in ("running", "collecting") or worker.status in TERMINAL:
-            continue
-        actions: tuple[tuple[Control, str], ...] = (("kill", "Stop"), ("resume", "Resume"))
-        for action, label in actions:
-            custom_id = f"fleet:{run.id.hex}:{worker.id.hex}:{worker.version}:{action}"
+    facts = tuple(
+        f"{worker.ordinal}. **{_literal(worker.role, 60)}** · "
+        f"{_literal(worker.backend, 20)} / {_literal(worker.model, 40)} — "
+        f"{worker.status.replace('_', ' ')}"
+        for worker in sorted(workers, key=lambda row: row.ordinal)
+    )
+    actions: tuple[tuple[Control, str], ...] = (("kill", "Stop"), ("resume", "Resume"))
+
+    def controls(target: str, version: int, label: str) -> tuple[CardButton, ...]:
+        result: list[CardButton] = []
+        for action, caption in actions:
+            custom_id = f"fleet:{run.id.hex}:{target}:{version}:{action}"
             if len(custom_id) > 100:
                 raise FleetRefused("invalid_control")
-
-            buttons.append(
-                CardButton(label=f"{label} {worker.ordinal}", style="primary", custom_id=custom_id)
+            result.append(
+                CardButton(label=f"{caption} {label}", style="primary", custom_id=custom_id)
             )
+        return tuple(result)
+
+    buttons = (
+        controls("all", run.version, "all")
+        if (not collected and run.status in ("running", "collecting"))
+        else ()
+    )
     card = PostedCard(
         kind="fleet",
         state=state,
         headline="Fleet — collected" if collected else f"Fleet — {run.status}",
-        facts=tuple(facts),
-        buttons=tuple(buttons),
+        facts=facts,
+        buttons=buttons,
         footer=(
             f"Budget cap ${run.total_budget_usd} · "
             f"Deadline <t:{int(run.deadline_at.timestamp())}:f>"
         ),
     )
-    return build_card_view(card, button_factory=FleetControl.from_button)
+    view = build_card_view(card, button_factory=FleetControl.from_button)
+    if not buttons:
+        return view
+    # Keep every status row. Newer active workers receive individual controls
+    # first; the run-level pair always remains available for the rest.
+    individually_controlled: set[uuid.UUID] = set()
+    for worker in sorted(workers, key=lambda row: row.ordinal, reverse=True):
+        if worker.status in TERMINAL:
+            continue
+        candidate_buttons = buttons + controls(worker.id.hex, worker.version, str(worker.ordinal))
+        try:
+            candidate = build_card_view(
+                card.model_copy(update={"buttons": candidate_buttons}),
+                button_factory=FleetControl.from_button,
+            )
+        except ValueError as error:
+            # The base card and typed control IDs are valid. Only the SDK's
+            # layout capacity may stop adding this pair; owner refusals escape.
+            if type(error) is not ValueError:
+                raise
+            break
+        view.stop()
+        view, buttons = candidate, candidate_buttons
+        individually_controlled.add(worker.id)
+    if any(
+        worker.status not in TERMINAL and worker.id not in individually_controlled
+        for worker in workers
+    ):
+        view.stop()
+        facts = tuple(
+            fact
+            + (
+                " · status only"
+                if worker.status not in TERMINAL and worker.id not in individually_controlled
+                else ""
+            )
+            for worker, fact in zip(
+                sorted(workers, key=lambda row: row.ordinal), facts, strict=True
+            )
+        )
+        return build_card_view(
+            card.model_copy(update={"buttons": buttons, "facts": facts}),
+            button_factory=FleetControl.from_button,
+        )
+    return view
 
 
 class FleetControl(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.LayoutView]],
-    template=r"fleet:(?P<run>[0-9a-f]{32}):(?P<worker>[0-9a-f]{32}):(?P<version>[0-9]+):(?P<action>kill|resume)",
+    template=r"fleet:(?P<run>[0-9a-f]{32}):(?P<worker>all|[0-9a-f]{32}):(?P<version>[0-9]+):(?P<action>kill|resume)",
 ):
     """The same durable, host-reconstructed control for live and restarted clients."""
 
@@ -108,7 +157,7 @@ class FleetControl(
         if match is None:
             raise FleetRefused("invalid_control")
         self.run_id = uuid.UUID(hex=match["run"])
-        self.worker_id = uuid.UUID(hex=match["worker"])
+        self.worker_id = None if match["worker"] == "all" else uuid.UUID(hex=match["worker"])
         self.expected_version = int(match["version"])
         self.action: Control = cast(Control, match["action"])
 
@@ -247,7 +296,7 @@ class DiscordFleetCard:
         self,
         interaction: discord.Interaction,
         *,
-        worker_id: uuid.UUID,
+        worker_id: uuid.UUID | None,
         action: Control,
         expected_version: int,
     ) -> bool:
@@ -261,7 +310,10 @@ class DiscordFleetCard:
                     worker_id=worker_id,
                     action=action,
                     expected_version=expected_version,
-                    operation_key=f"discord:fleet:{self._run_id}:{worker_id}:{expected_version}:{action}",
+                    operation_key=(
+                        f"discord:fleet:{self._run_id}:{worker_id or 'all'}:"
+                        f"{expected_version}:{action}"
+                    ),
                     now=self._clock(),
                 )
                 if reply.get("accepted") is not True:
