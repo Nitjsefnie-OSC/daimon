@@ -2140,6 +2140,16 @@ and chat-agent callers cannot use the direct write: chat changes go through
 the separate admin-confirmation flow. Disabled settings leave the default tool
 registry and setup controls unchanged.
 
+Backend selection discovery is deferred until the CLI agent command group is
+used. Unrelated help and version commands do not parse turn settings. Default
+tenant policy JSON retains its legacy shape; an explicitly configured backend
+allowlist is included in the output. The existing direct `set_agent_backend`
+MCP tool accepts `preview_only=true` to return compatibility and cost information
+with `applied=false`, without changing a setting. Chat credentials use the
+existing confirmation flow. Admin Details omit unavailable backend controls,
+and stale selections refuse without applying a change. Clear previews and their
+labels derive from the shared default backend.
+
 ### Output delivery pagination
 
 Delivery follows every Files API page through the authorized output port, so

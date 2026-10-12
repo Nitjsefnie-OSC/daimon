@@ -21,11 +21,13 @@ import pytest
 from daimon.adapters.cli.commands import agents as cli
 from daimon.adapters.cli.tenant import TenantSelector
 from daimon.adapters.discord.agent_setup import details_view as dv
+from daimon.adapters.discord.agent_setup import hydrate as dh
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools import agents as mcp_agents
 from daimon.adapters.slack.agent_setup import actions as sa
 from daimon.adapters.slack.agent_setup import panel_views as sv
+from daimon.adapters.slack.agent_setup.actions import load_details_view as read_slack_details
 from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
     decode_panel_metadata,
@@ -55,6 +57,7 @@ from daimon.testing.ma_models import ma_agent
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from mux.contracts.config import DEFAULT_BACKEND
 from pydantic import BaseModel
 from rich.console import Console
 from slack_sdk.errors import SlackApiError
@@ -94,6 +97,10 @@ class Refused(DaimonError):
 
 
 class Factory:
+    @asynccontextmanager
+    async def __call__(self):
+        yield object()
+
     def __init__(self):
         self.begins = 0
 
@@ -118,12 +125,15 @@ def seam(monkeypatch):
         configuration_digest="current",
         model="claude-opus-5-5",
     )
-    service = SimpleNamespace()
-    service.preview = AsyncMock(side_effect=lambda actual, target: Preview(target_backend=target))
+    service = SimpleNamespace(enabled=True, _sessions=factory)
+    service.preview = AsyncMock(
+        side_effect=lambda actual, target: Preview(target_backend=target or DEFAULT_BACKEND)
+    )
     service.current = AsyncMock(return_value=None)
     service.tenant_policy = AsyncMock(
         return_value=SimpleNamespace(enabled_backends=("anthropic", "openai"))
     )
+    service.read_selection = cb.AgentBackendService.read_selection.__get__(service)
     service.refused = None
 
     async def change(actual, target, local, actor, *, expected_preview_digest):
@@ -772,7 +782,7 @@ async def test_missing_actual_sdk_agent_is_a_typed_mcp_refusal(persisted):
 
 
 def cli_registration_probe(tmp_path, *, path, enabled):
-    # A fresh process witnesses import-time registration, with no ambient settings
+    # A fresh process witnesses the public command tree, with no ambient settings
     # or local .env. Help needs neither a database nor provider credentials.
     env = {"PATH": os.defpath, "LANG": "C.UTF-8", "COLUMNS": "80", "LINES": "24"}
     if path is not None:
@@ -780,15 +790,20 @@ def cli_registration_probe(tmp_path, *, path, enabled):
     if enabled is not None:
         env["DAIMON_TURN__CHANNEL_BACKENDS"] = enabled
     program = """
+import click
 import json
 from daimon.adapters.cli.commands.agents import agents_app
 from daimon.adapters.cli.main import app
+from typer.main import get_command
 from typer.testing import CliRunner
 runner = CliRunner()
 help_result = runner.invoke(agents_app, ["--help"])
 backend_result = runner.invoke(agents_app, ["backend", "--help"])
 root_result = runner.invoke(app, ["agents", "--help"])
-print(json.dumps({"groups": [group.name for group in agents_app.registered_groups],
+command = get_command(agents_app)
+context = click.Context(command)
+print(json.dumps({"groups": [name for name in command.list_commands(context)
+    if isinstance(command.get_command(context, name), click.Group)],
     "help": help_result.stdout, "exit": help_result.exit_code,
     "backend_help": backend_result.stdout, "backend_exit": backend_result.exit_code,
     "root_help": root_result.stdout, "root_exit": root_result.exit_code}))
@@ -828,3 +843,234 @@ def test_enabled_cli_registers_backend_set_clear_once(tmp_path):
     assert actual["groups"] == ["rule", "backend"]
     assert "backend" in actual["help"] and "backend" in actual["root_help"]
     assert "set" in actual["backend_help"] and "clear" in actual["backend_help"]
+
+
+@pytest.mark.parametrize(
+    "arguments", [["--help"], ["version"], ["run", "--help"], ["help", "agents"]]
+)
+def test_unrelated_cli_commands_do_not_parse_malformed_turn_settings(tmp_path, arguments):
+    program = """
+import json, sys
+from daimon.adapters.cli.main import app
+from typer.testing import CliRunner
+result = CliRunner().invoke(app, json.loads(sys.argv[1]))
+print(json.dumps({"exit": result.exit_code, "output": result.output,
+                  "exception": repr(result.exception)}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(arguments)],
+        cwd=tmp_path,
+        env={"PATH": os.defpath, "DAIMON_TURN__CHANNEL_BACKENDS": "not-a-boolean"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    actual = json.loads(result.stdout)
+    assert actual["exit"] == 0, actual
+    assert actual["output"].strip()
+    assert "ValidationError" not in actual["exception"]
+
+
+@pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini", None])
+async def test_direct_mcp_preview_only_reads_without_mutation_or_source_reread(seam, backend):
+    auth = AuthIdentity(account_id=ACCOUNT, tenant_id=TENANT, role=Role.ADMIN, is_admin=True)
+    result = await mcp_agents._set_agent_backend_impl(
+        seam.runtime,
+        auth,
+        "analyst",
+        backend=backend,
+        preview_only=True,
+    )
+    assert result["applied"] is False
+    assert result["preview"]["target_backend"] == (backend or "anthropic")
+    assert "revision" not in result
+    assert seam.loader.await_count == 1
+    assert seam.calls == []
+    seam.service.set_backend.assert_not_awaited()
+    seam.service.clear_backend.assert_not_awaited()
+
+
+@pytest.mark.parametrize("context", ["chat_agent_id", "slack_turn_context_id"])
+@pytest.mark.parametrize("preview_only", [False, True])
+async def test_direct_mcp_refuses_each_chat_credential_before_any_lookup(
+    seam, context, preview_only
+):
+    auth = AuthIdentity(
+        account_id=ACCOUNT,
+        tenant_id=TENANT,
+        role=Role.ADMIN,
+        is_admin=True,
+        **{context: uuid.uuid4()},
+    )
+    with pytest.raises(ToolError, match="request_agent_backend_switch"):
+        await mcp_agents._set_agent_backend_impl(
+            seam.runtime,
+            auth,
+            "analyst",
+            backend="openai",
+            preview_only=preview_only,
+        )
+    seam.loader.assert_not_awaited()
+    assert seam.calls == []
+
+
+async def test_discord_stale_selection_refuses_without_losing_details(seam):
+    seam.service.read_selection = AsyncMock(return_value=None)
+    view = discord_view(seam)
+    selected = SimpleNamespace(values=["openai"])
+    event = interaction()
+    view.swap_to = AsyncMock()
+    await view._on_backend_select(event, select=selected)
+    event.followup.send.assert_awaited_once()
+    assert "unavailable" in event.followup.send.await_args.args[0]
+    view.swap_to.assert_not_awaited()
+    assert seam.calls == []
+
+
+async def test_slack_stale_selection_refuses_without_mutating_or_replacing_modal(seam):
+    seam.service.read_selection = AsyncMock(return_value=None)
+    client = SimpleNamespace(views_update=AsyncMock())
+    await slack_dispatch(
+        seam,
+        client,
+        action_id=sv.ACTION_BACKEND_SELECT,
+        action={"selected_option": {"value": "openai"}},
+        meta=PanelMetadata(
+            team_id="T1",
+            channel_id="C1",
+            agent_name="analyst",
+            view="details",
+        ),
+    )
+    client.views_update.assert_not_awaited()
+    sa.post_ephemeral.assert_awaited_once()
+    assert "unavailable" in sa.post_ephemeral.await_args.kwargs["text"]
+    assert seam.calls == []
+
+
+async def test_teams_stale_selection_returns_toast_without_mutation(seam, monkeypatch):
+    seam.service.read_selection = AsyncMock(return_value=None)
+    actor = Actor(user_id="admin", tenant_id=TENANT, is_admin=True, conversation_id="conversation")
+    monkeypatch.setattr(tp, "card_actor", AsyncMock(return_value=actor))
+    ctx = SimpleNamespace(
+        activity=SimpleNamespace(
+            value=SimpleNamespace(
+                action=SimpleNamespace(
+                    data={"op": "backend_preview", "agent": "analyst", "model_backend": "openai"},
+                )
+            )
+        )
+    )
+    response = await tp.SetupPanel(seam.runtime)._act(ctx)
+    assert "unavailable" in str(response)
+    assert seam.calls == []
+
+
+async def test_details_hydration_hides_unavailable_backend_controls(seam, monkeypatch):
+    seam.service.read_selection = AsyncMock(return_value=None)
+    seam.settings.github = SimpleNamespace(fallback_pat=None, app_id=None, app_private_key=None)
+    seam.settings.mcp = SimpleNamespace(public_url=None, jwt_secret=None)
+    for module in (dh, sa):
+        monkeypatch.setattr(module, "identity_enabled_for", lambda *a: False)
+    monkeypatch.setattr(dh, "load_agent_details", AsyncMock(return_value=details()))
+    state = PanelState(
+        roster=[],
+        selected=None,
+        account_id=ACCOUNT,
+        guild_id=2001,
+        is_admin=True,
+        backend_options=("openai",),
+    )
+    actual = await dh.load_details_for(
+        seam.runtime,
+        state=state,
+        agent=SimpleNamespace(
+            name="analyst",
+            ma_agent_id="ag_analyst",
+        ),
+    )
+    assert actual.name == "analyst"
+    assert state.backend_options == () and state.backend_selection is None
+    monkeypatch.setattr(sa, "load_panel_roster", AsyncMock(return_value=object()))
+    monkeypatch.setattr(sa, "load_panel_details", AsyncMock(return_value=details()))
+    monkeypatch.setattr(sa, "resolve_attributions", AsyncMock(return_value={}))
+    monkeypatch.setattr(sa, "coding_tools_available", lambda *a: False)
+    modal = await read_slack_details(
+        seam.runtime,
+        tenant_id=TENANT,
+        meta=PanelMetadata(team_id="T1", channel_id="C1", agent_name="analyst", view="details"),
+        agent_name="analyst",
+        is_admin=True,
+    )
+    assert modal is not None and "analyst" in str(modal)
+    assert sv.ACTION_BACKEND_SELECT not in str(modal)
+    panel = tp.SetupPanel(seam.runtime)
+    panel._roster = AsyncMock(
+        return_value=SimpleNamespace(
+            rows=[
+                SimpleNamespace(
+                    name="analyst",
+                    ma_agent_id="ag_analyst",
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr(tp, "load_agent_details", AsyncMock(return_value=details()))
+    monkeypatch.setattr(tp, "load_grants_panel", AsyncMock(return_value=None))
+    actor = Actor(user_id="admin", tenant_id=TENANT, is_admin=True, conversation_id="conversation")
+    card = await panel._details(actor, "analyst", 0)
+    assert card is not None and "analyst" in card.model_dump_json()
+    assert "model_backend" not in card.model_dump_json()
+    assert seam.calls == []
+
+
+async def test_missing_sdk_source_is_absent_selection_with_no_write(persisted):
+    trace = ScriptedTransport()
+    trace.queue(ScriptedReply("GET", "/v1/agents", list_response([])))
+    async with trace.client() as client:
+        result = await persisted.service.read_selection(
+            client, tenant_id=persisted.tenant.id, agent_name="missing"
+        )
+    assert result is None
+    assert not trace.replies and not trace.violations
+    async with persisted.sessions() as session:
+        rows = await security_audit.list_events(session, tenant_id=persisted.tenant.id)
+    assert [row.operation for row in rows] == ["allowlist"]
+
+
+@pytest.mark.parametrize("typed", [True, False])
+async def test_selection_read_swallows_only_typed_preview_refusal(persisted, typed):
+    trace = ScriptedTransport()
+    replies(trace, persisted.native, 1)
+    error = (
+        cb.AgentBackendRefused("preview_unavailable") if typed else RuntimeError("renderer broke")
+    )
+
+    def unavailable(*a):
+        raise error
+
+    service = cb.AgentBackendService(persisted.sessions, enabled=True, cost_line=unavailable)
+    async with trace.client() as client:
+        if typed:
+            assert (
+                await service.read_selection(
+                    client, tenant_id=persisted.tenant.id, agent_name="analyst"
+                )
+                is None
+            )
+        else:
+            with pytest.raises(RuntimeError) as caught:
+                await service.read_selection(
+                    client, tenant_id=persisted.tenant.id, agent_name="analyst"
+                )
+            assert caught.value is error
+    assert not trace.replies and not trace.violations
+
+
+async def test_disabled_selection_read_does_not_touch_client_or_database():
+    def refuse(*a, **kw):
+        raise AssertionError("disabled selection tried IO")
+
+    service = cb.AgentBackendService(refuse, enabled=False)
+    assert await service.read_selection(object(), tenant_id=TENANT, agent_name="analyst") is None

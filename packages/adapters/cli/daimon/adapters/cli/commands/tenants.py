@@ -386,7 +386,12 @@ def _print_policy(
     console: Console, *, label: str, policy: TenantAccessPolicy, as_json: bool
 ) -> None:
     if as_json:
-        console.print_json(policy.model_dump_json())
+        exclude = (
+            {"enabled_backends"}
+            if policy.enabled_backends == OPEN_ACCESS_POLICY.enabled_backends
+            else None
+        )
+        console.print_json(policy.model_dump_json(exclude=exclude))
         return
     if policy == OPEN_ACCESS_POLICY:
         console.print(f"{label} access policy: open (anyone may invoke; no rules)")

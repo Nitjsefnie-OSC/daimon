@@ -509,7 +509,7 @@
         ],
         "schemas": {
           "path": "fixtures/mcp-tools.json",
-          "sha256": "5dfa90fab93e1471d8ffa4a4713597f131a112c9256cc63acba60a3b23913c55"
+          "sha256": "0ad9cb3ef59e4f67e8ad6f6c10f96270db742d3d09ef140624c75c6cb5883270"
         },
         "auth_commit": "9cf23f6c1eaf1d269ed9cab3f281ddd0cc9a6b82",
         "auth_source": {
@@ -751,7 +751,7 @@
         ],
         "schemas": {
           "path": "fixtures/mcp-tools.json",
-          "sha256": "5dfa90fab93e1471d8ffa4a4713597f131a112c9256cc63acba60a3b23913c55"
+          "sha256": "0ad9cb3ef59e4f67e8ad6f6c10f96270db742d3d09ef140624c75c6cb5883270"
         },
         "auth_commit": "9cf23f6c1eaf1d269ed9cab3f281ddd0cc9a6b82",
         "auth_source": {

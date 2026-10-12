@@ -476,7 +476,7 @@ class DetailsView(PanelViewBase):
                 placeholder="Model backend",
                 options=[
                     discord.SelectOption(
-                        label="Use default (Anthropic)",
+                        label=channel_backend.DEFAULT_BACKEND_LABEL,
                         value="clear",
                         default=state.backend_selection is None,
                     ),
@@ -552,17 +552,23 @@ class DetailsView(PanelViewBase):
         service = channel_backend.make_backend_service(
             self.runtime.sessionmaker, self.runtime.settings.turn
         )
-        agent = await channel_backend.load_backend_agent(
-            self.runtime.anthropic,
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            agent_name=self.details.name,
-        )
         clear = select.values[0] == "clear"
         target = BackendConfig.model_validate(
             {"backend": None if clear else select.values[0]}
         ).backend
-        preview = await service.preview(agent, target or "anthropic")
+        selection = await service.read_selection(
+            self.runtime.anthropic,
+            tenant_id=tenant_id,
+            agent_name=self.details.name,
+            target_backend=target,
+        )
+        if selection is None:
+            await self._backend_audit(interaction, outcome="denied", reason="selection_unavailable")
+            await interaction.followup.send(
+                "Model backend preview is unavailable. Nothing was changed.", ephemeral=True
+            )
+            return
+        preview = selection.preview
         await self.swap_to(
             interaction,
             DetailsView(
@@ -596,12 +602,6 @@ class DetailsView(PanelViewBase):
         service = channel_backend.make_backend_service(
             self.runtime.sessionmaker, self.runtime.settings.turn
         )
-        agent = await channel_backend.load_backend_agent(
-            self.runtime.anthropic,
-            self.runtime.sessionmaker,
-            tenant_id=preview.tenant_id,
-            agent_name=self.details.name,
-        )
         actor = channel_backend.BackendActor(
             tenant_id=preview.tenant_id,
             account_id=self.state.account_id,
@@ -611,6 +611,12 @@ class DetailsView(PanelViewBase):
             ),
         )
         try:
+            agent = await channel_backend.load_backend_agent(
+                self.runtime.anthropic,
+                self.runtime.sessionmaker,
+                tenant_id=preview.tenant_id,
+                agent_name=self.details.name,
+            )
             if self.backend_clear:
                 revision = await service.clear_backend(
                     agent, preview.setting_revision, actor, expected_preview_digest=preview.digest

@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Final
 
+import click
 import typer
 from daimon.adapters.cli.commands.channels import agent_rule_app
 from daimon.adapters.cli.errors import run_cli
@@ -61,12 +62,30 @@ from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.tenants import list_tenants_by_platform
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
+from typer.core import TyperGroup
 
-agents_app = typer.Typer(help="Agents: create, list, get, update, archive, fork, rule.")
+
+class AgentCommands(TyperGroup):
+    """Discover optional commands only when the agent group is used."""
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        commands = super().list_commands(ctx)
+        if not channel_backend.backend_selection_enabled(load_turn_settings()):
+            commands.remove("backend")
+        return commands
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name == "backend" and cmd_name not in self.list_commands(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+agents_app = typer.Typer(
+    help="Agents: create, list, get, update, archive, fork, rule.", cls=AgentCommands
+)
 agents_app.add_typer(agent_rule_app, name="rule")
 backend_app = typer.Typer(help="Set or clear an agent's model backend.")
-if channel_backend.backend_selection_enabled(load_turn_settings()):
-    agents_app.add_typer(backend_app, name="backend")
+agents_app.add_typer(backend_app, name="backend")
 
 
 @agents_app.callback()
@@ -598,7 +617,7 @@ async def agents_backend_change(
     agent = await channel_backend.load_backend_agent(
         rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
     )
-    preview = await service.preview(agent, target or "anthropic")
+    preview = await service.preview(agent, target)
     preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
     if not as_json:
         console.print(f"Model backend: {preview.target_backend}", markup=False)

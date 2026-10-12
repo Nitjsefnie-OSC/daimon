@@ -690,3 +690,10 @@ async def test_name_only_and_foreign_identity_requests_refuse_before_database_re
     )
     with pytest.raises(AgentBackendRefused, match="tenant mismatch"):
         await resolve_turn_backend(NoDatabase(), channel, foreign, enabled=True)
+
+
+async def test_clear_preview_uses_the_same_default_and_digest(owned):
+    service, agent, _, _ = owned
+    from mux.contracts.config import DEFAULT_BACKEND
+
+    assert await service.preview(agent, None) == await service.preview(agent, DEFAULT_BACKEND)

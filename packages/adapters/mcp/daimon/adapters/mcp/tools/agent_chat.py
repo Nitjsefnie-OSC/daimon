@@ -354,7 +354,7 @@ _CHAT_TURN_REFUSED = (
 )
 
 
-def _require_outside_chat_turn(auth: AuthIdentity) -> None:
+def require_outside_chat_turn(auth: AuthIdentity) -> None:
     """Refuse agent-chat turns driven by a chat turn's own credential.
 
     These tools are for headless callers (agent keys, the hub), which run
@@ -471,14 +471,14 @@ async def _start_turn_impl(
     sealed when the channel is, with read-only memory unless the agent is that
     isolated channel's own.
 
-    A chat turn's own credential is refused (``_require_outside_chat_turn``).
+    A chat turn's own credential is refused (``require_outside_chat_turn``).
 
     ``recheck`` (``_ctx._admission_recheck``) runs the access decision again
     immediately before the session is created and again before the message
     is sent, so a pin or allowlist change saved during the lookups above
     stops the turn rather than only the next one.
     """
-    _require_outside_chat_turn(auth)
+    require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
     billing_exempt: ExemptReason | None = (
         "mcp-internal-caller" if auth.platform_user_id is None else None
@@ -639,7 +639,7 @@ async def _continue_turn_impl(
     send (see ``_start_turn_impl`` for why the echo's own timestamp isn't
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation, WR-03). A
-    chat turn's own credential is refused (``_require_outside_chat_turn``).
+    chat turn's own credential is refused (``require_outside_chat_turn``).
     ``recheck`` runs the access decision again immediately before the send.
 
     A channel-bound key's channel sealed since the session opened refuses the
@@ -647,7 +647,7 @@ async def _continue_turn_impl(
     so sealed messages would outlive an unseal (`_bound_seal`). The session's
     own budget channel, which a billed follow-up is charged to, is gated too.
     """
-    _require_outside_chat_turn(auth)
+    require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle

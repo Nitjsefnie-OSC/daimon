@@ -491,16 +491,14 @@ class SetupPanel:
             service = channel_backend.make_backend_service(
                 self._runtime.sessionmaker, self._runtime.settings.turn
             )
-            policy = await service.tenant_policy(actor.tenant_id)
-            actual = await channel_backend.load_backend_agent(
-                self._runtime.anthropic,
-                self._runtime.sessionmaker,
-                tenant_id=actor.tenant_id,
-                agent_name=name,
+            selection = await service.read_selection(
+                self._runtime.anthropic, tenant_id=actor.tenant_id, agent_name=name
             )
-            revision = await service.current(actual)
-            backend_options = policy.enabled_backends
-            backend_selection = revision.backend if revision is not None else None
+            if selection is not None:
+                backend_options = selection.policy.enabled_backends
+                backend_selection = (
+                    selection.revision.backend if selection.revision is not None else None
+                )
         return cards.details_card(
             details,
             here=actor.conversation_id,
@@ -543,18 +541,30 @@ class SetupPanel:
             service = channel_backend.make_backend_service(
                 self._runtime.sessionmaker, self._runtime.settings.turn
             )
-            actual = await channel_backend.load_backend_agent(
-                self._runtime.anthropic,
-                self._runtime.sessionmaker,
-                tenant_id=actor.tenant_id,
-                agent_name=name,
-            )
             choice = str(data.get("model_backend" if op == "backend_preview" else "target") or "")
             target = BackendConfig.model_validate(
                 {"backend": None if choice == "clear" else choice}
             ).backend
+            selection = await service.read_selection(
+                self._runtime.anthropic,
+                tenant_id=actor.tenant_id,
+                agent_name=name,
+                target_backend=target,
+            )
+            if selection is None:
+                await record_panel_write(
+                    self._runtime.sessionmaker,
+                    tenant_id=actor.tenant_id,
+                    platform="teams",
+                    platform_user_id=actor.user_id,
+                    op="agent_backend",
+                    outcome="denied",
+                    reason="selection_unavailable",
+                    agent_name=name,
+                )
+                return toast("Model backend preview is unavailable. Nothing was changed.")
             if op == "backend_preview":
-                preview = await service.preview(actual, target or "anthropic")
+                preview = selection.preview
                 return replace_card(
                     cards.backend_preview_card(preview, agent_name=name, clear=target is None)
                 )
@@ -568,12 +578,6 @@ class SetupPanel:
             ):
                 return toast("That preview is no longer available. Choose a model backend again.")
             account_id = await get_or_create_account(self._runtime, actor)
-            current = await channel_backend.load_backend_agent(
-                self._runtime.anthropic,
-                self._runtime.sessionmaker,
-                tenant_id=actor.tenant_id,
-                agent_name=name,
-            )
             live_actor = await card_actor(self._runtime, activity)
             if live_actor is None:
                 return toast(DENIED)
@@ -585,6 +589,12 @@ class SetupPanel:
                 ),
             )
             try:
+                current = await channel_backend.load_backend_agent(
+                    self._runtime.anthropic,
+                    self._runtime.sessionmaker,
+                    tenant_id=actor.tenant_id,
+                    agent_name=name,
+                )
                 if target is None:
                     await service.clear_backend(
                         current, local, verified, expected_preview_digest=digest

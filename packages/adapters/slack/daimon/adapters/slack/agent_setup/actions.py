@@ -726,13 +726,14 @@ async def load_details_view(
     backend_selection: Provider | None = None
     if is_admin and channel_backend.backend_selection_enabled(runtime.settings.turn):
         service = channel_backend.make_backend_service(runtime.sessionmaker, runtime.settings.turn)
-        policy = await service.tenant_policy(tenant_id)
-        agent = await channel_backend.load_backend_agent(
-            runtime.anthropic, runtime.sessionmaker, tenant_id=tenant_id, agent_name=agent_name
+        selection = await service.read_selection(
+            runtime.anthropic, tenant_id=tenant_id, agent_name=agent_name
         )
-        revision = await service.current(agent)
-        backend_options = policy.enabled_backends
-        backend_selection = revision.backend if revision is not None else None
+        if selection is not None:
+            backend_options = selection.policy.enabled_backends
+            backend_selection = (
+                selection.revision.backend if selection.revision is not None else None
+            )
     view = build_details_view(
         details,
         meta=meta.with_view("details", agent_name=agent_name),
@@ -876,16 +877,49 @@ async def _dispatch_panel_action(
                 )
             return
         service = channel_backend.make_backend_service(runtime.sessionmaker, runtime.settings.turn)
-        agent = await channel_backend.load_backend_agent(
-            runtime.anthropic, runtime.sessionmaker, tenant_id=tenant_id, agent_name=name
-        )
+        if action_id != panel_views.ACTION_BACKEND_SELECT and (
+            meta.backend_revision is None
+            or meta.backend_digest is None
+            or meta.backend_target is None
+        ):
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text="That preview is no longer available. Choose a model backend again.",
+            )
+            return
         if action_id == panel_views.ACTION_BACKEND_SELECT:
             option = cast("Mapping[str, object]", action.get("selected_option") or {})
             choice = str(option.get("value") or "")
-            target = BackendConfig.model_validate(
-                {"backend": None if choice == "clear" else choice}
-            ).backend
-            preview = await service.preview(agent, target or "anthropic")
+        else:
+            choice = meta.backend_target
+        target = BackendConfig.model_validate(
+            {"backend": None if choice == "clear" else choice}
+        ).backend
+        selection = await service.read_selection(
+            runtime.anthropic, tenant_id=tenant_id, agent_name=name, target_backend=target
+        )
+        if selection is None:
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="agent_backend",
+                outcome="denied",
+                reason="selection_unavailable",
+                agent_name=name,
+            )
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text="Model backend preview is unavailable. Nothing was changed.",
+            )
+            return
+        preview = selection.preview
+        if action_id == panel_views.ACTION_BACKEND_SELECT:
             bound = dataclasses.replace(
                 meta,
                 backend_revision=preview.setting_revision,
@@ -898,22 +932,6 @@ async def _dispatch_panel_action(
                 view=panel_views.build_backend_preview_view(preview, meta=bound),
             )
             return
-        if (
-            meta.backend_revision is None
-            or meta.backend_digest is None
-            or meta.backend_target is None
-        ):
-            await post_ephemeral(
-                client,
-                channel_id=meta.channel_id or user_id,
-                user_id=user_id,
-                text="That preview is no longer available. Choose a model backend again.",
-            )
-            return
-        target = BackendConfig.model_validate(
-            {"backend": None if meta.backend_target == "clear" else meta.backend_target}
-        ).backend
-        preview = await service.preview(agent, target or "anthropic")
         try:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
@@ -928,9 +946,6 @@ async def _dispatch_panel_action(
             principal = await get_or_create_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
             )
-        current = await channel_backend.load_backend_agent(
-            runtime.anthropic, runtime.sessionmaker, tenant_id=tenant_id, agent_name=name
-        )
         is_admin = await resolve_is_admin(client, user_id=user_id)
         actor = channel_backend.BackendActor(
             tenant_id=tenant_id,
@@ -938,10 +953,13 @@ async def _dispatch_panel_action(
             subject=build_subject(is_admin=is_admin, platform_user_id=user_id),
         )
         try:
+            current = await channel_backend.load_backend_agent(
+                runtime.anthropic, runtime.sessionmaker, tenant_id=tenant_id, agent_name=name
+            )
             if target is None:
                 await service.clear_backend(
                     current,
-                    meta.backend_revision,
+                    cast(int, meta.backend_revision),
                     actor,
                     expected_preview_digest=meta.backend_digest,
                 )
@@ -949,7 +967,7 @@ async def _dispatch_panel_action(
                 await service.set_backend(
                     current,
                     target,
-                    meta.backend_revision,
+                    cast(int, meta.backend_revision),
                     actor,
                     expected_preview_digest=meta.backend_digest,
                 )

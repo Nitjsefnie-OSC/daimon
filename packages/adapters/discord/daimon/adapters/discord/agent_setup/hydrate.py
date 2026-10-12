@@ -454,16 +454,16 @@ async def load_details_for(
             state.avatar_urls[agent.name] = identity.avatar_url
     if state.is_admin and channel_backend.backend_selection_enabled(runtime.settings.turn):
         service = channel_backend.make_backend_service(runtime.sessionmaker, runtime.settings.turn)
-        policy = await service.tenant_policy(_tenant_id(state))
-        actual = await channel_backend.load_backend_agent(
-            runtime.anthropic,
-            runtime.sessionmaker,
-            tenant_id=_tenant_id(state),
-            agent_name=agent.name,
+        state.backend_options = ()
+        state.backend_selection = None
+        selection = await service.read_selection(
+            runtime.anthropic, tenant_id=_tenant_id(state), agent_name=agent.name
         )
-        revision = await service.current(actual)
-        state.backend_options = policy.enabled_backends
-        state.backend_selection = revision.backend if revision is not None else None
+        if selection is not None:
+            state.backend_options = selection.policy.enabled_backends
+            state.backend_selection = (
+                selection.revision.backend if selection.revision is not None else None
+            )
     return details
 
 
