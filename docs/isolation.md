@@ -35,7 +35,7 @@ scope uses the same one.
 | MA session and its transcript | own | own | own | **own** | own | own, private |
 | Sandbox working files | own | own | own | **own** (one sandbox per session) | own | own |
 | Session outputs (Files API) | own | own | own | **own** (listed by session) | own | own |
-| Chat attachments | n/a | visible to channel readers | **shared**: replayed history can carry them into other callers' context | posted by the caller | n/a | not delivered |
+| Chat attachments | n/a | visible to channel readers | **shared, by design**: visible to everyone in the thread, and replayed history can carry them into other participants' agents | posted by the caller | n/a | not delivered |
 | Published notebooks | own | shared by link | shared by link | managed by the publisher; opened by anyone with the link | n/a | shared by link |
 | Agent memory (`/mnt/memory`) | own | **shared** | **shared** | **shared** | **own** (one store per agent) | shared, optionally read-only |
 | Agent keys (`.env`) | own | shared | shared | **shared** | **own** | shared |
@@ -178,6 +178,11 @@ not always carry all of them:
 Within those bounds, attachments are **per thread, by design**: the thread is
 a shared room, and the agent sees what a reader of the thread sees.
 
+**Thread files are visible to everyone in the thread, including other
+participants' agents (by design, decided 2026-10-12).** This covers files
+people attach and files Daimon delivers into the thread. A file that should
+stay with one person belongs in a DM, not a shared thread.
+
 ## Agent memory
 
 Memory is **one MA memory store per (tenant, agent)**
@@ -188,6 +193,8 @@ chat, routine and DM session of that agent
 not split by caller, thread, channel or DM. The agent is told it is "your
 persistent memory across all conversations and channels"
 (`packages/core/daimon/core/memory_resource.py:37-44`).
+
+A split is in progress: each person gets a personal store per agent beside the shared one ([PR #866](https://github.com/pymc-labs/daimon/pull/866), not yet merged). Until it ships, the single shared store described here is what runs.
 
 What varies is only whether the mount is writable
 (`packages/core/daimon/core/memory_resource.py:119`). It is read-only:
@@ -310,7 +317,12 @@ from. Details are in
 
 Per-caller sessions are always on, so two people in one thread never share an
 MA session, sandbox, transcript or output listing. These are the paths by
-which something of one person's can still reach the other's turn:
+which something of one person's can still reach the other's turn.
+
+**Thread files are visible to everyone in the thread, including other
+participants' agents (by design, decided 2026-10-12).** Paths 1 and 2 below
+are therefore intended behaviour, not a leak; the rest are listed so the
+boundary is explicit.
 
 1. **Thread history.** Each turn's context can carry the other person's
    messages, Daimon's answers to them, and fetchable URLs for files in the
@@ -338,7 +350,10 @@ which something of one person's can still reach the other's turn:
    Only listing and deleting stay with the publisher's account.
 4. **Agent memory.** Both sessions mount the same store
    (`packages/core/daimon/core/sessions.py:471-479`); what one writes the
-   other reads, in this thread and every other.
+   other reads, in this thread and every other. Memory is being split per
+   person, with a personal store per agent mounted only in that person's
+   sessions ([PR #866](https://github.com/pymc-labs/daimon/pull/866), not yet
+   merged).
 5. **Agent keys, token connectors and the repo.** Both sessions mount the
    same `.env` (`packages/core/daimon/core/sessions.py:417-425`), the same
    token MCP credentials (`packages/core/daimon/core/sessions.py:390-411`) and
@@ -384,6 +399,8 @@ These are places where the code and its own description disagree today.
 - The memory instructions ask the agent to record "user preferences"
   (`packages/core/daimon/core/memory_resource.py:37-44`) in a store every
   caller of the agent shares, without saying it is shared between people.
+  [PR #866](https://github.com/pymc-labs/daimon/pull/866) (not yet merged)
+  moves personal facts to per-person stores.
 - A tenant owns MA skills by the first 8 hex characters of its id
   (`packages/core/daimon/core/defaults/metadata.py:177`,
   `packages/core/daimon/core/defaults/metadata.py:280`), a 32-bit prefix,
