@@ -925,6 +925,22 @@ same list (`session_snapshot.session_skills`), so adding or removing one
 replaces the conversation's session on its next message. Routines, headless
 runs and MCP chat don't use them.
 
+**Deleting a skill — `packages/core/daimon/core/skills/attachments.py`.** A
+session resolves every skill its agent pins and its channel adds, so a deleted
+skill that something still names fails every turn there. `daimon skills
+delete` and the `delete_skill` MCP tool look for references first (any
+non-archived agent, since skills are workspace-wide, and every `channel_skills`
+row) and refuse while there are any, naming the agents and channels and how to
+detach. The MCP refusal names only the caller's own workspace's agents and
+channels and counts the rest. `daimon skills delete --force` detaches the skill
+from each agent (keeping their other skills at the versions they pin) and each
+channel rule, then deletes it; chat has no force. If a session is still
+refused for a missing skill (`Could not resolve one or more skills`),
+`create_session` raises `SkillUnavailable`, a `UserFacingError` that names the
+skill and says to remove it from the agent or channel, instead of the generic
+"AI service couldn't accept the request"; a replacement session re-raises it
+rather than suggesting a retry.
+
 **Skill uploads.** One skill can be added to one agent by hand
 (`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
 it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,

@@ -54,10 +54,12 @@ from daimon.core.session_preparation import (
     prepare_session_for_turn,
 )
 from daimon.core.session_snapshot import hash_env_bytes, hash_tools
+from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.stores.channel_skills import add_channel_skill
 from daimon.core.stores.domain import AccountRow, Role, TenantRow, ThreadSessionRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -168,6 +170,7 @@ class _Transport:
         self.calls: list[tuple[str, str]] = []
         self.updates: list[dict[str, Any]] = []
         self.fail_session_create = False
+        self.fail_message = "boom"
         self.retrieve_error: int | None = None
         _register(self.state, _agent())
 
@@ -210,7 +213,10 @@ class _Transport:
                     400,
                     json={
                         "type": "error",
-                        "error": {"type": "invalid_request_error", "message": "boom"},
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": self.fail_message,
+                        },
                     },
                 )
             raise NotHandled
@@ -1419,6 +1425,60 @@ async def test_a_failed_replacement_backs_off_and_leaves_the_old_session_live(
     assert transport.creates == creates_after_failure + 1, (
         "once the backoff expires the replacement is attempted again"
     )
+
+
+async def test_a_replacement_for_a_deleted_channel_skill_names_it_instead_of_retrying(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Finding #6: a channel skill that no longer exists fails the replacement.
+
+    Asking again fails the same way, so the turn is refused with copy naming
+    the skill and how to detach it, not "Ask again to retry".
+    """
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await add_channel_skill(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="chan-1",
+        skill_id="skill_gone",
+        version="1791633132940669",
+        name="qa-haiku-canary",
+        owner_agent_name=None,
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+
+    transport.fail_session_create = True
+    transport.fail_message = (
+        'Could not resolve one or more skills: skill "skill_gone" version '
+        '"1791633132940669" not found'
+    )
+    extra = (
+        BetaManagedAgentsCustomSkill(
+            type="custom", skill_id="skill_gone", version="1791633132940669"
+        ),
+    )
+    with pytest.raises(SkillUnavailable) as refused:
+        await _prepare(
+            deps,
+            replace(_admission(account=account), channel_skills=extra),
+            tenant=tenant,
+            account=account,
+        )
+
+    message = str(refused.value)
+    assert refused.value.attached_to == "channel"
+    assert '"qa-haiku-canary"' in message and "remove_channel_skill" in message
+    assert "Ask again to retry" not in message
+    still_live = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert still_live is not None and still_live.ma_session_id == first.ma_session_id
 
 
 async def test_two_concurrent_preparations_for_one_caller_create_exactly_one_session(

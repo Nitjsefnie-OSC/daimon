@@ -479,3 +479,54 @@ async def test_apply_sweeps_previously_seeded_brainstorming_skill(
     assert [o.action for o in report.skills] == [Action.DELETED], (
         "brainstorming must be swept in this migration run"
     )
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_sweep_spares_a_skill_only_a_channel_rule_adds(
+    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession], dry_run: bool
+) -> None:
+    """Finding #6: the boot sweep reads `channel_skills` and keeps a channel's skill."""
+    from daimon.core.ma_identity import derive_tenant_uuid
+    from daimon.core.stores.channel_skills import add_channel_skill
+    from daimon.testing.factories import make_tenant
+
+    tenant_id = derive_tenant_uuid(platform="cli", workspace_id="local")
+    async with db_session_factory() as s, s.begin():
+        await make_tenant(s, platform="cli", workspace_id="local", id=tenant_id)
+        await add_channel_skill(
+            s,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id="555",
+            skill_id="sk_chan",
+            version="1791633132940669",
+            name="qa-haiku-canary",
+            owner_agent_name=None,
+            actor_account_id=None,
+        )
+    title = tenant_scoped_display_title(tenant_id=tenant_id, name="qa-haiku-canary")
+    skill = SkillListResponse(
+        id="sk_chan",
+        display_title=title,
+        source="custom",
+        type="skill",
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        latest_version="1791633132940669",
+    ).model_dump(mode="json")
+    deleted: list[str] = []
+    router = _full_router(skills=[skill])
+    router.add(
+        "DELETE",
+        r"/v1/skills/([^/]+)",
+        lambda req, m: deleted.append(m.group(1)) or httpx.Response(500),
+    )
+    client = build_fake_anthropic_http(router.dispatch)
+
+    report = await apply_defaults(
+        db_session_factory, client, tmp_path, dry_run=dry_run, run_preflight=False
+    )
+
+    assert not report.is_failure(), report
+    assert [o for o in report.skills if o.action is Action.DELETED] == []
+    assert deleted == []

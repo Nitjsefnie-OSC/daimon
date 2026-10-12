@@ -37,6 +37,7 @@ from daimon.core.ma import delete_skill_and_versions
 from daimon.core.skill_sync.bundler import extract_and_bundle
 from daimon.core.skill_sync.fetcher import GitHubAuthError, GitHubTarballFetcher, GitHubUnreachable
 from daimon.core.skill_zip import build_skill_zip
+from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.stores.user_skills import list_user_skills_for_tenant, upsert_user_skill
 from pydantic import BaseModel
@@ -425,6 +426,9 @@ async def _apply_phase(
     # Recompute the org-wide referenced set AFTER all re-pins
     if legacy_to_new:
         referenced_ids = await list_referenced_skill_ids(client)
+        # A channel rule pins its skill id too; deleting it fails that channel.
+        async with sessionmaker() as session:
+            referenced_ids |= await list_channel_skill_ids(session)
         for legacy_id, new_id in legacy_to_new.items():
             if legacy_id not in referenced_ids:
                 await delete_skill_and_versions(client, legacy_id)
@@ -433,7 +437,7 @@ async def _apply_phase(
                 _log.info(
                     "skills_backfill.deferred_delete",
                     skill_id=legacy_id,
-                    reason="still referenced by at least one agent",
+                    reason="still referenced by at least one agent or channel",
                 )
                 # Mark the row as DEFERRED in the summary
                 applied = [

@@ -1,7 +1,9 @@
 """Removed-YAML detection for each resource type.
 
-Sweep reads the MA API directly (list-then-filter) with no DB reads.
-The YAML validation in apply.py is the guard against unsafe sweeps.
+Sweep reads the MA API directly (list-then-filter) with no DB reads; the one
+DB fact the skill sweep needs, which skills a channel rule adds, is read by
+the caller and passed in. The YAML validation in apply.py is the guard
+against unsafe sweeps.
 
 Per main-design 'Delete vs archive on MA':
 - Agents: MA archive only (no hard delete).
@@ -12,6 +14,7 @@ Per main-design 'Delete vs archive on MA':
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -108,6 +111,7 @@ async def sweep_removed_skills(
     present_names: set[str],
     tenant_id: uuid.UUID,
     dry_run: bool,
+    channel_skill_ids: Collection[str],
     skills_view: list[SkillListResponse] | None = None,
 ) -> list[ResourceOutcome]:
     """Delete seeded skills that belong to this tenant and are no longer in the defaults tree.
@@ -126,7 +130,10 @@ async def sweep_removed_skills(
 
     Skills passing all four filters are then spared if:
       - display_title is in present_names (still in the defaults tree), OR
-      - skill id is in referenced_skill_ids (an agent still pins it)
+      - skill id is in referenced_skill_ids (an agent still pins it), OR
+      - skill id is in channel_skill_ids (a channel rule still adds it; a
+        session in that channel resolves it, so deleting it fails every turn
+        there)
 
     A full skills.list page raises SkillsListTruncatedError BEFORE any delete
     decision; _run_sweep's existing except (APIError, DaimonError) boundary converts
@@ -157,6 +164,9 @@ async def sweep_removed_skills(
             continue
         if sk.id in referenced_skill_ids:
             _log.info("defaults.sweep_skip_referenced_skill", name=display_title, skill_id=sk.id)
+            continue
+        if sk.id in channel_skill_ids:
+            _log.info("defaults.sweep_skip_channel_skill", name=display_title, skill_id=sk.id)
             continue
         if dry_run:
             outcomes.append(

@@ -127,6 +127,11 @@ fingerprint table described below.
 tree is archived, never hard-deleted; a skill is hard-deleted. Only resources
 stamped as defaults-managed are candidates, so an operator's own agents are
 never touched.
+Skills carry no managed marker, so the skill sweep spares any skill a
+non-archived agent still pins or a channel rule (`channel_skills`) still adds;
+deleting either would fail every turn that mounts it. If the channel rules
+can't be read, the skill sweep is skipped and reported as failed rather than
+run without them.
 
 Apply is not something you only run by hand. It runs at container start and
 from the compose `init` service, and a per-tenant equivalent,

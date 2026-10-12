@@ -46,6 +46,12 @@ from daimon.core.skills.add import (
     read_local_skill,
     repo_origin,
 )
+from daimon.core.skills.attachments import (
+    SkillStillAttached,
+    detach_skill_everywhere,
+    find_skill_attachments,
+    still_attached_message,
+)
 from daimon.core.skills.ingest import SkillBundle
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.specs import SkillRepo
@@ -398,14 +404,22 @@ def skills_delete_command(
     ctx: typer.Context,
     name: str,
     yes: Annotated[bool, YES_OPTION] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Detach the skill from every agent and channel that uses it, then delete it.",
+        ),
+    ] = False,
 ) -> None:
+    """Delete a skill and all its versions; refused while an agent or channel uses it."""
     settings = load_settings()
     console = Console(highlight=False)
     selector = ctx.obj
 
     async def _with_defaults() -> None:
         async with build_runtime(settings) as rt:
-            await delete_skill(rt, console, name=name, yes=yes, selector=selector)
+            await delete_skill(rt, console, name=name, yes=yes, selector=selector, force=force)
 
     run_cli(_with_defaults(), console=console)
 
@@ -417,6 +431,7 @@ async def delete_skill(
     name: str,
     yes: bool,
     selector: TenantSelector | None = None,
+    force: bool = False,
 ) -> None:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
@@ -431,6 +446,31 @@ async def delete_skill(
     skill = await find_skill_by_display_title(rt.anthropic, canonical, on_truncation="degrade")
     if skill is None:
         raise StoreError(f"no skill named {name!r} in your account.")
+    # A skill an agent pins or a channel rule adds is resolved at every session
+    # creation there; deleting it would fail each of those turns.
+    attachments = await find_skill_attachments(rt.anthropic, rt.sessionmaker, skill_id=skill.id)
+    if attachments and not force:
+        raise SkillStillAttached(
+            still_attached_message(
+                name,
+                attachments,
+                agent_detach="remove it from each agent (the `remove_skill` chat tool)",
+                channel_detach=(
+                    "remove it from each channel with "
+                    f"`daimon channels skills remove <platform> <workspace> <channel> {name}`"
+                ),
+                force_hint="Or rerun with --force to detach it everywhere and delete it.",
+            ),
+            attachments=attachments,
+        )
+    if attachments:
+        await detach_skill_everywhere(
+            rt.anthropic, rt.sessionmaker, skill_id=skill.id, attachments=attachments
+        )
+        console.print(
+            f"detached {name!r} from {len(attachments.agents)} agent(s) and "
+            f"{len(attachments.channels)} channel rule(s)"
+        )
     await delete_skill_and_versions(rt.anthropic, skill.id)
     console.print(f"[green]✓ deleted skill {name!r}[/green]")
 

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `daimon skills delete` and the `delete_skill` chat tool refuse to delete a skill an agent or channel still uses, saying where it is attached and how to detach it. Before, the delete succeeded and every later turn for that agent or channel failed. `daimon skills delete --force` detaches it from every agent and channel first, then deletes it.
+- The defaults sweep that runs on every start no longer deletes a library skill that only a channel adds; before, every turn in that channel then failed.
+- A turn whose agent or channel still names a deleted skill now says which skill is missing and to ask an admin to remove it from the agent's or channel's skills, instead of "Daimon's AI service couldn't accept the request" or "Ask again to retry".
 - Model calls an agent made while its chat worker was down (a deploy or crash mid-turn) are now billed when the next turn in that thread ends, at the same price and once only. Previously they went unbilled unless the usage sweep was switched on.
 - When your team's Daimon credit runs out, the reply now says how to fix it: "An admin can top up with `/billing`." on Discord and Slack, and `billing` in a 1:1 chat on Teams. Before, it only said "Ask an admin to top up." without naming where.
 - A routine that posts to a channel or thread now says so there when it fails, instead of posting nothing. The notice names the routine, says what went wrong in plain words (for example "The request to the AI model failed." or "Your team's Daimon credit has run out.") and that it will try again at its next scheduled time. It is posted once when a routine starts failing, not on every failed run, and again only after a run has succeeded.

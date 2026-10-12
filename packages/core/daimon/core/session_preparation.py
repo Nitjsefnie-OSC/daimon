@@ -81,6 +81,7 @@ from daimon.core.session_update_ops import (
     SessionBusy,
     apply_update_ops,
 )
+from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind
 from daimon.core.stores.session_preparations import (
@@ -448,6 +449,10 @@ async def _run_replacement(
         if isinstance(error, AdmissionDenied | DmSourceSealedError | SessionBusyError):
             # Decided again just before the successor was created: refused or
             # deferred for a seal, not a failed preparation.
+            raise error
+        if isinstance(error, SkillUnavailable):
+            # A skill the successor mounts is gone: asking again fails the same
+            # way, so the turn says which skill to detach instead.
             raise error
         return PreparationFailure(reasons=reasons, stage=stage, retry_after=now)
 
