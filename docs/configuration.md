@@ -464,6 +464,15 @@ kept in memory, so each restart allows one more hint per thread.
 Hours before the unmentioned-reply hint may be shown again in the same thread. Kept in
 memory, so a restart allows one more.
 
+### `DAIMON_DISCORD__PROTECTED_CHANNEL_NOTICE_COOLDOWN_MIN`
+
+`float` · optional · default `10.0`
+
+Minutes before the same person is told again that Daimon can't reply in a channel whose
+Who can post rule is Nobody. Their mention gets a 🔒 reaction and a direct message naming
+the rule and who can change it; nothing else is posted and no turn runs. Kept in memory
+per person and channel, so a restart allows one more.
+
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS_PER_TENANT`
 
 `int` · optional · default `3`

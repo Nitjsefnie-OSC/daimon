@@ -42,6 +42,7 @@ from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
 )
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
+from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn_queue import TurnTicket
 from daimon.testing import (
     DEFAULT_MODEL_ID,
@@ -93,6 +94,8 @@ def _make_runtime(
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
     discord_settings.thread_open_notice_after_s = 3.0
+    discord_settings.protected_channel_notice_cooldown_min = 10.0
+    discord_settings.bot_display_name = "daimon"
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
@@ -1603,6 +1606,164 @@ class TestProtectedChannelAdmission:
         posts.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
         if not in_thread:
             message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+
+class TestProtectedChannelNotice:
+    """QA-NEW13: a mention in a Who-can-post-Nobody channel is not silent. The
+    mention gets a 🔒 reaction and the author a direct message naming the rule
+    and who can change it; nothing is posted into the channel and no turn runs.
+    Once per person per channel per cooldown."""
+
+    async def _bot_for(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy,
+    ) -> DaimonBot:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        return make_bot(_make_runtime(tenant.id, db_session_factory))
+
+    @staticmethod
+    def _protected_message(*, in_thread: bool = False, author_id: int = 111) -> Any:
+        if in_thread:
+            message: Any = _make_thread_message(parent_id=789, author_id=author_id)
+            message.channel.parent.category_id = None
+        else:
+            message = _make_channel_message(channel_id=789, author_id=author_id)
+            message.channel.category_id = None
+        message.author.send = AsyncMock()
+        return message
+
+    @pytest.mark.parametrize("in_thread", [False, True], ids=["channel", "thread-under-it"])
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_mention_gets_a_reaction_and_a_dm_but_nothing_in_the_channel(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        in_thread: bool,
+    ) -> None:
+        bot = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        message = self._protected_message(in_thread=in_thread)
+
+        await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        message.channel.send.assert_not_called()
+        if not in_thread:
+            message.create_thread.assert_not_called()
+        message.add_reaction.assert_awaited_once_with("🔒")
+        message.author.send.assert_awaited_once()
+        notice = message.author.send.await_args.args[0]
+        assert "<#789>" in notice, "the notice names the protected channel, not the thread"
+        assert "**Who can post**" in notice and "**Nobody**" in notice, "names the rule"
+        assert "server admin" in notice and "/agent-setup" in notice, "says who can change it"
+
+    async def test_the_signal_is_rate_limited_per_person_and_channel(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        first, again = self._protected_message(), self._protected_message()
+        other_person = self._protected_message(author_id=222)
+
+        for message in (first, again, other_person):
+            await bot.on_message(message)
+
+        first.add_reaction.assert_awaited_once_with("🔒")
+        first.author.send.assert_awaited_once()
+        again.add_reaction.assert_not_called()
+        again.author.send.assert_not_called()
+        other_person.add_reaction.assert_awaited_once_with("🔒")
+        other_person.author.send.assert_awaited_once()
+
+    async def test_a_closed_dm_still_leaves_the_reaction(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        message = self._protected_message()
+        message.author.send = AsyncMock(
+            side_effect=discord.Forbidden(MagicMock(status=403), "Cannot send messages")
+        )
+
+        await bot.on_message(message)
+
+        message.add_reaction.assert_awaited_once_with("🔒")
+        message.channel.send.assert_not_called()
+
+    async def test_an_unreadable_policy_gets_no_signal(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Unknown protection is not "not allowed here": stay fully silent."""
+        bot = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        message = self._protected_message()
+
+        with patch(
+            "daimon.core.turn.protection.load_access_policy",
+            new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+        ):
+            await bot.on_message(message)
+
+        message.add_reaction.assert_not_called()
+        message.author.send.assert_not_called()
+        message.channel.send.assert_not_called()
+
+    async def test_a_replayed_backlog_mention_gets_no_signal(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        message = self._protected_message()
+
+        await bot.on_message(message, startup_replay=True)
+
+        message.add_reaction.assert_not_called()
+        message.author.send.assert_not_called()
+
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_rule_set_after_the_entry_check_signals_at_admission(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """The rule can land between the entry check and admission; admission's
+        writers_none refusal gives the same quiet signal and posts nothing."""
+        bot = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        message = self._protected_message()
+
+        with patch(
+            "daimon.adapters.discord.bot._channel_protection_state",
+            new=AsyncMock(return_value=ProtectionState.UNPROTECTED),
+        ):
+            await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        message.channel.send.assert_not_called()
+        message.create_thread.assert_not_called()
+        message.add_reaction.assert_any_await("🔒")
+        message.author.send.assert_awaited_once()
 
 
 class TestProtectedChannelSilence:

@@ -458,7 +458,11 @@ thread's uncached parent is fetched for its category only when a category
 has a rule and the channel isn't already closed, and cached so
 admission doesn't fetch it again. Anything but `unprotected` drops the turn
 with only a log line, and the entries' error boundaries post only when the
-state is `unprotected`. The entries are Discord `on_message`, organic thread
+state is `unprotected`. The one exception is a Discord mention whose state is
+`protected` (at `on_message` or as admission's `writers_none` refusal): it gets
+a 🔒 reaction and a DM to its author naming the rule and who can change it,
+once per person and channel per `protected_channel_notice_cooldown_min`
+(`DaimonBot._signal_protected_channel`). `unknown` stays silent. The entries are Discord `on_message`, organic thread
 participation, wizard submit and continuation turns, and Slack
 `_handle_app_mention` (with a second check in `_orchestrate` after it claims
 the thread, and on its ephemeral shed notice), and Teams `_handle` and
