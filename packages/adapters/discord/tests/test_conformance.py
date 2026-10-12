@@ -33,9 +33,6 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
-from daimon.testing.db import db_clean as db_clean
-from daimon.testing.db import db_engine as db_engine
-from daimon.testing.db import db_schema as db_schema
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .harness import make_bot
@@ -46,9 +43,9 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.asyncio
 
-# This module needs genuinely committed rows on separate pooled connections.
-# Re-export the shared fixtures locally so its schema/pool cannot inherit an
-# unrelated test's retained transaction and block tenant provisioning in setup.
+# Use the adapter conftest's shared schema, engine and cleanup lifetimes.
+# These callbacks still need separate pooled connections and committed rows;
+# a module-local fixture alias must not replace the schema admission dependency.
 
 
 @pytest_asyncio.fixture

@@ -5,6 +5,12 @@ envelope. The application does not import it. Use a dedicated idle `DaimonBot`;
 the probe temporarily captures its mention handler and restores it on success,
 callback failure, timeout or cancellation. It never attaches to a live gateway.
 
+The conformance tests use the adapter conftest's shared schema, engine and
+cleanup fixtures. Their callback sessionmaker still opens separate pooled
+connections for committed admission rows. Re-exporting those session fixtures
+inside the test module gives pytest another schema dependency and can tear down
+an engine while another fixture still owns its transaction.
+
 `MultiHumanEnvelope` supplies the bot, tenant UUID, guild ID, channel ID, at
 least two `ThreadInputs(first, queued)` under that channel, and a `run` callback.
 The bot needs its normal gateway identity and a ready tenant in the host DB;
