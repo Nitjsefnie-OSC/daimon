@@ -18,7 +18,11 @@ from decimal import Decimal
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core.pricing import MODEL_PRICING
-from daimon.core.thread_naming import THREAD_NAMING_MODEL, suggest_thread_name
+from daimon.core.thread_naming import (
+    THREAD_NAMING_MODEL,
+    is_generic_thread_name,
+    suggest_thread_name,
+)
 from daimon.core.usage_recording import record_thread_naming_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -39,7 +43,10 @@ async def generate_thread_name(
     timeout_seconds: float,
     channel_id: str | None = None,
 ) -> str:
-    """Title from ``message_text``; ``fallback`` on failure, timeout or a blank answer.
+    """Title from ``message_text``; ``fallback`` on failure, timeout, or a blank or generic answer.
+
+    A generic answer ("Greeting", "Help request") names nothing, so the
+    fallback, built from the message itself, is the better title.
 
     Metering runs before the return: tokens were spent whatever came back.
     The usage row is keyed on the opening message id, which Discord reuses
@@ -80,6 +87,9 @@ async def generate_thread_name(
 
     if suggestion.name is None:
         log.info("thread.naming_skipped", message_id=message_id, reason="blank_answer")
+        return fallback
+    if is_generic_thread_name(suggestion.name):
+        log.info("thread.naming_skipped", message_id=message_id, reason="generic_answer")
         return fallback
     log.info("thread.named", message_id=message_id)
     return suggestion.name
