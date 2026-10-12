@@ -891,3 +891,11 @@ OpenAI host tests use the shared isolated SDK factory for direct clients and
 inject it into offline C04/component and F1 replay factories. Standalone mux
 retains a guarded default without importing host testing; injected clients
 refuse ambient provider settings again when the SDK copies them.
+
+Gemini C06/C04 round runners are separately invoked and require merged source,
+lead-pinned financial and GO documents, the isolated five-dollar primary-only
+line, and fresh evidence output before key access. Offline SDK proofs retain
+native cancel/EOF occupancy, ambiguous-delivery recovery, all fenced store
+boundaries and monotonic terminal settlement. Historical certificates and
+standard pending declarations are unchanged; see
+[money and scenario boundaries](mux/drivers/gemini/LIVE-ROUND.md).
