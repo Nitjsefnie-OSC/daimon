@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any
 
 import pytest
@@ -201,23 +202,16 @@ def _final_message(session_id: str, text: str) -> Event:
     )
 
 
-@pytest.fixture(params=["memory", "postgres"])
-async def bound(
-    request: pytest.FixtureRequest, db_session_factory: async_sessionmaker[AsyncSession]
-) -> tuple[Any, ...]:
-    """A worker's bound session and lease, on the memory store or Postgres."""
-    if request.param == "memory":
-        store: Any = MemoryStateStore()
-        run = _plain_run()
-    else:
-        store = PostgresStateStore(db_session_factory, trust_caller_clock=True)
-        run = await _run(db_session_factory)
-    worker = _status_worker("running", run_id=run.id, tenant_id=run.tenant_id)
+async def _bind(
+    store: Any, run: FleetRun, worker: FleetWorker, *, session_id: str = "sess_w0"
+) -> tuple[Any, ResourceRef, Any, str]:
+    """Bind a worker's private slot to its session and take the slot's lease."""
     slot = worker_slot(run, worker)
-    session = ResourceRef(id="sess_w0", kind="session", provider="openai", account_scope_id="p")
+    session = ResourceRef(id=session_id, kind="session", provider="openai", account_scope_id="p")
+    binding_id = f"bind_{uuid.uuid4()}"
     await store.put_binding(
         ProviderBinding(
-            id=f"bind_{uuid.uuid4()}",
+            id=binding_id,
             thread=slot.thread,
             provider="openai",
             profile="openai.persistent_workspace",
@@ -231,7 +225,23 @@ async def bound(
     lease = await store.acquire_lease(
         slot, holder="p1", turn_id="turn_1", now=NOW, ttl=timedelta(minutes=5)
     )
-    return store, worker, slot, session, lease
+    return slot, session, lease, binding_id
+
+
+@pytest.fixture(params=["memory", "postgres"])
+async def bound(
+    request: pytest.FixtureRequest, db_session_factory: async_sessionmaker[AsyncSession]
+) -> tuple[Any, ...]:
+    """A worker's bound session and lease, on the memory store or Postgres."""
+    if request.param == "memory":
+        store: Any = MemoryStateStore()
+        run = _plain_run(max_workers=2)
+    else:
+        store = PostgresStateStore(db_session_factory, trust_caller_clock=True)
+        run = await _run(db_session_factory)
+    worker = _status_worker("running", run_id=run.id, tenant_id=run.tenant_id)
+    slot, session, lease, _ = await _bind(store, run, worker)
+    return store, run, worker, slot, session, lease
 
 
 async def _successor(store: Any, slot: Any) -> Any:
@@ -246,7 +256,7 @@ async def _successor(store: Any, slot: Any) -> Any:
 async def test_a_result_after_the_turn_journaled_its_final_message_is_one_entry_of_its_own(
     bound: tuple[Any, ...],
 ) -> None:
-    store, worker, slot, session, lease = bound
+    store, run, worker, slot, session, lease = bound
     final = _final_message(session.id, "the answer")
     # The worker turn already journaled its final message under its native key.
     await store.append_events(
@@ -257,10 +267,19 @@ async def test_a_result_after_the_turn_journaled_its_final_message_is_one_entry_
         now=NOW,
     )
 
-    first = await append_result(store, session, worker, final, lease=lease, cursor="c1", now=NOW)
+    first = await append_result(
+        store, run, worker, session, final, lease=lease, cursor="c1", now=NOW
+    )
     successor = await _successor(store, slot)
     again = await append_result(
-        store, session, worker, final, lease=successor, cursor="c1", now=NOW + timedelta(minutes=6)
+        store,
+        run,
+        worker,
+        session,
+        final,
+        lease=successor,
+        cursor="c1",
+        now=NOW + timedelta(minutes=6),
     )
 
     assert again == first
@@ -273,11 +292,12 @@ async def test_a_result_after_the_turn_journaled_its_final_message_is_one_entry_
 async def test_a_successor_with_a_rebuilt_event_gets_the_stored_result(
     bound: tuple[Any, ...],
 ) -> None:
-    store, worker, slot, session, lease = bound
+    store, run, worker, slot, session, lease = bound
     first = await append_result(
         store,
-        session,
+        run,
         worker,
+        session,
         _final_message(session.id, "the answer"),
         lease=lease,
         cursor="c1",
@@ -290,8 +310,9 @@ async def test_a_successor_with_a_rebuilt_event_gets_the_stored_result(
 
     again = await append_result(
         store,
-        session,
+        run,
         worker,
+        session,
         rebuilt,
         lease=successor,
         cursor="c1",
@@ -368,11 +389,22 @@ async def test_a_worker_moves_only_along_its_transitions_under_a_version_cas(
         await fleet.mark_running(
             sm, tenant_id=tenant, worker_id=worker.id, expected_version=1, binding_id="b"
         )
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    _, session, lease, binding_id = await _bind(store, run, worker)
     running = await fleet.mark_running(
-        sm, tenant_id=tenant, worker_id=worker.id, expected_version=2, binding_id="bind_w0"
+        sm, tenant_id=tenant, worker_id=worker.id, expected_version=2, binding_id=binding_id
     )
-    assert running.binding_id == "bind_w0"
-    pointer = await _memory_result(run, running)
+    assert running.binding_id == binding_id
+    pointer = await append_result(
+        store,
+        run,
+        running,
+        session,
+        _final_message(session.id, "ok"),
+        lease=lease,
+        cursor="c",
+        now=NOW,
+    )
     done = await fleet.record_result(
         sm, tenant_id=tenant, worker_id=worker.id, expected_version=3, result=pointer
     )
@@ -387,28 +419,6 @@ async def test_a_worker_moves_only_along_its_transitions_under_a_version_cas(
                 status=status,  # type: ignore[arg-type]
                 error_code="x",
             )
-
-
-async def _memory_result(run: FleetRun, worker: FleetWorker) -> ResultPointer:
-    store = MemoryStateStore()
-    slot = worker_slot(run, worker)
-    session = ResourceRef(id="sess_w0", kind="session", provider="openai", account_scope_id="p")
-    await store.put_binding(
-        ProviderBinding(
-            id="bind_w0",
-            thread=slot.thread,
-            provider="openai",
-            profile="openai.persistent_workspace",
-            native_refs={"session": session.id},
-            generation=1,
-            config_revision=1,
-            legacy_account_id=slot.account_id,
-        ),
-        expected_generation=0,
-    )
-    lease = await store.acquire_lease(slot, holder="p", turn_id="t", now=NOW, ttl=timedelta(1))
-    event = _final_message(session.id, "ok")
-    return await append_result(store, session, worker, event, lease=lease, cursor="c", now=NOW)
 
 
 async def test_two_claims_cannot_both_win_one_worker(
@@ -752,3 +762,279 @@ async def test_a_caller_owned_transaction_commits_or_rolls_back_its_moves_togeth
     async with sm() as idle:
         with pytest.raises(FleetConflict, match="active transaction"):
             await fleet.run_status(idle, tenant_id=run.tenant_id, run_id=run.id)
+
+
+async def test_a_worker_cannot_append_with_another_workers_session_or_lease(
+    bound: tuple[Any, ...],
+) -> None:
+    store, run, worker_a, _, session_a, lease_a = bound
+    worker_b = _status_worker("running", run_id=run.id, tenant_id=run.tenant_id, ordinal=1)
+    _, session_b, lease_b, _ = await _bind(store, run, worker_b, session_id="sess_w1")
+    answer = _final_message(session_b.id, "B's answer")
+
+    with pytest.raises(FleetConflict, match="lease is not"):  # B's session and lease
+        await append_result(
+            store, run, worker_a, session_b, answer, lease=lease_b, cursor="c", now=NOW
+        )
+    with pytest.raises(FleetConflict, match="is not worker"):  # B's session, A's lease
+        await append_result(
+            store, run, worker_a, session_b, answer, lease=lease_a, cursor="c", now=NOW
+        )
+    assert await store.read_events(session_b.id) == []
+    assert await store.read_events(session_a.id) == []
+
+
+async def test_a_result_pointer_must_be_the_workers_own_journal_entry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    started: list[FleetWorker] = []
+    pointers: list[ResultPointer] = []
+    for ordinal in range(2):
+        await _worker(sm, run, ordinal)
+        claimed = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+        assert claimed is not None
+        _, session, lease, binding_id = await _bind(
+            store, run, claimed, session_id=f"sess_w{ordinal}"
+        )
+        running = await fleet.mark_running(
+            sm,
+            tenant_id=run.tenant_id,
+            worker_id=claimed.id,
+            expected_version=claimed.version,
+            binding_id=binding_id,
+        )
+        started.append(running)
+        event = _final_message(session.id, f"answer {ordinal}")
+        pointers.append(
+            await append_result(
+                store, run, running, session, event, lease=lease, cursor="c", now=NOW
+            )
+        )
+    a, b = started
+    own = pointers[0]
+    for wrong in (
+        ResultPointer(
+            session_id="sess_nowhere", sequence=0, digest=own.digest, excerpt=own.excerpt
+        ),
+        pointers[1],  # worker B's real result
+        replace(own, sequence=own.sequence + 1),
+        replace(own, digest="0" * 64),
+        replace(own, excerpt="something else"),
+    ):
+        with pytest.raises(FleetConflict):
+            await fleet.record_result(
+                sm,
+                tenant_id=run.tenant_id,
+                worker_id=a.id,
+                expected_version=a.version,
+                result=wrong,
+            )
+    _, (still, _) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert still.status == "running" and still.result is None
+
+    done = await fleet.record_result(
+        sm, tenant_id=run.tenant_id, worker_id=a.id, expected_version=a.version, result=own
+    )
+    assert done.status == "succeeded" and done.result == own
+    assert b.status == "running"
+
+
+async def test_a_lease_successor_records_the_result_its_predecessor_appended(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    await _worker(sm, run, 0)
+    claimed = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+    assert claimed is not None
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    slot, session, lease, binding_id = await _bind(store, run, claimed)
+    running = await fleet.mark_running(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=claimed.id,
+        expected_version=claimed.version,
+        binding_id=binding_id,
+    )
+    first = await append_result(
+        store,
+        run,
+        running,
+        session,
+        _final_message(session.id, "done"),
+        lease=lease,
+        cursor="c",
+        now=NOW,
+    )
+    # The first process dies before recording; its successor reconciles.
+    successor = await _successor(store, slot)
+    rebuilt = _final_message(session.id, "rebuilt").model_copy(update={"id": "ev_other"})
+    again = await append_result(
+        store,
+        run,
+        running,
+        session,
+        rebuilt,
+        lease=successor,
+        cursor="c",
+        now=NOW + timedelta(minutes=6),
+    )
+    assert again == first
+    done = await fleet.record_result(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=running.id,
+        expected_version=running.version,
+        result=again,
+    )
+    assert done.result == first
+
+
+@pytest.mark.parametrize("precision", [2, 6, 28])
+async def test_storable_amounts_do_not_depend_on_the_ambient_decimal_precision(
+    db_session_factory: async_sessionmaker[AsyncSession], precision: int
+) -> None:
+    with localcontext() as context:
+        context.prec = precision
+        run = await _run(db_session_factory, budget="3")
+        worker = await fleet.add_worker(
+            db_session_factory,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            ordinal=0,
+            role="r",
+            spec=SPEC,
+            spec_digest="d",
+            backend="openai",
+            profile="p",
+            model="m",
+            budget_usd=Decimal("2.450001"),
+            deadline_at=LATER,
+            max_turns=1,
+        )
+        assert (run.total_budget_usd, worker.budget_usd) == (Decimal(3), Decimal("2.450001"))
+        for bad in ("1.2345678", "-1", "NaN", "1000000"):
+            with pytest.raises(FleetConflict, match="not a storable"):
+                await _run(db_session_factory, budget=bad, key=f"op-{bad}")
+
+
+async def test_a_locked_status_read_holds_the_run_until_its_transaction_ends(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    run = await _run(pooled)
+    async with pooled.begin() as session:
+        await fleet.run_status(session, tenant_id=run.tenant_id, run_id=run.id, for_update=True)
+
+        async def add() -> FleetWorker:
+            return await _worker(pooled, run, 0)
+
+        adding = asyncio.create_task(add())
+        await asyncio.sleep(0.3)
+        assert not adding.done()  # add_worker waits for the run lock
+    assert (await adding).ordinal == 0
+
+
+# Reviewer counterexamples, kept as regressions
+
+
+@pytest.mark.parametrize("precision", [2, 6])
+async def test_reviewer_legal_amounts_do_not_depend_on_ambient_precision(
+    pooled: async_sessionmaker[AsyncSession], precision: int
+) -> None:
+    with localcontext() as context:
+        context.prec = precision
+        run = await _run(pooled, budget="3.123456")
+        worker = await _worker(pooled, run, 0)
+    assert run.total_budget_usd == Decimal("3.123456") and worker.budget_usd == Decimal("2")
+
+
+async def test_reviewer_a_preview_never_becomes_or_replaces_the_result(
+    bound: tuple[Any, ...],
+) -> None:
+    store, run, worker, slot, session, lease = bound
+    original = _final_message(session.id, "authoritative answer")
+    preview = original.model_copy(
+        update={
+            "authority": "preview",
+            "id": "preview-event",
+            "payload": {
+                **dict(original.payload),
+                "content": [{"type": "text", "text": "unverified draft"}],
+            },
+        }
+    )
+    with pytest.raises(FleetConflict, match="recorded event"):
+        await append_result(
+            store, run, worker, session, preview, lease=lease, cursor="preview", now=NOW
+        )
+    assert await store.read_events(session.id) == []  # refused before anything is written
+
+    final = await append_result(
+        store, run, worker, session, original, lease=lease, cursor="record", now=NOW
+    )
+    successor = await _successor(store, slot)
+    again = await append_result(
+        store,
+        run,
+        worker,
+        session,
+        original,
+        lease=successor,
+        cursor="record",
+        now=NOW + timedelta(minutes=6),
+    )
+    events = await store.read_events(session.id)
+    assert again == final and final.excerpt == "authoritative answer"
+    assert len({event.id for event in events}) == len(events)
+
+
+async def test_reviewer_a_valid_session_lease_cannot_install_another_runs_worker_result(
+    bound: tuple[Any, ...],
+) -> None:
+    store, run, worker, _, session, lease = bound
+    other = replace(worker, id=uuid.uuid4(), run_id=uuid.uuid4())
+    with pytest.raises(FleetConflict):
+        await append_result(
+            store,
+            run,
+            other,
+            session,
+            _final_message(session.id, "another worker answer"),
+            lease=lease,
+            cursor="c1",
+            now=NOW,
+        )
+    assert await store.read_events(session.id) == []
+
+
+async def test_reviewer_publication_requires_a_real_worker_journal_pointer(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    worker = await _worker(sm, run, 0)
+    claimed = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+    assert claimed and claimed.id == worker.id
+    running = await fleet.mark_running(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=worker.id,
+        expected_version=claimed.version,
+        binding_id="binding_worker",
+    )
+    with pytest.raises(FleetConflict):
+        await fleet.record_result(
+            sm,
+            tenant_id=run.tenant_id,
+            worker_id=worker.id,
+            expected_version=running.version,
+            result=ResultPointer(
+                session_id="nonexistent-foreign-session",
+                sequence=99,
+                digest="0" * 64,
+                excerpt="foreign output",
+            ),
+        )

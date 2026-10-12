@@ -21,7 +21,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Context, Decimal, InvalidOperation, localcontext
 from typing import Any, cast
 
 from daimon.core._models import FleetRun as FleetRunRow
@@ -36,6 +36,7 @@ from daimon.core.fleet import (
     ResultPointer,
     RunStatus,
     WorkerStatus,
+    check_result,
     worker_slot,
 )
 from daimon.core.stores import mux_state
@@ -47,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _ACTIVE: tuple[WorkerStatus, ...] = ("starting", "running")
 _MICRO = Decimal("0.000001")
 _MAX_AMOUNT = Decimal("999999.999999")
+_AMOUNT_PRECISION = 40  # well past Numeric(12, 6) and any input it can hold
 
 type Source = async_sessionmaker[AsyncSession] | AsyncSession
 """A sessionmaker (the call commits on its own) or a caller's session inside its
@@ -66,8 +68,14 @@ async def _transaction(source: Source) -> AsyncIterator[AsyncSession]:
 
 
 def _amount(value: Decimal) -> Decimal:
-    """An amount the columns store exactly: finite, at least 0, whole micro-dollars."""
-    if not value.is_finite() or value < 0 or value > _MAX_AMOUNT or value % _MICRO:
+    """An amount the columns store exactly: finite, at least 0, whole micro-dollars.
+
+    Checked in a local context wide enough for every storable amount, so the
+    answer never depends on the caller's ambient decimal precision.
+    """
+    with localcontext(Context(prec=_AMOUNT_PRECISION, traps=[InvalidOperation])):
+        storable = value.is_finite() and 0 <= value <= _MAX_AMOUNT and value % _MICRO == 0
+    if not storable:
         raise FleetConflict(f"{value} is not a storable fleet amount")
     return value
 
@@ -409,21 +417,48 @@ async def record_result(
     expected_version: int,
     result: ResultPointer,
 ) -> FleetWorker:
-    """`running -> succeeded`, pointing at the result already in the worker's journal."""
-    return await _move_worker(
-        sessionmaker,
-        tenant_id=tenant_id,
-        worker_id=worker_id,
-        expected_version=expected_version,
-        target="succeeded",
-        values={
-            "result_session_id": result.session_id,
-            "result_sequence": result.sequence,
-            "result_digest": result.digest,
-            "result_excerpt": result.excerpt,
-            "finished_at": func.now(),
-        },
-    )
+    """`running -> succeeded`, pointing at the result already in the worker's journal.
+
+    In the same transaction the pointer is checked against the store
+    (`check_result`): the worker's own slot binding must name its session, and
+    the entry there must be the worker's result. A pointer to another worker's
+    session, or to no entry at all, is refused and nothing changes.
+    """
+    async with _transaction(sessionmaker) as session:
+        pair = (
+            await session.execute(
+                select(FleetRunRow, FleetWorkerRow)
+                .join(
+                    FleetWorkerRow,
+                    (FleetWorkerRow.run_id == FleetRunRow.id)
+                    & (FleetWorkerRow.tenant_id == FleetRunRow.tenant_id),
+                )
+                .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.id == worker_id)
+                .with_for_update(of=FleetWorkerRow)
+            )
+        ).one_or_none()
+        if pair is None:
+            raise FleetConflict(f"no fleet worker {worker_id} in this tenant")
+        run, worker = _run(pair[0]), _worker(pair[1])
+        binding = await mux_state.get_binding(session, worker_slot(run, worker))
+        after = await mux_state.read_events(
+            session, result.session_id, after=result.sequence - 1, limit=1
+        )
+        check_result(run, worker, binding, after[0] if after else None, result)
+        return await _move_worker(
+            session,
+            tenant_id=tenant_id,
+            worker_id=worker_id,
+            expected_version=expected_version,
+            target="succeeded",
+            values={
+                "result_session_id": result.session_id,
+                "result_sequence": result.sequence,
+                "result_digest": result.digest,
+                "result_excerpt": result.excerpt,
+                "finished_at": func.now(),
+            },
+        )
 
 
 async def finish(
@@ -514,15 +549,17 @@ async def set_run_status(
 
 
 async def run_status(
-    sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID
+    sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID, for_update: bool = False
 ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:
+    """The run and its workers. With `for_update` (in the caller's transaction) the
+    run row stays locked to its commit, so a completion check cannot race
+    `add_worker` or another completion; card and status reads leave it off."""
     async with _transaction(sessionmaker) as session:
+        query = select(FleetRunRow).where(
+            FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id
+        )
         run = (
-            await session.execute(
-                select(FleetRunRow).where(
-                    FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id
-                )
-            )
+            await session.execute(query.with_for_update() if for_update else query)
         ).scalar_one_or_none()
         if run is None:
             raise FleetConflict(f"no fleet run {run_id} in this tenant")

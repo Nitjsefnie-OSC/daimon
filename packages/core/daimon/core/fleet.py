@@ -28,7 +28,8 @@ from typing import Final, Literal
 
 from mux.contracts.events import Event
 from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
-from mux.state.journal import JournalEntry
+from mux.contracts.resources import ProviderBinding
+from mux.state.journal import JournalEntry, is_authoritative
 from mux.state.lease import Lease, Slot
 from mux.state.store import StateStore
 from pydantic import JsonValue
@@ -189,25 +190,80 @@ def _excerpt(payload: Mapping[str, JsonValue]) -> str:
     return body[:EXCERPT_LIMIT]
 
 
+def _check_member(run: FleetRun, worker: FleetWorker) -> None:
+    if worker.run_id != run.id or worker.tenant_id != run.tenant_id:
+        raise FleetConflict(f"worker {worker.id} is not in run {run.id}")
+
+
+def check_result(
+    run: FleetRun,
+    worker: FleetWorker,
+    binding: ProviderBinding | None,
+    stored: Event | None,
+    pointer: ResultPointer,
+) -> None:
+    """Refuse a result that is not this worker's own journal entry.
+
+    The worker's private slot must be bound (`binding`) to the pointer's session,
+    and the entry at the pointer (`stored`) must be the worker's result entry with
+    the pointer's digest and excerpt. `append_result` makes such pointers;
+    `record_result` checks one against the store before the worker succeeds.
+    """
+    _check_member(run, worker)
+    if (
+        binding is None
+        or binding.thread != worker_slot(run, worker).thread
+        or binding.native_refs.get("session") != pointer.session_id
+        or (worker.binding_id is not None and binding.id != worker.binding_id)
+    ):
+        raise FleetConflict(f"session {pointer.session_id} is not worker {worker.id}'s")
+    if (
+        stored is None
+        or not is_authoritative(stored)
+        or stored.id != result_source_key(worker.id)
+        or stored.session_id != pointer.session_id
+        or stored.sequence != pointer.sequence
+        or result_digest(dict(stored.payload)) != pointer.digest
+        or _excerpt(dict(stored.payload)) != pointer.excerpt
+    ):
+        raise FleetConflict(
+            f"worker {worker.id} has no result at {pointer.session_id}:{pointer.sequence}"
+        )
+
+
 async def append_result(
     store: StateStore,
-    session: ResourceRef,
+    run: FleetRun,
     worker: FleetWorker,
+    session: ResourceRef,
     event: Event,
     *,
     lease: Lease,
     cursor: str,
     now: datetime,
 ) -> ResultPointer:
-    """Append the worker's result to its own journal, once, under its lease.
+    """Append the worker's result to its own journal, once, under its own lease.
 
-    The result entry is the worker's, not the caller's event: it is stored under an
-    id and source key derived from the worker, so it never repeats an event the
-    turn already journaled, and a retry or a lease successor (whatever event object
-    it rebuilt) is a journal duplicate. The pointer always names that one entry.
+    The lease must be the worker's slot's and the session the one its binding
+    names; anything else is refused before the journal is touched. The result
+    entry is the worker's, not the caller's event: it is stored under an id and
+    source key derived from the worker, so it never repeats an event the turn
+    already journaled, and a retry or a lease successor (whatever event object it
+    rebuilt) is a journal duplicate. The pointer always names that one entry.
+    Only a recorded or reconciled event can be a result: a preview or a gap is
+    refused before anything is written, and recovery never picks one.
     """
+    if not is_authoritative(event):
+        raise FleetConflict(f"a result must be a recorded event, not a {event.authority} one")
+    _check_member(run, worker)
+    slot = worker_slot(run, worker)
+    if lease.slot != slot:
+        raise FleetConflict(f"the lease is not worker {worker.id}'s slot")
+    binding = await store.get_binding(slot)
+    if binding is None or binding.native_refs.get("session") != session.id:
+        raise FleetConflict(f"session {session.id} is not worker {worker.id}'s")
     result_id = result_source_key(worker.id)
-    entry = event.model_copy(update={"id": result_id})
+    entry = event.model_copy(update={"id": result_id, "session_id": session.id})
     appended = await store.append_events(
         session,
         [JournalEntry(source_key=result_id, event=entry)],
@@ -217,12 +273,14 @@ async def append_result(
     )
     stored = appended.appended[0] if appended.appended else await _stored(store, session, result_id)
     payload = dict(stored.payload)
-    return ResultPointer(
+    pointer = ResultPointer(
         session_id=session.id,
         sequence=stored.sequence,
         digest=result_digest(payload),
         excerpt=_excerpt(payload),
     )
+    check_result(run, worker, binding, stored, pointer)
+    return pointer
 
 
 async def _stored(store: StateStore, session: ResourceRef, event_id: str) -> Event:
@@ -232,6 +290,6 @@ async def _stored(store: StateStore, session: ResourceRef, event_id: str) -> Eve
         if not page:
             raise FleetConflict(f"result {event_id} is not in session {session.id}")
         for stored in page:
-            if stored.id == event_id:
+            if stored.id == event_id and is_authoritative(stored):
                 return stored
         after = page[-1].sequence
