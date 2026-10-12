@@ -84,7 +84,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
-from daimon.core.turn.runtimes import ScopedTurnRuntimes
+from daimon.core.turn.runtimes import ScopedTurnRuntimes, ensure_channel_runtime
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
@@ -203,9 +203,15 @@ ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedT
 _PROVIDER_PREPARATIONS: dict[str, ProviderPreparation] = {}
 
 
-def register_turn_preparation(profile: str, prepare: ProviderPreparation) -> None:
+def register_turn_preparation(
+    profile: str, prepare: ProviderPreparation, *, fallback: bool = False
+) -> None:
     """Register provider-native binding; missing hooks never use Anthropic IDs."""
-    if profile == "anthropic.managed_agents" or profile in _PROVIDER_PREPARATIONS:
+    if profile == "anthropic.managed_agents":
+        raise ValueError(f"turn preparation already registered: {profile}")
+    if profile in _PROVIDER_PREPARATIONS:
+        if fallback:
+            return
         raise ValueError(f"turn preparation already registered: {profile}")
     _PROVIDER_PREPARATIONS[profile] = prepare
 
@@ -216,15 +222,6 @@ def _admitted_profile(admission: Admission) -> str:
         if admission.backend_revision is not None
         else "anthropic.managed_agents"
     )
-
-
-async def _gemini_preparation(request: ProviderPreparationRequest) -> PreparedTurn:
-    from daimon.core.turn.gemini_prepare import prepare_gemini_turn
-
-    return await prepare_gemini_turn(request)
-
-
-register_turn_preparation("gemini.inline_reuse", _gemini_preparation)
 
 
 @dataclass(frozen=True)
@@ -972,12 +969,19 @@ async def bind_session_impl(
 
     profile = _admitted_profile(admission)
     if profile != "anthropic.managed_agents":
-        prepare = _PROVIDER_PREPARATIONS.get(profile)
-        if prepare is None or (deps.turn_path or load_turn_settings().path) != "mux":
+        if (deps.turn_path or load_turn_settings().path) != "mux":
             raise AdmissionDenied(reason="backend_unsupported")
         from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
 
         if not fixed_plan_origin_allowed(admission.backend_revision_origin):
+            raise AdmissionDenied(reason="backend_unsupported")
+
+        prepare = _PROVIDER_PREPARATIONS.get(profile)
+        if prepare is None and ensure_channel_runtime(
+            profile, ready=lambda: profile in _PROVIDER_PREPARATIONS
+        ):
+            prepare = _PROVIDER_PREPARATIONS.get(profile)
+        if prepare is None:
             raise AdmissionDenied(reason="backend_unsupported")
         scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
         request = ProviderPreparationRequest(

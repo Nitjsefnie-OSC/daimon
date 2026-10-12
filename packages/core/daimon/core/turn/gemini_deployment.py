@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
-from daimon.core.mux_backend import TurnRuntime
+from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
@@ -20,9 +20,13 @@ from daimon.core.turn.gemini import (
     GeminiJournal,
     GeminiTransportRuntime,
     GeminiUsageRuntime,
+    compose_gemini_backend,
+    compose_gemini_codec,
 )
+from daimon.core.turn.gemini_prepare import prepare_gemini_turn
 from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiStorage
-from daimon.core.turn.prepare import ProviderPreparationRequest
+from daimon.core.turn.io import register_turn_codec
+from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_preparation
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
@@ -170,3 +174,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             {},
         ),
     )
+
+
+def register_runtime() -> None:
+    """Install the provider's host callbacks without transports or credential access."""
+    from daimon.core.turn.runtimes import register_channel_runtime
+
+    register_turn_backend(PROFILE, compose_gemini_backend, fallback=True)
+    register_turn_codec(PROFILE, compose_gemini_codec, fallback=True)
+    register_turn_preparation(PROFILE, prepare_gemini_turn, fallback=True)
+    register_channel_runtime(PROFILE, build_gemini_runtime, fallback=True)

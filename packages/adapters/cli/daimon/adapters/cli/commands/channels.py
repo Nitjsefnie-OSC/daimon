@@ -520,7 +520,7 @@ async def _copy_resource_host(
     factory = rt.resource_hosts
     if factory is None:
         return None
-    from daimon.core.turn.openai_deployment import authorized_deployments
+    from daimon.core.turn.runtimes import authorized_channel_deployments
 
     async with rt.sessionmaker() as session:
         revision = await current_backend(session, channel_ref(tenant_id, platform, channel))
@@ -532,7 +532,9 @@ async def _copy_resource_host(
         )
     authorized = [
         deployment
-        for deployment in authorized_deployments(str(tenant_id))
+        for deployment in authorized_channel_deployments(
+            PERSISTENT_WORKSPACE.profile_id, str(tenant_id)
+        )
         if deployment.platform == platform
         and deployment.channel_id == channel
         and deployment.config_digest == revision.digest

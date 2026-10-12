@@ -191,6 +191,7 @@ async def test_unregistered_selection_never_uses_anthropic(
     path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delitem(io_module._TURN_CODECS, PROFILE, raising=False)
+    monkeypatch.setattr(runtime_module, "entry_points", lambda **kwargs: ())
     transport = ScriptedTransport()
     async with transport.client() as client:
         with pytest.raises(UnsupportedCapability):
@@ -276,6 +277,7 @@ async def test_missing_preparation_fails_before_native_binding(
     path: str, db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delitem(preparation._PROVIDER_PREPARATIONS, PROFILE, raising=False)
+    monkeypatch.setattr(runtime_module, "entry_points", lambda **kwargs: ())
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(
@@ -375,6 +377,7 @@ async def test_missing_codec_does_not_construct_a_registered_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delitem(io_module._TURN_CODECS, PROFILE, raising=False)
+    monkeypatch.setattr(runtime_module, "entry_points", lambda **kwargs: ())
 
     def forbidden(request: TurnBackendRequest) -> TurnBackend:
         raise AssertionError("backend must not be constructed without a codec")
@@ -554,7 +557,9 @@ async def test_application_runtime_is_lazy_scoped_and_carried_into_execution(
             assert request.deps.turn_runtimes.get("gemini.inline_reuse") is None
         return prepared(request)
 
-    monkeypatch.setitem(runtime_module._RUNTIME_FACTORIES, PROFILE, factory)
+    monkeypatch.setitem(
+        runtime_module._RUNTIME_FACTORIES, PROFILE, runtime_module._RuntimeRegistration(factory)
+    )
     monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, PROFILE, hook)
     # An isolated prefix and no .env file keep this validated offline config
     # separate from deployment credentials.
@@ -613,6 +618,7 @@ async def test_missing_runtime_constructor_refuses_without_provider_or_key_acces
         raise AssertionError("an absent deployment must refuse")
 
     monkeypatch.setattr(runtime_module, "_RUNTIME_FACTORIES", {})
+    monkeypatch.setattr(runtime_module, "entry_points", lambda **kwargs: ())
     monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, PROFILE, hook)
     transport = ScriptedTransport()
     async with transport.client() as client:
@@ -646,7 +652,9 @@ async def test_channel_runtime_refuses_invalid_admission_before_constructor(
     def forbidden(request: ProviderPreparationRequest) -> TurnRuntime:
         raise AssertionError("invalid admission reached runtime/credential construction")
 
-    monkeypatch.setitem(runtime_module._RUNTIME_FACTORIES, PROFILE, forbidden)
+    monkeypatch.setitem(
+        runtime_module._RUNTIME_FACTORIES, PROFILE, runtime_module._RuntimeRegistration(forbidden)
+    )
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(deps_for(client, db_session_factory), channel_backends=True)

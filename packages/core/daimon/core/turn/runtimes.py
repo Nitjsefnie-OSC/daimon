@@ -3,25 +3,100 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from importlib.metadata import entry_points
+from typing import TYPE_CHECKING, Protocol, cast
 
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.turn.errors import AdmissionDenied
-from mux.errors import ScopeViolation
+from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
 
 if TYPE_CHECKING:
     from daimon.core.turn.prepare import ProviderPreparationRequest
 
 RuntimeFactory = Callable[["ProviderPreparationRequest"], TurnRuntime]
-_RUNTIME_FACTORIES: dict[str, RuntimeFactory] = {}
 
 
-def register_channel_runtime(profile: str, factory: RuntimeFactory) -> None:
-    """Register an explicit deployment constructor; registration performs no I/O."""
-    if profile == "anthropic.managed_agents" or profile in _RUNTIME_FACTORIES:
+class RuntimeDeployment(Protocol):
+    """Read-only operator fields consumed by resource authorization callers."""
+
+    @property
+    def account_id(self) -> str: ...
+
+    @property
+    def platform(self) -> str: ...
+
+    @property
+    def channel_id(self) -> str: ...
+
+    @property
+    def config_digest(self) -> str | None: ...
+
+    @property
+    def project(self) -> str: ...
+
+
+DeploymentLoader = Callable[[str], tuple[RuntimeDeployment, ...]]
+
+
+@dataclass(frozen=True)
+class _RuntimeRegistration:
+    factory: RuntimeFactory
+    authorizations: DeploymentLoader | None = None
+
+
+_RUNTIME_FACTORIES: dict[str, _RuntimeRegistration] = {}
+
+
+def register_channel_runtime(
+    profile: str,
+    factory: RuntimeFactory,
+    *,
+    authorizations: DeploymentLoader | None = None,
+    fallback: bool = False,
+) -> None:
+    """Register a constructor; provider defaults preserve explicit host overrides."""
+    if profile == "anthropic.managed_agents":
         raise ValueError(f"channel runtime already registered: {profile}")
-    _RUNTIME_FACTORIES[profile] = factory
+    if profile in _RUNTIME_FACTORIES:
+        if fallback:
+            return
+        raise ValueError(f"channel runtime already registered: {profile}")
+    _RUNTIME_FACTORIES[profile] = _RuntimeRegistration(factory, authorizations)
+
+
+def ensure_channel_runtime(profile: str, *, ready: Callable[[], bool] | None = None) -> bool:
+    """Install only the selected profile through its provider-owned entry point.
+
+    Existing constructors and readers take precedence, but a missing host edge
+    still needs installation. The caller supplies its existing registry lookup
+    when it needs such an edge. Default turns never discover distributions;
+    registrars bind callbacks without clients, credentials or deployment reads.
+    """
+    if profile == "anthropic.managed_agents":
+        return False
+    if profile in _RUNTIME_FACTORIES and (ready is None or ready()):
+        return True
+    selected = entry_points(group="daimon.turn_runtimes", name=profile)
+    if len(selected) != 1:
+        return False
+    try:
+        register = cast(Callable[[], None], next(iter(selected)).load())
+        register()
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return False
+    return profile in _RUNTIME_FACTORIES and (ready is None or ready())
+
+
+def authorized_channel_deployments(profile: str, tenant_id: str) -> tuple[RuntimeDeployment, ...]:
+    """Re-read provider-validated operator grants, without a turn or credential lookup."""
+    if not ensure_channel_runtime(profile):
+        raise UnsupportedCapability(("host_deployment_authorization",), profile)
+    read = _RUNTIME_FACTORIES[profile].authorizations
+    if read is None:
+        raise UnsupportedCapability(("host_deployment_authorization",), profile)
+    return read(tenant_id)
 
 
 def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
@@ -50,18 +125,9 @@ def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         or revision.model is None
     ):
         raise ScopeViolation(request.thread_id, "runtime differs from admitted channel scope")
-    factory = _RUNTIME_FACTORIES.get(revision.profile)
-    if factory is None and revision.profile == "openai.persistent_workspace":
-        from daimon.core.turn.openai_deployment import build_openai_runtime
-
-        factory = build_openai_runtime
-    if factory is None and revision.profile == "gemini.inline_reuse":
-        from daimon.core.turn.gemini_deployment import build_gemini_runtime
-
-        factory = build_gemini_runtime
-    if factory is None:
+    if not ensure_channel_runtime(revision.profile):
         raise AdmissionDenied(reason="backend_unsupported")
-    return factory(request)
+    return _RUNTIME_FACTORIES[revision.profile].factory(request)
 
 
 class ScopedTurnRuntimes(Mapping[str, TurnRuntime]):

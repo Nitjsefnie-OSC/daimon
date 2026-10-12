@@ -239,10 +239,11 @@ async def _hosted_agent(
     The readback retrieves the provider's agent and refuses one that differs
     from the catalog row.
     """
+    from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE
+
     if rt.gemini_resource_hosts is not None:
         from daimon.adapters.cli.runtime import ResourceHostMismatch, request_gemini_resource_host
         from daimon.core.channel_backend import channel_ref, current_backend
-        from mux.profiles import INLINE_REUSE
 
         selected_grants = [g for g in rt.gemini_resource_grants if g.tenant_id == tenant_id]
         for grant in selected_grants:
@@ -271,12 +272,14 @@ async def _hosted_agent(
     factory = rt.resource_hosts
     if factory is None:
         return None
-    from daimon.core.turn.openai_deployment import authorized_deployments
+    from daimon.core.turn.runtimes import authorized_channel_deployments
 
     accounts = sorted(
         {
             deployment.account_id
-            for deployment in authorized_deployments(str(tenant_id))
+            for deployment in authorized_channel_deployments(
+                PERSISTENT_WORKSPACE.profile_id, str(tenant_id)
+            )
             if deployment.project == factory.account_scope_id
         }
     )
