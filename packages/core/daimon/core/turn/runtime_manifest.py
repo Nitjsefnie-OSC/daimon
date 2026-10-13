@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast
 from uuid import UUID
 
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
@@ -119,8 +120,50 @@ def manifest_configuration_matches(row: Mapping[str, JsonValue], revision: Confi
 
 
 def fixed_plan_origin_allowed(origin: str | None) -> bool:
-    """An operator's fixed native plan is not an agent-counterpart proof."""
+    """Only channel-origin plans bypass the complete authorized-source proof."""
     return origin == "channel"
+
+
+async def read_preparation_counterpart(request: ProviderPreparationRequest) -> AgentRevision:
+    """Read a scoped native component; this is not complete source-preservation authority."""
+    from daimon.core.stores.neutral_catalog import AgentRevision
+    from daimon.core.turn.ceiling import remaining_s
+    from daimon.core.turn.errors import AdmissionDenied
+
+    revision = request.admission.backend_revision
+    if (
+        request.admission.backend_revision_origin != "agent"
+        or not request.deps.agent_backends
+        or not request.deps.channel_backends
+        or request.deps.turn_path != "mux"
+        or revision is None
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
+    runtime = request.deps.turn_runtimes.get(revision.profile)
+    if runtime is None or runtime.read_agent_counterpart is None:
+        raise AdmissionDenied(reason="backend_unsupported")
+    try:
+        row = await asyncio.wait_for(
+            runtime.read_agent_counterpart(request),
+            timeout=remaining_s(request.deadline, now=request.now()),
+        )
+        if (
+            not isinstance(cast(object, row), AgentRevision)
+            or row.agent.ref.kind != "agent"
+            or row.agent.ref.tenant_id != request.scope.tenant_id
+            or row.agent.ref.account_id != request.scope.account_id
+            or row.agent.ref.provider != revision.backend
+            or row.agent.spec.model.provider != revision.backend
+            or row.agent.spec.model.id != revision.model
+            or (
+                request.admission.backend_counterpart is not None
+                and row != request.admission.backend_counterpart
+            )
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        return row
+    except Exception:
+        raise AdmissionDenied(reason="backend_unsupported") from None
 
 
 class CounterpartPlan(Protocol):
@@ -202,25 +245,13 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         raise AdmissionDenied(reason="backend_unsupported") from None
 
 
-async def read_counterpart(
+def validate_counterpart_request(
     plan: CounterpartPlan,
     request: ProviderPreparationRequest,
-    *,
-    source: BackendAgent,
-    resources: NeutralResourceHost,
-    verify_native: Callable[[AgentRevision], Awaitable[None]],
-) -> AgentRevision:
-    """Verify an installed native catalog component, without authorizing execution.
-
-    Complete source preservation is a separate owner's proof. Names and source
-    digests cannot substitute for identity, version or operator configuration.
-    Readback detects drift; it does not create a native CAS guarantee.
-    """
+) -> ConfigRevision:
+    """Validate the same immutable source/configuration pins before native allocation."""
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.skills.ingest import SkillIngestError
     from daimon.core.turn.errors import AdmissionDenied
-    from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
-    from mux.profiles import get_profile
 
     revision, scope = request.admission.backend_revision, request.scope
     if (
@@ -236,37 +267,69 @@ async def read_counterpart(
         != (plan.tenant_id, plan.platform, plan.channel_id)
         or request.platform != plan.platform
         or revision.profile != plan.profile
-        or source.tenant_id != request.tenant_id
-        or source.agent_id != plan.source_agent_id
-        or source.agent_id
+        or plan.source_agent_id
         != derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
         or plan.source_agent_version != request.admission.agent.version
         or plan.counterpart_catalog_id is None
         or plan.counterpart_catalog_revision is None
         or plan.agent_id is None
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
+    if select_runtime_manifest(request, type(plan)) != plan:
+        raise AdmissionDenied(reason="backend_unsupported")
+    return revision
+
+
+async def read_counterpart(
+    plan: CounterpartPlan,
+    request: ProviderPreparationRequest,
+    *,
+    source: BackendAgent,
+    resources: NeutralResourceHost,
+    verify_native: Callable[[AgentRevision], Awaitable[None]],
+) -> AgentRevision:
+    """Verify an installed native catalog component, without authorizing execution.
+
+    Complete source preservation is a separate owner's proof. Names and source
+    digests cannot substitute for identity, version or operator configuration.
+    Readback detects drift; it does not create a native CAS guarantee.
+    """
+    from daimon.core.skills.ingest import SkillIngestError
+    from daimon.core.turn.errors import AdmissionDenied
+    from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+    from mux.profiles import get_profile
+
+    revision = validate_counterpart_request(plan, request)
+    scope = request.scope
+    catalog_id = cast(str, plan.counterpart_catalog_id)
+    if (
+        source.tenant_id != request.tenant_id
+        or source.agent_id != plan.source_agent_id
         or resources.scope != scope
         or resources.workspace != plan.project
         or resources.backend.capabilities().profile_id != plan.profile
     ):
         raise AdmissionDenied(reason="backend_unsupported")
-    if select_runtime_manifest(request, type(plan)) != plan:
-        raise AdmissionDenied(reason="backend_unsupported")
     try:
-        row = await resources.entry(plan.counterpart_catalog_id)
+        row = await resources.entry(catalog_id)
         if (
             row.local_revision != plan.counterpart_catalog_revision
             or row.agent.ref.id != plan.agent_id
             or row.agent.spec.model.id != revision.model
+            or (
+                request.admission.backend_counterpart is not None
+                and row != request.admission.backend_counterpart
+            )
             or row.agent.spec.model.provider != get_profile(plan.profile).provider
             or tuple(pin.id for pin in row.agent.spec.skills or ()) != plan.skill_ids
         ):
             raise AdmissionDenied(reason="backend_unsupported")
-        checked = await resources.read(plan.counterpart_catalog_id)
+        checked = await resources.read(catalog_id)
         await verify_native(checked)
         if (
             checked != row
             or select_runtime_manifest(request, type(plan)) != plan
-            or await resources.entry(plan.counterpart_catalog_id) != row
+            or await resources.entry(catalog_id) != row
         ):
             raise AdmissionDenied(reason="backend_unsupported")
         return checked

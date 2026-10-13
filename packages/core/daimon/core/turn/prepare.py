@@ -25,7 +25,7 @@ import functools
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 import anthropic as anthropic_pkg
@@ -70,7 +70,6 @@ from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.github_access import get_agent_mode, list_authorized_repos
 from daimon.core.stores.github_issued_tokens import list_session_tokens
-from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -84,7 +83,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
-from daimon.core.turn.runtimes import ScopedTurnRuntimes, ensure_channel_runtime
+from daimon.core.turn.runtimes import ensure_channel_runtime, scope_channel_runtimes
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
@@ -98,6 +97,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from daimon.core.session_preparation_stages import WorkspaceTransfer
+    from daimon.core.stores.neutral_catalog import AgentRevision
 
 log = structlog.get_logger(__name__)
 
@@ -197,6 +197,7 @@ class ProviderPreparationRequest:
     transfer: WorkspaceTransfer | None
     deadline: dt.datetime
     now: Callable[[], dt.datetime]
+    counterpart: AgentRevision | None = field(default=None, kw_only=True)
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
@@ -999,17 +1000,20 @@ async def bind_session_impl(
             effective_deadline,
             now,
         )
-        runtimes: ScopedTurnRuntimes | None = None
-        if deps.channel_backends and deps.turn_runtime_factory is not None:
-            provider_deps = replace(
-                deps, state_store=deps.state_store or PostgresStateStore(deps.sessionmaker)
-            )
-            request = replace(request, deps=provider_deps)
-            runtimes = ScopedTurnRuntimes(request, deps.turn_runtime_factory)
-            request = replace(request, deps=replace(provider_deps, turn_runtimes=runtimes))
+        request, runtimes = scope_channel_runtimes(request)
 
         async def _prepare_provider() -> PreparedTurn:
-            result = await prepare(request)
+            selected = request
+            if admission.backend_revision_origin == "agent":
+                from daimon.core.turn.runtime_manifest import read_preparation_counterpart
+
+                counterpart = await read_preparation_counterpart(request)
+                selected = replace(
+                    request,
+                    counterpart=counterpart,
+                    admission=replace(admission, backend_counterpart=counterpart),
+                )
+            result = await prepare(selected)
             ref = result.session_ref
             backend = result.backend
             if ref is None or (
@@ -1027,7 +1031,7 @@ async def bind_session_impl(
             ):
                 raise ScopeViolation("preparation", "provider returned a foreign prepared session")
             if runtimes is not None:
-                result = replace(result, runtime=runtimes.resolved)
+                result = replace(result, runtime=result.runtime or runtimes.resolved)
             return result
 
         try:

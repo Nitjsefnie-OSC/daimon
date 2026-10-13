@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 import httpx
 from pydantic import JsonValue
 
+from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.transport import Object, SDKTransport, Transport
 
 if TYPE_CHECKING:
@@ -164,3 +165,19 @@ def configured_transport(*, api_key: str) -> Transport:
     if not api_key.strip():
         raise ValueError("explicit Gemini credential is required")
     return _ConfiguredTransport(api_key)
+
+
+class _ConfiguredCatalogTransport(_ConfiguredTransport):
+    async def create_agent(self, definition: Mapping[str, JsonValue]) -> Object:
+        async with self._client() as client:
+            return await SDKAgentCatalogTransport(client).create_agent(definition)
+
+    async def get_agent(self, id_: str) -> Object:
+        async with self._client() as client:
+            return await SDKAgentCatalogTransport(client).get_agent(id_)
+
+
+def configured_catalog_transport(*, api_key: str) -> AgentCatalogTransport:
+    if not api_key.strip():
+        raise ValueError("explicit Gemini credential is required")
+    return _ConfiguredCatalogTransport(api_key)

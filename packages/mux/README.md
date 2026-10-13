@@ -934,3 +934,13 @@ An empty declaration refuses worker MCP delegation. OpenAI preserves finite
 allowlist. Anthropic's neutral MCP compiler does not preserve policy controls,
 so its declaration stays empty. Native confirmation support does not by itself
 prove that the neutral per-tool permission field is compiled.
+
+The explicit Gemini deployment edge also exposes `configured_catalog_transport`
+for native agent create/readback, reusing the same request-owned SDK client and
+ambient-configuration refusal. Catalog capability alone still cannot execute a
+named agent. A host that has verified its complete scoped counterpart may inject
+the exact neutral `Agent` into the existing driver. Session creation then retains
+that native ID, and each dispatch checks the stored definition against it. The
+Flash accounting transport uses the verified model for one named-agent attempt;
+it never substitutes the inline fallback chain. Existing inline callers omit this
+optional dependency and retain their requests and accounting policy.

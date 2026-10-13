@@ -91,6 +91,7 @@ from daimon.core.stores.accounts import (
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.thread_sessions import get_thread_session_at
@@ -233,6 +234,7 @@ class Admission:
         default=None, compare=False, repr=False
     )
     backend_footer_profile: str | None = field(default=None, compare=False, repr=False)
+    backend_counterpart: AgentRevision | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.backend_revision is not None and self.backend_revision_origin not in (
@@ -243,7 +245,11 @@ class Admission:
 
 
 def _require_backend_origin(
-    selection: ResolvedBackend, origin: Literal["channel", "agent"]
+    selection: ResolvedBackend,
+    origin: Literal["channel", "agent"],
+    revision: ConfigRevision | None = None,
+    *,
+    agent_backends: bool = False,
 ) -> None:
     from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
 
@@ -733,6 +739,55 @@ async def admit_impl(
     _require_run_agent(policy, grant)
     mark("agent_policy")
 
+    backend_counterpart: AgentRevision | None = None
+
+    async def verify_origin(
+        selection: ResolvedBackend,
+        origin: Literal["channel", "agent"],
+        revision: ConfigRevision | None,
+    ) -> None:
+        nonlocal backend_counterpart
+        _require_backend_origin(selection, origin, agent_backends=deps.agent_backends)
+        if revision is None or selection.profile == MANAGED_AGENTS.profile_id:
+            return
+        from daimon.core.turn.ceiling import turn_deadline
+        from daimon.core.turn.prepare import (
+            DEFAULT_MA_CAPABILITIES,
+            ProviderPreparationRequest,
+            admitted_session_scope,
+        )
+        from daimon.core.turn.runtime_manifest import read_preparation_counterpart
+        from daimon.core.turn.runtimes import scope_channel_runtimes
+
+        provisional = Admission(
+            account_id=principal.account_id,
+            agent=agent,
+            environment=environment,
+            config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
+            grant=grant,
+            backend_revision=revision,
+            backend_revision_origin=origin,
+        )
+        request = ProviderPreparationRequest(
+            deps=deps,
+            admission=provisional,
+            scope=admitted_session_scope(
+                provisional, tenant_id=tenant_id, session_id="preparation"
+            ),
+            tenant_id=tenant_id,
+            platform=platform,
+            external_user_id=external_user_id,
+            thread_id=thread_id or channel_id,
+            session_account_id=principal.account_id,
+            reuse_existing=True,
+            capabilities=DEFAULT_MA_CAPABILITIES,
+            transfer=None,
+            deadline=turn_deadline(now=now),
+            now=lambda: now,
+        )
+        request, _ = scope_channel_runtimes(request)
+        backend_counterpart = await read_preparation_counterpart(request)
+
     if selection_enabled and channel is not None:
         if retained_revision is None and not configured_channel:
             # Reuse the authorized source read; a friendly name cannot carry
@@ -758,7 +813,9 @@ async def admit_impl(
                         channel,
                         source_agent,
                         enabled=True,
-                        validate_origin=_require_backend_origin,
+                        validate_origin=(
+                            verify_origin if deps.agent_backends else _require_backend_origin
+                        ),
                     )
                     backend = (
                         check_backend(backend_revision, enabled_backends=policy.enabled_backends)
@@ -867,6 +924,7 @@ async def admit_impl(
     result = Admission(
         backend_revision=backend_revision,
         backend_revision_origin=backend_revision_origin,
+        backend_counterpart=backend_counterpart,
         backend_footer_profile=backend_footer_profile,
         backend_ever_shared=backend_ever_shared,
         backend=backend,

@@ -7,7 +7,7 @@ Adapters retain ownership of client configuration and lifetime.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -24,7 +24,9 @@ from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
 
 if TYPE_CHECKING:
+    from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.deps import TurnDeps
+    from daimon.core.turn.prepare import ProviderPreparationRequest
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,9 @@ class TurnRuntime:
     transport_factory: Callable[[ConfigRevision, Scope], object]
     journal: object
     usage_store: object
+    read_agent_counterpart: (
+        Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None
+    ) = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

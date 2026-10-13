@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 from pydantic import JsonValue
 
 from mux.contracts.ids import ModelRef
+from mux.contracts.resources import Agent
 from mux.drivers.gemini.transport import Object, Transport, object_value, string
 from mux.errors import ProviderError
 
@@ -35,7 +36,10 @@ class FlashAccounting(Protocol):
 
 
 class FlashTransport:
-    def __init__(self, source: Transport, accounting: FlashAccounting) -> None:
+    def __init__(
+        self, source: Transport, accounting: FlashAccounting, *, native_agent: Agent | None = None
+    ) -> None:
+        self._native_agent = native_agent
         self.source, self.accounting = source, accounting
         self._models: dict[str, ModelRef] = {}
 
@@ -48,7 +52,19 @@ class FlashTransport:
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
-        for index, name in enumerate(FLASH_MODELS):
+        models = FLASH_MODELS
+        if self._native_agent is not None:
+            if request.get(
+                "agent"
+            ) != self._native_agent.ref.id or self._native_agent.spec.model != ModelRef(
+                provider="gemini", id=FLASH_PRIMARY
+            ):
+                raise ProviderError(
+                    "invalid_request", retryable=False, native_code="named_agent_model_required"
+                )
+            # A retained native definition cannot be replaced by the inline fallback chain.
+            models = (self._native_agent.spec.model.id,)
+        for index, name in enumerate(models):
             model = ModelRef(provider="gemini", id=name)
             await self.accounting.before_attempt(model=model, attempt=index + 1)
             bounded = dict(request)
@@ -65,7 +81,7 @@ class FlashTransport:
                         http_status=503 if refused else None,
                     )
                 )
-                if not refused or index + 1 == len(FLASH_MODELS):
+                if not refused or index + 1 == len(models):
                     raise
                 continue
             # No fallback on malformed/lost acceptance or persistence failure.

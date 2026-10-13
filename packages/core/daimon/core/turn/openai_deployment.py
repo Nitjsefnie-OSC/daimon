@@ -12,11 +12,13 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
+from daimon.core.channel_backend import load_backend_agent
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.openai_host import PROFILE, OpenAIHostRuntime, register_host
+from daimon.core.turn.openai_host import PROFILE, OpenAIHostRuntime, driver, register_host
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
@@ -26,6 +28,7 @@ from daimon.core.turn.runtime_manifest import (
     read_counterpart,
     select_runtime_manifest,
     validate_counterpart_pins,
+    validate_counterpart_request,
 )
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
@@ -109,9 +112,14 @@ class OpenAIDeployment(BaseModel):
 
 
 def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
-    if not fixed_plan_origin_allowed(getattr(request.admission, "backend_revision_origin", None)):
+    origin = request.admission.backend_revision_origin
+    if fixed_plan_origin_allowed(origin):
+        return _manifest_deployment(request)
+    if origin != "agent" or not request.deps.agent_backends:
         raise AdmissionDenied(reason="backend_unsupported")
-    return _manifest_deployment(request)
+    deployment = _manifest_deployment(request)
+    validate_counterpart_request(deployment, request)
+    return deployment
 
 
 def _manifest_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
@@ -173,8 +181,21 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 account_id=scope.account_id,
             )
 
+        agent = ref(deployment.agent_id, "agent")
+        if preparation.admission.backend_revision_origin == "agent":
+            checked = preparation.counterpart
+            if not preparation.deps.agent_backends or checked is None:
+                raise AdmissionDenied(reason="backend_unsupported")
+            validate_counterpart_request(deployment, preparation)
+            if (
+                checked.catalog_id != deployment.counterpart_catalog_id
+                or checked.local_revision != deployment.counterpart_catalog_revision
+                or checked.agent.ref != agent
+            ):
+                raise AdmissionDenied(reason="backend_unsupported")
+            agent = checked.agent.ref
         return SessionSpec(
-            agent=ref(deployment.agent_id, "agent"),
+            agent=agent,
             agent_revision=Revision(local=0),
             environment=ref(deployment.environment_id, "environment"),
             config_revision=revision.local,
@@ -204,8 +225,30 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
 
         return configured_transport(api_key=secret, project=deployment.project)
 
-    return OpenAIHostRuntime(
+    async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
+        validate_counterpart_request(deployment, preparation)
+        source = await load_backend_agent(
+            preparation.deps.anthropic,
+            preparation.deps.sessionmaker,
+            tenant_id=preparation.tenant_id,
+            agent_name=(preparation.admission.agent.metadata or {}).get(
+                MA_METADATA_KEY_NAME, preparation.admission.config.agent_name
+            )
+            or "",
+            actual_agent=preparation.admission.agent,
+        )
+        resources = NeutralResourceHost(
+            driver(runtime, revision, scope),
+            preparation.deps.sessionmaker,
+            scope=scope,
+            account_scope_id=deployment.project,
+            operation_key="counterpart-read",
+        )
+        return await deployment.read_counterpart(preparation, source=source, resources=resources)
+
+    runtime = OpenAIHostRuntime(
         transport_factory=transport,
+        read_agent_counterpart=read,
         journal=OpenAIRecoveryJournal(),
         usage_store=OpenAIUsageRevisions(),
         account_scope_id=deployment.project,
@@ -218,6 +261,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             spend_limit_usd_cents=deployment.spend_limit_usd_cents,
         ),
     )
+
+    return runtime
 
 
 def register_runtime() -> None:

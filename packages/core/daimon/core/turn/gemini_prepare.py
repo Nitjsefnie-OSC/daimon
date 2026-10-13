@@ -68,6 +68,13 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         raise UnsupportedCapability(("gemini_durable_runtime",), PROFILE)
     journal, usage = runtime.journal, runtime.usage_store
     deployment = journal.deployment
+    if admission.backend_revision_origin == "agent":
+        checked = request.counterpart
+        if not request.deps.agent_backends or checked is None or deployment is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        deployment = replace(deployment, native_agent=checked.agent)
+        journal = replace(journal, deployment=deployment)
+        runtime = replace(runtime, journal=journal)
     if (
         deployment is None
         or deployment.config_digest != config.digest
@@ -88,13 +95,19 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or prior.profile != PROFILE
         or prior.config_revision != config.local
         or "session" not in prior.native_refs
+        or (
+            deployment.native_agent is not None
+            and prior.native_refs.get("agent") != deployment.native_agent.ref.id
+        )
     ):
         raise ScopeViolation(binding_id, "Gemini binding differs from admitted revision")
     backend = gemini_backend(config, request.scope, runtime, deployment.account_scope_id)
     if prior is None:
-        agent = await backend.agents.create(
-            request.scope, deployment.agent, key=f"{binding_id}:agent"
-        )
+        agent = deployment.native_agent
+        if agent is None:
+            agent = await backend.agents.create(
+                request.scope, deployment.agent, key=f"{binding_id}:agent"
+            )
         environment = await backend.environments.create(
             request.scope,
             deployment.environment,
@@ -206,6 +219,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         session_account_id=request.session_account_id,
         _record=record,
         backend=backend,
+        runtime=runtime if deployment.native_agent is not None else None,
         session_ref=session_ref,
         native_footer_cost=footer_cost,
     )

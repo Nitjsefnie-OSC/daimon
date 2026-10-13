@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -167,3 +167,20 @@ class ScopedTurnRuntimes(Mapping[str, TurnRuntime]):
         return len(self._runtimes) + int(
             self._profile is not None and self._profile not in self._runtimes
         )
+
+
+def scope_channel_runtimes(
+    request: ProviderPreparationRequest,
+) -> tuple[ProviderPreparationRequest, ScopedTurnRuntimes | None]:
+    """Bind the existing lazy runtime owner to one admitted configuration and scope."""
+    from daimon.core.stores.mux_state import PostgresStateStore
+
+    deps = request.deps
+    if not deps.channel_backends or deps.turn_runtime_factory is None:
+        return request, None
+    provider_deps = replace(
+        deps, state_store=deps.state_store or PostgresStateStore(deps.sessionmaker)
+    )
+    request = replace(request, deps=provider_deps)
+    runtimes = ScopedTurnRuntimes(request, deps.turn_runtime_factory)
+    return replace(request, deps=replace(provider_deps, turn_runtimes=runtimes)), runtimes
