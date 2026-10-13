@@ -2510,3 +2510,18 @@ Prepared native scope is checked by the existing admitted-session scope owner.
 Binding publication, turn I/O and worker handoff use that single identity rule.
 The worker allocation prototype is deferred with its actual caller and complete
 source/native preservation proof; it is not an exported preparation path.
+
+Worker normalization accepts an optional `captured_source` on the existing
+`resolve_worker_spec`. Only the scoped loader and read-only resource projector
+supply this input. Root authorization, finite role-selected models and backend
+grants remain the ceiling; names and stored digests grant no authority. Captured
+instructions and represented tools, skills, MCP, environment and resource intent
+must be retained unless explicitly narrowed through declared drops. Opaque native
+extensions, model options, implicit memory and credential resources refuse with
+`WorkerSpecRefused` before allocation rather than being silently discarded.
+The canonical digest includes the complete owner capture (including hidden source
+and resource-generation facts), so stale stored intent must be refused rather
+than rewritten. Inherited seals and read-only restrictions remain in force.
+This normalization does not prove native execution; the existing preparation
+owner still classifies obligations and independently recaptures source and native
+readback before input. Omitting the new argument preserves the existing path.

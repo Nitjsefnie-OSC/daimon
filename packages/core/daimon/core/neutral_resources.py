@@ -47,6 +47,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_upload
 from daimon.core.skills.service import AddedSkill, StoredSkillUpload, UploadedSkill, add_skill
 from daimon.core.stores import security_audit
+from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import (
     AgentRevision,
     CatalogConflict,
@@ -74,7 +75,7 @@ from mux.profiles import get_profile, native_agent_tools, neutral_catalog_profil
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, TypeAdapter, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -830,6 +831,7 @@ WorkerField = Literal[
     "effort",
     "extensions",
     "system",
+    "memory",
     "budget",
     "deadline",
     "max_turns",
@@ -1043,10 +1045,12 @@ def resolve_worker_spec(
     resources: tuple[ResourceBinding, ...] = (),
     environment: EnvironmentSpec | None = None,
     limits: WorkerLimits | None = None,
+    captured_source: BackendAgent | None = None,
 ) -> ResolvedWorkerSpec:
     """Resolve existing spec shapes against authentic, finite parent authority.
 
     This does not reserve funds, create resources or authorize native execution.
+    captured_source comes only from the scoped loader/resource projector.
     Preparation must repeat against fresh host facts and apply the derived port
     and tool grants; a persisted digest is an idempotency key, never authority.
     """
@@ -1122,10 +1126,61 @@ def resolve_worker_spec(
         resolved = AgentSpec.model_validate(data)
     except ValueError:
         raise WorkerSpecRefused("spec", "unsupported") from None
+    if captured_source is not None:
+        actual, effective = captured_source.source, captured_source.effective_spec
+        if (
+            actual is None
+            or effective is None
+            or actual.native is None
+            or actual.lifecycle != "active"
+            or actual.archived_at is not None
+            or captured_source.resource_scope != fleet.scope
+            or str(captured_source.tenant_id) != fleet.scope.tenant_id
+            or actual.ref.tenant_id != fleet.scope.tenant_id
+            or (
+                actual != spec
+                if isinstance(spec, Agent)
+                else captured_source.agent_id != parent.agent_id
+            )
+            or captured_source.memory_read_only is None
+            or captured_source.memory_required is None
+            or captured_source.environment is None
+        ):
+            raise WorkerSpecRefused("scope", "stale")
+        if effective.extensions or effective.model.options:
+            raise WorkerSpecRefused("extensions", "unsupported")
+        for field, required, requested in (
+            ("tools", effective.tools, resolved.tools),
+            ("skills", effective.skills, resolved.skills),
+            ("mcp", effective.mcp_servers, resolved.mcp_servers),
+        ):
+            if field not in resolved.declared_drops:
+                _worker_subset(
+                    cast(WorkerField, field), tuple(required or ()), tuple(requested or ())
+                )
+        if captured_source.memory_required and "memory" not in resolved.declared_drops:
+            raise WorkerSpecRefused("memory", "unsupported")
+        if "sandbox" not in resolved.declared_drops:
+            environment = environment if environment is not None else parent.environment
+            if environment is None or environment != captured_source.environment.spec:
+                raise WorkerSpecRefused("sandbox", "not_subset")
+            if "repository" not in resolved.declared_drops:
+                _worker_subset(
+                    "files", captured_source.repository_sources, tuple(environment.sources or ())
+                )
+        if {item.kind for item in captured_source.resource_requirements} & {"native", "credential"}:
+            raise WorkerSpecRefused("files", "unsupported")
+        _worker_subset("files", captured_source.resource_requirements, resources)
+        system = effective.system or ""
+        parent = replace(
+            parent,
+            base_system=parent.base_system
+            + ("\n\n" + system if system and system != parent.base_system else ""),
+            memory_read_only=parent.memory_read_only or captured_source.memory_read_only,
+        )
     drops = resolved.declared_drops
-    if not set(parent.spec.declared_drops) <= set(drops) or not set(source.declared_drops) <= set(
-        drops
-    ):
+    inherited = (parent.spec, source, captured_source.effective_spec if captured_source else None)
+    if any(item is not None and not set(item.declared_drops) <= set(drops) for item in inherited):
         raise WorkerSpecRefused("declared_drops", "not_subset")
     # All root stamps remain immutable; omitted clone keys preserve, null
     # values delete source-only keys, and an explicit map clear cannot erase
@@ -1315,6 +1370,8 @@ def resolve_worker_spec(
         "seals": sorted(parent.seal_ids),
         "memory_read_only": parent.memory_read_only,
     }
+    if captured_source is not None:
+        body["capture"] = TypeAdapter(object).dump_python(dict(captured_source), mode="json")
     digest = hashlib.sha256(
         json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

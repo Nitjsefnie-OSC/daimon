@@ -3061,3 +3061,25 @@ async def test_worker_never_silently_loses_retained_memory_on_materialization_fa
                 memory_read_only=True,
             )
     assert trace.requests == []
+
+
+async def test_actual_sdk_projected_worker_source_refuses_opaque_intent_before_allocation(
+    db_preflight, db_nullpool_engine
+):
+    from dataclasses import replace
+
+    from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+
+    from .test_fleet_permissions import NOW, POLICY
+
+    _, _, _, original, _, worker, captured = await worker_source_context(db_nullpool_engine)
+    root = replace(
+        worker.permissions,
+        fleet=replace(worker.permissions.fleet, depth=0),
+        agent_id=captured.agent_id,
+    )
+    assert captured.source.native == original.model_dump(mode="json", exclude_unset=True)
+    assert captured.effective_spec.extensions
+    with pytest.raises(WorkerSpecRefused) as refusal:
+        resolve_worker_spec(root, worker.spec, policy=POLICY, now=NOW, captured_source=captured)
+    assert (refusal.value.field, refusal.value.reason) == ("extensions", "unsupported")

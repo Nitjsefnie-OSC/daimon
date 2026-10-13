@@ -1234,3 +1234,253 @@ async def test_declared_drops_are_recorded_in_existing_audit_without_source_payl
             worker=malformed,
         )
     assert len(await list_events(db_session, tenant_id=tenant.id)) == 1
+
+
+def captured_worker_source(root):
+    """Owner facts for represented intent; native preparation is still a separate proof."""
+    from daimon.core.stores.domain import BackendAgent
+    from mux.contracts.resources import Environment
+
+    root = replace(root, agent_id=uuid4())
+    source = Agent(
+        ref=ResourceRef(
+            provider=root.spec.model.provider,
+            kind="agent",
+            id="captured-source",
+            account_scope_id="owned-workspace",
+            tenant_id=root.fleet.scope.tenant_id,
+            account_id=root.fleet.scope.account_id,
+        ),
+        revision=Revision(local=1, native="1"),
+        spec=root.spec,
+        native={"id": "captured-source", "version": 1},
+        created_at=NOW,
+    )
+    captured = BackendAgent(
+        tenant_id=UUID(root.fleet.scope.tenant_id),
+        agent_id=root.agent_id,
+        name="source",
+        configuration_digest="never-authority",
+        source=source,
+        effective_spec=root.spec,
+        resource_scope=root.fleet.scope,
+        environment=Environment(
+            ref=source.ref.model_copy(update={"kind": "environment", "id": "environment"}),
+            revision=Revision(local=1, native="1"),
+            spec=root.environment,
+            created_at=NOW,
+        ),
+        memory_required=False,
+        memory_read_only=True,
+    )
+    return root, captured
+
+
+def test_captured_intent_keeps_root_and_source_instructions_with_role_selected_model():
+    root, captured = captured_worker_source(parent("openai"))
+    root = replace(root, seal_ids=frozenset({"root-seal"}), memory_read_only=False)
+    other = root.spec.model.model_copy(update={"id": "another-authorized-model"})
+    root = replace(root, models=root.models + (other,))
+    captured = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(
+                update={"system": "Source rule", "model": other}
+            )
+        }
+    )
+    # The existing finite grant also pins its model, so explicit role choice cannot bypass it.
+    with pytest.raises(WorkerSpecRefused):
+        resolve(root, root.spec.model_copy(update={"model": other}), captured_source=captured)
+    result = resolve(
+        root, root.spec.model_copy(update={"system": "Role rule"}), captured_source=captured
+    )
+    assert result.spec.system == "Protected root instruction\n\nSource rule\n\nRole rule"
+    assert result.spec.model == root.spec.model
+    assert result.permissions.seal_ids == root.seal_ids
+    assert result.permissions.memory_read_only is True
+    assert (
+        result.digest
+        == resolve(
+            root, root.spec.model_copy(update={"system": "Role rule"}), captured_source=captured
+        ).digest
+    )
+
+
+@pytest.mark.parametrize("field", ("tools", "skills", "mcp"))
+def test_source_obligations_cannot_be_silently_omitted(field):
+    root = parent("openai")
+    additions = {
+        "skills": (SkillRef(id="pinned", version="1"),),
+        "mcp_servers": (
+            MCPConnection(
+                name="bound",
+                url="https://bound.invalid",
+                credential_ref="bound-auth",
+                tool_policy={"allowed_tools": ["read"]},
+            ),
+        ),
+    }
+    root = replace(root, spec=root.spec.model_copy(update=additions))
+    root, captured = captured_worker_source(root)
+    key = "mcp_servers" if field == "mcp" else field
+    with pytest.raises(WorkerSpecRefused) as refusal:
+        resolve(root, root.spec.model_copy(update={key: ()}), captured_source=captured)
+    assert (refusal.value.field, refusal.value.reason) == (field, "not_subset")
+    result = resolve(
+        root,
+        root.spec.model_copy(update={key: (), "declared_drops": (field,)}),
+        captured_source=captured,
+    )
+    assert getattr(result.spec, key) == ()
+
+
+@pytest.mark.parametrize(
+    "change", ("tenant", "scope", "agent", "native", "environment", "projection")
+)
+def test_capture_requires_current_scoped_projector_identity(change):
+    root, captured = captured_worker_source(parent("openai"))
+    updates = {
+        "tenant": {"tenant_id": uuid4()},
+        "scope": {
+            "resource_scope": root.fleet.scope.model_copy(update={"account_id": str(uuid4())})
+        },
+        "agent": {"agent_id": uuid4()},
+        "native": {"source": captured.source.model_copy(update={"native": None})},
+        "environment": {"environment": None},
+        "projection": {"memory_required": None},
+    }
+    with pytest.raises(WorkerSpecRefused, match="scope: stale"):
+        resolve(root, captured_source=captured.model_copy(update=updates[change]))
+
+
+@pytest.mark.parametrize("change", ("native", "generation", "environment_revision", "guidance"))
+def test_capture_facts_change_canonical_digest_even_when_authored_spec_is_unchanged(change):
+    root, captured = captured_worker_source(parent("openai"))
+    original = resolve(root, captured_source=captured)
+    updates = {
+        "native": {
+            "source": captured.source.model_copy(
+                update={"native": {"id": "captured-source", "version": 2}}
+            )
+        },
+        "generation": {"resource_generations": (("repo", NOW),)},
+        "environment_revision": {
+            "environment": captured.environment.model_copy(
+                update={"revision": Revision(local=1, native="2")}
+            )
+        },
+        "guidance": {"memory_instructions": "Read-only memory instruction"},
+    }
+    changed = resolve(root, captured_source=captured.model_copy(update=updates[change]))
+    assert changed.spec == original.spec
+    assert changed.digest != original.digest
+
+
+@pytest.mark.parametrize(
+    "opaque", ("extensions", "effort", "memory", "credential", "native_resource", "environment")
+)
+def test_unrepresentable_capture_is_typed_refused_before_any_allocation(opaque):
+    root, captured = captured_worker_source(parent("openai"))
+    changes = {
+        "extensions": {
+            "effective_spec": captured.effective_spec.model_copy(
+                update={
+                    "extensions": (
+                        ExtensionConfig(
+                            namespace="anthropic.model_config",
+                            version=1,
+                            value={"model": {"model": "ungranted"}},
+                        ),
+                    )
+                }
+            )
+        },
+        "effort": {
+            "effective_spec": captured.effective_spec.model_copy(
+                update={
+                    "model": captured.effective_spec.model.model_copy(
+                        update={"options": {"effort": "high"}}
+                    )
+                }
+            )
+        },
+        "memory": {"memory_required": True},
+        "credential": {
+            "resource_requirements": (
+                ResourceBinding(id="credential", kind="credential", credential_ref="opaque"),
+            )
+        },
+        "native_resource": {
+            "resource_requirements": (ResourceBinding(id="opaque", kind="native"),)
+        },
+        "environment": {
+            "environment": captured.environment.model_copy(
+                update={
+                    "spec": captured.environment.spec.model_copy(
+                        update={
+                            "native_config": ExtensionConfig(
+                                namespace="anthropic.environment_config", version=1, value={}
+                            )
+                        }
+                    )
+                }
+            )
+        },
+    }
+    with pytest.raises(WorkerSpecRefused):
+        resolve(root, captured_source=captured.model_copy(update=changes[opaque]))
+
+
+def test_clone_capture_must_match_retained_source_revision_and_native_snapshot():
+    root, captured = captured_worker_source(parent("openai"))
+    root = replace(
+        root,
+        source_agents=(captured.source.ref,),
+        source_revisions=((captured.source.ref, captured.source.revision),),
+    )
+    result = resolve(root, captured.source, captured_source=captured)
+    assert result.source_agent == (captured.source.ref, captured.source.revision)
+    for update in ({"revision": Revision(local=1, native="2")}, {"native": {"id": "different"}}):
+        with pytest.raises(WorkerSpecRefused, match="scope: stale"):
+            resolve(
+                root,
+                captured.source,
+                captured_source=captured.model_copy(
+                    update={"source": captured.source.model_copy(update=update)}
+                ),
+            )
+
+
+def test_captured_sandbox_and_resources_cannot_replace_root_grants():
+    root, captured = captured_worker_source(parent("openai"))
+    binding = ResourceBinding(id="file", kind="artifact")
+    with pytest.raises(WorkerSpecRefused, match="files: not_subset"):
+        resolve(
+            root, captured_source=captured.model_copy(update={"resource_requirements": (binding,)})
+        )
+    wider = root.environment.model_copy(update={"network": NetworkPolicy(mode="unrestricted")})
+    with pytest.raises(WorkerSpecRefused, match="sandbox: not_subset"):
+        resolve(
+            root,
+            environment=wider,
+            captured_source=captured.model_copy(
+                update={"environment": captured.environment.model_copy(update={"spec": wider})}
+            ),
+        )
+
+
+def test_capture_inherited_drops_remain_restrictions():
+    root, captured = captured_worker_source(parent("openai"))
+    captured = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(
+                update={"declared_drops": ("memory",)}
+            )
+        }
+    )
+    with pytest.raises(WorkerSpecRefused, match="declared_drops: not_subset"):
+        resolve(root, captured_source=captured)
+    result = resolve(
+        root, root.spec.model_copy(update={"declared_drops": ("memory",)}), captured_source=captured
+    )
+    assert result.declared_drops == ("memory",)
