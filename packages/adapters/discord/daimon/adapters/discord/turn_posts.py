@@ -11,7 +11,6 @@ recorded yet, so they cannot be tidied with the tools.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -19,8 +18,8 @@ from typing import Any
 import structlog
 from daimon.adapters.discord.lifecycle import SendFn
 from daimon.adapters.discord.post_transport import DiscordPostTransport
-from daimon.core.channel_tidy import RECORD_TIMEOUT_S, record_turn_post
-from daimon.core.stores.agent_posts import AgentPostRow, record_post
+from daimon.core.channel_tidy import record_turn_post
+from daimon.core.stores.agent_posts import AgentPostRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -114,26 +113,4 @@ async def record_replacement_post(
     Recovery knows the stored agent UUID, not an invented native agent ID.
     The bot verifies the post/root destination before handing it here.
     """
-    try:
-        async with asyncio.timeout(RECORD_TIMEOUT_S), sessionmaker.begin() as session:
-            await record_post(
-                session,
-                tenant_id=post.tenant_id,
-                platform=post.platform,
-                channel_id=post.channel_id,
-                message_id=str(replacement.id),
-                agent_id=post.agent_id,
-                kind=post.kind,
-                parent_channel_id=post.parent_channel_id,
-                thread_ts=post.thread_ts,
-                source=post.source,
-                requester_platform_user_id=post.requester_platform_user_id,
-                turn_card_intent_id=post.turn_card_intent_id,
-            )
-    except Exception as exc:
-        log.warning(
-            "channel_tidy.turn_record_failed",
-            tenant_id=str(post.tenant_id),
-            platform=post.platform,
-            error_type=type(exc).__name__,
-        )
+    await record_turn_post(sessionmaker, recorded_post=post, message_id=str(replacement.id))

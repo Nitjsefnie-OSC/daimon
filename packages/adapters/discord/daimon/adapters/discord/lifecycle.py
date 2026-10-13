@@ -1078,7 +1078,7 @@ class DiscordTurnLifecycle:
         the final-response extraction and only the post-tool recap survives."""
         # Fleet turns disclose one collected, reviewed terminal summary.
         # Intermediate sealed text is not that summary, even on failure.
-        if self._fleet_card is not None:
+        if self._fleet_card is not None and not await self._fleet_card.allow_sealed_responses():
             return
         for index, text in extract_sealed_responses(
             state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS

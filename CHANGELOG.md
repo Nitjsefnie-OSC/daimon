@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse verified Gemini worker readback and share native worker publication authority checks.
 - Keep continuation timers and known work readable during queue upgrades by filtering unsupported reasons before batching, validation and lease mutations. Worker-completion publication remains closed.
 - Compose scoped fleet journal reads and financially locked admission through the existing owners; validate result contracts before funding, recover pending dispatch, and validate exact live origins for explicitly installed MCP bridges.
+- Preserve ordinary sealed answers when the trusted Discord fleet resolver proves no active fleet, and record replacement messages through the shared turn-post owner.
+
 - Bind opted-in Discord fleet cards to the installed shared service, defer root lookup until rendering, and keep control edits and replacement-message capture on the existing post transport.
 
 - Preserve a tenant-wide clone source identity only under its exact root source/revision grant and authorized account capture.

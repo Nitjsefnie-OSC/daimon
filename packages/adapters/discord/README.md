@@ -96,3 +96,11 @@ replacement message IDs carry the original post attribution in the existing
 post store. Live refresh and collected-card edits adopt the returned message,
 so subsequent edits target the actual replacement. Capture is metadata only;
 there is no production QA recorder or new card table.
+
+When the trusted fleet resolver proves there is no active fleet, the installed
+factory preserves the complete ordinary lifecycle delivery, including sealed
+pre-tool replies and terminal failures. Missing or foreign authority stays
+closed, and active fleets expose only the reviewed collected summary.
+Replacement capture passes canonical stored attribution to the shared
+`record_turn_post` owner; its timeout, transaction and failure logging also
+apply to recovered controls.

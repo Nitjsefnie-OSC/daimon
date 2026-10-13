@@ -449,6 +449,18 @@ class DiscordFleetCard:
                 )
                 return False
 
+    async def allow_sealed_responses(self) -> bool:
+        """Only the trusted snapshot's proven absence restores ordinary delivery.
+
+        An unresolved or foreign root never permits disclosure. Active fleet
+        text is governed by collect/review, including on terminal failure.
+        """
+        async with self._lock:
+            try:
+                return await self._snapshot(None) is None
+            except (FleetRefused, WorkerSpecRefused):
+                return False
+
     async def allow_summary(self) -> bool:
         """Gate the existing orchestrator answer on authoritative collect/review."""
         async with self._lock:

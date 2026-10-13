@@ -688,8 +688,9 @@ def test_real_bot_flag_off_does_not_construct_a_sender_or_fleet_service():
     bot.runtime.fleet_card_factory.assert_not_called()
 
 
+@pytest.mark.parametrize("recovered_attribution", [False, True])
 async def test_real_webhook_replacement_records_both_accepted_card_messages(
-    db_nullpool_engine, db_clean, monkeypatch
+    db_nullpool_engine, db_clean, monkeypatch, recovered_attribution
 ):
     from daimon.adapters.discord import post_transport
     from daimon.adapters.discord.post_transport import DiscordPostTransport
@@ -845,7 +846,26 @@ async def test_real_webhook_replacement_records_both_accepted_card_messages(
     )
 
     async def record_replacement(message):
-        await recorder.message(thread, message, turn_card_intent_id=intent.id)
+        if not recovered_attribution:
+            await recorder.message(thread, message, turn_card_intent_id=intent.id)
+            return
+        from daimon.adapters.discord.turn_posts import record_replacement_post
+        from daimon.core import channel_tidy
+
+        async with sessionmaker() as session:
+            captured = await get_post(
+                session, tenant_id=TENANT, platform="discord", channel_id="70", message_id="900"
+            )
+        assert captured is not None
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                channel_tidy,
+                "derive_agent_uuid",
+                MagicMock(
+                    side_effect=AssertionError("stored attribution must not derive a native agent")
+                ),
+            )
+            await record_replacement_post(sessionmaker, captured, message)
 
     async def resolve_root(destination, actor_id, intent_id, run_id, interaction):
         assert destination is thread and actor_id == 123
@@ -960,6 +980,123 @@ async def test_unbound_factory_absence_allows_only_an_ordinary_final_answer():
     send.assert_not_awaited()
 
 
+@pytest.mark.parametrize("terminal", ["success", "failure"])
+@pytest.mark.parametrize("render_first", [False, True])
+async def test_installed_factory_proven_absence_preserves_complete_lifecycle_delivery(
+    terminal, render_first
+):
+    """Compare the actual lifecycle's full delivery trace, including sealed text."""
+    state = TurnState(
+        content=[
+            TextBlock(kind="text", text="An ordinary sealed answer. " * 30),
+            ToolUseBlock(
+                kind="tool_use", id="trailing-tool", type="agent.tool_use", name="read", input={}
+            ),
+            TextBlock(kind="text", text="The ordinary final recap."),
+        ]
+    )
+
+    async def deliver(installed):
+        _, owner, _, send, edit = setup()
+        resolver = AsyncMock(return_value=None)
+        thread = MagicMock(spec=discord.Thread)
+        thread.id, thread.parent_id = 70, 50
+        thread.guild.id = 60
+        card = (
+            DiscordFleetCardFactory(FleetOrchestrator(owner), resolver)(
+                thread, 123, send, edit, turn_card_intent_id=UUID(int=72)
+            )
+            if installed
+            else None
+        )
+        trace = []
+
+        async def deliver_message(operation, args, kwargs):
+            payload = dict(kwargs)
+            if "embeds" in payload:
+                payload["embeds"] = [embed.to_dict() for embed in payload["embeds"]]
+            if payload.get("allowed_mentions") is not None:
+                payload["allowed_mentions"] = payload["allowed_mentions"].to_dict()
+            if payload.get("view") is not None:
+                payload["view"] = payload["view"].to_components()
+            trace.append((operation, tuple(message.id for message in args), payload))
+            message = MagicMock(spec=discord.Message)
+            message.id = 900 + len(trace)
+            return message
+
+        async def send_message(*args, **kwargs):
+            return await deliver_message("send", args, kwargs)
+
+        async def edit_message(*args, **kwargs):
+            return await deliver_message("edit", args, kwargs)
+
+        send.side_effect, edit.side_effect = send_message, edit_message
+        lifecycle = DiscordTurnLifecycle(
+            send=send,
+            edit=edit,
+            agent_name="root",
+            model_id="fixture-model",
+            fleet_card=card,
+            clock=lambda: 1000.0,
+            request_id=lambda: "fixture-request",
+        )
+        if render_first:
+            await lifecycle.on_render(state)
+        if terminal == "success":
+            await lifecycle.on_terminal_success(state)
+        else:
+            await lifecycle.on_terminal_failure(state, RuntimeError("fixture failure"))
+        owner.read_run.assert_not_awaited()
+        owner.read_result.assert_not_awaited()
+        owner.wait.assert_not_awaited()
+        if installed:
+            assert resolver.await_count > 0
+        return trace, lifecycle.was_answered
+
+    ordinary = await deliver(False)
+    installed = await deliver(True)
+    assert installed == ordinary
+    assert (
+        sum("An ordinary sealed answer." in row[2].get("content", "") for row in installed[0]) == 1
+    )
+
+
+@pytest.mark.parametrize("authority", ["unresolved", "foreign", "active", "failed"])
+async def test_installed_factory_never_discloses_sealed_text_without_proven_absence(authority):
+    from daimon.core.fleet_orchestration import FleetRefused
+
+    _, owner, _, send, edit = setup()
+    root = parent()
+    if authority == "foreign":
+        root = replace(root, subject=Subject(platform_user_id="456"))
+    resolver = AsyncMock(return_value=(root, POLICY))
+    if authority == "unresolved":
+        resolver.side_effect = FleetRefused("prerequisites_unavailable")
+    if authority == "failed":
+        owner.read_run.return_value = (run(), (worker(status="failed"),))
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = 70, 50
+    thread.guild.id = 60
+    card = DiscordFleetCardFactory(FleetOrchestrator(owner), resolver)(thread, 123, send, edit)
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    sealed = "An unreviewed sealed answer. " * 30
+    state = TurnState(
+        content=[
+            TextBlock(kind="text", text=sealed),
+            ToolUseBlock(kind="tool_use", id="tool", type="agent.tool_use", name="read", input={}),
+        ]
+    )
+    await lifecycle.on_terminal_failure(state, RuntimeError("fixture failure"))
+    assert not any(
+        sealed in call.kwargs.get("content", "")
+        for call in send.await_args_list + edit.await_args_list
+    )
+    owner.read_result.assert_not_awaited()
+    owner.wait.assert_not_awaited()
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_runtime_installs_factory_only_with_opted_in_owner_bindings(
     db_nullpool_engine, monkeypatch, enabled
@@ -1018,3 +1155,105 @@ async def test_runtime_refuses_missing_fleet_binding_before_sdk_or_db_constructi
             raise AssertionError("unbound runtime must refuse")
     database.assert_not_called()
     sdk.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["write", "timeout"])
+async def test_replacement_capture_uses_the_owners_failure_policy(
+    db_session_factory, monkeypatch, failure
+):
+    from daimon.adapters.discord.turn_posts import TurnPostRecorder, record_replacement_post
+    from daimon.core import channel_tidy
+    from daimon.core.stores.agent_posts import get_post
+    from daimon.testing.factories import make_tenant
+    from structlog.testing import capture_logs
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = 70, 50
+    original = MagicMock(spec=discord.Message)
+    original.id = 900
+    recorder = TurnPostRecorder(db_session_factory, tenant.id, "root-agent", 123)
+    await recorder.message(thread, original, turn_card_intent_id=UUID(int=72))
+    async with db_session_factory() as session:
+        captured = await get_post(
+            session, tenant_id=tenant.id, platform="discord", channel_id="70", message_id="900"
+        )
+    assert captured is not None
+    replacement = MagicMock(spec=discord.Message)
+    replacement.id = 901
+
+    entered = asyncio.Event()
+
+    async def blocked_write(*args, **kwargs):
+        entered.set()
+        if failure == "write":
+            raise RuntimeError("injected store failure")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(channel_tidy, "record_post", blocked_write)
+    monkeypatch.setattr(channel_tidy, "RECORD_TIMEOUT_S", 1.0)
+    with capture_logs() as logs:
+        await record_replacement_post(db_session_factory, captured, replacement)
+    assert entered.is_set()
+    assert logs == [
+        {
+            "event": "channel_tidy.turn_record_failed",
+            "log_level": "warning",
+            "tenant_id": str(tenant.id),
+            "platform": "discord",
+            "source": "turn",
+            "error_type": "RuntimeError" if failure == "write" else "TimeoutError",
+        }
+    ]
+    async with db_session_factory() as session:
+        assert (
+            await get_post(
+                session, tenant_id=tenant.id, platform="discord", channel_id="70", message_id="901"
+            )
+            is None
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"tenant_id": UUID(int=999)},
+        {"platform": "slack"},
+        {"channel_id": "71"},
+        {"requester_platform_user_id": "456"},
+        {"source": "auto_thread"},
+        {"turn_card_intent_id": UUID(int=73)},
+        {"parent_channel_id": "51"},
+        {"thread_ts": "foreign-thread"},
+        {"ma_agent_id": "do-not-infer-native-id"},
+        {"recorded_intent": None},
+    ],
+)
+async def test_stored_replacement_attribution_cannot_be_overridden_before_writing(overrides):
+    from daimon.core.channel_tidy import record_turn_post
+    from daimon.core.stores.agent_posts import AgentPostRow
+
+    overrides = dict(overrides)
+    intent = overrides.pop("recorded_intent", UUID(int=72))
+    stored = AgentPostRow(
+        id=UUID(int=80),
+        tenant_id=TENANT,
+        platform="discord",
+        channel_id="70",
+        message_id="900",
+        parent_channel_id="50",
+        thread_ts=None,
+        kind="message",
+        agent_id=UUID(int=44),
+        content_hmac=None,
+        source="turn",
+        requester_platform_user_id="123",
+        turn_card_intent_id=intent,
+        posted_at=NOW,
+        deleted_at=None,
+    )
+    sessionmaker = MagicMock(spec=async_sessionmaker)
+    with pytest.raises(ValueError, match="recorded attribution|must name its turn"):
+        await record_turn_post(sessionmaker, recorded_post=stored, message_id="901", **overrides)
+    sessionmaker.begin.assert_not_called()
