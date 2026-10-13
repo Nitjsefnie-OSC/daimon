@@ -4237,6 +4237,7 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
         return state
 
     captured_deadlines: dict[str, datetime | None] = {}
+    render_tables: list[bool] = []
 
     async def _bind_session_wrapper(*args: Any, **kwargs: Any) -> Any:
         captured_deadlines["bind"] = kwargs.get("deadline")
@@ -4244,6 +4245,7 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
 
     async def _run_prepared_turn_wrapper(*args: Any, **kwargs: Any) -> Any:
         captured_deadlines["run"] = kwargs.get("deadline")
+        render_tables.append(kwargs["lifecycle"]._render_tables)
         return await real_run_prepared_turn(*args, **kwargs)
 
     with (
@@ -4289,6 +4291,7 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
     assert captured_deadlines.get("bind") is not None, (
         "bind_session must receive a non-None deadline"
     )
+    assert render_tables == [False], "Slack tables stay plain text without a tenant entry"
     assert captured_deadlines.get("run") is not None, (
         "run_prepared_turn must receive a non-None deadline"
     )

@@ -1430,9 +1430,9 @@ class Settings(BaseSettings):
     table_rendering: dict[uuid.UUID, bool] = Field(
         default_factory=dict[uuid.UUID, bool],
         description=(
-            "Per-tenant table rendering opt-in, keyed by tenant UUID. True renders "
-            "final Markdown tables as PNG on Discord and native tables on Slack. "
-            "Missing/false preserves plain text. Set DAIMON_TABLE_RENDERING to a JSON object."
+            "Per-tenant table rendering, keyed by tenant UUID. Discord renders final "
+            "Markdown tables as PNG unless the tenant is set to false. Slack renders "
+            "native tables only when set to true. Set DAIMON_TABLE_RENDERING to a JSON object."
         ),
     )
     database: DatabaseSettings

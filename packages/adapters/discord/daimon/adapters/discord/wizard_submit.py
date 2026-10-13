@@ -86,6 +86,7 @@ from daimon.adapters.discord.errors import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, SendFn
 from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.adapters.discord.tables import tables_enabled
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.turn_card_recovery import (
@@ -619,8 +620,7 @@ async def run_wizard_submit_turn_observed(
                 alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
                 tenant_id=row.tenant_id,
                 budget_channel_id=admission.budget_channel_id,
-                render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
-                is True,
+                render_tables=tables_enabled(bot.runtime.settings.table_rendering, row.tenant_id),
                 send=_turn_send(turn_id),
                 edit=_edit_message,
                 delete=_delete_message,
@@ -734,8 +734,7 @@ async def run_wizard_submit_turn_observed(
                 alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
                 tenant_id=row.tenant_id,
                 budget_channel_id=admission.budget_channel_id,
-                render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
-                is True,
+                render_tables=tables_enabled(bot.runtime.settings.table_rendering, row.tenant_id),
                 send=_turn_send(turn_card_intent.id),
                 edit=_edit_message,
                 agent_name=agent.name,

@@ -1962,10 +1962,10 @@ deletion.
 
 ### Platform table rendering
 
-Enable per tenant with `DAIMON_TABLE_RENDERING`, a JSON map of tenant UUIDs to
-booleans. Teams renders Markdown tables natively, so the setting does nothing
-there. Missing/false preserves current plain-text delivery. UUID keys are
-validated at startup. Core `tables.render_tables` parses pipe-delimited Markdown tables outside fenced
+`DAIMON_TABLE_RENDERING` is a JSON map of tenant UUIDs to booleans. Discord
+renders tables unless the tenant is set to false; Slack renders them only when
+set to true. Teams renders Markdown tables natively, so the setting does nothing
+there. UUID keys are validated at startup. Core `tables.render_tables` parses pipe-delimited Markdown tables outside fenced
 code and accepts an optional async platform hook. Without a hook the input is
 returned unchanged. Both adapter helpers also default to disabled. Hook failures
 and oversized tables retain their raw text. Rejected Discord attachment edits
@@ -1974,7 +1974,8 @@ keeps already-delivered chunks in place and retries only the rejected table.
 The shared bound is 20 columns, 100 rows including the header, and 10000 cell
 characters; at most ten tables render per answer.
 
-Discord renders final-answer tables off-thread as PNG attachments using bundled
+Discord renders final-answer tables off-thread as PNG attachments, each with the
+raw Markdown (up to 1024 characters) as its description, using bundled
 Inter fonts (including wizard submissions and their recovery turns), navy headers, light alternating rows, and horizontal rules. Wide
 cells wrap without truncation, all-numeric body columns align right even without
 an explicit `---:` marker, and a pixel budget
