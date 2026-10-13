@@ -311,12 +311,15 @@ async def test_a_private_channel_in_a_space_is_read_from_another_member(
             runtime, auth, channel_id=_PRIVATE, limit=5, cursor=None, read_policy=outside
         )
     await create_space(
+        runtime.client,
         sessionmaker,
         tenant_id=auth.tenant_id,
+        platform="teams",
         name="client",
         rule=ChannelRule(readers="inside"),
         channel_ids=[_CHANNEL, _PRIVATE],
         subject=Subject(is_admin=True),
+        default=runtime.deployment_default,
     )
 
     inside = await load_read_policy(runtime, bound, origin_context_id=None)

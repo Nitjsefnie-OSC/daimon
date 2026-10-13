@@ -1100,12 +1100,15 @@ async def test_space_members_take_one_agent_rule_and_refuse_their_own_rules(
     await _bind(db_session, tenant.id, "c2", "local")
     await db_session.commit()
     await create_space(
+        client,
         db_session_factory,
         tenant_id=tenant.id,
+        platform="discord",
         name="client",
         rule=OWN,
         channel_ids=["c1", "c2"],
         subject=ADMIN,
+        default=DEFAULT,
     )
 
     assert await _agent_rule(client, db_session_factory, tenant.id, "local", ("c1", "c2")) == (

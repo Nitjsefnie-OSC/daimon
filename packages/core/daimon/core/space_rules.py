@@ -16,8 +16,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import structlog
+from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelRule, SpaceRule, TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
+from daimon.core.channel_rules import own_agent_refusal, render_rule_refusal
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.permissions import (
     AgentRule,
     RuleRefused,
@@ -26,6 +29,7 @@ from daimon.core.permissions import (
     with_agent_rule,
     with_space,
 )
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import spaces as store
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -129,9 +133,70 @@ async def _members(session: AsyncSession, space: SpaceRow) -> list[str]:
     return [ref.channel_id for ref in await store.list_space_channels(session, space_id=space.id)]
 
 
+@dataclass(frozen=True)
+class _Agents:
+    """What checking a would-be own agent needs (`own_agent_refusal`)."""
+
+    anthropic: AsyncAnthropic
+    platform: str
+    default: DeploymentDefault
+
+
+def _newly_own(
+    policy: TenantAccessPolicy, updated: TenantAccessPolicy, space: SpaceRule, channel_id: str
+) -> tuple[str, ...]:
+    """Agents the join makes the Space's own that were no channel's or Space's own before."""
+    if space.rule.readers != "own":
+        return ()
+    was_own = set(_own_agents(policy, space))
+    if channel_rule(policy, channel_id).readers == "own":
+        was_own |= set(runs_only_in(policy, channel_id))
+    return tuple(n for n in runs_only_in(updated, channel_id) if n not in was_own)
+
+
+async def _require_own_agents(
+    session: AsyncSession,
+    agents: _Agents,
+    *,
+    tenant_id: uuid.UUID,
+    policy: TenantAccessPolicy,
+    space: SpaceRule,
+    channel_id: str,
+    names: Sequence[str],
+) -> None:
+    """Refuse a join that makes an agent the Space's own that could not be a channel's.
+
+    The same checks as setting a channel's readers to own: not built in, and
+    answering nowhere outside the Space. An agent left only as a rule is skipped.
+    """
+    for name in names:
+        # An MA lookup under the policy lock, but only for an agent the join
+        # makes own, which is rare.
+        agent = await find_agent_by_daimon_tag(agents.anthropic, tenant_id=tenant_id, name=name)
+        if agent is None:
+            continue
+        refusal = await own_agent_refusal(
+            session,
+            tenant_id=tenant_id,
+            platform=agents.platform,
+            channel_id=channel_id,
+            policy=policy,
+            default=agents.default,
+            name=name,
+            agent=agent,
+            within=space.channel_ids,
+        )
+        if refusal is not None:
+            raise SpaceRefused(
+                f"joining {channel_id} would make {name} an own agent of Space {space.name}: "
+                + render_rule_refusal(refusal, agent_name=name, channel_id=channel_id)
+            )
+
+
 async def _join(
     session: AsyncSession,
     policy: TenantAccessPolicy,
+    agents: _Agents,
     *,
     space: SpaceRow,
     members: list[str],
@@ -147,10 +212,20 @@ async def _join(
         session, space=space, tenant_id=space.tenant_id, channel_id=channel_id
     )
     members.append(channel_id)
+    after = _space_rule(space, members)
     try:
-        updated = with_space(policy, before.key, _space_rule(space, members))
+        updated = with_space(policy, before.key, after)
     except RuleRefused as exc:
         raise SpaceRefused(str(exc)) from exc
+    await _require_own_agents(
+        session,
+        agents,
+        tenant_id=space.tenant_id,
+        policy=updated,
+        space=after,
+        channel_id=channel_id,
+        names=_newly_own(policy, updated, before, channel_id),
+    )
     for name in extended:
         runs_in = updated.agent_rules[name].runs_in or ()
         updated = with_agent_rule(updated, name, AgentRule(runs_in=(*runs_in, channel_id)))
@@ -158,19 +233,23 @@ async def _join(
 
 
 async def create_space(
+    anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
+    platform: str,
     name: str,
     rule: ChannelRule,
     channel_ids: Sequence[str],
     subject: Subject,
+    default: DeploymentDefault,
     loosen_rules: bool = False,
 ) -> SpaceChange:
     """Create Space `name` of `channel_ids`; raise `SpaceRefused` if refused.
 
     `loosen_rules` lets a channel whose rule is stricter than the Space's join.
     """
+    agents = _Agents(anthropic, platform, default)
     if rule.readers not in ("inside", "own"):
         raise SpaceRefused("a Space's readers are inside or own")
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
@@ -182,6 +261,7 @@ async def create_space(
             updated, _ = await _join(
                 session,
                 updated,
+                agents,
                 space=space,
                 members=members,
                 channel_id=channel_id,
@@ -195,12 +275,15 @@ async def create_space(
 
 
 async def add_space_channel(
+    anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
+    platform: str,
     name: str,
     channel_id: str,
     subject: Subject,
+    default: DeploymentDefault,
     extend_agents: bool = False,
     loosen_rules: bool = False,
 ) -> SpaceChange:
@@ -217,6 +300,7 @@ async def add_space_channel(
         updated, extended = await _join(
             session,
             policy,
+            _Agents(anthropic, platform, default),
             space=space,
             members=members,
             channel_id=channel_id,

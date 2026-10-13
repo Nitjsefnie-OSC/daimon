@@ -170,12 +170,15 @@ async def spaces_create(
         rt, console, tenant_id=tenant_id, channel_ids=channels, confirm=confirm
     )
     change = await create_space(
+        rt.anthropic,
         rt.sessionmaker,
         tenant_id=tenant_id,
+        platform=platform,
         name=name,
         rule=rule,
         channel_ids=channels,
         subject=_OPERATOR,
+        default=rt.deployment_default,
         loosen_rules=loosen_rules,
     )
     _print_change(console, change, "created")
@@ -237,11 +240,14 @@ async def spaces_add(
         rt, console, tenant_id=tenant_id, channel_ids=[*members, channel_id], confirm=confirm
     )
     change = await add_space_channel(
+        rt.anthropic,
         rt.sessionmaker,
         tenant_id=tenant_id,
+        platform=platform,
         name=name,
         channel_id=channel_id,
         subject=_OPERATOR,
+        default=rt.deployment_default,
         extend_agents=extend_agents,
         loosen_rules=loosen_rules,
     )

@@ -337,7 +337,7 @@ def release_agents_of(
     return policy, names
 
 
-async def _own_agent_refusal(
+async def own_agent_refusal(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
@@ -413,7 +413,7 @@ async def _channel_agent(
     )
     if agent is None:
         return _ChannelAgent(name, answering, "no_channel_agent")
-    refusal = await _own_agent_refusal(
+    refusal = await own_agent_refusal(
         session,
         tenant_id=tenant_id,
         platform=platform,
@@ -764,7 +764,7 @@ async def set_agent_rule(
     The rule replaces any on the agent's other names. A channel's own agent
     keeps its rule until that channel's readers change; a rule naming a
     channel only its own agents read names it alone, and makes the agent one
-    of its own only if it could be (`_own_agent_refusal`). None also clears
+    of its own only if it could be (`own_agent_refusal`). None also clears
     the rule an archived agent left behind, but only when no live agent
     answers to `agent_name` under any name a rule applies to (`agent_aliases`:
     its MA name, its config name, a report reader's source names), so a live
@@ -805,7 +805,7 @@ async def set_agent_rule(
         if own and len(keys) > 1:
             raise ChannelRuleRefused("own_channel_alone", channel_id=own[0])
         if own and home is None and agent is not None:
-            refusal = await _own_agent_refusal(
+            refusal = await own_agent_refusal(
                 session,
                 tenant_id=tenant_id,
                 platform=platform,
@@ -853,6 +853,7 @@ __all__ = [
     "copy_name",
     "describe_rule",
     "keep_to_own",
+    "own_agent_refusal",
     "release_agents_of",
     "render_rule_refusal",
     "resolve_rule",

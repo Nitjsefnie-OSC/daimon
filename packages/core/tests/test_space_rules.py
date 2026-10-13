@@ -5,10 +5,14 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from anthropic import AsyncAnthropic
 from daimon.core.access_policy import AgentRule, ChannelRule, SpaceRule, TenantAccessPolicy
 from daimon.core.authz import Subject
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.permissions import agent_permissions, channel_rule, with_channel_rule
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.space_rules import (
+    SpaceChange,
     SpaceRefused,
     add_space_channel,
     create_space,
@@ -17,14 +21,70 @@ from daimon.core.space_rules import (
     remove_space_channel,
 )
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.spaces import space_key
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ADMIN = Subject(is_admin=True)
 OWN = ChannelRule(readers="own", writers="own")
 INSIDE = ChannelRule(readers="inside")
+DEFAULT = DeploymentDefault(agent_name="daimon")
+
+
+def _client(tenant_id: uuid.UUID, *agents: tuple[str, bool]) -> AsyncAnthropic:
+    """A fake MA holding `agents`, each (name, built in)."""
+    state = FakeMAState()
+    for index, (name, managed) in enumerate(agents):
+        metadata = {MA_METADATA_KEY_MANAGED: "true"} if managed else {}
+        agent = ma_agent(id=f"agent_{index}", name=name, tenant_id=tenant_id, metadata=metadata)
+        state.agents[agent.id] = agent.model_dump(mode="json")
+    return build_fake_anthropic(make_fake_ma_handler(state))
+
+
+async def _create(
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    channel_ids: list[str],
+    *,
+    rule: ChannelRule = OWN,
+    client: AsyncAnthropic | None = None,
+) -> SpaceChange:
+    return await create_space(
+        client or _client(tenant_id),
+        factory,
+        tenant_id=tenant_id,
+        platform="discord",
+        name="s",
+        rule=rule,
+        channel_ids=channel_ids,
+        subject=ADMIN,
+        default=DEFAULT,
+    )
+
+
+async def _add(
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    *,
+    client: AsyncAnthropic | None = None,
+    extend_agents: bool = False,
+) -> SpaceChange:
+    return await add_space_channel(
+        client or _client(tenant_id),
+        factory,
+        tenant_id=tenant_id,
+        platform="discord",
+        name="s",
+        channel_id=channel_id,
+        subject=ADMIN,
+        default=DEFAULT,
+        extend_agents=extend_agents,
+    )
 
 
 def _space(rule: ChannelRule) -> SpaceRule:
@@ -61,14 +121,7 @@ async def test_create_writes_the_space_rule_onto_each_member_and_not_the_space(
     )
     await db_session.commit()
 
-    change = await create_space(
-        db_session_factory,
-        tenant_id=tenant.id,
-        name="client",
-        rule=OWN,
-        channel_ids=["c1", "c2"],
-        subject=ADMIN,
-    )
+    change = await _create(db_session_factory, tenant.id, ["c1", "c2"])
 
     stored = (
         await db_session.execute(text("SELECT policy FROM tenant_access_policies"))
@@ -83,9 +136,7 @@ async def test_create_writes_the_space_rule_onto_each_member_and_not_the_space(
         "the agent naming both members has the Space as its home"
     )
     with pytest.raises(SpaceRefused, match="admin"):
-        await delete_space(
-            db_session_factory, tenant_id=tenant.id, name="client", subject=Subject()
-        )
+        await delete_space(db_session_factory, tenant_id=tenant.id, name="s", subject=Subject())
 
 
 async def test_space_rule_wins_over_a_member_rule_that_drifted(
@@ -93,14 +144,7 @@ async def test_space_rule_wins_over_a_member_rule_that_drifted(
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    await create_space(
-        db_session_factory,
-        tenant_id=tenant.id,
-        name="s",
-        rule=OWN,
-        channel_ids=["c1"],
-        subject=ADMIN,
-    )
+    await _create(db_session_factory, tenant.id, ["c1"])
     loaded = await load_access_policy(db_session, tenant_id=tenant.id)
     await set_access_policy(
         db_session, tenant_id=tenant.id, policy=with_channel_rule(loaded, "c1", ChannelRule())
@@ -123,30 +167,14 @@ async def test_add_extends_the_spaces_agents_and_refuses_a_second_own_agent(
         ),
     )
     await db_session.commit()
-    await create_space(
-        db_session_factory,
-        tenant_id=tenant.id,
-        name="s",
-        rule=OWN,
-        channel_ids=["c1"],
-        subject=ADMIN,
-    )
+    await _create(db_session_factory, tenant.id, ["c1"])
 
-    change = await add_space_channel(
-        db_session_factory,
-        tenant_id=tenant.id,
-        name="s",
-        channel_id="c3",
-        subject=ADMIN,
-        extend_agents=True,
-    )
+    change = await _add(db_session_factory, tenant.id, "c3", extend_agents=True)
     assert change.agents == ("x",), "the Space's own agent is extended"
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.agent_rules["x"].runs_in == ("c1", "c3"), "x now runs in the new member too"
     with pytest.raises(SpaceRefused, match="keeps its own agents"):
-        await add_space_channel(
-            db_session_factory, tenant_id=tenant.id, name="s", channel_id="c4", subject=ADMIN
-        )
+        await _add(db_session_factory, tenant.id, "c4")
 
 
 async def test_remove_and_delete_leave_members_contained(
@@ -159,14 +187,7 @@ async def test_remove_and_delete_leave_members_contained(
         policy=TenantAccessPolicy(agent_rules={"x": AgentRule(runs_in=("c1", "c2", "c3"))}),
     )
     await db_session.commit()
-    await create_space(
-        db_session_factory,
-        tenant_id=tenant.id,
-        name="s",
-        rule=OWN,
-        channel_ids=["c1", "c2", "c3"],
-        subject=ADMIN,
-    )
+    await _create(db_session_factory, tenant.id, ["c1", "c2", "c3"])
 
     removed = await remove_space_channel(
         db_session_factory, tenant_id=tenant.id, name="s", channel_id="c3", subject=ADMIN
@@ -183,3 +204,33 @@ async def test_remove_and_delete_leave_members_contained(
     assert deleted.agents == ("x",), "x names two former members: it is reported stranded"
     assert policy.spaces == {} and channel_rule(policy, "c1") == OWN, "members keep the rule"
     assert agent_permissions(policy, ("x",)).home is None, "and x has no home left: runs nowhere"
+
+
+async def test_join_runs_the_own_agent_checks_on_agents_it_makes_own(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An agent that becomes the Space's own must pass what a channel's own agent does."""
+    tenant = await make_tenant(db_session)
+    rules = {"builtin": AgentRule(runs_in=("c1",)), "roamer": AgentRule(runs_in=("c2",))}
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(agent_rules=rules)
+    )
+    # roamer also answers in c9, outside the Space.
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c9"),
+        tenant_id=tenant.id,
+        agent_name="roamer",
+        mode="agent",
+    )
+    await db_session.commit()
+    client = _client(tenant.id, ("builtin", True), ("roamer", False))
+
+    with pytest.raises(SpaceRefused, match="builtin an own agent of Space s: builtin is built in"):
+        await _create(db_session_factory, tenant.id, ["c1"], client=client)
+    await _create(db_session_factory, tenant.id, ["c3"], client=client)
+    with pytest.raises(SpaceRefused, match="roamer also answers outside"):
+        await _add(db_session_factory, tenant.id, "c2", client=client)
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert agent_permissions(policy, ("builtin",)).home is None, "nothing changed"
+    assert agent_permissions(policy, ("roamer",)).home is None, "nor here"
