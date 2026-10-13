@@ -982,3 +982,46 @@ async def test_openai_hosted_component_cannot_erase_the_legacy_source_environmen
     assert isinstance(refused.value.__cause__, UnsupportedCapability)
     assert "environment" in refused.value.__cause__.missing
     assert not owned.wire.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("route", ["channel", "legacy"])
+async def test_worker_cannot_bypass_source_proof_through_channel_origin(
+    explicit_worker_request, monkeypatch, route
+):
+    from daimon.core.turn import prepare as preparation
+
+    request, _, owned, transport = explicit_worker_request
+
+    async def forbidden(selected):
+        raise AssertionError("a worker reached the preparer without its source proof")
+
+    monkeypatch.setitem(
+        preparation._PROVIDER_PREPARATIONS, request.admission.backend_revision.profile, forbidden
+    )
+    admission = replace(request.admission, backend_revision_origin="channel")
+    if route == "legacy":
+        from mux.contracts.config import ConfigRevision
+        from mux.profiles import backend_selection
+
+        admission = replace(
+            request.admission,
+            backend_revision=ConfigRevision.create(
+                request.admission.backend_revision.channel, 1, backend_selection("anthropic")
+            ),
+        )
+    with pytest.raises(AdmissionDenied):
+        await bind_session_impl(
+            request.deps,
+            admission,
+            tenant_id=request.tenant_id,
+            platform=request.platform,
+            external_user_id=request.external_user_id,
+            thread_id=request.thread_id,
+            session_account_id=request.session_account_id,
+            reuse_existing=True,
+            deadline=request.deadline,
+            now=request.now,
+            worker=request.worker,
+        )
+    assert not owned.wire.requests and not transport.requests

@@ -973,6 +973,8 @@ async def bind_session_impl(
         return result
 
     profile = _admitted_profile(admission)
+    if worker is not None and admission.backend_revision_origin != "agent":
+        raise AdmissionDenied(reason="backend_unsupported")
     if profile != "anthropic.managed_agents":
         if (deps.turn_path or load_turn_settings().path) != "mux":
             raise AdmissionDenied(reason="backend_unsupported")
@@ -1052,6 +1054,9 @@ async def bind_session_impl(
             )
         except TimeoutError as error:
             raise ceiling_error() from error
+
+    if worker is not None:
+        raise AdmissionDenied(reason="backend_unsupported")
 
     async def _bind() -> PreparedTurn:
         # Decide the admission again at the moment its session is found,
