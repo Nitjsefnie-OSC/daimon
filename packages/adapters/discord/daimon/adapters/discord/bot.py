@@ -83,7 +83,11 @@ from daimon.adapters.discord.turn_card_recovery import (
     reconcile_turn_card_intent,
     retire_terminal_turn_card,
 )
-from daimon.adapters.discord.turn_posts import TurnPostRecorder, archive_thread_quietly
+from daimon.adapters.discord.turn_posts import (
+    TurnPostRecorder,
+    archive_thread_quietly,
+    record_replacement_post,
+)
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.vision import (
     build_image_url_prefix,
@@ -224,6 +228,7 @@ from discord.http import HTTPClient
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
+    from daimon.core.stores.agent_posts import AgentPostRow
 
 log = structlog.get_logger()
 
@@ -807,12 +812,80 @@ class DaimonBot(commands.Bot):
         send: Callable[[], SendFn],
         edit: EditFn,
         run_id: uuid.UUID | None = None,
+        turn_card_intent_id: uuid.UUID | None = None,
+        recorded_post: AgentPostRow | None = None,
+        on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
     ) -> DiscordFleetCard | None:
         factory = getattr(self.runtime, "fleet_card_factory", None)
         settings = getattr(self.runtime.settings, "fleet", None)
         if factory is None or getattr(settings, "enabled", False) is not True:
             return None
-        return factory(thread, requester_id, send(), edit, run_id=run_id)
+        return factory(
+            thread,
+            requester_id,
+            send(),
+            edit,
+            run_id=run_id,
+            turn_card_intent_id=turn_card_intent_id,
+            recorded_post=recorded_post,
+            on_replacement=on_replacement,
+        )
+
+    async def recover_fleet_card(
+        self, interaction: discord.Interaction, *, run_id: uuid.UUID
+    ) -> DiscordFleetCard | None:
+        """Rebuild through the captured post and the same transport owner."""
+        thread, message = interaction.channel, interaction.message
+        if (
+            not isinstance(thread, discord.Thread)
+            or message is None
+            or self.runtime.fleet_card_factory is None
+            or not self.runtime.settings.fleet.enabled
+        ):
+            return None
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
+        async with self.runtime.sessionmaker() as session:
+            post = await get_post(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=str(thread.id),
+                message_id=str(message.id),
+            )
+        if (
+            post is None
+            or post.source != "turn"
+            or post.kind != "message"
+            or post.turn_card_intent_id is None
+            or post.parent_channel_id != str(thread.parent_id)
+        ):
+            return None
+        transport = DiscordPostTransport(
+            self,
+            thread,
+            name=message.author.name,
+            avatar_url=None,
+            builtin=message.webhook_id is None,
+        )
+
+        async def record(replacement: discord.Message) -> None:
+            await record_replacement_post(self.runtime.sessionmaker, post, replacement)
+
+        async def send(*args: Any, **kwargs: Any) -> discord.Message:  # noqa: ANN401
+            sent = await transport.send(*args, **kwargs)
+            await record(sent)
+            return sent
+
+        return self.fleet_card_for(
+            thread=thread,
+            requester_id=interaction.user.id,
+            send=lambda: send,
+            edit=transport.edit,
+            run_id=run_id,
+            turn_card_intent_id=post.turn_card_intent_id,
+            recorded_post=post,
+            on_replacement=record,
+        )
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
@@ -3514,6 +3587,10 @@ class DaimonBot(commands.Bot):
                         thread, turn_card_intent_id=turn_id, transport=transport
                     ),
                     edit=_edit_message,
+                    turn_card_intent_id=turn_id,
+                    on_replacement=lambda msg: recorder.message(
+                        thread, msg, turn_card_intent_id=turn_id
+                    ),
                 ),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
@@ -4343,6 +4420,10 @@ class DaimonBot(commands.Bot):
                         thread, turn_card_intent_id=turn_id, transport=transport
                     ),
                     edit=_edit_message,
+                    turn_card_intent_id=turn_id,
+                    on_replacement=lambda msg: recorder.message(
+                        thread, msg, turn_card_intent_id=turn_id
+                    ),
                 ),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,

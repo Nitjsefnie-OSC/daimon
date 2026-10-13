@@ -4,6 +4,12 @@ Opted-in Discord worker fleets use the existing posted-card renderer and Stop
 guard. The card shows each worker's role, backend, model and current state.
 Complete rows stay in ordinal order within Discord's total text limit; large
 fleets show one `+N more` count for the rows that do not fit.
+Enabled runtime composition requires the shared fleet service and authenticated
+root resolver. Root lookup waits until render time; control recovery and
+replacement capture reuse the recorded post and existing Discord transport.
+Proven fleet absence preserves ordinary sealed and final delivery. Unresolved
+or foreign roots and active fleets never disclose intermediate sealed text.
+Live and recovered replacement posts share the bounded core turn-post writer.
 Stop and Resume reload current root permissions and use the shared fleet
 operation owner with a scoped version and idempotency key. The ordinary
 orchestrator answer is delivered only after authoritative collection and

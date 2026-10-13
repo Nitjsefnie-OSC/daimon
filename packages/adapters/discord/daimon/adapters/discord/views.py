@@ -26,12 +26,16 @@ registered `posted_controls.fleet.FleetControl` item to recover after restart.
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
 from daimon.adapters.discord.turn_card_recovery import turn_card_custom_id
 
 import discord
+
+if TYPE_CHECKING:
+    from daimon.adapters.discord.lifecycle import EditFn
 
 log = structlog.get_logger()
 
@@ -41,10 +45,16 @@ async def finish_control(
     *,
     view: discord.ui.View | discord.ui.LayoutView,
     allowed_mentions: discord.AllowedMentions | None = None,
+    edit: EditFn | None = None,
 ) -> None:
     """A completed Stop or Resume uses the existing missing-card boundary."""
     try:
-        if allowed_mentions is None:
+        if edit is not None:
+            if interaction.message is None:
+                return
+            await interaction.response.defer()
+            await edit(interaction.message, view=view, allowed_mentions=allowed_mentions)
+        elif allowed_mentions is None:
             await interaction.response.edit_message(view=view)
         else:
             await interaction.response.edit_message(view=view, allowed_mentions=allowed_mentions)
