@@ -2578,3 +2578,7 @@ still subject to the root's sandbox grant and independent native readback.
 Worker clone normalization retains the actual authorized source reference and
 revision through the existing resolver. A changed source or missing source grant
 refuses before allocation; stored worker intent and digests are never rewritten.
+
+Worker cleanup uses the verified prepared resource ports through the existing
+bounded archive owner. Unsupported archive remains a logged limitation and
+preserves the original dispatch failure, input count and reconciliation hold.

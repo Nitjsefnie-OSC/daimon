@@ -626,22 +626,37 @@ async def run_worker(
                 if result.ma_session_id in archived:
                     return
                 archived.add(result.ma_session_id)
-                io = turn_io(
-                    deps.anthropic,
-                    result.ma_session_id,
-                    **_turn_port_kwargs(
-                        deps,
-                        result.admission,
+                backend, ref, scope = result.backend, result.session_ref, result._scope  # pyright: ignore[reportPrivateUsage]
+                archive = (
+                    functools.partial(
+                        backend.sessions.archive,
+                        scope,
+                        ref,
+                        key=f"{operation}:orphan:{result.ma_session_id}",
+                    )
+                    if backend is not None and ref is not None and scope is not None
+                    else None
+                )
+                io = (
+                    None
+                    if archive is not None
+                    else turn_io(
+                        deps.anthropic,
                         result.ma_session_id,
-                        tenant_id=request.tenant_id,
-                        provider_backend=result.backend,
-                        provider_session=result.session_ref,
-                        provider_runtime=result.runtime,
-                        provider_scope=result._scope,  # pyright: ignore[reportPrivateUsage]
-                    ),
+                        **_turn_port_kwargs(
+                            deps,
+                            result.admission,
+                            result.ma_session_id,
+                            tenant_id=request.tenant_id,
+                            provider_backend=result.backend,
+                            provider_session=result.session_ref,
+                            provider_runtime=result.runtime,
+                            provider_scope=result._scope,  # pyright: ignore[reportPrivateUsage]
+                        ),
+                    )
                 )
                 await _archive_orphaned_session(
-                    deps.anthropic, session_id=result.ma_session_id, io=io
+                    deps.anthropic, session_id=result.ma_session_id, io=io, archive=archive
                 )
 
             async def commit_transition(

@@ -2235,3 +2235,53 @@ async def test_clone_dispatch_cannot_invent_or_reuse_source_lineage(
             cancel=asyncio.Event(),
         )
     assert calls == [] and owned.wire.requests == []
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_worker_cleanup_uses_prepared_ports_and_preserves_the_original_failure(
+    claimed_worker_request,
+    monkeypatch,
+    capsys,
+):
+    import asyncio
+
+    from daimon.core import headless_runner
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.turn.persistence import TurnPersistence
+
+    request, root, worker, prices, _, calls = claimed_worker_request
+    entered = []
+
+    async def refused(self, *args, **kwargs):
+        entered.append(self.binding.native_refs["session"])
+        raise FleetConflict("offline final message refusal")
+
+    def forbidden_codec(*args, **kwargs):
+        raise AssertionError("cleanup rebuilt a codec outside its turn context")
+
+    # Result publication fails after the real SDK input and terminal frame.
+    monkeypatch.setattr(TurnPersistence, "publish_worker_result", refused)
+    monkeypatch.setattr(headless_runner, "turn_io", forbidden_codec)
+    with pytest.raises(FleetConflict, match="offline final message refusal"):
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert len(entered) == 1
+    assert len([call for call in calls if call.method == "POST"]) == 1
+    output = capsys.readouterr().out
+    assert output.count("turn.recovery_orphan_archive_failed") == 1
+    assert "session_archive" in output
+    from daimon.core.stores import fleet
+
+    async with request.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet.lock_budget(
+            db, tenant_id=request.tenant_id, actor_id=root.fleet.account_id, run_id=worker.run_id
+        )
+        retained = next(row for _, rows in graph for row in rows if row.id == worker.id)
+    assert retained.turns_used == 1 and retained.result is None
+    assert retained.reserved_usd > 0 and retained.status == "running"
