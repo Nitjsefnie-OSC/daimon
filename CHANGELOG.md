@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Score offline fleet outcomes from scoped native completion, durable worker success and authoritative journal results, retaining known failures when evidence is missing.
 - Score offline fleet outcomes from scoped native completion, durable worker success and authoritative journal results, retaining known failures when evidence is missing and fencing review dispatch behind the ready cohort and original-root resume.
 - Allow explicit tool-free Gemini channel turns to request a native model output-token limit through the existing driver and runtime.
+- Retire a fleet run’s completion-wake scheduling atomically when it ends, preserving delivery evidence and native usage while revoking stale queue claims.
 
+- Retire a fleet run’s pending/claimed completion wakes atomically when it ends, clearing only their leases and preserving delivered/skipped records unchanged.
 - Keep all adversarial redaction growth checks stable under load by measuring capturing-thread CPU time.
 - Reserve opt-in fleet root origins and tenant-wide intent ownership before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.
 - Reserve opt-in fleet root origins before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.

@@ -40,7 +40,7 @@ from daimon.core.fleet import (
     check_result,
     worker_slot,
 )
-from daimon.core.stores import mux_state, tenant_ledger
+from daimon.core.stores import mux_state, task_continuations, tenant_ledger
 from pydantic import JsonValue
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -628,9 +628,14 @@ async def set_run_status(
                 .returning(FleetRunRow)
             )
         ).scalar_one_or_none()
-    if row is None:
-        raise FleetConflict(f"run {run_id} cannot become {status} at version {expected_version}")
-    return _run(row)
+        if row is None:
+            raise FleetConflict(
+                f"run {run_id} cannot become {status} at version {expected_version}"
+            )
+        run = _run(row)
+        if finished:
+            await task_continuations.retire_worker_finished_rows(session, run=run)
+    return run
 
 
 async def run_status(
