@@ -1138,3 +1138,15 @@ missing profile support refuses it. Omission preserves ordinary execution.
 Native internal inference, token overshoot and remote cancellation delay are
 not bounded by that host input count. Requested hard token or model-request
 limits retain their separate unsupported-capability refusal.
+
+
+For an explicitly budgeted worker, the Anthropic session composer sends the
+canonical amount as positive integer USD cents in `budget.max_list_cost.amount`.
+The shared lifecycle codec carries that field through the SDK's extra body for
+both ordinary and repository-backed creation. The owned session's creation
+acknowledgement and fresh readback must retain the same budget before execution.
+The OpenAI preparation edge compiles the amount into the existing
+`spend_control.limit` integer cents and rejects conflicting deployment controls
+or missing, malformed or changed native echoes. Native rejection never retries
+without the control. Unconfigured calls omit these additional request fields;
+soft controls do not make provider-internal inference a hard bounded bill.

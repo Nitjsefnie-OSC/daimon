@@ -4,6 +4,7 @@ import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -2804,7 +2805,13 @@ async def test_projection_uses_composer_vault_copilot_and_app_filters(
 
 
 async def worker_source_context(
-    db_nullpool_engine, *, original_tools=(), granted_tools=(), environment_config=None, warm=False
+    db_nullpool_engine,
+    *,
+    original_tools=(),
+    granted_tools=(),
+    environment_config=None,
+    warm=False,
+    native_budget=None,
 ):
     from dataclasses import replace
 
@@ -2865,6 +2872,18 @@ async def worker_source_context(
             ),
         ),
     )
+    if native_budget is not None:
+        root = replace(
+            root,
+            limits=type(root.limits).model_validate(
+                root.limits.model_dump()
+                | {
+                    "native_budget_usd": native_budget,
+                    "max_turns": 1,
+                    "deadline": datetime(2026, 10, 12, 18, tzinfo=UTC) + timedelta(seconds=120),
+                }
+            ),
+        )
     worker = resolve_worker_spec(
         root, root.spec, policy=POLICY, now=datetime(2026, 10, 12, 18, tzinfo=UTC)
     )
@@ -2958,8 +2977,9 @@ async def worker_source_context(
         ),
     ],
 )
+@pytest.mark.parametrize("native_budget", [None, Decimal("0.01")])
 async def test_worker_executes_new_agent_with_original_source_memory_and_resource_identity(
-    db_preflight, db_nullpool_engine, fault
+    db_preflight, db_nullpool_engine, fault, native_budget
 ):
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mux_compat import create_agent
@@ -2974,7 +2994,7 @@ async def test_worker_executes_new_agent_with_original_source_memory_and_resourc
         environment,
         worker,
         source,
-    ) = await worker_source_context(db_nullpool_engine, warm=True)
+    ) = await worker_source_context(db_nullpool_engine, warm=True, native_budget=native_budget)
     executing = ma_agent(
         id="actual-worker",
         tenant_id=str(tenant_id),
@@ -2990,6 +3010,10 @@ async def test_worker_executes_new_agent_with_original_source_memory_and_resourc
     snapshots = {}
 
     def drift(raw, stage):
+        if fault == f"{stage}_budget":
+            raw["budget"]["max_list_cost"]["amount"] = "2"
+        if fault == f"{stage}_budget_missing":
+            raw.pop("budget")
         if fault == f"{stage}_model":
             raw["agent"]["model"]["id"] = "claude-opus-4-6"
         elif fault == f"{stage}_options":
@@ -3023,6 +3047,8 @@ async def test_worker_executes_new_agent_with_original_source_memory_and_resourc
                 metadata=body["metadata"],
                 resources=body["resources"],
             )
+            if "budget" in body:
+                result["budget"] = body["budget"]
             snapshots[result["id"]] = result
             return httpx.Response(200, json=drift(json.loads(json.dumps(result)), "ack"))
         if "/environments/" in request.url.path:
@@ -3167,6 +3193,17 @@ async def test_worker_executes_new_agent_with_original_source_memory_and_resourc
         request.json() for request in transport.requests if request.path == "/v1/sessions"
     )
     assert session_request["agent"] == executing.id
+    if native_budget is not None:
+        assert worker.limits.max_turns == 1
+        assert (
+            worker.limits.deadline - datetime(2026, 10, 12, 18, tzinfo=UTC)
+        ).total_seconds() == 120
+        assert session_request["budget"] == {
+            "type": "limit",
+            "max_list_cost": {"amount": "1", "currency": "USD"},
+        }
+    else:
+        assert "budget" not in session_request
     assert guards == ["fresh", "fresh", "fresh"]
     async with sessions() as db:
         source_memory = await get_memory_store_id(db, tenant_id=tenant_id, agent_id=source.agent_id)
@@ -3729,3 +3766,14 @@ async def test_actual_tenant_scoped_source_clone_requires_the_root_account_captu
     assert result.permissions.fleet.scope.account_id == root.fleet.scope.account_id
     assert result.spec.metadata == root.spec.metadata
     assert result.digest == resolve_worker_spec(root, actual, **kwargs).digest
+
+
+@pytest.mark.parametrize(
+    "fault", ["ack_budget", "get_budget", "ack_budget_missing", "get_budget_missing"]
+)
+async def test_worker_budget_echo_mismatch_refuses_owned_session(
+    db_preflight, db_nullpool_engine, fault
+):
+    await test_worker_executes_new_agent_with_original_source_memory_and_resource_identity(
+        db_preflight, db_nullpool_engine, fault, Decimal("0.01")
+    )

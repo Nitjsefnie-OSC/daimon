@@ -296,15 +296,15 @@ def test_native_budget_requires_single_input_and_short_deadline():
             WorkerLimits.model_validate(values | changes).require_native_dispatch(NOW)
 
 
-def test_soft_native_budget_does_not_waive_unsupported_hard_limits():
-    root = parent()
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+def test_soft_native_budget_does_not_waive_unsupported_hard_limits(provider):
+    root = parent(provider)
     values = root.limits.model_dump() | {"native_budget_usd": Decimal("0.02")}
-    profile = get_profile(root.backend_grants[0].profile)
     with pytest.raises(WorkerSpecRefused, match="native_budget_usd: unsupported"):
-        WorkerLimits.model_validate(values).require_profile(profile)
-    supported = profile.model_copy(
-        update={"support": dict(profile.support) | {"session_spend_control": "native"}}
-    )
+        WorkerLimits.model_validate(values).require_profile(
+            get_profile(parent("gemini").backend_grants[0].profile)
+        )
+    supported = get_profile(root.backend_grants[0].profile)
     WorkerLimits.model_validate(values).require_profile(supported)
     for field in ("max_model_requests", "max_input_tokens", "max_output_tokens"):
         with pytest.raises(WorkerSpecRefused, match="budget: unsupported"):

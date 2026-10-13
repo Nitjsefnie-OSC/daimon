@@ -24,6 +24,7 @@ PERSISTENT_WORKSPACE = Profile(
     support={
         "neutral_catalog": "native",
         "agent_delete": "native",
+        "session_spend_control": "native",
         "thread_workspace_persistence": "native",
         "turn_lifecycle": "native",
         "cancel": "native",

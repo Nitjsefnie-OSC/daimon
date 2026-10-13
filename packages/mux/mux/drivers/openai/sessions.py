@@ -124,6 +124,10 @@ class OpenAISessions:
                 raise ProviderError(
                     "permission", retryable=False, native_code="host_delegation_enabled"
                 )
+        if self._controls.spend_limit_usd_cents is not None:
+            limit = object_json(raw.get("spend_control") or {}).get("limit")
+            if type(limit) is not int or limit != self._controls.spend_limit_usd_cents:
+                raise ContinuityLost(binding.id, ("session spend control differs from admission",))
         status = text(raw["status"])
         states = {
             "idle": "idle",

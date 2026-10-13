@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import cast
 
 import httpx
@@ -302,8 +303,10 @@ async def test_list_filters_foreign_tags_and_ungranted_untagged_sessions() -> No
     assert [session.ref.id for session in page.data] == ["allowed"]
 
 
+@pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.parametrize("credential", [False, True])
 async def test_claimed_session_create_lost_ack_posts_once_with_production_retries(
+    configured: bool,
     credential: bool,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -341,10 +344,124 @@ async def test_claimed_session_create_lost_ack_posts_once_with_production_retrie
             secrets=lambda scope, reference: material,
         )
         with single_attempt_mutation(), pytest.raises(ProviderError) as caught:
-            await port.create(SCOPE, spec(resources=mounts), key="allocation")
+            await port.create(
+                SCOPE,
+                spec(
+                    resources=mounts,
+                    **(
+                        {
+                            "extensions": {
+                                "anthropic.session_create": ExtensionConfig(
+                                    namespace="anthropic.session_create",
+                                    version=1,
+                                    value={
+                                        "budget": {
+                                            "type": "limit",
+                                            "max_list_cost": {"amount": "1", "currency": "USD"},
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                        if configured
+                        else {}
+                    ),
+                ),
+                key="allocation",
+            )
         assert client.max_retries == 8
     transport.assert_consumed()
     assert len(transport.requests) == 1
     if credential:
         assert transport.requests[0].json()["resources"][0]["authorization_token"] == material
         assert material not in str(caught.value) + repr(caught.value.__cause__) + caplog.text
+
+
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("repository", [False, True])
+async def test_native_budget_wire_and_omitted_byte_parity(configured, repository):
+    transport = ScriptedTransport()
+    body = ma_session(id="sess_1").model_dump(mode="json")
+    transport.queue(ScriptedReply("POST", "/v1/sessions", httpx.Response(200, json=body)))
+    budget = {"type": "limit", "max_list_cost": {"amount": "1", "currency": "USD"}}
+    mounts = (
+        (
+            ResourceBinding(
+                id="repository",
+                kind="repository",
+                native=ExtensionConfig(
+                    namespace="anthropic.session_resource_create",
+                    version=1,
+                    value={
+                        "resource": {
+                            "type": "github_repository",
+                            "url": "https://github.com/example/repo",
+                            "authorization_token_ref": "credential",
+                        }
+                    },
+                ),
+            ),
+        )
+        if repository
+        else ()
+    )
+    values = {"resources": mounts} if repository else {}
+    if configured:
+        values["extensions"] = {
+            "anthropic.session_create": ExtensionConfig(
+                namespace="anthropic.session_create", version=1, value={"budget": budget}
+            )
+        }
+    async with transport.client() as client:
+        port = AnthropicSessions(
+            client,
+            "org",
+            ResourceAuthorization(SCOPE, frozenset({("agent", "ag_1"), ("environment", "env_1")})),
+            secrets=lambda scope, reference: "offline-credential",
+        )
+        await port.create(SCOPE, spec(**values), key="budgeted")
+    transport.assert_consumed()
+    expected = {"agent": "ag_1", "environment_id": "env_1"}
+    if repository:
+        expected["resources"] = [
+            {
+                "type": "github_repository",
+                "url": "https://github.com/example/repo",
+                "authorization_token": "offline-credential",
+            }
+        ]
+    if configured:
+        expected["budget"] = budget
+    assert transport.requests[0].json() == expected
+    assert transport.requests[0].body == json.dumps(expected, separators=(",", ":")).encode()
+
+
+@pytest.mark.parametrize("amount", [True, 1, 1.0, "0", "01", "-1", "1.5"])
+async def test_invalid_native_budget_refuses_before_sdk(amount):
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        port = AnthropicSessions(
+            client,
+            "org",
+            ResourceAuthorization(SCOPE, frozenset({("agent", "ag_1"), ("environment", "env_1")})),
+        )
+        with pytest.raises(ValidationError):
+            await port.create(
+                SCOPE,
+                spec(
+                    extensions={
+                        "anthropic.session_create": ExtensionConfig(
+                            namespace="anthropic.session_create",
+                            version=1,
+                            value={
+                                "budget": {
+                                    "type": "limit",
+                                    "max_list_cost": {"amount": amount, "currency": "USD"},
+                                }
+                            },
+                        )
+                    }
+                ),
+                key="invalid",
+            )
+    assert transport.requests == []

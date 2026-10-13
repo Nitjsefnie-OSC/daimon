@@ -48,7 +48,10 @@ async def test_controls_use_native_fields_and_preserve_omitted_defaults(
         if request.url.path == "/v1/agents/a":
             return httpx.Response(200, json={"id": "a", "metadata": {}})
         assert request.url.path == "/v1/agents/sessions"
-        return httpx.Response(200, json=native_session())
+        raw = native_session()
+        if limit is not None:
+            raw["spend_control"] = {"limit": limit}
+        return httpx.Response(200, json=raw)
 
     async with build_async_openai(
         transport=httpx.MockTransport(handle),
@@ -103,6 +106,7 @@ async def test_conversation_only_supports_spend_limit_but_refuses_hosted_size(
             return httpx.Response(200, json={"id": "a", "metadata": {}})
         raw = native_session()
         raw["environment"] = {"type": "none"}
+        raw["spend_control"] = {"limit": 5}
         return httpx.Response(200, json=raw)
 
     async with build_async_openai(

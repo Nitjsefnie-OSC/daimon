@@ -1002,3 +1002,11 @@ that admission control. Unrequested limits preserve existing serialized intent.
 native spend control. It does not promise a hard final bill or imply support
 for model-request or token ceilings. Hosts retain their original input claims,
 deadlines, cancellation and unknown-usage holds around that control.
+
+
+Anthropic and OpenAI declare `session_spend_control` for the existing native
+session creation codecs. Anthropic's closed budget value uses a positive cents
+string and is merged through the SDK `extra_body`; OpenAI uses strict positive
+integer cents in `spend_control.limit`, verifying its native echo. Neither flag
+advertises hard internal model-request or output limits. Missing controls remain
+omitted for unconfigured callers.

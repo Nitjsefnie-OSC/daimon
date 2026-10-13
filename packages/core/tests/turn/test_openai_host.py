@@ -84,6 +84,11 @@ class Wire:
 
     def session(self):
         return {
+            **(
+                {"spend_control": {"limit": self.expected_spend_limit}}
+                if self.expected_spend_limit is not None
+                else {}
+            ),
             "id": SESSION_ID,
             "agent": {
                 "id": "native-agent",
