@@ -456,6 +456,12 @@ class ChannelReadPolicy:
     origin: TurnOriginRow | None = None
     origin_place: Place | None = None
 
+    @property
+    def reach_ids(self) -> frozenset[str]:
+        """The origin ids and every channel of a Space one is in (`space_reach`), for
+        checks made outside `authorize`, which widens raw ids itself."""
+        return space_reach(self.policy, self.origin_channel_ids)
+
     def _decide(self, channel_id: str, parent_channel_id: str | None) -> Decision:
         return authorize(
             self.policy,
@@ -516,9 +522,8 @@ async def load_read_policy(
     expired, another account's or another responder's counts as none too.
     An agent key minted in a channel needs no origin: its calls run inside
     that channel (`token_channel_id`), and only that channel. While a channel
-    is kept to its own agents the executing agent is resolved too. Either way
-    a turn in a Space is inside all its channels (`space_reach`), which the
-    Teams private-channel checks read straight from `origin_channel_ids`.
+    is kept to its own agents the executing agent is resolved too. The ids
+    stay raw, so a policy read again later widens them by its own Spaces.
     """
     policy = await load_channel_policy(runtime, auth)
     agent = (
@@ -529,7 +534,7 @@ async def load_read_policy(
     bound = token_channel_id(auth)
     if bound is not None:
         return ChannelReadPolicy(
-            policy, space_reach(policy, {bound}), agent, origin_place=Place(channel_id=bound)
+            policy, frozenset({bound}), agent, origin_place=Place(channel_id=bound)
         )
     # Readers own are limited too, so an origin that holds a call is resolved.
     if not (any_readers_limited(policy) or resolve_without_seals):
@@ -543,7 +548,7 @@ async def load_read_policy(
         # A Slack thread's rule is keyed by its channel_id:thread_ts form.
         inside.add(f"{origin.parent_channel_id}:{origin.thread_id}")
     return ChannelReadPolicy(
-        policy, space_reach(policy, inside), agent, origin, origin_place=turn_origin_place(origin)
+        policy, frozenset(inside), agent, origin, origin_place=turn_origin_place(origin)
     )
 
 

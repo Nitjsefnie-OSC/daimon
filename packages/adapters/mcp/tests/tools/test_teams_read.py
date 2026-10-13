@@ -323,6 +323,10 @@ async def test_a_private_channel_in_a_space_is_read_from_another_member(
     )
 
     inside = await load_read_policy(runtime, bound, origin_context_id=None)
+    assert inside.origin_channel_ids == {_CHANNEL}, (
+        "ids stay raw, so a recheck under a later policy widens by that policy's Spaces"
+    )
+    assert _PRIVATE in inside.reach_ids, "the private-channel check sees the Space"
     await _teams_read_channel_impl(
         runtime, auth, channel_id=_PRIVATE, limit=5, cursor=None, read_policy=inside
     )
