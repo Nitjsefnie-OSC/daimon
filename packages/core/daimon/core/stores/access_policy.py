@@ -135,6 +135,14 @@ async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     ).scalar_one()
 
 
+def _without_spaces(stored: object) -> object:
+    # Spaces come only from their tables: a `spaces` key edited into the row
+    # must not add one.
+    if isinstance(stored, dict):
+        return {k: v for k, v in cast("dict[str, object]", stored).items() if k != "spaces"}
+    return stored
+
+
 async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
     """The tenant's policy with its Spaces; a Space's rule is its channels' rule."""
     # Select the row, not just its payload: a JSON `null` payload would
@@ -148,7 +156,7 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     if record is not None:
         try:
             # JSON null, an array or a string fail validation like a bad field does.
-            policy = TenantAccessPolicy.model_validate(record.policy)
+            policy = TenantAccessPolicy.model_validate(_without_spaces(record.policy))
         except ValidationError as exc:
             raise AccessPolicyUnreadable(tenant_id=tenant_id) from exc
     spaces = await list_space_rules(session, tenant_id=tenant_id)

@@ -25,6 +25,7 @@ from daimon.core.permissions import (
     AgentRule,
     RuleRefused,
     channel_rule,
+    is_thread_key,
     runs_only_in,
     with_agent_rule,
     with_space,
@@ -96,6 +97,8 @@ def join_refusal(
     agents would merge two agents' memory into one audience, which must be
     asked for, not implied.
     """
+    if is_thread_key(channel_id):
+        return f"{channel_id} is a thread; a Space takes whole channels"
     before = channel_rule(policy, channel_id)
     if not loosen_rules and (lost := loosened(before, space.rule)):
         return (
@@ -132,7 +135,12 @@ async def _space(session: AsyncSession, *, tenant_id: uuid.UUID, name: str) -> S
 
 
 async def _members(session: AsyncSession, space: SpaceRow) -> list[str]:
-    return [ref.channel_id for ref in await store.list_space_channels(session, space_id=space.id)]
+    return [
+        ref.channel_id
+        for ref in await store.list_space_channels(
+            session, tenant_id=space.tenant_id, space_id=space.id
+        )
+    ]
 
 
 @dataclass(frozen=True)
@@ -397,7 +405,7 @@ async def delete_space(
         kept = _keeping(policy, own, members)
         _require_keeping(kept, keep_agents, "its channel")
         stranded = tuple(a for a in own if a not in kept)
-        await store.delete_space(session, space_id=space.id)
+        await store.delete_space(session, tenant_id=tenant_id, space_id=space.id)
     _log.info("space.deleted", tenant_id=str(tenant_id), space_id=str(space.id))
     return SpaceChange(space, tuple(members), stranded, kept=kept)
 

@@ -75,7 +75,10 @@ async def _members(rt: CliRuntime, *, tenant_id: uuid.UUID, name: str) -> list[s
         space = await get_space(session, tenant_id=tenant_id, name=name)
         if space is None:
             raise StoreError(f"there is no Space named {name}")
-        return [ref.channel_id for ref in await list_space_channels(session, space_id=space.id)]
+        return [
+            ref.channel_id
+            for ref in await list_space_channels(session, tenant_id=tenant_id, space_id=space.id)
+        ]
 
 
 async def _require_confirmed(
@@ -388,7 +391,7 @@ async def spaces_list(
     async with rt.sessionmaker() as session:
         spaces = await list_spaces_for_tenant(session, tenant_id=tenant_id)
         for space in spaces:
-            refs = await list_space_channels(session, space_id=space.id)
+            refs = await list_space_channels(session, tenant_id=tenant_id, space_id=space.id)
             channels = ", ".join(ref.channel_id for ref in refs) or "no channels"
             console.print(
                 escape(

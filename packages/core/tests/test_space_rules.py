@@ -115,6 +115,11 @@ def test_join_refuses_to_loosen_a_members_rule_unless_asked(
     assert join_refusal(TenantAccessPolicy(), _space(space), "a") is None, "an open channel joins"
 
 
+def test_join_refuses_a_thread() -> None:
+    refusal = join_refusal(TenantAccessPolicy(), _space(OWN), "C1:1700000000.000100")
+    assert refusal is not None and "thread" in refusal, refusal
+
+
 async def test_create_writes_the_space_rule_onto_each_member_and_not_the_space(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

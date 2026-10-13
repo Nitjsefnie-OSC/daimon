@@ -153,6 +153,12 @@ def thread_rule_key(platform: str, raw: str) -> str:
     raise RuleRefused(f"{value} is not a Slack channel_id:thread_ts or a Discord thread id")
 
 
+def is_thread_key(channel_id: str) -> bool:
+    """Whether `channel_id` is a Slack thread key (``channel:ts``). A Discord thread id
+    looks like a channel id, so it can't be told apart here."""
+    return _SLACK_THREAD_KEY.fullmatch(channel_id) is not None
+
+
 def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:
     """Raise `RuleRefused` for a rule nothing would enforce at `channel_id`.
 
@@ -711,6 +717,7 @@ __all__ = [
     "home_channel_ids",
     "home_key",
     "is_space_key",
+    "is_thread_key",
     "space_channel_ids",
     "space_of",
     "space_reach",

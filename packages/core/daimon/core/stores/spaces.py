@@ -57,12 +57,15 @@ async def list_spaces_for_tenant(session: AsyncSession, *, tenant_id: uuid.UUID)
     return [SpaceRow.model_validate(row) for row in rows]
 
 
-async def list_space_channels(session: AsyncSession, *, space_id: uuid.UUID) -> list[ChannelRef]:
-    """The Space's channels, each with its own tenant and platform, by channel id."""
+async def list_space_channels(
+    session: AsyncSession, *, tenant_id: uuid.UUID, space_id: uuid.UUID
+) -> list[ChannelRef]:
+    """The channels of `tenant_id`'s Space, each with its own tenant and platform, by id."""
     rows = await session.execute(
         select(SpaceChannel.tenant_id, Tenant.platform, SpaceChannel.channel_id)
         .join(Tenant, Tenant.id == SpaceChannel.tenant_id)
-        .where(SpaceChannel.space_id == space_id)
+        .join(Space, Space.id == SpaceChannel.space_id)
+        .where(SpaceChannel.space_id == space_id, Space.tenant_id == tenant_id)
         .order_by(SpaceChannel.channel_id)
     )
     return [
@@ -90,7 +93,9 @@ async def add_space_channel(
     # Members from another tenant need the place/agent tenant split first.
     if tenant_id != space.tenant_id:
         raise SpaceRefused("a Space takes only channels of the workspace that owns it")
-    if await get_channel_space_id(session, tenant_id=tenant_id, channel_id=channel_id):
+    if held := await get_channel_space_id(session, tenant_id=tenant_id, channel_id=channel_id):
+        if held == space.id:
+            raise SpaceRefused(f"{channel_id} is already in Space {space.name}")
         raise SpaceRefused(f"{channel_id} is already in a Space; remove it from that one first")
     try:
         async with session.begin_nested():
@@ -114,9 +119,11 @@ async def remove_space_channel(
     return cast(CursorResult[Any], result).rowcount > 0
 
 
-async def delete_space(session: AsyncSession, *, space_id: uuid.UUID) -> bool:
-    """Delete the Space and its memberships; True when it existed."""
-    result = await session.execute(delete(Space).where(Space.id == space_id))
+async def delete_space(session: AsyncSession, *, tenant_id: uuid.UUID, space_id: uuid.UUID) -> bool:
+    """Delete `tenant_id`'s Space and its memberships; True when it existed."""
+    result = await session.execute(
+        delete(Space).where(Space.id == space_id, Space.tenant_id == tenant_id)
+    )
     await session.flush()
     return cast(CursorResult[Any], result).rowcount > 0
 

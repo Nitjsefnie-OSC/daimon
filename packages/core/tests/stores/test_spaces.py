@@ -23,7 +23,7 @@ async def test_space_round_trips_its_channels_and_rule(db_session: AsyncSession)
             db_session, space=space, tenant_id=tenant.id, channel_id=channel_id
         )
 
-    refs = await spaces.list_space_channels(db_session, space_id=space.id)
+    refs = await spaces.list_space_channels(db_session, tenant_id=tenant.id, space_id=space.id)
     assert refs == [
         ChannelRef(tenant_id=tenant.id, platform="slack", channel_id="C1"),
         ChannelRef(tenant_id=tenant.id, platform="slack", channel_id="C2"),
@@ -38,7 +38,9 @@ async def test_space_round_trips_its_channels_and_rule(db_session: AsyncSession)
     assert await spaces.remove_space_channel(
         db_session, space_id=space.id, tenant_id=tenant.id, channel_id="C1"
     ), "removing a member reports it"
-    assert await spaces.delete_space(db_session, space_id=space.id), "deleting reports it"
+    assert await spaces.delete_space(db_session, tenant_id=tenant.id, space_id=space.id), (
+        "deleting reports it"
+    )
     assert await spaces.list_space_rules(db_session, tenant_id=tenant.id) == {}, "nothing left"
 
 
@@ -53,6 +55,14 @@ async def test_a_channel_joins_one_space_of_its_own_tenant(db_session: AsyncSess
         await spaces.add_space_channel(
             db_session, space=second, tenant_id=tenant.id, channel_id="1"
         )
+    with pytest.raises(SpaceRefused, match="already in Space a"):
+        await spaces.add_space_channel(db_session, space=first, tenant_id=tenant.id, channel_id="1")
+    assert (
+        await spaces.list_space_channels(db_session, tenant_id=other.id, space_id=first.id) == []
+    ), "another tenant reads none of its channels"
+    assert not await spaces.delete_space(db_session, tenant_id=other.id, space_id=first.id), (
+        "nor deletes it"
+    )
     with pytest.raises(SpaceRefused, match="owns it"):
         await spaces.add_space_channel(db_session, space=first, tenant_id=other.id, channel_id="9")
     with pytest.raises(SpaceRefused, match="already a Space named a"):
@@ -66,7 +76,9 @@ async def test_tenant_delete_cascades_its_spaces(db_session: AsyncSession) -> No
 
     await delete_tenant(db_session, tenant_id=tenant.id)
 
-    assert await spaces.list_space_channels(db_session, space_id=space.id) == [], "cascaded"
+    assert (
+        await spaces.list_space_channels(db_session, tenant_id=tenant.id, space_id=space.id) == []
+    ), "cascaded"
 
 
 async def test_external_accounts_are_counted_per_channel(db_session: AsyncSession) -> None:
