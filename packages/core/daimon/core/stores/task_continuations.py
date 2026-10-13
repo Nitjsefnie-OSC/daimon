@@ -24,13 +24,15 @@ from datetime import datetime, timedelta
 from typing import Literal, get_args
 
 from daimon.core._models import Account, CredentialRequest, TaskContinuation, ThreadSession
+from daimon.core._models import FleetRun as FleetRunModel
+from daimon.core.fleet import RUN_TRANSITIONS, FleetRun
 from daimon.core.stores.domain import (
     ContinuationReason,
     Role,
     TaskContinuationRow,
     UnattendedRequester,
 )
-from sqlalchemy import and_, func, or_, select, text, true, update
+from sqlalchemy import and_, case, exists, func, or_, select, text, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -389,6 +391,49 @@ async def cancel_wake_row(
     ).scalar_one_or_none()
     await session.flush()
     return cancelled is not None
+
+
+async def retire_worker_finished_rows(session: AsyncSession, *, run: FleetRun) -> int:
+    """Withdraw this ended run's scheduling, retaining native/audit evidence.
+
+    Frozen waits use canonical JSON with run_id first. Match that closed prefix
+    without casting untrusted text, so a corrupt wait cannot roll back run end.
+    The caller holds the run lock; publication takes that same lock first.
+    """
+    active = TaskContinuation.status.in_(("pending", "claimed"))
+    retired = await session.scalars(
+        update(TaskContinuation)
+        .where(
+            exists(
+                select(FleetRunModel.id).where(
+                    FleetRunModel.tenant_id == run.tenant_id,
+                    FleetRunModel.id == run.id,
+                    FleetRunModel.status.not_in(tuple(RUN_TRANSITIONS)),
+                )
+            ),
+            TaskContinuation.tenant_id == run.tenant_id,
+            TaskContinuation.reason == "worker_finished",
+            TaskContinuation.platform == run.platform,
+            TaskContinuation.parent_channel_id == run.channel_id,
+            TaskContinuation.thread_id == run.thread_id,
+            TaskContinuation.requester_account_id == run.orchestrator_account_id,
+            TaskContinuation.requested_work.startswith(f'{{"run_id":"{run.id}",'),
+            or_(
+                active,
+                TaskContinuation.lease_owner.is_not(None),
+                TaskContinuation.lease_expires_at.is_not(None),
+            ),
+        )
+        .values(
+            status=case((active, "cancelled"), else_=TaskContinuation.status),
+            skip_reason=case((active, "run_ended"), else_=TaskContinuation.skip_reason),
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+        .returning(TaskContinuation.id)
+    )
+    await session.flush()
+    return len(tuple(retired))
 
 
 async def list_dispatchable_continuations(
