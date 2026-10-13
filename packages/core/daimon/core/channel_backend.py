@@ -36,6 +36,8 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import source_agent_record
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import MODEL_PRICING, ProviderPrice, list_price_preview
 from daimon.core.stores import access_policy as policy_store
@@ -735,6 +737,7 @@ async def load_backend_agent(
             skills=skills,
             mcps=mcps,
             required_capabilities=_native_agent_requirements(actual.spec),
+            source=actual,
         )
     actual = actual_agent
     if actual is not None:
@@ -759,6 +762,7 @@ async def load_backend_agent(
         skills=skills,
         mcps=mcps,
         required_capabilities=("multiagent",) if actual.multiagent is not None else (),
+        source=source_agent_record(actual, resource_scope(tenant_id=str(tenant_id))),
     )
 
 

@@ -34,6 +34,11 @@ _log = structlog.get_logger(__name__)
 _MOUNT_PATH = ".env"
 
 
+def session_env_key(key: str, *, exclude_github: bool) -> bool:
+    """The session owner's app-mode exclusion, before value decoding/upload."""
+    return not exclude_github or key not in ("GH_TOKEN", "GITHUB_TOKEN")
+
+
 def assemble_env_bytes(rows: list[AgentFileRow]) -> bytes:
     """Pure: build .env byte content from secret rows.
 
@@ -127,8 +132,7 @@ async def upload_env_and_mount(
     """
     async with session_factory() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
-    if exclude_github:
-        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+    rows = [row for row in rows if session_env_key(row.key, exclude_github=exclude_github)]
     if not rows:
         return None
 

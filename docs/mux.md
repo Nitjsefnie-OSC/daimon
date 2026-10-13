@@ -2429,3 +2429,18 @@ The tool service adds no database tables, native client or permission resolver.
 Missing bindings stay unavailable; offline dependency stubs do not certify
 native worker execution. Existing self-only agent-chat tools continue to refuse
 inside chat turns.
+### Source intent before native execution
+
+Backend selection retains the authorized source definition and concrete revision, including instructions, tools, skills and native constraints. The existing session owner can project caller-specific tool policy and resource intent using metadata-only store reads. Projection never decrypts credentials, uploads files, mints tokens or provisions native resources. It retains the actual admission scope; an unknown native workspace is unbound rather than assigned an invented routing identity.
+
+Persistent memory is required even when no binding exists: the ordinary session composer lazily provisions it. The projection records required provisioning, access and guidance without creating a store. Source environment defaults, repository access, credentials and inherited restrictions also remain obligations. The projection carries captured facts; the preparation boundary alone derives the outstanding preservation obligations. Source capture and counterpart identity readback do not establish preservation. All unproved target mappings remain typed refusals at the existing preparation boundary; default and channel-origin turn dispatch remain unchanged.
+
+The shared preparation seam reports closed obligation labels for instructions,
+tools and approval, skills, MCP, credentials, files, repository, memory and
+environment under the existing `backend_unsupported` refusal. It captures the
+actual caller's effective seals, read-only memory and publishing restrictions
+before checking an agent-origin revision. A native catalog component remains
+readback evidence; it cannot replace the complete source and resource proof.
+No installed source-preservation positive is claimed by this capture path.
+
+Obligation labels are derived only at the shared preparation boundary from the actual captured definition and resource intent. An empty source baseline still requires implicit memory and an unproved environment; unrelated instruction, tool, attachment and credential labels are not pre-filled. With agent backend capture enabled, existing balance, cap and channel-budget refusals win before source projection and publish no backend revision.

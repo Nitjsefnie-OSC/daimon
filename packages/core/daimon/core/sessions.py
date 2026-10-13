@@ -39,7 +39,7 @@ from daimon.core.agent_mcp_credentials import (
     resolve_hidden_mcp_server_names,
 )
 from daimon.core.config import GithubAppSettings, McpSettings
-from daimon.core.credential_env import upload_env_and_mount
+from daimon.core.credential_env import session_env_key, upload_env_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -60,6 +60,7 @@ from daimon.core.github_app_session import (
 )
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
@@ -67,7 +68,8 @@ from daimon.core.mcp_vault import (
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
 )
-from daimon.core.memory_resource import ensure_memory_store_and_mount
+from daimon.core.memory_resource import ensure_memory_store_and_mount, memory_instructions
+from daimon.core.mux_compat import agent_spec, source_environment_record
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_ports_compat import (
     archive_session_record,
@@ -81,10 +83,21 @@ from daimon.core.session_snapshot import (
     session_tools,
     snapshot_from_created_session,
 )
+from daimon.core.stores import (
+    agent_files,
+    agent_github_binding,
+    agent_memory_stores,
+    github_credentials,
+)
+from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from mux.contracts.ids import Scope
+from mux.contracts.resources import ResourceBinding, WorkspaceSource
+from mux.errors import ScopeViolation
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -96,6 +109,196 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 __all__ = ["create_session", "create_isolated_session"]
+
+
+async def _session_app_mode(
+    session_factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> bool:
+    async with session_factory() as session:
+        return await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app"
+
+
+async def project_session_resources(
+    source: BackendAgent,
+    *,
+    agent: BetaManagedAgentsAgent,
+    environment: BetaEnvironment,
+    session_factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    agent_uuid: uuid.UUID,
+    account_id: uuid.UUID | None,
+    resource_scope: Scope,
+    memory_read_only: bool,
+    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    asks_before_publishing: bool = False,
+    mcp_settings: McpSettings | None = None,
+    agent_github_app: GithubAppSettings | None = None,
+    hide_personal_for: uuid.UUID | None = None,
+    is_external: bool = False,
+    requester_is_headless: bool = False,
+    app_session_unmapped: bool = False,
+    slack_turn_context_id: uuid.UUID | None = None,
+    private_dm_id: str | None = None,
+    origin_seal_ids: Collection[str] = (),
+    extra_resources: Sequence[Resource] = (),
+) -> BackendAgent:
+    """Read the existing composer's obligations without resolving or materializing secrets.
+
+    The result describes source intent, never preservation or execution authority.
+    Every target mapping remains unproven until the existing preparation seam proves it.
+    """
+    actual = source.source
+    if (
+        actual is None
+        or source.tenant_id != tenant_id
+        or source.agent_id != agent_uuid
+        or agent_uuid != derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+        or actual.ref.id != agent.id
+        or actual.ref.tenant_id != str(tenant_id)
+        or actual.revision.native != str(agent.version)
+        or actual.native != agent.model_dump(mode="json", exclude_unset=True)
+        or resource_scope.tenant_id != str(tenant_id)
+        or resource_scope.is_platform
+        or resource_scope.is_legacy_host_authorized
+        or (account_id is not None and resource_scope.account_id != str(account_id))
+        or environment.archived_at is not None
+        or (environment.metadata or {}).get(MA_METADATA_KEY_TENANT, str(tenant_id))
+        != str(tenant_id)
+    ):
+        raise ScopeViolation(
+            "source-preparation", "source context differs from authorized identity"
+        )
+    scope = resource_scope
+    app_mode = await _session_app_mode(session_factory, tenant_id=tenant_id, agent_id=agent_uuid)
+    async with session_factory() as session:
+        keys = await agent_files.list_agent_file_revisions(
+            session, tenant_id=tenant_id, agent_id=agent_uuid
+        )
+        credentials = await credential_store.list_credential_revisions(
+            session, tenant_id=tenant_id, agent_id=agent_uuid
+        )
+        binding = (
+            None
+            if app_mode
+            else await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
+        )
+        store_id = await agent_memory_stores.get_memory_store_id(
+            session, tenant_id=tenant_id, agent_id=agent_uuid
+        )
+        overlay = (
+            None
+            if app_mode
+            else await agent_github_binding.get_agent_github_binding(session, agent_id=agent_uuid)
+        )
+        pat_revision = (
+            await github_credentials.get_credential_revision(
+                session, principal_id=overlay.principal_id
+            )
+            if overlay is not None
+            else None
+        )
+    hidden = frozenset[str]()
+    hiding_for = account_id if account_id is not None else hide_personal_for
+    if hiding_for is not None:
+        hidden = await resolve_hidden_mcp_server_names(
+            session_factory,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            account_id=hiding_for,
+            server_urls={server.name: server.url for server in agent.mcp_servers},
+        )
+    public_url = (
+        str(mcp_settings.public_url)
+        if mcp_settings is not None and mcp_settings.public_url is not None
+        else None
+    )
+    tools = session_tools(
+        agent,
+        hidden,
+        tool_safety=tool_safety,
+        public_url=public_url,
+        asks_before_publishing=asks_before_publishing,
+    )
+    servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
+    payload = agent.model_dump(
+        mode="json", include={"name", "description", "model", "system", "metadata", "multiagent"}
+    )
+    payload.update(
+        tools=[tool.model_dump(mode="json", exclude_none=True) for tool in tools],
+        mcp_servers=[server.model_dump(mode="json") for server in servers],
+        skills=[skill.model_dump(mode="json") for skill in session_skills(agent, channel_skills)],
+    )
+    requirements: list[ResourceBinding] = []
+    generations: list[tuple[str, dt.datetime]] = []
+    for key, updated in keys:
+        if session_env_key(key, exclude_github=app_mode):
+            identity = f"agent-env:{tenant_id}:{agent_uuid}:{key}"
+            requirements.append(
+                ResourceBinding(
+                    id=identity, kind="credential", target_path=".env", credential_ref=identity
+                )
+            )
+            generations.append((identity, updated))
+    for identity, _url, updated in credentials:
+        reference = f"agent-mcp:{identity}"
+        requirements.append(
+            ResourceBinding(id=reference, kind="credential", credential_ref=reference)
+        )
+        generations.append((reference, updated))
+    if pat_revision is not None and overlay is not None:
+        reference = f"github-credential:{overlay.principal_id}"
+        requirements.append(
+            ResourceBinding(id=reference, kind="credential", credential_ref=reference)
+        )
+        generations.append((reference, pat_revision))
+    repos: list[WorkspaceSource] = []
+    if binding is not None:
+        repos.append(
+            WorkspaceSource(
+                kind="repository",
+                target_path=".",
+                repository_url=f"https://github.com/{binding.repo_url}",
+                ref=binding.default_branch,
+                credential_ref=binding.ma_secret_ref,
+            )
+        )
+        generations.append((f"repository:{tenant_id}:{agent_uuid}", binding.updated_at))
+    if app_mode and not is_external:
+        # This owner's requester-access calculation may use network and tokens.
+        # Capture its locally declared intent; remote effective access remains unproven.
+        from daimon.core.github_app_session import declared_app_repositories
+
+        repos.extend(
+            await declared_app_repositories(
+                session_factory, tenant_id=tenant_id, agent_id=agent_uuid
+            )
+        )
+    if (
+        extra_resources
+        or slack_turn_context_id is not None
+        or private_dm_id is not None
+        or app_session_unmapped
+        or requester_is_headless
+        or origin_seal_ids
+        or agent_github_app is not None
+    ):
+        # Opaque carry resources and private credentials are not absent obligations.
+        requirements.append(ResourceBinding(id="caller-resources", kind="native"))
+    return source.model_copy(
+        update={
+            "effective_spec": agent_spec(payload),
+            "environment": source_environment_record(environment, scope),
+            "resource_scope": scope,
+            "resource_requirements": tuple(requirements),
+            "repository_sources": tuple(repos),
+            "resource_generations": tuple(generations),
+            "memory_required": True,
+            "memory_store_id": store_id,
+            "memory_read_only": memory_read_only,
+            "memory_instructions": memory_instructions(read_only=memory_read_only),
+        }
+    )
 
 
 def _session_metadata(
@@ -264,10 +467,9 @@ async def create_session(
     )
     app_mode = False
     if tenant_id is not None and agent_uuid is not None and session_factory is not None:
-        async with session_factory() as session:
-            app_mode = (
-                await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid) == "app"
-            )
+        app_mode = await _session_app_mode(
+            session_factory, tenant_id=tenant_id, agent_id=agent_uuid
+        )
     vault_id: str | None = None
     caller_vault_id: str | None = None
     try:

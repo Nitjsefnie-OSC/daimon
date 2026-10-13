@@ -93,3 +93,57 @@ async def test_real_admission_refuses_even_a_reader_accepting_the_native_compone
         assert await mux_state.next_config_local(db, REVISION.channel) == 1
     assert reads == [], "refusal must precede native component readback and INSERT"
     assert host.wire.requests == [] and host.created == []
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+async def test_prewrite_source_projection_receives_effective_seal_and_memory_policy(
+    selector_host, provider, monkeypatch
+):
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.turn import runtime_manifest
+
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(agent, provider, 0, actor)
+    policy = TenantAccessPolicy(
+        enabled_backends=("anthropic", "openai", "gemini"),
+        channel_rules={"channel": ChannelRule(readers="inside")},
+        agent_rules={"test-agent": AgentRule(runs_in=("channel",))},
+    )
+    async with host.sessions.begin() as db:
+        await set_access_policy(db, tenant_id=TENANT, policy=policy)
+    seen = []
+
+    async def refuse(request):
+        captured = request.admission
+        assert captured.source_sealed
+        assert captured.memory_read_only
+        assert captured.asks_before_publishing
+        assert captured.origin_seal_ids == frozenset({"channel"})
+        assert captured.origin_channel_id == "channel" and captured.origin_thread_id == "new"
+        assert captured.channel_skills == ()
+        assert request.scope.account_id == str(captured.account_id)
+        seen.append(request)
+        raise AdmissionDenied(reason="backend_unsupported")
+
+    # Isolate the context passed to the awaited proof; the proof itself refuses.
+    monkeypatch.setattr(runtime_manifest, "read_preparation_counterpart", refuse)
+    existing = next(iter(host.deps.turn_runtimes.values()))
+    profile = "openai.persistent_workspace" if provider == "openai" else "gemini.inline_reuse"
+    deps = replace(host.deps, agent_backends=True, turn_runtimes={profile: existing})
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await admit_impl(
+            deps,
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id="caller",
+            channel_id="channel",
+            thread_id="new",
+            now=datetime.now(UTC),
+        )
+    assert len(seen) == 1
+    async with host.sessions() as db:
+        assert await mux_state.latest_config_revision(db, REVISION.channel) is None
+    assert host.created == [] and host.wire.requests == []

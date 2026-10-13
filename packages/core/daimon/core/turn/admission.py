@@ -89,7 +89,7 @@ from daimon.core.stores.accounts import (
     set_role,
 )
 from daimon.core.stores.channel_skills import list_channel_skills
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import BackendAgent, Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -253,7 +253,9 @@ def _require_backend_origin(
 ) -> None:
     from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
 
-    if selection.profile != MANAGED_AGENTS.profile_id and not fixed_plan_origin_allowed(origin):
+    if selection.profile != MANAGED_AGENTS.profile_id and not (
+        fixed_plan_origin_allowed(origin) or (origin == "agent" and agent_backends)
+    ):
         raise AdmissionDenied(reason="backend_unsupported")
 
 
@@ -739,7 +741,17 @@ async def admit_impl(
     _require_run_agent(policy, grant)
     mark("agent_policy")
 
+    # Every id that seals the turn: its channel, and the thread sealed on its
+    # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
+    # them are recorded, so unsealing one later leaves the others holding.
+    seal_ids = limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
+    source_sealed = bool(seal_ids)
+    memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
+        is_dm and policy.dm_memory_read_only
+    )
+
     backend_counterpart: AgentRevision | None = None
+    source_agent: BackendAgent | None = None
 
     async def verify_origin(
         selection: ResolvedBackend,
@@ -765,6 +777,15 @@ async def admit_impl(
             environment=environment,
             config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
             grant=grant,
+            memory_read_only=memory_read_only,
+            asks_before_publishing=_asks_before_publishing(policy, grant),
+            source_sealed=source_sealed,
+            origin_channel_id=channel_id,
+            origin_thread_id=thread_id,
+            origin_seal_ids=seal_ids,
+            private_dm_id=(thread_id or channel_id) if is_dm else None,
+            channel_skills=channel_skills,
+            is_external=is_external,
             backend_revision=revision,
             backend_revision_origin=origin,
         )
@@ -784,61 +805,74 @@ async def admit_impl(
             transfer=None,
             deadline=turn_deadline(now=now),
             now=lambda: now,
+            source=source_agent,
         )
         request, _ = scope_channel_runtimes(request)
-        backend_counterpart = await read_preparation_counterpart(request)
+        prepared = await read_preparation_counterpart(request)
+        backend_counterpart = prepared.counterpart
 
-    if selection_enabled and channel is not None:
-        if retained_revision is None and not configured_channel:
-            # Reuse the authorized source read; a friendly name cannot carry
-            # another resource's backend preference.
-            try:
-                source_agent = await channel_backend.load_backend_agent(
-                    deps.anthropic,
-                    deps.sessionmaker,
-                    tenant_id=tenant_id,
-                    agent_name=(agent.metadata or {}).get(MA_METADATA_KEY_NAME, config.agent_name),
-                    actual_agent=agent,
-                )
-            except channel_backend.AgentBackendRefused as error:
-                raise AdmissionDenied(reason="backend_unsupported") from error
-            async with deps.sessionmaker() as selection_session:
+    async def resolve_preference() -> None:
+        nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
+        nonlocal backend_footer_profile, source_agent
+        if selection_enabled and channel is not None:
+            if retained_revision is None and not configured_channel:
+                # Reuse the authorized source read; a friendly name cannot carry
+                # another resource's backend preference.
                 try:
-                    (
-                        backend_revision,
-                        backend_ever_shared,
-                        source,
-                    ) = await channel_backend.resolve_turn_backend(
-                        selection_session,
-                        channel,
-                        source_agent,
-                        enabled=True,
-                        validate_origin=(
-                            verify_origin if deps.agent_backends else _require_backend_origin
-                        ),
+                    source_agent = await channel_backend.load_backend_agent(
+                        deps.anthropic,
+                        deps.sessionmaker,
+                        tenant_id=tenant_id,
+                        agent_name=(agent.metadata or {}).get(
+                            MA_METADATA_KEY_NAME, config.agent_name
+                        )
+                        or "",
+                        actual_agent=agent,
                     )
-                    backend = (
-                        check_backend(backend_revision, enabled_backends=policy.enabled_backends)
-                        if backend_revision is not None
-                        else None
-                    )
-                except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
+                except channel_backend.AgentBackendRefused as error:
                     raise AdmissionDenied(reason="backend_unsupported") from error
-                # Preparation uses another transaction. Publish the immutable
-                # effective revision and its origin before that transaction.
-                await selection_session.commit()
-            backend_revision_origin = source if source != "default" else None
-            if backend_revision is not None:
-                backend_footer_profile = backend_revision.profile
-        elif retained_revision == 0 and not configured_channel:
-            async with deps.sessionmaker() as selection_session:
-                preference = await channel_backend.current_agent_backend(
-                    selection_session,
-                    tenant_id,
-                    derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
-                )
-            if preference is not None and preference.backend is not None:
-                backend_footer_profile = resolve_default(BackendConfig()).profile
+                async with deps.sessionmaker() as selection_session:
+                    try:
+                        (
+                            backend_revision,
+                            backend_ever_shared,
+                            source,
+                        ) = await channel_backend.resolve_turn_backend(
+                            selection_session,
+                            channel,
+                            source_agent,
+                            enabled=True,
+                            validate_origin=(
+                                verify_origin if deps.agent_backends else _require_backend_origin
+                            ),
+                        )
+                        backend = (
+                            check_backend(
+                                backend_revision, enabled_backends=policy.enabled_backends
+                            )
+                            if backend_revision is not None
+                            else None
+                        )
+                    except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
+                        raise AdmissionDenied(reason="backend_unsupported") from error
+                    # Preparation uses another transaction. Publish the immutable
+                    # effective revision and its origin before that transaction.
+                    await selection_session.commit()
+                backend_revision_origin = source if source != "default" else None
+                if backend_revision is not None:
+                    backend_footer_profile = backend_revision.profile
+            elif retained_revision == 0 and not configured_channel:
+                async with deps.sessionmaker() as selection_session:
+                    preference = await channel_backend.current_agent_backend(
+                        selection_session,
+                        tenant_id,
+                        derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+                    )
+                if preference is not None and preference.backend is not None:
+                    backend_footer_profile = resolve_default(BackendConfig()).profile
+
+    if not deps.agent_backends:
+        await resolve_preference()
 
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
         dm_source_channel_id if is_dm else channel_id
@@ -895,15 +929,6 @@ async def admit_impl(
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
-    # Every id that seals the turn: its channel, and the thread sealed on its
-    # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
-    # them are recorded, so unsealing one later leaves the others holding.
-    seal_ids = limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
-    source_sealed = bool(seal_ids)
-    memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
-        is_dm and policy.dm_memory_read_only
-    )
-
     channel_skills = (
         ()
         if is_dm
@@ -920,6 +945,9 @@ async def admit_impl(
     )
 
     mark("channel_skills")
+
+    if deps.agent_backends:
+        await resolve_preference()
 
     result = Admission(
         backend_revision=backend_revision,

@@ -2455,3 +2455,198 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
     assert session_bodies[0]["agent"] == "ag_personal", (
         "nothing hidden means the call shape does not change at all"
     )
+
+
+@pytest.mark.parametrize(
+    "warm,read_only", [(False, False), (False, True), (True, False), (True, True)]
+)
+async def test_read_only_source_projection_keeps_implicit_memory_without_provisioning(
+    db_preflight, db_nullpool_engine, warm, read_only, monkeypatch
+):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.memory_resource import memory_instructions
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_memory_stores
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    agent = ma_agent(id="agent-source", tenant_id=str(tenant.id), name="source")
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    if warm:
+        async with sessions.begin() as db:
+            await agent_memory_stores.insert_memory_store(
+                db, tenant_id=tenant.id, agent_id=agent_uuid, memory_store_id="mem-existing"
+            )
+
+    def no_materialization(*args, **kwargs):
+        raise AssertionError("read-only projection attempted a materialization or decryption")
+
+    monkeypatch.setattr("daimon.core.memory_resource.create_memory_store", no_materialization)
+    monkeypatch.setattr("daimon.core.credential_env.upload_env_file", no_materialization)
+    monkeypatch.setattr("daimon.core.github_app_session.prepare_app_access", no_materialization)
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+        projected = await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=agent_uuid,
+            account_id=account.id,
+            memory_read_only=read_only,
+            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+        )
+    assert projected.memory_required is True
+    assert projected.memory_store_id == ("mem-existing" if warm else None)
+    assert projected.memory_read_only is read_only
+    assert projected.memory_instructions == memory_instructions(read_only=read_only)
+    assert (
+        projected.environment.spec.native_config.value["config"]["networking"]["type"]
+        == "unrestricted"
+    )
+    assert projected.resource_scope.tenant_id == str(tenant.id)
+    assert projected.resource_scope.account_id == str(account.id)
+    async with sessions() as db:
+        assert await agent_memory_stores.get_memory_store_id(
+            db, tenant_id=tenant.id, agent_id=agent_uuid
+        ) == ("mem-existing" if warm else None)
+    assert not transport.requests and not transport.violations
+
+
+@pytest.mark.parametrize(
+    "changed", ["tenant", "identity", "version", "instructions", "archived_environment"]
+)
+async def test_source_projection_refuses_changed_source_before_database_or_native_io(changed):
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.mux_compat import source_agent_record
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores.domain import BackendAgent
+    from mux.errors import ScopeViolation
+
+    class NoDatabase:
+        def __call__(self):
+            raise AssertionError("foreign/stale source read a database")
+
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    agent = ma_agent(id="agent-source", tenant_id=str(tenant_id), name="source")
+    source = BackendAgent(
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+        name="source",
+        configuration_digest="preview",
+        source=source_agent_record(agent, resource_scope(tenant_id=str(tenant_id))),
+    )
+    environment = ma_environment(tenant_id=str(tenant_id))
+    if changed == "tenant":
+        tenant_id = uuid.uuid4()
+    elif changed == "identity":
+        agent = agent.model_copy(update={"id": "same-name-new-source"})
+    elif changed == "version":
+        agent = agent.model_copy(update={"version": agent.version + 1})
+    elif changed == "instructions":
+        agent = agent.model_copy(update={"system": "changed source intent"})
+    else:
+        environment = environment.model_copy(update={"archived_at": "2026-10-12T00:00:00Z"})
+    with pytest.raises(ScopeViolation):
+        await project_session_resources(
+            source,
+            agent=agent,
+            environment=environment,
+            session_factory=NoDatabase(),
+            tenant_id=tenant_id,
+            agent_uuid=source.agent_id,
+            account_id=account_id,
+            memory_read_only=False,
+            resource_scope=resource_scope(tenant_id=str(tenant_id), account_id=str(account_id)),
+        )
+
+
+async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
+    db_preflight, db_nullpool_engine, monkeypatch
+):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_mcp_credentials as credentials
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        agent = ma_agent(id="agent-resources", tenant_id=str(tenant.id), name="source")
+        identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+        await put_agent_file(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            key="SOURCE_KEY",
+            content="private-env-value",
+            set_by_account_id=None,
+        )
+        credential = await credentials.upsert_credential(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            mcp_server_url="https://source.example.test",
+            encrypted_token=b"private-ciphertext",
+        )
+        await repo_binding_store.set_binding(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            repo_url="owner/source",
+            default_branch="work",
+            ma_secret_ref="owned-repo-credential",
+            proof=None,
+        )
+
+    def no_secret_resolution(*args, **kwargs):
+        raise AssertionError("projection tried to resolve or export a secret")
+
+    monkeypatch.setattr("daimon.core.stores.agent_files.decode_value", no_secret_resolution)
+    monkeypatch.setattr("daimon.core.sessions.get_pat", no_secret_resolution)
+    monkeypatch.setattr("daimon.core.sessions.resolve_clone_token", no_secret_resolution)
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+        projected = await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=identity,
+            account_id=account.id,
+            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+            memory_read_only=True,
+        )
+    assert {resource.credential_ref for resource in projected.resource_requirements} == {
+        f"agent-env:{tenant.id}:{identity}:SOURCE_KEY",
+        f"agent-mcp:{credential.id}",
+    }
+    assert projected.repository_sources[0].repository_url == "https://github.com/owner/source"
+    assert projected.repository_sources[0].ref == "work"
+    assert len(projected.resource_generations) == 3
+    for output in (repr(projected), projected.model_dump_json()):
+        assert "private-env-value" not in output and "private-ciphertext" not in output
+        assert "owned-repo-credential" not in output and "SOURCE_KEY" not in output
+    assert not transport.requests and not transport.violations

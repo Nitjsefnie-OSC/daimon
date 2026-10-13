@@ -57,6 +57,20 @@ _STORE_DESCRIPTION = (
 )
 
 
+def memory_instructions(*, read_only: bool) -> str:
+    return READ_ONLY_MEMORY_INSTRUCTIONS if read_only else MEMORY_INSTRUCTIONS
+
+
+def memory_mount(store_id: str, *, read_only: bool) -> BetaManagedAgentsMemoryStoreResourceParam:
+    """The same mount intent applies before and after lazy provisioning."""
+    return {
+        "type": "memory_store",
+        "memory_store_id": store_id,
+        "access": "read_only" if read_only else "read_write",
+        "instructions": memory_instructions(read_only=read_only),
+    }
+
+
 async def ensure_memory_store_and_mount(
     anthropic: AsyncAnthropic,
     session_factory: async_sessionmaker[AsyncSession],
@@ -120,12 +134,7 @@ async def ensure_memory_store_and_mount(
                 agent_name=agent_name,
             )
 
-    return {
-        "type": "memory_store",
-        "memory_store_id": store_id,
-        "access": "read_only" if read_only else "read_write",
-        "instructions": READ_ONLY_MEMORY_INSTRUCTIONS if read_only else MEMORY_INSTRUCTIONS,
-    }
+    return memory_mount(store_id, read_only=read_only)
 
 
 async def archive_memory_store_for_agent(

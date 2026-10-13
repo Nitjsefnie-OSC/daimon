@@ -67,7 +67,7 @@ from daimon.core.shared_threads import (
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
-from daimon.core.stores.domain import TransferKind
+from daimon.core.stores.domain import BackendAgent, TransferKind
 from daimon.core.stores.github_access import get_agent_mode, list_authorized_repos
 from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.thread_sessions import (
@@ -198,6 +198,7 @@ class ProviderPreparationRequest:
     deadline: dt.datetime
     now: Callable[[], dt.datetime]
     counterpart: AgentRevision | None = field(default=None, kw_only=True)
+    source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
@@ -974,7 +975,11 @@ async def bind_session_impl(
             raise AdmissionDenied(reason="backend_unsupported")
         from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
 
-        if not fixed_plan_origin_allowed(admission.backend_revision_origin):
+        if not fixed_plan_origin_allowed(admission.backend_revision_origin) and not (
+            admission.backend_revision_origin == "agent"
+            and deps.agent_backends
+            and deps.channel_backends
+        ):
             raise AdmissionDenied(reason="backend_unsupported")
 
         prepare = _PROVIDER_PREPARATIONS.get(profile)
@@ -1007,12 +1012,7 @@ async def bind_session_impl(
             if admission.backend_revision_origin == "agent":
                 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 
-                counterpart = await read_preparation_counterpart(request)
-                selected = replace(
-                    request,
-                    counterpart=counterpart,
-                    admission=replace(admission, backend_counterpart=counterpart),
-                )
+                selected = await read_preparation_counterpart(request)
             result = await prepare(selected)
             ref = result.session_ref
             backend = result.backend

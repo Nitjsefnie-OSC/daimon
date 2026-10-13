@@ -43,10 +43,13 @@ from mux.contracts.resources import (
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources._secrets import CredentialFileUpload
 from mux.drivers.anthropic.resources.agents import (
+    agent_record,
+)
+from mux.drivers.anthropic.resources.agents import (
     update_agent_ignored as native_update_agent_ignored,
 )
 from mux.drivers.anthropic.resources.artifacts import Artifacts as NativeArtifacts
-from mux.drivers.anthropic.resources.environments import EnvironmentReads
+from mux.drivers.anthropic.resources.environments import EnvironmentReads, environment_record
 from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
 from mux.drivers.anthropic.resources.memory_stores import StoreCreate
 from mux.drivers.anthropic.resources.walk import ResourceWalk
@@ -160,6 +163,20 @@ def agent_spec(payload: Mapping[str, object]) -> AgentSpec:
     if extensions:
         values["extensions"] = tuple(extensions)
     return AgentSpec.model_validate(values)
+
+
+def source_agent_record(item: BetaManagedAgentsAgent, scope: Scope) -> Agent | None:
+    """Retain the driver's complete source record without another native read."""
+    try:
+        return agent_record(item, "", scope)
+    except (AttributeError, TypeError, ValueError):
+        # Preview reads tolerate partial SDK replies; execution needs the full record.
+        return None
+
+
+def source_environment_record(item: BetaEnvironment, scope: Scope) -> Environment:
+    """Project an already-authorized native environment without I/O."""
+    return environment_record(item, "", scope)
 
 
 def agent_patch(payload: Mapping[str, object]) -> AgentPatch:

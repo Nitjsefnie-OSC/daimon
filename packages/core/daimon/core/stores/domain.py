@@ -14,8 +14,9 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from daimon.core.session_snapshot import SessionSnapshot
-from mux.contracts.ids import PROVIDERS, Provider
+from mux.contracts.ids import PROVIDERS, Provider, Scope
 from mux.contracts.profile import Capability
+from mux.contracts.resources import Agent, AgentSpec, Environment, ResourceBinding, WorkspaceSource
 from pydantic import BaseModel, ConfigDict, Field
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
@@ -1084,6 +1085,20 @@ class BackendAgent(_Facts):
     mcps: tuple[CompatibilityItem, ...] = ()
     required_capabilities: tuple[Capability, ...] = ()
     shared_threads: bool = False
+    # Owner-loaded preparation inputs are kept in memory, never in settings or logs.
+    source: Agent | None = Field(default=None, exclude=True, repr=False)
+    effective_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
+    environment: Environment | None = Field(default=None, exclude=True, repr=False)
+    resource_scope: Scope | None = Field(default=None, exclude=True, repr=False)
+    resource_requirements: tuple[ResourceBinding, ...] = Field(default=(), exclude=True, repr=False)
+    repository_sources: tuple[WorkspaceSource, ...] = Field(default=(), exclude=True, repr=False)
+    resource_generations: tuple[tuple[str, datetime], ...] = Field(
+        default=(), exclude=True, repr=False
+    )
+    memory_required: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
+    memory_store_id: str | None = Field(default=None, exclude=True, repr=False)
+    memory_read_only: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
+    memory_instructions: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class TenantBackendPolicy(_Facts):

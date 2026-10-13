@@ -782,3 +782,75 @@ async def test_retained_and_disabled_resolution_need_no_fabricated_source(owned)
         assert result == (retained, False, "channel")
         with pytest.raises(AgentBackendRefused, match="agent identity required"):
             await resolve_turn_backend(session, channel, None, enabled=True)
+
+
+async def test_source_loader_retains_full_sdk_intent_without_serializing_it(owned):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.testing.ma_models import ma_agent
+    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+    _, prior, _, sessions = owned
+    payload = ma_agent(
+        id="agent-source", name=prior.name, tenant_id=str(prior.tenant_id)
+    ).model_dump(mode="json")
+    payload["system"] = "private source guidance"
+    payload["skills"] = [{"type": "custom", "skill_id": "skill-original", "version": "17"}]
+    payload["mcp_servers"] = [
+        {"type": "url", "name": "source-server", "url": "https://mcp.example.test/source"}
+    ]
+    payload["tools"] = [
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "source-server",
+            "default_config": {"enabled": True, "permission": "always_ask"},
+        }
+    ]
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply("GET", "/v1/agents/agent-source", httpx.Response(200, json=payload))
+    )
+    async with transport.client() as client:
+        actual = await client.beta.agents.retrieve("agent-source")
+        loaded = await load_backend_agent(
+            client, sessions, tenant_id=prior.tenant_id, agent_name=prior.name, actual_agent=actual
+        )
+    assert loaded.source is not None
+    assert loaded.source.native == actual.model_dump(mode="json", exclude_unset=True)
+    assert loaded.source.spec.system == payload["system"]
+    assert loaded.source.spec.skills[0].version == "17"
+    assert loaded.source.spec.mcp_servers[0].url == payload["mcp_servers"][0]["url"]
+    assert (
+        loaded.source.spec.extensions[0].value["tools"][0]["default_config"]["permission"]
+        == "always_ask"
+    )
+    assert loaded.source.ref.account_scope_id == "", "unknown native workspace is not invented"
+    for output in (repr(loaded), loaded.model_dump_json()):
+        assert (
+            "private source guidance" not in output
+            and "https://mcp.example.test/source" not in output
+        )
+    assert len(transport.requests) == 1 and not transport.violations
+
+
+async def test_source_projection_missing_unused_sdk_date_keeps_existing_preview(owned):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.testing.ma_models import ma_agent
+    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+    _, prior, _, sessions = owned
+    payload = ma_agent(
+        id="agent-partial", name=prior.name, tenant_id=str(prior.tenant_id)
+    ).model_dump(mode="json")
+    payload["created_at"] = None
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply("GET", "/v1/agents/agent-partial", httpx.Response(200, json=payload))
+    )
+    async with transport.client() as client:
+        actual = await client.beta.agents.retrieve("agent-partial")
+        loaded = await load_backend_agent(
+            client, sessions, tenant_id=prior.tenant_id, agent_name=prior.name, actual_agent=actual
+        )
+    assert loaded.configuration_digest and loaded.model == actual.model.id
+    assert loaded.source is None, "partial preview cannot stand for a complete execution source"
+    assert len(transport.requests) == 1 and not transport.violations
