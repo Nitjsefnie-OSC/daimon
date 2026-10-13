@@ -979,3 +979,9 @@ The existing Anthropic environment codec can project fully explicit cloud
 networking and package policy for source-preservation checks. Implicit defaults
 and unsupported policy retain their native obligations. Native environment
 request encoding remains unchanged.
+
+OpenAI completed messages receive their stable item identity during native event
+normalization. Recovery retains previously recorded event IDs and native
+provenance, including journals written with stream IDs before that normalization
+rule; no journal migration is required. Worker allocation and session creation
+reuse the shared preparation and fenced mutation guards.

@@ -187,3 +187,16 @@ def test_foreign_native_turn_cannot_end_local_root() -> None:
     native["session_id"] = "foreign"
     with pytest.raises(ValueError, match="another session"):
         EventNormalizer("s").normalize(event("turn.completed", "e", turn=native))
+
+
+def test_final_message_identity_is_assigned_once_with_native_provenance() -> None:
+    live = EventNormalizer("s").normalize(
+        event("turn.item.done", "native-stream-event", item=message(), turn_id="root")
+    )
+    saved = EventNormalizer("s").saved_item(message())
+    assert live is not None and saved is not None
+    assert live.id == saved.id == "openai:item:item"
+    assert live.native.event_id == "native-stream-event"
+    assert saved.native.event_id == "openai:item:item"
+    legacy = live.model_copy(update={"id": "native-stream-event"})
+    assert merge_history((legacy,), (saved,)) == (legacy,)
