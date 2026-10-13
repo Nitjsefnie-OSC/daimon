@@ -38,16 +38,19 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.turn.admission import Admission
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.prepare import ContinuityOutcome
+from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
 from discord.http import HTTPClient, Route
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -380,21 +383,24 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
     def unused_recovery(*args: Any) -> NoReturn:
         raise AssertionError("unexpected recovery")
 
-    prepared = types.SimpleNamespace(
-        admission=types.SimpleNamespace(
-            asks_before_publishing=False,
-            agent=types.SimpleNamespace(system=""),
-            account_id=uuid.uuid4(),
-            grant=None,
-            backend_revision=None,
+    async def unused_record(event: Any) -> None:
+        raise AssertionError("unexpected usage recording")
+
+    account_id = uuid.uuid4()
+    prepared = PreparedTurn(
+        admission=Admission(
+            account_id=account_id,
+            agent=ma_agent(system=""),
+            environment=ma_environment(),
+            config=ResolvedConfig(agent_name="test", environment_name="test"),
         ),
         ma_session_id="fake-session",
         mapping_id=None,
+        watermark=None,
+        reused=False,
+        session_account_id=account_id,
         continuity=ContinuityOutcome(),
-        _record=None,
-        session_ref=None,
-        backend=None,
-        runtime=None,
+        _record=unused_record,
     )
     deps = replace(
         deps_for(None, None),
