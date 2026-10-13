@@ -441,8 +441,11 @@ class AgentBackendService:
         backend: Provider | None,
         expected_revision: int,
         actor: BackendActor,
-        operation: Literal["set", "clear", "revert"],
+        operation: Literal["set", "clear", "revert", "fleet_grant_set", "fleet_grant_revoke"],
         expected_preview_digest: str | None,
+        *,
+        fleet_grant: AgentFleetGrant | None = None,
+        now: datetime | None = None,
     ) -> AgentBackendRevision:
         self._check_actor(agent.tenant_id, actor)
         async with policy_store.policy_write_transaction(
@@ -466,34 +469,50 @@ class AgentBackendService:
                 if current.previous_local is not None and previous is None:
                     raise AgentBackendRefused("no_previous_revision")
                 backend = previous.backend if previous else None
-            preview = await self._preview(session, agent, backend)
-            target = preview.target_backend
-            if not preview.allowed:
-                raise AgentBackendRefused("backend_not_allowed")
-            if expected_preview_digest is not None and preview.digest != expected_preview_digest:
+            grant_operation = operation in ("fleet_grant_set", "fleet_grant_revoke")
+            if grant_operation:
+                if now is None:
+                    raise AgentBackendRefused("invalid_fleet_grant")
+                preview = await self._fleet_preview(session, agent, fleet_grant, now=now)
+                backend = current.backend if current else None
+                previous_local = current.previous_local if current else None
+                retained_grant = preview.fleet_grant
+            else:
+                preview = await self._preview(session, agent, backend)
+                if not preview.allowed:
+                    raise AgentBackendRefused("backend_not_allowed")
+                previous_local = local or None
+                retained_grant = current.fleet_grant if current else None
+            if (grant_operation or expected_preview_digest is not None) and (
+                preview.digest != expected_preview_digest
+            ):
                 raise AgentBackendRefused("stale_preview")
-            # Validation is the same owner used for explicit channel selections.
-            check_backend(
-                ConfigRevision.create(
-                    ChannelRef(
-                        tenant_id=str(agent.tenant_id), platform="cli", channel_id=agent.name
-                    ),
-                    1,
-                    backend_selection(target),
+            if not grant_operation:
+                # Validation is the same owner used for explicit channel selections.
+                check_backend(
+                    ConfigRevision.create(
+                        ChannelRef(
+                            tenant_id=str(agent.tenant_id), platform="cli", channel_id=agent.name
+                        ),
+                        1,
+                        backend_selection(preview.target_backend),
+                    )
                 )
-            )
-            revision = await agent_backends.put_revision(
-                session,
-                tenant_id=agent.tenant_id,
-                agent_id=agent.agent_id,
-                agent_name=agent.name,
-                local=local + 1,
-                backend=backend,
-                previous_local=local or None,
-                digest=_revision_digest(agent, backend, current.fleet_grant if current else None),
-                preview_digest=preview.digest,
-                fleet_grant=current.fleet_grant if current else None,
-            )
+            try:
+                revision = await agent_backends.put_revision(
+                    session,
+                    tenant_id=agent.tenant_id,
+                    agent_id=agent.agent_id,
+                    agent_name=agent.name,
+                    local=local + 1,
+                    backend=backend,
+                    previous_local=previous_local,
+                    digest=_revision_digest(agent, backend, retained_grant),
+                    preview_digest=preview.digest,
+                    fleet_grant=retained_grant,
+                )
+            except IntegrityError:
+                raise AgentBackendRefused("stale_revision") from None
             await security_audit.append_event(
                 session,
                 tenant_id=agent.tenant_id,
@@ -588,59 +607,6 @@ class AgentBackendService:
         async with self._sessions() as session:
             return await self._fleet_preview(session, agent, value, now=now)
 
-    async def _write_fleet_grant(
-        self,
-        agent: BackendAgent,
-        value: AgentFleetGrant | None,
-        expected_revision: int,
-        actor: BackendActor,
-        *,
-        expected_preview_digest: str,
-        now: datetime,
-    ) -> AgentBackendRevision:
-        self._check_actor(agent.tenant_id, actor)
-        async with policy_store.policy_write_transaction(
-            self._sessions, tenant_id=agent.tenant_id
-        ) as session:
-            await self._actor(session, agent.tenant_id, actor)
-            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-            local = current.local if current else 0
-            if local != expected_revision:
-                raise AgentBackendRefused("stale_revision")
-            preview = await self._fleet_preview(session, agent, value, now=now)
-            if preview.digest != expected_preview_digest:
-                raise AgentBackendRefused("stale_preview")
-            backend = current.backend if current else None
-            try:
-                revision = await agent_backends.put_revision(
-                    session,
-                    tenant_id=agent.tenant_id,
-                    agent_id=agent.agent_id,
-                    agent_name=agent.name,
-                    local=local + 1,
-                    backend=backend,
-                    previous_local=current.previous_local if current else None,
-                    digest=_revision_digest(agent, backend, preview.fleet_grant),
-                    preview_digest=preview.digest,
-                    fleet_grant=preview.fleet_grant,
-                )
-            except IntegrityError:
-                raise AgentBackendRefused("stale_revision") from None
-            await security_audit.append_event(
-                session,
-                tenant_id=agent.tenant_id,
-                account_id=actor.account_id,
-                agent_id=agent.agent_id,
-                platform=None,
-                platform_user_id=None,
-                tool_name="agent_backend",
-                operation="fleet_grant_set" if value is not None else "fleet_grant_revoke",
-                outcome="allowed",
-                reason="completed",
-                scope=f"agent_backend:{agent.agent_id}:{revision.local}",
-            )
-            return revision
-
     async def set_fleet_grant(
         self,
         agent: BackendAgent,
@@ -651,12 +617,14 @@ class AgentBackendService:
         expected_preview_digest: str,
         now: datetime,
     ) -> AgentBackendRevision:
-        return await self._write_fleet_grant(
+        return await self._change(
             agent,
-            value,
+            None,
             expected_revision,
             actor,
-            expected_preview_digest=expected_preview_digest,
+            "fleet_grant_set",
+            expected_preview_digest,
+            fleet_grant=value,
             now=now,
         )
 
@@ -669,12 +637,13 @@ class AgentBackendService:
         expected_preview_digest: str,
         now: datetime,
     ) -> AgentBackendRevision:
-        return await self._write_fleet_grant(
+        return await self._change(
             agent,
             None,
             expected_revision,
             actor,
-            expected_preview_digest=expected_preview_digest,
+            "fleet_grant_revoke",
+            expected_preview_digest,
             now=now,
         )
 

@@ -416,3 +416,130 @@ async def test_grant_read_is_tenant_and_agent_scoped(owned):
     await set_grant(service, agent, actor)
     assert await service.read_fleet_grant(uuid.uuid4(), agent.agent_id, now=NOW) is None
     assert await service.read_fleet_grant(agent.tenant_id, uuid.uuid4(), now=NOW) is None
+
+
+@pytest.mark.parametrize("operation", ["set", "clear", "revert"])
+@pytest.mark.parametrize("grant_first", [False, True])
+async def test_mixed_backend_and_grant_cas_has_one_shared_winner(owned, operation, grant_first):
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    first = await service.set_backend(agent, "openai", 0, actor)
+    second = await service.set_backend(agent, "gemini", first.local, actor)
+    current = await set_grant(service, agent, actor)
+    value = None if operation == "clear" else grant()
+    preview = await service.preview_fleet_grant(agent, value, now=NOW)
+
+    async def backend_write():
+        if operation == "set":
+            return await service.set_backend(agent, "anthropic", current.local, actor)
+        if operation == "clear":
+            return await service.clear_backend(agent, current.local, actor)
+        return await service.revert(agent, actor, expected_revision=current.local)
+
+    async def grant_write():
+        if value is None:
+            return await service.revoke_fleet_grant(
+                agent, current.local, actor, expected_preview_digest=preview.digest, now=NOW
+            )
+        return await service.set_fleet_grant(
+            agent, value, current.local, actor, expected_preview_digest=preview.digest, now=NOW
+        )
+
+    writes = (grant_write(), backend_write()) if grant_first else (backend_write(), grant_write())
+    results = await asyncio.gather(*writes, return_exceptions=True)
+    if grant_first:
+        results.reverse()
+    failures = [result for result in results if isinstance(result, AgentBackendRefused)]
+    assert len(failures) == 1 and failures[0].reason == "stale_revision"
+    winner = results[0] if not isinstance(results[0], Exception) else results[1]
+    latest = await service.current(agent)
+    assert latest == winner and latest.local == current.local + 1
+    if not isinstance(results[0], Exception):
+        assert latest.previous_local == current.local
+        assert latest.fleet_grant == current.fleet_grant
+        assert (
+            latest.backend
+            == {"set": "anthropic", "clear": None, "revert": first.backend}[operation]
+        )
+    else:
+        assert latest.backend == second.backend and latest.previous_local == current.previous_local
+        assert (
+            latest.fleet_grant is None
+            if value is None
+            else latest.fleet_grant["epoch"] == latest.local
+        )
+    assert len(await service.audit(agent.tenant_id, agent_id=agent.agent_id)) == 4
+
+
+@pytest.mark.parametrize("operation", ["backend", "grant_set", "grant_revoke"])
+async def test_all_mutations_translate_insert_conflicts_and_leave_no_audit(
+    owned, monkeypatch, operation
+):
+    from daimon.core.stores import agent_backends
+    from sqlalchemy.exc import IntegrityError
+
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+
+    async def conflict(*args, **kwargs):
+        raise IntegrityError("offline insert", {}, RuntimeError("same revision"))
+
+    monkeypatch.setattr(agent_backends, "put_revision", conflict)
+    with pytest.raises(AgentBackendRefused) as refused:
+        if operation == "backend":
+            await service.set_backend(agent, "openai", 0, actor)
+        elif operation == "grant_set":
+            await set_grant(service, agent, actor)
+        else:
+            await revoke_grant(service, agent, actor)
+    assert refused.value.reason == "stale_revision"
+    assert await service.current(agent) is None
+    assert await service.audit(agent.tenant_id, agent_id=agent.agent_id) == ()
+
+
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_grant_preview_remains_mandatory_in_shared_mutation(owned, revoke):
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    with pytest.raises(AgentBackendRefused) as refused:
+        if revoke:
+            await service.revoke_fleet_grant(agent, 0, actor, expected_preview_digest=None, now=NOW)
+        else:
+            await service.set_fleet_grant(
+                agent, grant(), 0, actor, expected_preview_digest=None, now=NOW
+            )
+    assert refused.value.reason == "stale_preview"
+    assert await service.current(agent) is None
+    assert await service.audit(agent.tenant_id, agent_id=agent.agent_id) == ()
+
+
+async def test_backend_append_after_malformed_grant_revokes_without_rewriting_history(owned):
+    from sqlalchemy import select
+
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    granted = await set_grant(service, agent, actor)
+    invalid = {"unknown-grant-shape": True}
+    async with sessions.begin() as db:
+        await db.execute(
+            update(AgentBackendRevisionRecord)
+            .where(
+                AgentBackendRevisionRecord.tenant_id == agent.tenant_id,
+                AgentBackendRevisionRecord.agent_id == agent.agent_id,
+                AgentBackendRevisionRecord.local == granted.local,
+            )
+            .values(fleet_grant=invalid)
+        )
+    changed = await service.set_backend(agent, "openai", granted.local, actor)
+    assert changed.backend == "openai" and changed.fleet_grant is None
+    assert not changed.fleet_grant_invalid
+    assert await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=NOW) is None
+    async with sessions() as db:
+        retained = await db.scalar(
+            select(AgentBackendRevisionRecord.fleet_grant).where(
+                AgentBackendRevisionRecord.tenant_id == agent.tenant_id,
+                AgentBackendRevisionRecord.agent_id == agent.agent_id,
+                AgentBackendRevisionRecord.local == granted.local,
+            )
+        )
+        assert retained == invalid
