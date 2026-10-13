@@ -4606,8 +4606,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 226,
-      "end": 226,
+      "line": 246,
+      "end": 246,
       "scope": "test_environment_create_preserves_configuration",
       "category": "test",
       "resource": "environments.create",
@@ -4619,8 +4619,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 252,
-      "end": 252,
+      "line": 275,
+      "end": 275,
       "scope": "test_agent_update_keeps_version_and_null_clear_semantics",
       "category": "test",
       "resource": "agents.update",
@@ -4630,8 +4630,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 450,
-      "end": 450,
+      "line": 473,
+      "end": 473,
       "scope": "test_skills_listing_keeps_pagination_and_truncation_signal",
       "category": "test",
       "resource": "skills.list",
@@ -4643,8 +4643,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 629,
-      "end": 629,
+      "line": 652,
+      "end": 652,
       "scope": "test_canonical_worker_agent_create_preserves_actual_sdk_bytes",
       "category": "test",
       "resource": "agents.create",
@@ -4656,8 +4656,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 271,
-      "end": 271,
+      "line": 294,
+      "end": 294,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "agents.retrieve",
@@ -4667,8 +4667,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 386,
-      "end": 389,
+      "line": 409,
+      "end": 412,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.create",
@@ -4680,8 +4680,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 533,
-      "end": 533,
+      "line": 556,
+      "end": 556,
       "scope": "test_skill_walks_keep_sdk_terminal_page_stop_rule",
       "category": "test",
       "resource": "skills.list",
@@ -4719,8 +4719,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 274,
-      "end": 274,
+      "line": 297,
+      "end": 297,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "agents.archive",
@@ -4730,8 +4730,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 398,
-      "end": 400,
+      "line": 421,
+      "end": 423,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.create",
@@ -4743,8 +4743,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 474,
-      "end": 474,
+      "line": 497,
+      "end": 497,
       "scope": "test_missing_page_data_keeps_sdks_empty_iterator_behavior",
       "category": "test",
       "resource": "agents.list",
@@ -4754,8 +4754,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 482,
-      "end": 482,
+      "line": 505,
+      "end": 505,
       "scope": "test_missing_page_data_keeps_sdks_empty_iterator_behavior",
       "category": "test",
       "resource": "environments.list",
@@ -4765,8 +4765,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 526,
-      "end": 526,
+      "line": 549,
+      "end": 549,
       "scope": "test_skill_walks_keep_sdk_terminal_page_stop_rule",
       "category": "test",
       "resource": "skills.versions.list",
@@ -4778,8 +4778,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 277,
-      "end": 277,
+      "line": 300,
+      "end": 300,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "environments.archive",
@@ -4789,8 +4789,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 285,
-      "end": 285,
+      "line": 308,
+      "end": 308,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "environments.update",
@@ -4800,8 +4800,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 406,
-      "end": 406,
+      "line": 429,
+      "end": 429,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.download",
@@ -4814,8 +4814,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 430,
-      "end": 430,
+      "line": 453,
+      "end": 453,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.list",
@@ -4827,8 +4827,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 436,
-      "end": 436,
+      "line": 459,
+      "end": 459,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.delete",
@@ -4838,8 +4838,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 420,
-      "end": 420,
+      "line": 443,
+      "end": 443,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.list",
@@ -4851,8 +4851,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 432,
-      "end": 432,
+      "line": 455,
+      "end": 455,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.delete",
@@ -14048,25 +14048,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 59,
-      "module": "anthropic.types.beta",
-      "names": [
-        "BetaManagedAgentsVault"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/core/daimon/core/mux_compat.py",
       "line": 60,
-      "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
-      "names": [
-        "BetaManagedAgentsCredential"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 617,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsVault"
@@ -14075,7 +14057,16 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 627,
+      "line": 61,
+      "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
+      "names": [
+        "BetaManagedAgentsCredential"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 638,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsVault"
@@ -14084,7 +14075,16 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 644,
+      "line": 648,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 665,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14093,7 +14093,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 660,
+      "line": 681,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14102,7 +14102,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 712,
+      "line": 733,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -16710,7 +16710,7 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 373,
+      "line": 396,
       "module": "anthropic",
       "names": [
         "APIStatusError"
@@ -16719,7 +16719,7 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 642,
+      "line": 665,
       "module": "anthropic",
       "names": [
         "InternalServerError"
