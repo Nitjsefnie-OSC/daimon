@@ -48,7 +48,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.core import compile_agent
-from mux.drivers.gemini.fake import MemoryStorage
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord, Storage
 from mux.drivers.gemini.transport import Transport
