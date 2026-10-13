@@ -38,6 +38,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.pytest_plugin import db_preflight as db_preflight
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -404,6 +405,7 @@ def host_parent() -> WorkerPermissions:
 
 def host_owner() -> Mock:
     owner = create_autospec(FleetPorts, instance=True)
+    owner.controller_account.return_value = AUTH.account_id
     owner.read_run.return_value = (
         FleetRun(
             id=RUN,
@@ -474,6 +476,7 @@ async def test_mcp_current_caller_cannot_control_another_principals_fleet(tool: 
         return root, TenantAccessPolicy(enabled_backends=("anthropic",))
 
     owner = host_owner()
+    owner.controller_account.return_value = None
     bridge = HostFleetToolService(FleetOrchestrator(owner), load)
     async with Client(registered(bridge)) as client:
         with pytest.raises(ToolError, match="controller_required"):
@@ -528,6 +531,7 @@ async def test_controller_refusal_persists_as_an_authz_denial(
         sessionmaker=committing_sessionmaker,
     )
     owner = host_owner()
+    owner.controller_account.return_value = None
     server = FastMCP("fleet-denial-audit")
     server.add_middleware(audit)
     server.add_middleware(SeedAuth())

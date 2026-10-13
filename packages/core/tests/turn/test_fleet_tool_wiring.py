@@ -9,6 +9,7 @@ from decimal import Decimal
 import httpx
 import pytest
 from daimon.core._models import FleetWorker as WorkerRow
+from daimon.core._models import PlatformPrincipal
 from daimon.core.fleet import result_digest
 from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused, HostFleetPorts
 from daimon.core.headless_runner import run_worker
@@ -58,9 +59,16 @@ async def test_real_worker_journal_collect_refuses_absent_required_review(
             .values(result_contract={"format": "text", "review_required": True})
         )
     worker = replace(worker, result_contract={"format": "text", "review_required": True})
-    root = replace(
-        root, subject=replace(root.subject, platform_user_id=root.fleet.scope.principal_id)
-    )
+    async with request.deps.sessionmaker.begin() as db:
+        db.add(
+            PlatformPrincipal(
+                tenant_id=request.tenant_id,
+                account_id=root.fleet.account_id,
+                platform=request.platform,
+                external_id=request.external_user_id,
+            )
+        )
+    root = replace(root, subject=replace(root.subject, platform_user_id=request.external_user_id))
     request = replace(
         request,
         admission=replace(
@@ -254,9 +262,16 @@ async def test_required_review_gate_uses_real_spawn_dispatch_and_full_journal(
     claimed_openai_worker, monkeypatch, verdict
 ):
     request, root, worker, prices, owned, calls, primary_wire = claimed_openai_worker
-    root = replace(
-        root, subject=replace(root.subject, platform_user_id=root.fleet.scope.principal_id)
-    )
+    async with request.deps.sessionmaker.begin() as db:
+        db.add(
+            PlatformPrincipal(
+                tenant_id=request.tenant_id,
+                account_id=root.fleet.account_id,
+                platform=request.platform,
+                external_id=request.external_user_id,
+            )
+        )
+    root = replace(root, subject=replace(root.subject, platform_user_id=request.external_user_id))
     request = replace(
         request,
         admission=replace(
@@ -443,3 +458,83 @@ async def test_required_review_gate_uses_real_spawn_dispatch_and_full_journal(
                 "status": "blocked",
                 "reason": "review_refused",
             }
+
+
+@pytest.mark.parametrize("rollback", (False, True))
+async def test_real_worker_result_and_completion_wake_share_the_transaction(
+    claimed_openai_worker, monkeypatch, rollback
+):
+    from uuid import uuid4
+
+    from daimon.core.continuity import wakes
+    from daimon.core.continuity.continuation import ContinuationRequest
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.stores.task_continuations import list_pending_continuations
+
+    request, root, worker, prices, _, _, _ = claimed_openai_worker
+    run, _ = await fleet.run_status(
+        request.deps.sessionmaker, tenant_id=request.tenant_id, run_id=worker.run_id
+    )
+    continuation = ContinuationRequest(
+        tenant_id=run.tenant_id,
+        platform=run.platform,
+        parent_channel_id=run.channel_id,
+        thread_id=run.thread_id,
+        requester_account_id=run.orchestrator_account_id,
+        requester_external_user_id=root.subject.platform_user_id,
+        target_ma_agent_id=request.admission.agent.id,
+        target_name=request.admission.config.agent_name,
+        requested_work=None,
+        reason="worker_finished",
+        idempotency_key=uuid4(),
+    )
+    continuation = continuation.model_copy(
+        update={"idempotency_key": wakes.worker_finished_key(run.id, (worker.id,))}
+    )
+    async with request.deps.sessionmaker.begin() as db:
+        await fleet.lock_budget(
+            db, tenant_id=run.tenant_id, actor_id=run.orchestrator_account_id, run_id=run.id
+        )
+        await wakes.arm_worker_finished(
+            db, continuation, run_id=run.id, worker_ids=(worker.id,), now=request.now()
+        )
+    publish = wakes.enqueue_worker_finished
+    seen = []
+
+    async def checked(db, **kwargs):
+        _, rows = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+        seen.append(rows[0].status)
+        assert rows[0].status == "succeeded"
+        offered = await publish(db, **kwargs)
+        assert offered
+        if rollback:
+            raise FleetConflict("publication rollback")
+        return offered
+
+    monkeypatch.setattr("daimon.core.headless_runner.enqueue_worker_finished", checked)
+    call = run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    if rollback:
+        with pytest.raises(FleetConflict):
+            await call
+    else:
+        assert (await call).status == "succeeded"
+    assert seen == ["succeeded"]  # mark_running never invokes the terminal publisher.
+    async with request.deps.sessionmaker() as db:
+        ready = await list_pending_continuations(
+            db, tenant_id=run.tenant_id, platform=run.platform, thread_id=run.thread_id
+        )
+    _, rows = await fleet.run_status(
+        request.deps.sessionmaker, tenant_id=run.tenant_id, run_id=run.id
+    )
+    assert bool(ready) is not rollback
+    assert rows[0].status == ("running" if rollback else "succeeded")
+    if rollback:
+        assert rows[0].result is None and rows[0].binding_id is not None
+        assert rows[0].reserved_usd > 0

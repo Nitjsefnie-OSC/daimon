@@ -2676,3 +2676,24 @@ Fleet roots are projected only when fleet orchestration is enabled and the host 
 `read_frozen_root` in `daimon.core.turn.runtime_manifest` takes the original scope and exactly one selector: the genuine card `intent_id` or verified native `origin_id`. A captured `run_id`, when provided, must match. Cards and authenticated tools consume the same record and fresh policy; recovered controls must provide their captured run. The lookup preserves the original scope principal and finite bounds, checks the current origin, intent, requester, binding and run, and refuses stale or foreign associations. Fresh read authorization cannot enlarge or replace the frozen authority. This seam does not install an operator grant policy or certify a live deployment.
 
 Before creating a root run, the existing operation owner durably reserves its exact origin and intent. The intent reservation checks prior associations across all accounts in the tenant under the card row lock; public readers remain account-scoped. The origin key and immutable intent association remain authoritative while delivery is pending, claimed, unknown or processed; neither a competing intent nor a missing receipt can allocate a second run or root budget. Only a processed receipt is readable as a frozen root. Stored receipts are decoded through the existing persistence owner in JSON mode, preserving strict money and scope fields.
+
+
+
+Fleet controls read the prepared root through the existing frozen-root projection.
+The MCP service can use the real turn dependencies and verified active origin;
+handles do not supply authority. Controller admission resolves the caller's
+platform identity to the original account. A trusted tenant administrator may
+control an already-authorized root.
+Scoped, versioned stop acknowledgements and their retries use the existing
+operation store. They preserve worker bindings, usage and held reservations;
+a stop acknowledgement does not certify native termination. Resume without
+accepted-attempt reconciliation refuses explicitly. Completion waits freeze an
+exact initial cohort, then separate review cohorts for each reviewed target,
+in the existing continuation queue. Each wait reloads the original frozen root
+through the turn dependencies; a shared ports instance never holds a fixed wake
+address. A successful worker
+result publishes that cohort's wake in the same transaction. The deployment must
+install the compatible completion reader and the normal runner's fresh root
+checks. Native dispatch and its budget watchdog remain separate installation
+prerequisites; absent hooks keep spawn unavailable. A run-wide stop does not
+publish an armed completion wait.

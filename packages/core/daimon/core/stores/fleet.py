@@ -569,6 +569,37 @@ async def requeue(
     )
 
 
+async def request_worker_stop(
+    sessionmaker: Source,
+    *,
+    tenant_id: uuid.UUID,
+    worker_id: uuid.UUID,
+    expected_version: int,
+) -> FleetWorker:
+    """Record stop intent without asserting native termination or releasing a hold."""
+    async with _transaction(sessionmaker) as session:
+        row = (
+            await session.execute(
+                update(FleetWorkerRow)
+                .where(
+                    FleetWorkerRow.tenant_id == tenant_id,
+                    FleetWorkerRow.id == worker_id,
+                    FleetWorkerRow.version == expected_version,
+                    FleetWorkerRow.status.in_(("pending", "starting", "running")),
+                )
+                .values(
+                    error_code="stop_requested",
+                    version=FleetWorkerRow.version + 1,
+                    updated_at=func.now(),
+                )
+                .returning(FleetWorkerRow)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise FleetConflict("worker stop transition refused")
+        return _worker(row)
+
+
 async def set_run_status(
     sessionmaker: Source,
     *,

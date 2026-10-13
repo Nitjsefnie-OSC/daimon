@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bind opt-in fleet root permissions to the exact admitted source, turn intent, active origin and native session binding through the existing durable operation owner.
 
+- Bind opted-in fleet controls and completion waits to verified prepared roots, retaining stop intent without certifying native termination.
 - Preserve recorded OpenAI message IDs across recovery and assign new item IDs during normalization; reuse the fenced session-creation guard for fleet workers.
 - Apply low managed-agent token budgets to Gemini workers and support explicitly granted Flash-Lite worker definitions.
 - Retain staging cash reservations when callbacks provide only token estimates without complete measured spend.

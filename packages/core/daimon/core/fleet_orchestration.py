@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -20,13 +20,14 @@ from mux.contracts.config import BackendConfig
 from mux.contracts.events import AgentMessagePayload, Event, TextPart
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import Agent, AgentPatch, AgentSpec, SessionSpec
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 if TYPE_CHECKING:
     from daimon.core.fleet import FleetRun, FleetWorker
     from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerLimits, WorkerPermissions
     from daimon.core.pricing import ModelRates, ProviderPrice
     from daimon.core.stores.domain import BackendAgent
+    from daimon.core.turn.deps import TurnDeps
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -80,6 +81,8 @@ class FleetPorts(Protocol):
     async def read_run(
         self, scope: Scope, run_id: uuid.UUID
     ) -> tuple[FleetRun, tuple[FleetWorker, ...]]: ...
+
+    async def controller_account(self, parent: WorkerPermissions) -> uuid.UUID | None: ...
 
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision
@@ -176,7 +179,10 @@ def _authorize(parent: WorkerPermissions, policy: TenantAccessPolicy) -> None:
 def _scope(parent: WorkerPermissions, run: FleetRun) -> None:
     facts = parent.fleet
     if (
-        run.id != facts.run_id
+        facts.scope.is_platform
+        or facts.scope.is_legacy_host_authorized
+        or facts.scope.account_id != str(run.orchestrator_account_id)
+        or run.id != facts.run_id
         or str(run.tenant_id) != facts.scope.tenant_id
         or run.orchestrator_account_id != facts.account_id
         or run.platform != facts.root.channel.platform
@@ -222,10 +228,10 @@ class FleetOrchestrator:
             raise FleetRefused("prerequisites_unavailable")
         return self._ports
 
-    @staticmethod
-    def _controller_authorize(parent: WorkerPermissions) -> None:
-        if parent.subject.platform_user_id != parent.fleet.scope.principal_id and (
-            not parent.subject.is_admin or parent.subject.via_agent_key
+    async def _controller_authorize(self, parent: WorkerPermissions) -> None:
+        if parent.subject.via_agent_key or (
+            not parent.subject.is_admin
+            and await self._owner().controller_account(parent) != parent.fleet.account_id
         ):
             record_authz_denial("fleet_control", "controller_required")
             raise FleetRefused("controller_required")
@@ -402,7 +408,7 @@ class FleetOrchestrator:
             raise FleetRefused("deadline_timezone_required")
         run, workers = await self.read_snapshot(parent, policy, run_id)
         _session_authorize(parent, policy, continuing=True)
-        self._controller_authorize(parent)
+        await self._controller_authorize(parent)
         worker = next((row for row in workers if row.id == worker_id), None)
         if worker_id is not None and worker is None:
             raise FleetRefused("foreign_worker")
@@ -555,13 +561,22 @@ class FleetOrchestrator:
         unfinished/failed worker, a refused review or an invalid result contract.
         """
         run, workers = await self.read_snapshot(parent, policy, run_id)
-        self._controller_authorize(parent)
+        await self._controller_authorize(parent)
         if run.status in ("cancelled", "failed"):
             return {"run_id": str(run.id), "status": "blocked", "reason": "run_stopped"}
         if not workers:
             raise FleetRefused("empty_run")
-        if any(worker.status in ("pending", "starting", "running") for worker in workers):
-            await self._owner().wait(parent, run, workers)
+        active = {
+            worker.reviewer_of
+            for worker in workers
+            if worker.status in ("pending", "starting", "running")
+        }
+        if active:
+            # The initial phase precedes separate review cohorts for each target.
+            for target in {None} if None in active else active:
+                await self._owner().wait(
+                    parent, run, tuple(worker for worker in workers if worker.reviewer_of == target)
+                )
             return {"run_id": str(run.id), "status": "waiting"}
         if any(worker.status != "succeeded" for worker in workers):
             return {"run_id": str(run.id), "status": "blocked", "reason": "worker_failed"}
@@ -631,11 +646,27 @@ class HostFleetPorts:
         | None = None,
         clone_reader: Callable[[WorkerPermissions, ResourceRef, Revision], Awaitable[Agent]]
         | None = None,
+        deps: TurnDeps | None = None,
         wait: Callable[[WorkerPermissions, FleetRun, tuple[FleetWorker, ...]], Awaitable[None]]
         | None = None,
     ) -> None:
         self.sessions, self.prices, self.markup = sessions, prices, markup
         self._dispatch, self._clone_reader, self._wait = dispatch, clone_reader, wait
+        self._deps = deps
+
+    async def controller_account(self, parent: WorkerPermissions) -> uuid.UUID | None:
+        from daimon.core.stores.identity import find_platform_principal
+
+        if parent.subject.platform_user_id is None:
+            return None
+        async with self.sessions() as db:
+            principal = await find_platform_principal(
+                db,
+                tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
+                platform=parent.fleet.root.channel.platform,
+                external_id=parent.subject.platform_user_id,
+            )
+            return principal.account_id if principal is not None else None
 
     async def read_run(
         self, scope: Scope, run_id: uuid.UUID
@@ -830,9 +861,168 @@ class HostFleetPorts:
     async def wait(
         self, parent: WorkerPermissions, run: FleetRun, workers: tuple[FleetWorker, ...]
     ) -> None:
-        if self._wait is None:
+        if self._wait is not None:
+            return await self._wait(parent, run, workers)
+        if self._deps is None:
             raise FleetRefused("prerequisites_unavailable")
-        await self._wait(parent, run, workers)
+        from daimon.core.continuity.continuation import ContinuationRequest
+        from daimon.core.continuity.wakes import arm_worker_finished, worker_finished_key
+        from daimon.core.neutral_resources import WorkerSpecRefused
+        from daimon.core.stores import access_policy, fleet, mux_state, turn_origins
+        from daimon.core.stores.domain import ChatPlatform
+        from daimon.core.turn.runtime_manifest import read_frozen_root
+        from mux.errors import ScopeViolation
+
+        try:
+            frozen, _ = await read_frozen_root(
+                self._deps,
+                parent.fleet.scope,
+                origin_id=parent.fleet.origin_id,
+                run_id=run.id,
+                now=datetime.now(UTC),
+            )
+        except (WorkerSpecRefused, ScopeViolation, fleet.FleetConflict):
+            raise FleetRefused("wait_unavailable") from None
+        ids = tuple(worker.id for worker in workers)
+        async with self.sessions.begin() as db:
+            policy = await access_policy.load_access_policy(db, tenant_id=run.tenant_id)
+            _authorize(parent, policy)
+            _session_authorize(parent, policy, continuing=True)
+            await fleet.lock_budget(
+                db, tenant_id=run.tenant_id, actor_id=parent.fleet.account_id, run_id=run.id
+            )
+            actual, _ = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+            _scope(parent, actual)
+            now = await mux_state.database_clock(db)
+            origin = await turn_origins.get_active_origin(
+                db,
+                origin_id=parent.fleet.origin_id,
+                tenant_id=actual.tenant_id,
+                account_id=actual.orchestrator_account_id,
+                platform=actual.platform,
+                now=now,
+            )
+            _scope(frozen, actual)
+            if (
+                origin is None
+                or not frozen.subject.platform_user_id
+                or origin.responder_ma_agent_id != frozen.source_agents[0].id
+            ):
+                raise FleetRefused("wait_unavailable")
+            try:
+                request = ContinuationRequest(
+                    tenant_id=actual.tenant_id,
+                    platform=TypeAdapter[ChatPlatform](ChatPlatform).validate_python(
+                        actual.platform
+                    ),
+                    parent_channel_id=actual.channel_id,
+                    thread_id=actual.thread_id,
+                    requester_account_id=actual.orchestrator_account_id,
+                    requester_external_user_id=frozen.subject.platform_user_id,
+                    target_ma_agent_id=origin.responder_ma_agent_id,
+                    target_name=origin.responder_name,
+                    requested_work=None,
+                    reason="worker_finished",
+                    idempotency_key=worker_finished_key(actual.id, ids),
+                )
+                row = await arm_worker_finished(
+                    db, request, run_id=actual.id, worker_ids=ids, now=now
+                )
+            except ValueError:
+                raise FleetRefused("wait_unavailable") from None
+            if row is None:
+                raise FleetRefused("wait_unavailable")
+
+    async def _control_record(
+        self,
+        parent: WorkerPermissions,
+        run: FleetRun,
+        worker: FleetWorker | None,
+        *,
+        action: Control,
+        operation_key: str,
+        expected_version: int,
+        write: bool,
+    ) -> Mapping[str, JsonValue] | None:
+        from daimon.core.fleet import FleetConflict
+        from daimon.core.stores import access_policy, fleet, mux_state
+        from mux.errors import OperationConflict, ScopeViolation
+        from mux.state.operations import request_digest
+
+        if action != "kill":
+            raise FleetRefused("resume_evidence_unavailable")
+        scope = parent.fleet.scope
+        key = f"fleet:{run.id}:control:{operation_key}"
+        terms: dict[str, JsonValue] = {
+            "run_id": str(run.id),
+            "worker_id": str(worker.id) if worker else None,
+            "action": action,
+            "operation_key": operation_key,
+            "expected_version": expected_version,
+        }
+        digest = request_digest(terms)
+        try:
+            async with self.sessions.begin() as db:
+                policy = await access_policy.load_access_policy(db, tenant_id=run.tenant_id)
+                _authorize(parent, policy)
+                _session_authorize(parent, policy, continuing=True)
+                await fleet.lock_budget(
+                    db, tenant_id=run.tenant_id, actor_id=parent.fleet.account_id, run_id=run.id
+                )
+                actual, _ = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+                _scope(parent, actual)
+                now = await mux_state.database_clock(db)
+                if write:
+                    begun = await mux_state.begin_operation(
+                        db, scope, key=key, request_digest=digest, operation_id=key, now=now
+                    )
+                    record = None if begun.fresh else begun.record
+                else:
+                    record = await mux_state.get_operation(db, scope, key)
+                    if record is None:
+                        return None
+                if record is not None:
+                    if record.operation.request_digest != digest:
+                        raise FleetRefused("operation_conflict")
+                    if record.operation.status != "processed":
+                        raise FleetRefused("control_evidence_unavailable")
+                    return record.result
+                if actual.status != "running":
+                    raise FleetRefused("terminal_run")
+                if worker is None:
+                    updated = await fleet.set_run_status(
+                        db,
+                        tenant_id=run.tenant_id,
+                        run_id=run.id,
+                        expected_version=expected_version,
+                        status="cancelled",
+                    )
+                else:
+                    updated = await fleet.request_worker_stop(
+                        db,
+                        tenant_id=run.tenant_id,
+                        worker_id=worker.id,
+                        expected_version=expected_version,
+                    )
+                reply = terms | {"accepted": True, "version": updated.version}
+                await mux_state.claim_send(
+                    db, scope, key, now=now, clock=mux_state.database_clock, fence=None
+                )
+                await mux_state.advance_operation(
+                    db,
+                    scope,
+                    key,
+                    "processed",
+                    now=now,
+                    clock=mux_state.database_clock,
+                    fence=None,
+                    result=reply,
+                )
+                return reply
+        except OperationConflict:
+            raise FleetRefused("operation_conflict") from None
+        except (FleetConflict, ScopeViolation):
+            raise FleetRefused("control_evidence_invalid") from None
 
     async def retained_control(
         self,
@@ -844,7 +1034,15 @@ class HostFleetPorts:
         operation_key: str,
         expected_version: int,
     ) -> Mapping[str, JsonValue] | None:
-        raise FleetRefused("prerequisites_unavailable")
+        return await self._control_record(
+            parent,
+            run,
+            worker,
+            action=action,
+            operation_key=operation_key,
+            expected_version=expected_version,
+            write=False,
+        )
 
     async def control(
         self,
@@ -857,4 +1055,15 @@ class HostFleetPorts:
         expected_version: int,
         resolved: tuple[ResolvedWorkerSpec, ...],
     ) -> Mapping[str, JsonValue]:
-        raise FleetRefused("prerequisites_unavailable")
+        reply = await self._control_record(
+            parent,
+            run,
+            worker,
+            action=action,
+            operation_key=operation_key,
+            expected_version=expected_version,
+            write=True,
+        )
+        if reply is None:
+            raise FleetRefused("control_evidence_unavailable")
+        return reply
