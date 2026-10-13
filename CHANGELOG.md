@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve ordinary sealed answers when the trusted Discord fleet resolver proves no active fleet, and record replacement messages through the shared turn-post owner.
 
 - Bind opted-in Discord fleet cards to the installed shared service, defer root lookup until rendering, and keep control edits and replacement-message capture on the existing post transport.
+- Admitted Anthropic workers allocate fresh native agents and verified warm sessions through the existing scoped mutation, source-proof and headless result owners.
+
 - Native worker session creation retains scoped creation receipts before readback, refuses changed warm-memory grants without provisioning, and archives independently owned rejected sessions.
 
 - Preserve a tenant-wide clone source identity only under its exact root source/revision grant and authorized account capture.
