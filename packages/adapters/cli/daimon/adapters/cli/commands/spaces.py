@@ -44,6 +44,10 @@ _OPERATOR = Subject(is_admin=True)
 _CONFIRM = typer.Option(
     "--confirm", help="The channels share one audience: everyone in one may read the others."
 )
+_LOOSEN = typer.Option(
+    "--loosen-rules",
+    help="Let a channel kept to its own agents, or taking no replies, take the looser Space rule.",
+)
 _UNSEEN = (
     "Daimon can't see who reads a channel, only who it has answered there. A Space "
     "shares every channel's history and its agents' memory with all the others, so "
@@ -93,12 +97,17 @@ async def _require_confirmed(
         raise typer.Exit(1)
 
 
+def _rule(rule: ChannelRule) -> str:
+    return f"readers {rule.readers}, writers {rule.writers}"
+
+
 def _print_change(console: Console, change: SpaceChange, verb: str) -> None:
     space = change.space
     channels = ", ".join(change.channel_ids) or "no channels"
-    console.print(
-        f"Space {space.name} {verb}: readers {space.readers}, writers {space.writers}; {channels}."
-    )
+    after = ChannelRule.model_validate({"readers": space.readers, "writers": space.writers})
+    console.print(f"Space {space.name} {verb}: {_rule(after)}; {channels}.")
+    for channel_id, before in change.rules_before:
+        console.print(escape(f"  {channel_id}: {_rule(before)} -> {_rule(after)}"))
 
 
 @spaces_app.command("create")
@@ -112,6 +121,7 @@ def spaces_create_command(
         str | None, typer.Option(help="own or none with readers own; any or none with inside.")
     ] = None,
     confirm: Annotated[bool, _CONFIRM] = False,
+    loosen_rules: Annotated[bool, _LOOSEN] = False,
 ) -> None:
     """Create a Space of existing channels; each takes its rule."""
     console = Console(highlight=False)
@@ -128,6 +138,7 @@ def spaces_create_command(
                 readers=readers,
                 writers=writers,
                 confirm=confirm,
+                loosen_rules=loosen_rules,
             )
 
     run_cli(_run(), console=console)
@@ -144,6 +155,7 @@ async def spaces_create(
     readers: str = "own",
     writers: str | None = None,
     confirm: bool = False,
+    loosen_rules: bool = False,
 ) -> None:
     tenant_id = await _tenant_id(rt, platform=platform, workspace_id=workspace_id)
     default_writers = "own" if readers == "own" else "any"
@@ -164,6 +176,7 @@ async def spaces_create(
         rule=rule,
         channel_ids=channels,
         subject=_OPERATOR,
+        loosen_rules=loosen_rules,
     )
     _print_change(console, change, "created")
     if rule.readers == "own":
@@ -184,6 +197,7 @@ def spaces_add_command(
         typer.Option("--extend-agents", help="Let the Space's own agents run in the channel too."),
     ] = False,
     confirm: Annotated[bool, _CONFIRM] = False,
+    loosen_rules: Annotated[bool, _LOOSEN] = False,
 ) -> None:
     """Add a channel to a Space; it takes the Space's rule."""
     console = Console(highlight=False)
@@ -199,6 +213,7 @@ def spaces_add_command(
                 channel_id=channel_id,
                 extend_agents=extend_agents,
                 confirm=confirm,
+                loosen_rules=loosen_rules,
             )
 
     run_cli(_run(), console=console)
@@ -214,6 +229,7 @@ async def spaces_add(
     channel_id: str,
     extend_agents: bool = False,
     confirm: bool = False,
+    loosen_rules: bool = False,
 ) -> None:
     tenant_id = await _tenant_id(rt, platform=platform, workspace_id=workspace_id)
     members = await _members(rt, tenant_id=tenant_id, name=name)
@@ -227,6 +243,7 @@ async def spaces_add(
         channel_id=channel_id,
         subject=_OPERATOR,
         extend_agents=extend_agents,
+        loosen_rules=loosen_rules,
     )
     _print_change(console, change, "now")
     if change.agents:

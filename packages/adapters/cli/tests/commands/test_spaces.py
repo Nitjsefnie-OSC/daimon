@@ -14,10 +14,11 @@ from daimon.adapters.cli.commands.spaces import (
     spaces_list,
     spaces_remove,
 )
-from daimon.core.access_policy import ChannelRule
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.permissions import channel_rule
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.space_rules import SpaceRefused
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -52,6 +53,9 @@ async def test_spaces_need_confirming_then_create_add_list_remove_delete(
         )
 
     await spaces_create(**args, name="client", channel_ids=["C1", "C2"], confirm=True)
+    assert "C1: readers any, writers any -> readers own, writers own" in _out(console), (
+        "each member's rule is shown before and after"
+    )
     await spaces_add(**args, name="client", channel_id="C3", confirm=True)
     await spaces_list(**args)
     assert "client: readers own, writers own; C1, C2, C3" in _out(console), "listed"
@@ -64,3 +68,28 @@ async def test_spaces_need_confirming_then_create_add_list_remove_delete(
 
     await spaces_delete(**args, name="client")
     assert "Space client deleted; C1, C2 keep its rule." in _out(console), "deleted"
+
+
+async def test_spaces_add_refuses_to_loosen_a_rule_unless_asked(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel taking no replies keeps them off unless the operator asks to loosen it."""
+    tenant = await provision_tenant(db_session_factory, platform="slack", workspace_id="T1")
+    rt = build_cli_runtime(db_session_factory)
+    console = _console()
+    args = {"rt": rt, "console": console, "platform": "slack", "workspace_id": "T1"}
+    async with db_session_factory() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.tenant_id,
+            policy=TenantAccessPolicy(channel_rules={"C2": ChannelRule(writers="none")}),
+        )
+        await session.commit()
+    await spaces_create(**args, name="client", channel_ids=["C1"], readers="inside")
+
+    with pytest.raises(SpaceRefused, match="writers none to any"):
+        await spaces_add(**args, name="client", channel_id="C2", confirm=True)
+    await spaces_add(**args, name="client", channel_id="C2", confirm=True, loosen_rules=True)
+    assert "C2: readers any, writers none -> readers inside, writers any" in _out(console), (
+        "the loosened rule is shown"
+    )
