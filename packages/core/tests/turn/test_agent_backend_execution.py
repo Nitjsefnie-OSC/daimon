@@ -110,7 +110,8 @@ async def test_component_readback_is_awaited_once_and_retained(counterpart: Agen
 
     runtime = TurnRuntime(no_transport, object(), object(), read_agent_counterpart=read)
     request = request_for(counterpart, runtime)
-    assert await read_preparation_counterpart(request) is counterpart
+    assert runtime.read_agent_counterpart is not None
+    assert await runtime.read_agent_counterpart(request) is counterpart
     assert calls == [request]
     assert request.counterpart is None, "proof completion cannot mutate an earlier request"
 
@@ -291,7 +292,7 @@ async def test_public_bind_refuses_before_native_preparer_or_transport(
     assert calls == [], "no component callback can bypass source-preservation refusal"
 
 
-async def test_proof_timeout_refuses_and_cancels_reader_without_preparation(
+async def test_source_projection_timeout_refuses_and_cancels_capture_without_preparation(
     monkeypatch, counterpart
 ):
     import asyncio
@@ -309,9 +310,24 @@ async def test_proof_timeout_refuses_and_cancels_reader_without_preparation(
     async def prepare(request):
         raise AssertionError("expired proof reached native preparation")
 
+    from daimon.core import sessions
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_compat import source_agent_record
+    from daimon.core.stores.domain import BackendAgent
+
     runtime = TurnRuntime(no_transport, object(), object(), read_agent_counterpart=read)
     request = request_for(counterpart, runtime)
-    request = replace(request, deadline=NOW + timedelta(milliseconds=20))
+    source = BackendAgent(
+        tenant_id=TENANT,
+        agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=request.admission.agent.id),
+        name="source",
+        configuration_digest="source-snapshot",
+        source=source_agent_record(request.admission.agent, SCOPE),
+    )
+    request = replace(request, source=source, deadline=NOW + timedelta(milliseconds=20))
+    monkeypatch.setattr(
+        sessions, "project_session_resources", lambda *args, **kwargs: read(request)
+    )
     monkeypatch.setitem(
         module._PROVIDER_PREPARATIONS, request.admission.backend_revision.profile, prepare
     )
@@ -321,7 +337,7 @@ async def test_proof_timeout_refuses_and_cancels_reader_without_preparation(
     assert cancelled.is_set()
 
 
-async def test_cancellation_drains_pending_component_readback_without_preparation(
+async def test_cancellation_drains_pending_source_capture_without_preparation(
     monkeypatch, counterpart
 ):
     import asyncio
@@ -344,6 +360,22 @@ async def test_cancellation_drains_pending_component_readback_without_preparatio
     request = request_for(counterpart, runtime)
     monkeypatch.setitem(
         module._PROVIDER_PREPARATIONS, request.admission.backend_revision.profile, prepare
+    )
+    from daimon.core import sessions
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_compat import source_agent_record
+    from daimon.core.stores.domain import BackendAgent
+
+    source = BackendAgent(
+        tenant_id=TENANT,
+        agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=request.admission.agent.id),
+        name="source",
+        configuration_digest="source-snapshot",
+        source=source_agent_record(request.admission.agent, SCOPE),
+    )
+    request = replace(request, source=source)
+    monkeypatch.setattr(
+        sessions, "project_session_resources", lambda *args, **kwargs: read(request)
     )
     task = asyncio.create_task(read_preparation_counterpart(request))
     await asyncio.wait_for(entered.wait(), timeout=1)

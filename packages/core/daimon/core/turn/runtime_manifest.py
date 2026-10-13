@@ -124,11 +124,17 @@ def fixed_plan_origin_allowed(origin: str | None) -> bool:
     return origin == "channel"
 
 
-async def read_preparation_counterpart(request: ProviderPreparationRequest) -> AgentRevision:
-    """Read a scoped native component; this is not complete source-preservation authority."""
-    from daimon.core.stores.neutral_catalog import AgentRevision
+async def read_preparation_counterpart(
+    request: ProviderPreparationRequest,
+) -> ProviderPreparationRequest:
+    """Capture complete source intent and refuse every unproved preservation obligation."""
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.sessions import project_session_resources
     from daimon.core.turn.ceiling import remaining_s
     from daimon.core.turn.errors import AdmissionDenied
+    from mux.errors import UnsupportedCapability
 
     revision = request.admission.backend_revision
     if (
@@ -137,31 +143,110 @@ async def read_preparation_counterpart(request: ProviderPreparationRequest) -> A
         or not request.deps.channel_backends
         or request.deps.turn_path != "mux"
         or revision is None
+        or request.scope.tenant_id != str(request.tenant_id)
+        or request.scope.account_id != str(request.session_account_id)
+        or request.scope.account_id != str(request.admission.account_id)
+        or request.scope.is_platform
+        or request.scope.is_legacy_host_authorized
     ):
         raise AdmissionDenied(reason="backend_unsupported")
-    runtime = request.deps.turn_runtimes.get(revision.profile)
-    if runtime is None or runtime.read_agent_counterpart is None:
-        raise AdmissionDenied(reason="backend_unsupported")
+
+    async def capture() -> BackendAgent:
+        source = request.source
+        if source is None:
+            source = await load_backend_agent(
+                request.deps.anthropic,
+                request.deps.sessionmaker,
+                tenant_id=request.tenant_id,
+                agent_name=(request.admission.agent.metadata or {}).get(
+                    MA_METADATA_KEY_NAME, request.admission.config.agent_name
+                )
+                or "",
+                actual_agent=request.admission.agent,
+            )
+        return await project_session_resources(
+            source,
+            agent=request.admission.agent,
+            environment=request.admission.environment,
+            session_factory=request.deps.sessionmaker,
+            tenant_id=request.tenant_id,
+            agent_uuid=source.agent_id,
+            account_id=(
+                None if request.admission.shared_owner is not None else request.admission.account_id
+            ),
+            resource_scope=request.scope,
+            memory_read_only=request.admission.memory_read_only,
+            channel_skills=request.admission.channel_skills,
+            tool_safety=request.deps.tool_safety,
+            asks_before_publishing=request.admission.asks_before_publishing,
+            mcp_settings=request.deps.mcp,
+            agent_github_app=request.deps.agent_github_app,
+            is_external=request.admission.is_external,
+            hide_personal_for=request.admission.shared_owner,
+            slack_turn_context_id=request.admission.slack_turn_context_id,
+            private_dm_id=request.admission.private_dm_id,
+            origin_seal_ids=request.admission.origin_seal_ids,
+        )
+
     try:
-        row = await asyncio.wait_for(
-            runtime.read_agent_counterpart(request),
-            timeout=remaining_s(request.deadline, now=request.now()),
+        source = await asyncio.wait_for(
+            capture(), timeout=remaining_s(request.deadline, now=request.now())
         )
         if (
-            not isinstance(cast(object, row), AgentRevision)
-            or row.agent.ref.kind != "agent"
-            or row.agent.ref.tenant_id != request.scope.tenant_id
-            or row.agent.ref.account_id != request.scope.account_id
-            or row.agent.ref.provider != revision.backend
-            or row.agent.spec.model.provider != revision.backend
-            or row.agent.spec.model.id != revision.model
-            or (
-                request.admission.backend_counterpart is not None
-                and row != request.admission.backend_counterpart
+            source.tenant_id != request.tenant_id
+            or source.agent_id
+            != derive_agent_uuid(
+                tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
             )
+            or source.resource_scope != request.scope
+            or source.source is None
+            or source.source.ref.kind != "agent"
+            or source.source.ref.tenant_id != request.scope.tenant_id
+            or source.source.lifecycle != "active"
+            or source.source.ref.id != request.admission.agent.id
+            or source.source.revision.local != request.admission.agent.version
         ):
-            raise AdmissionDenied(reason="backend_unsupported")
-        return row
+            raise UnsupportedCapability(("source_context",), revision.profile)
+        # Capture is evidence of source intent, not evidence that a target preserved it.
+        spec = source.effective_spec
+        if spec is None:
+            raise UnsupportedCapability(("source_definition",), revision.profile)
+        missing: set[str] = set()
+        if spec.system is not None:
+            missing.add("instructions")
+        if (
+            spec.tools
+            or any(extension.value.get("tools") for extension in spec.extensions or ())
+            or request.admission.asks_before_publishing
+        ):
+            missing.add("tools")
+        if spec.skills or request.admission.channel_skills:
+            missing.add("skills")
+        if spec.mcp_servers:
+            missing.add("mcp")
+        if source.repository_sources:
+            missing.add("repository")
+        for resource in source.resource_requirements:
+            if resource.target_path is not None:
+                missing.add("files")
+            missing.add(
+                "credentials"
+                if resource.kind == "credential"
+                else "repository"
+                if resource.kind == "repository"
+                else "files"
+                if resource.kind == "artifact"
+                else "memory"
+                if resource.resource is not None and resource.resource.kind == "memory_store"
+                else "source_definition"
+            )
+        if source.memory_required is not False or source.memory_store_id is not None:
+            missing.add("memory")
+        # No installed target plan proves the source environment or complete materialization.
+        missing.add("environment")
+        raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
+    except UnsupportedCapability as error:
+        raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception:
         raise AdmissionDenied(reason="backend_unsupported") from None
 

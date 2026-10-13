@@ -447,13 +447,13 @@ async def resolve_hidden_mcp_server_names(
         )
         if not grants:
             return frozenset()
-        credentials = await cred_store.list_credentials(
+        credentials = await cred_store.list_credential_revisions(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
     return hidden_mcp_server_names(
         grants,
         agent_id=agent_id,
         account_id=account_id,
-        shared_server_urls=[credential.mcp_server_url for credential in credentials],
+        shared_server_urls=[url for _, url, _ in credentials],
         server_urls=server_urls,
     )

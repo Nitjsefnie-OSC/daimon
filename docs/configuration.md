@@ -1191,9 +1191,9 @@ configuration is unchanged; a configured one is checked against its profile and 
 
 `bool` · optional · default `False`
 
-Run an agent-selected native backend only after its operator-installed counterpart
-passes scoped source, manifest, catalog and native readback. Requires mux and
-channel_backends; off by default.
+Capture complete scoped source and resource intent for an agent-selected native backend.
+Unproved obligations are refused; counterpart identity readback alone never authorizes
+execution. Requires mux and channel_backends; off by default.
 
 ## Thread Naming
 

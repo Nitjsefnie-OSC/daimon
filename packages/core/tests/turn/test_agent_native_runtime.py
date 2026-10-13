@@ -157,7 +157,7 @@ async def test_installed_runtime_reader_uses_real_scoped_catalog_and_sdk_readbac
 ):
     request, runtime, _, _ = native_request
     assert runtime.read_agent_counterpart is not None
-    row = await read_preparation_counterpart(request)
+    row = await runtime.read_agent_counterpart(request)
     assert row == owned.retained
     assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
     if owned.wire.provider == "openai":
@@ -210,17 +210,15 @@ async def test_installed_runtime_proof_failures_have_zero_native_mutations(
         owned.manifest_path.write_text(json.dumps([] if values is None else [values]))
     with pytest.raises(AdmissionDenied):
         await read_preparation_counterpart(request)
-    if failure in ("native_drift", "native_missing"):
-        assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
-    else:
-        assert not owned.wire.requests
+    assert not owned.wire.requests, "unproved source refuses before target drift reads"
 
 
 async def test_real_host_refuses_complete_native_component_as_source_execution_proof(
     native_request, owned
 ):
     request, runtime, wire, posts = native_request
-    row = await read_preparation_counterpart(request)
+    assert runtime.read_agent_counterpart is not None
+    row = await runtime.read_agent_counterpart(request)
     assert row == owned.retained
     assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
     owned.wire.requests.clear()
@@ -304,3 +302,199 @@ async def test_real_host_refuses_source_obligations_missing_from_installed_count
             now=request.now,
         )
     assert not any(r.method != "GET" for r in owned.wire.requests)
+
+
+@pytest.mark.parametrize(
+    "obligation",
+    [
+        "instructions",
+        "tools",
+        "skills",
+        "mcp",
+        "credentials",
+        "files",
+        "repository",
+        "memory",
+        "environment",
+    ],
+)
+async def test_complete_source_obligation_capture_refuses_before_target_io(
+    native_request, owned, obligation, monkeypatch
+):
+    from daimon.core import sessions
+    from daimon.core._models import AgentFile
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_mcp_credentials, agent_memory_stores, agent_repo_binding
+    from mux.errors import UnsupportedCapability
+
+    request, _, wire, posts = native_request
+    baseline_values = request.admission.agent.model_dump()
+    baseline_values.update(system=None, tools=[], skills=[], mcp_servers=[])
+    baseline_agent = type(request.admission.agent).model_validate(baseline_values)
+    request = replace(
+        request,
+        admission=replace(request.admission, agent=baseline_agent),
+        deps=replace(request.deps, agent_github_app=None),
+    )
+    with pytest.raises(AdmissionDenied) as baseline_refusal:
+        await read_preparation_counterpart(request)
+    baseline = baseline_refusal.value.__cause__
+    assert isinstance(baseline, UnsupportedCapability)
+    assert set(baseline.missing) == {"memory", "environment"}
+    assert obligation not in baseline.missing or obligation in {"memory", "environment"}
+    assert owned.wire.requests == [] and wire.requests == [] and posts == []
+    source_id = derive_agent_uuid(
+        tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+    )
+    values = request.admission.agent.model_dump()
+    if obligation == "instructions":
+        values["system"] = "Source instructions must survive"
+    elif obligation == "tools":
+        values["tools"] = [
+            {
+                "type": "agent_toolset_20260401",
+                "configs": [
+                    {"name": "bash", "enabled": True, "permission_policy": {"type": "always_ask"}}
+                ],
+                "default_config": {"enabled": False, "permission_policy": {"type": "always_ask"}},
+            }
+        ]
+    elif obligation == "skills":
+        values["skills"] = [{"type": "custom", "skill_id": "required-source-skill", "version": "1"}]
+    elif obligation == "mcp":
+        values["mcp_servers"] = [
+            {"type": "url", "name": "required-source-mcp", "url": "https://mcp.invalid/mcp"}
+        ]
+    agent = type(request.admission.agent).model_validate(values)
+    request = replace(request, admission=replace(request.admission, agent=agent))
+    async with request.deps.sessionmaker.begin() as db:
+        if obligation == "credentials":
+            await agent_mcp_credentials.upsert_credential(
+                db,
+                tenant_id=request.tenant_id,
+                agent_id=source_id,
+                mcp_server_url="https://mcp.invalid/mcp",
+                encrypted_token=b"unread-credential-marker",
+            )
+        elif obligation == "files":
+            db.add(
+                AgentFile(
+                    tenant_id=request.tenant_id,
+                    agent_id=source_id,
+                    key="PRIVATE_SAMPLE",
+                    content="intentionally-invalid-ciphertext",
+                    encoding="fernet_v1",
+                )
+            )
+        elif obligation == "repository":
+            await agent_repo_binding.set_binding(
+                db,
+                tenant_id=request.tenant_id,
+                agent_id=source_id,
+                repo_url="example/source",
+                default_branch="main",
+                ma_secret_ref="opaque-source-credential",
+                proof=None,
+            )
+        assert (
+            await agent_memory_stores.get_memory_store_id(
+                db,
+                tenant_id=request.tenant_id,
+                agent_id=source_id,
+            )
+            is None
+        )
+    if obligation == "environment":
+        raw = request.admission.environment.model_dump()
+        raw["config"]["packages"]["pip"] = ["required-source-package==1"]
+        environment = type(request.admission.environment).model_validate(raw)
+        request = replace(request, admission=replace(request.admission, environment=environment))
+    captured = []
+    original = sessions.project_session_resources
+
+    async def capture(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        captured.append(result)
+        return result
+
+    def no_decryption(*args, **kwargs):
+        raise AssertionError("source projection decoded a secret")
+
+    monkeypatch.setattr(sessions, "project_session_resources", capture)
+    monkeypatch.setattr("daimon.core.stores.agent_files._cipher", no_decryption)
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(request)
+    detail = refused.value.__cause__
+    assert isinstance(detail, UnsupportedCapability)
+    expected = {"memory", "environment", obligation}
+    if obligation == "files":
+        expected.add("credentials")
+    assert set(detail.missing) == expected
+    assert len(captured) == 1
+    source = captured[0]
+    assert source.source is not None and source.source.ref.id == agent.id
+    assert source.source.ref.account_scope_id == "", "unknown SDK workspace cannot be fabricated"
+    assert source.resource_scope == request.scope
+    assert source.effective_spec is not None
+    assert source.memory_required is True and source.memory_store_id is None
+    assert (
+        source.memory_instructions and source.memory_read_only is request.admission.memory_read_only
+    )
+    if obligation == "instructions":
+        assert source.effective_spec.system == values["system"]
+    elif obligation == "tools":
+        extension = next(
+            e for e in source.effective_spec.extensions if e.namespace == "anthropic.agent_tools"
+        )
+        assert (
+            extension.value["tools"][0]["configs"][0]["permission_policy"]["type"] == "always_ask"
+        )
+    elif obligation == "skills":
+        assert source.effective_spec.skills[0].id == "required-source-skill"
+    elif obligation == "mcp":
+        assert source.effective_spec.mcp_servers[0].name == "required-source-mcp"
+    elif obligation in ("files", "credentials"):
+        assert source.resource_requirements and source.resource_generations
+    elif obligation == "repository":
+        assert source.repository_sources[0].repository_url == "https://github.com/example/source"
+    elif obligation == "environment":
+        assert source.environment is not None
+        assert source.environment.native["config"]["packages"]["pip"] == [
+            "required-source-package==1"
+        ]
+    assert source.model_dump() == {
+        key: value
+        for key, value in source.model_dump().items()
+        if key
+        not in {
+            "source",
+            "effective_spec",
+            "environment",
+            "resource_scope",
+            "resource_requirements",
+            "repository_sources",
+            "resource_generations",
+            "memory_required",
+            "memory_store_id",
+            "memory_read_only",
+            "memory_instructions",
+        }
+    }
+    assert "Source instructions must survive" not in repr(source)
+    assert "intentionally-invalid-ciphertext" not in repr(source)
+    assert owned.wire.requests == [] and wire.requests == [] and posts == []
+
+
+async def test_opaque_caller_resource_is_an_unproved_source_definition(native_request, owned):
+    from mux.errors import UnsupportedCapability
+
+    request, _, wire, posts = native_request
+    request = replace(
+        request, admission=replace(request.admission, private_dm_id="caller-private-context")
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(request)
+    detail = refused.value.__cause__
+    assert isinstance(detail, UnsupportedCapability)
+    assert {"source_definition", "memory", "environment"} <= set(detail.missing)
+    assert owned.wire.requests == [] and wire.requests == [] and posts == []

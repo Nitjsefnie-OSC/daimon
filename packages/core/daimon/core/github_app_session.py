@@ -72,6 +72,7 @@ from daimon.core.stores.github_links import get_account_link, get_user
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.turn_origin import current_origin_id
 from mux.contracts.ids import Scope
+from mux.contracts.resources import WorkspaceSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = logging.getLogger(__name__)
@@ -304,6 +305,29 @@ async def revoke_token(client: httpx.AsyncClient, token: str) -> None:
         response.raise_for_status()
 
 
+async def _declared_repositories(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> list[tuple[AgentGrant, AuthorizedRepo]]:
+    async with sessionmaker() as session:
+        return await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
+
+
+async def declared_app_repositories(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> tuple[WorkspaceSource, ...]:
+    """Local declared access only; requester authorization/materialization stays unresolved."""
+    rows = await _declared_repositories(sessionmaker, tenant_id=tenant_id, agent_id=agent_id)
+    return tuple(
+        WorkspaceSource(
+            kind="repository",
+            target_path=grant.mount_path or f"/workspace/{repo.repo_full_name}",
+            repository_url=f"https://github.com/{repo.repo_full_name}",
+            credential_ref=f"app-repo:{tenant_id}:{agent_id}:{repo.repo_id}:{grant.version}:{repo.version}",
+        )
+        for grant, repo in rows
+    )
+
+
 async def prepare_app_access(
     sessionmaker: async_sessionmaker[AsyncSession],
     client: httpx.AsyncClient,
@@ -320,9 +344,8 @@ async def prepare_app_access(
     """Mint only this session's effective repository groups, recording every token."""
     if is_external:
         return AppSessionAccess((), (), None)
-    async with sessionmaker() as session:
-        if not await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id):
-            return AppSessionAccess((), (), None)
+    if not await _declared_repositories(sessionmaker, tenant_id=tenant_id, agent_id=agent_id):
+        return AppSessionAccess((), (), None)
     if fernet is None or config.app_id is None or config.private_key is None:
         raise ValueError("GitHub App mode requires App credentials and encryption")
     rows, user_id, link_generation = await _effective_rows(

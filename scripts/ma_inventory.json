@@ -3848,6 +3848,33 @@
       "response_access": []
     },
     {
+      "file": "packages/core/tests/test_agent_backend.py",
+      "line": 813,
+      "end": 813,
+      "scope": "test_source_loader_retains_full_sdk_intent_without_serializing_it",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "client.beta.agents.retrieve('agent-source')",
+      "request_keys": [],
+      "response_access": [
+        "actual.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_agent_backend.py",
+      "line": 850,
+      "end": 850,
+      "scope": "test_source_projection_missing_unused_sdk_date_keeps_existing_preview",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "client.beta.agents.retrieve('agent-partial')",
+      "request_keys": [],
+      "response_access": [
+        "actual.model",
+        "actual.model.id"
+      ]
+    },
+    {
       "file": "packages/core/tests/test_checkpoint_turn_scope.py",
       "line": 78,
       "end": 78,
@@ -13986,7 +14013,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 56,
+      "line": 59,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsVault"
@@ -13995,7 +14022,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 57,
+      "line": 60,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14004,16 +14031,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 590,
-      "module": "anthropic.types.beta",
-      "names": [
-        "BetaManagedAgentsVault"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 600,
+      "line": 607,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsVault"
@@ -14023,6 +14041,15 @@
     {
       "file": "packages/core/daimon/core/mux_compat.py",
       "line": 617,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 634,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14031,7 +14058,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 633,
+      "line": 650,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14040,7 +14067,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 685,
+      "line": 702,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
