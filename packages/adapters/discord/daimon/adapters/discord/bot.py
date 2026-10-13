@@ -170,6 +170,7 @@ from daimon.core.thread_naming import (
 )
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -880,21 +881,6 @@ class DaimonBot(commands.Bot):
             tasks.discard(current)
         return tasks
 
-    def _keeps_turn_for_recovery(self) -> bool:
-        """Whether the current task is unwinding from the shutdown drain's cancel.
-
-        Such a turn's MA session is still running and nothing in this process
-        will read it again, so its cleanup must not clear the thread marker:
-        the next process's orphan sweep needs it to deliver a finished answer
-        or interrupt the session, and it only acts once this owner is gone.
-        """
-        task = asyncio.current_task()
-        return (
-            self.runtime.turn_deps.running_turns.shutting_down is True
-            and task is not None
-            and task.cancelling() > 0
-        )
-
     async def _drain_and_close(self) -> None:
         """Graceful shutdown drain.
 
@@ -938,7 +924,7 @@ class DaimonBot(commands.Bot):
         # cancelled turn's slot cannot start a queued one this snapshot missed.
         # Cancelled turns leave their provider sessions recoverable: the thread
         # marker stays for the next process's orphan sweep, and a DM interrupts
-        # its own session (`RunningTurns.shutting_down`).
+        # its own session (`RunningTurns.is_drain_cancel`).
         self.turn_queue.stop_dispatch()
         self.runtime.turn_deps.running_turns.begin_shutdown()
         tasks = self._running_turn_tasks()
@@ -3695,18 +3681,11 @@ class DaimonBot(commands.Bot):
                 prepared.ma_session_id,
                 outcome.ma_session_id if outcome is not None else None,
             )
-            done_ids = {prepared.mapping_id}
-            if outcome is not None:
-                done_ids.add(outcome.mapping_id)
-            if self._keeps_turn_for_recovery():
-                # Cancelled by the shutdown drain: leave the marker for recovery.
-                done_ids.clear()
-            for done_id in done_ids - {None}:
-                if done_id is None:  # pragma: no cover - set difference guarantees this
-                    continue
-                async with self.runtime.sessionmaker() as session:
-                    await clear_active_turn(session, id=done_id)
-                    await session.commit()
+            await release_turn_markers(
+                self.runtime.sessionmaker,
+                self.runtime.turn_deps.running_turns,
+                {i: None for i in (prepared.mapping_id, outcome and outcome.mapping_id) if i},
+            )
             if outcome is not None and not lifecycle_holder[0].card_discard_failed:
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,
@@ -4840,18 +4819,11 @@ class DaimonBot(commands.Bot):
                 prepared.ma_session_id,
                 outcome.ma_session_id if outcome is not None else None,
             )
-            _done_ids = {prepared.mapping_id}
-            if outcome is not None:
-                _done_ids.add(outcome.mapping_id)
-            if self._keeps_turn_for_recovery():
-                # Cancelled by the shutdown drain: leave the marker for recovery.
-                _done_ids.clear()
-            for _done_id in _done_ids - {None}:
-                if _done_id is None:  # pragma: no cover - set difference guarantees this
-                    continue
-                async with self.runtime.sessionmaker() as _ct_session:
-                    await clear_active_turn(_ct_session, id=_done_id)
-                    await _ct_session.commit()
+            await release_turn_markers(
+                self.runtime.sessionmaker,
+                self.runtime.turn_deps.running_turns,
+                {i: None for i in (prepared.mapping_id, outcome and outcome.mapping_id) if i},
+            )
             if outcome is not None and not lifecycle_holder[0].card_discard_failed:
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,
