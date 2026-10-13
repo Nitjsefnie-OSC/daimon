@@ -43,7 +43,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `last_fired_at`, `last_error`, `last_result_tail` | what the last run did |
 | `destination_kind` / `destination_id` | optional: `channel` or `thread` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>`, on Teams `<channel id>;messageid=<root id>` |
 | `channel_id` | the channel whose budget a run's spend counts against: the destination's parent channel, set when the destination is; without a destination, the channel the routine was made in (MCP `origin_context_id`, or the Slack panel's channel); `NULL` from a DM or with no origin. Clearing the destination keeps it |
-| `delivery_status`, `delivery_kind`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why, in the note); the kind is `result` or `failure_notice`; `NULL` for a routine without a destination |
+| `delivery_status`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why); `NULL` for a routine without a destination |
 | `delivery_payload` | the text a pending post carries: that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
 | `delivery_lease_owner` / `delivery_lease_expires_at` | the poster holding a `claimed` row |
 
@@ -408,17 +408,16 @@ It will try again at its next scheduled time.
 
 The middle line says what failed in plain words, never the raw error, by
 the `TerminationReason` the scheduler records where it catches the failure: a
-model request that failed for good (`UPSTREAM`), a run that
-took too long (`CEILING`), a used-up monthly cap, or otherwise "Something
-went wrong while it was running." A depleted balance or used-up channel
-budget says it in the turn refusal's words (`daimon.core.turn.notices`,
-naming the platform's billing command), then that it will try again. The
-notice is queued only while `last_error` is still null, so a routine that
-keeps failing posts once and stays quiet until a run succeeds; the panels
-still show every failure. It never replaces a post that is pending or
-claimed, so an undelivered result wins. The outbox row carries
-`delivery_kind` and `delivery_note` = `failure_notice` until it settles; the
-poster reads the note, which every release writes. Nothing is posted for `scheduler_shutdown`,
+model request that failed for good (`UPSTREAM`), a run that took too long
+(`CEILING`), a used-up monthly cap, or otherwise "Something went wrong while
+it was running." A depleted balance or used-up channel budget says it in the
+turn refusal's words (`daimon.core.turn.notices`, naming the platform's
+billing command), then that it will try again. The notice is queued only
+while `last_error` is still null, so a routine that keeps failing posts once
+and stays quiet until a run succeeds; the panels still show every failure.
+It never replaces a post that is pending or claimed, so an undelivered result
+wins. The outbox row carries `delivery_note = failure_notice` until it
+settles. Nothing is posted for `scheduler_shutdown`,
 a routine with no tenant or creator, any access-policy refusal
 (`invoker_not_allowed`, `access_policy_unreadable`, `runs_elsewhere`,
 `own_agents_only`), or a routine without a destination.

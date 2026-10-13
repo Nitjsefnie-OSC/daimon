@@ -35,14 +35,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 
-FAILURE_NOTICE = "failure_notice"
-"""`delivery_note` of a pending failure notice, written with `delivery_kind`.
-
-The poster reads the note: the previous release writes the note and not the
-kind, so only the note is right for every row while it can still run."""
-
 LAST_RESULT_TAIL_MAX = 1000
 """Maximum length of the stored preview; delivery keeps the complete reply."""
+
+FAILURE_NOTICE = "failure_notice"
+"""`delivery_note` of a pending post that tells the destination a run failed.
+
+The poster renders such a payload as a failure notice instead of a result.
+Settling replaces the note as for any post."""
 
 
 async def create_routine(
@@ -225,7 +225,6 @@ async def update_routine(
             destination_kind=None,
             destination_id=None,
             delivery_status=None,
-            delivery_kind=None,
             delivery_payload=None,
             delivery_note=None,
         )
@@ -470,7 +469,6 @@ async def record_result(
     if delivery is not None:
         values.update(
             delivery_status=delivery,
-            delivery_kind="result",
             delivery_note=delivery_note,
             delivery_payload=tail if delivery == "pending" else None,
             delivery_lease_owner=None,
@@ -508,7 +506,6 @@ async def queue_failure_notice(
             )
             .values(
                 delivery_status="pending",
-                delivery_kind="failure_notice",
                 delivery_note=FAILURE_NOTICE,
                 delivery_payload=notice,
                 delivery_lease_owner=None,

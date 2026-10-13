@@ -29,7 +29,7 @@ from daimon.core.stores.routines import (
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.testing.factories import make_tenant
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _PDF_ERROR = "TurnError: upstream: The PDF specified was not valid"
@@ -197,7 +197,7 @@ async def test_a_fire_that_raises_is_classified_where_it_is_caught(
     await drain_outcomes()
 
     after = await _get(db_session_factory, row)
-    assert (after.delivery_kind, after.delivery_note) == ("failure_notice", FAILURE_NOTICE)
+    assert after.delivery_note == FAILURE_NOTICE
     assert after.delivery_payload is not None and after.delivery_payload.startswith(expected)
     assert "PDF" not in after.delivery_payload, "no raw error text"
     async with db_session_factory() as s:
@@ -231,7 +231,7 @@ async def test_a_failed_run_posts_one_notice_per_failing_streak(
     row = await _routine(db_session)
 
     failed = await _fail(sm, row, _PDF_ERROR)
-    assert (failed.delivery_status, failed.delivery_kind) == ("pending", "failure_notice")
+    assert (failed.delivery_status, failed.delivery_note) == ("pending", FAILURE_NOTICE)
     assert failed.delivery_payload == _MODEL_NOTICE
     assert failed.last_error == _PDF_ERROR, "the panel still sees the raw error"
 
@@ -250,9 +250,9 @@ async def test_a_failed_run_posts_one_notice_per_failing_streak(
     assert len(await _deliver(sm)) == 1, "the success posts its result"
 
     after_recovery = await _fail(sm, row, "timeout: exceeded 3000.0s", TerminationReason.CEILING)
-    assert (after_recovery.delivery_status, after_recovery.delivery_kind) == (
+    assert (after_recovery.delivery_status, after_recovery.delivery_note) == (
         "pending",
-        "failure_notice",
+        FAILURE_NOTICE,
     ), "failing again after a success is a new streak"
 
 
@@ -268,7 +268,7 @@ async def test_a_pending_result_is_not_replaced_by_a_notice(
     failed = await _fail(sm, row, _PDF_ERROR)
 
     assert (failed.delivery_status, failed.delivery_payload) == ("pending", "All green.")
-    assert failed.delivery_kind == "result"
+    assert failed.delivery_note is None
 
 
 async def test_no_notice_without_a_destination_or_for_a_quiet_error(
@@ -298,3 +298,42 @@ async def test_a_fire_that_raises_queues_the_notice_through_the_tick(
     after = await _get(db_session_factory, row)
     assert after.last_error == _PDF_ERROR
     assert (after.delivery_status, after.delivery_payload) == ("pending", _MODEL_NOTICE)
+
+
+# The previous release's outbox writes: its `queue_failure_notice` and its
+# `record_result(delivery="pending")`. Both write the note this release reads.
+_OLD_FAILURE = (
+    "UPDATE routines SET delivery_status = 'pending', delivery_note = 'failure_notice', "
+    "delivery_payload = :payload WHERE id = :id"
+)
+_OLD_RESULT = (
+    "UPDATE routines SET delivery_status = 'pending', delivery_note = NULL, "
+    "delivery_payload = 'All green.' WHERE id = :id"
+)
+
+
+@pytest.mark.parametrize(
+    ("first", "then", "expected"),
+    [
+        (_OLD_FAILURE, "result", "Result from team-020-analyst's daily routine"),
+        (_OLD_FAILURE, _OLD_RESULT, "Result from team-020-analyst's daily routine"),
+        ("result", _OLD_FAILURE, "team-020-analyst's daily routine at 09:00 UTC failed"),
+    ],
+)
+async def test_either_release_writing_last_decides_what_the_post_says(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    first: str,
+    then: str,
+    expected: str,
+) -> None:
+    sm = db_session_factory
+    row = await _routine(db_session)
+    for step in (first, then):
+        async with sm() as s, s.begin():
+            if step == "result":
+                await record_result(s, row.id, tail="All green.", error=None, delivery="pending")
+            else:
+                await s.execute(text(step), {"id": row.id, "payload": _MODEL_NOTICE})
+
+    assert (await _deliver(sm))[0].startswith(expected)
