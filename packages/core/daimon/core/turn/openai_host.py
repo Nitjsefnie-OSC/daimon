@@ -348,7 +348,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             verifying.sessions.validate_spend_control(native)
             native = await verifying.sessions.retrieve(request.scope, native.ref)
         except (ContinuityLost, ProviderError, ScopeViolation):
-            if runtime.controls.spend_limit_usd_cents is not None:
+            if runtime.controls.require_spend_control_echo:
                 from daimon.core.turn.run import (
                     _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
                 )

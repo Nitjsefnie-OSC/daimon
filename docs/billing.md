@@ -1152,7 +1152,7 @@ without the control. Unconfigured calls omit these additional request fields;
 soft controls do not make provider-internal inference a hard bounded bill.
 
 
-A scoped OpenAI creation acknowledgement is retained as a provisioning receipt
+An explicitly budgeted worker's scoped OpenAI creation acknowledgement is retained as a provisioning receipt
 before its native spend-control echo is validated. The receipt includes the
 native session reference and budget echo; it does not establish a runnable
 binding. A rejected acknowledgement or fresh readback refuses input and uses
@@ -1165,3 +1165,9 @@ parent's provider. This is an admission condition; the worker exposure producer
 does not thereby price or reserve root inference. Root admission, native budget,
 request count, wake lifetime and trusted grant installation remain separate
 caller obligations. Worker lines must fit alongside the reserved root room.
+
+Ordinary OpenAI sessions, including deployment-level spend limits without a
+worker `native_budget_usd`, preserve their prior request and readback behavior.
+Only an explicit worker budget enables strict native echo validation, against
+the exact integer cents sent in that session request. A deployment limit alone
+does not enable provisioning receipts or budget-rejection cleanup.

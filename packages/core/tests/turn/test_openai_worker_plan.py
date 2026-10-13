@@ -1157,6 +1157,7 @@ async def test_native_budget_compiler_is_decimal_context_independent(target):
         context.prec = 6
         runtime = build_openai_runtime(candidate)
     assert runtime.controls.spend_limit_usd_cents == 123456789
+    assert runtime.controls.require_spend_control_echo is True
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])

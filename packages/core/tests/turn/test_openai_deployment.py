@@ -229,6 +229,8 @@ async def test_plan_is_scoped_and_credential_access_is_deferred(
     assert isinstance(runtime.journal, OpenAIRecoveryJournal)
     assert isinstance(runtime.usage_store, OpenAIUsageRevisions)
     assert runtime.account_scope_id == "project" and runtime.price is None
+    assert runtime.controls.spend_limit_usd_cents == 4
+    assert runtime.controls.require_spend_control_echo is False
     plan = await runtime.session_plan(application)
     assert plan.agent.id == "native-agent" and plan.agent.id != application.admission.agent.id
     assert plan.environment is not None and plan.environment.id == "native-template"
@@ -257,6 +259,7 @@ async def test_omitted_native_spend_control_is_preserved(
     runtime = build_channel_runtime(application)
     assert isinstance(runtime, OpenAIHostRuntime)
     assert runtime.controls.spend_limit_usd_cents is None
+    assert runtime.controls.require_spend_control_echo is False
     assert runtime.controls.multi_agent_enabled is False
     assert runtime.controls.container_size == "small"
 

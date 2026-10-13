@@ -664,9 +664,10 @@ callback remains None. Anonymous MCP also requires a clean HTTPS destination;
 userinfo, query/fragment carriers and invalid server names refuse at compilation
 and the SDK edge before I/O or logging. See [the driver contract](../../docs/mux.md#gemini-scoped-mcp-authentication)
 for admission, DEBUG redaction, continuation and offline proof limits.
-OpenAI explicit session spend limits use integer USD cents and require the
-configured cap to appear unchanged in native session responses before host
-input. Omitted caps preserve existing behavior. Control failures retain scoped
+OpenAI explicit worker session budgets use integer USD cents and require the
+sent cap to appear unchanged in native session responses before host input.
+Ordinary deployment-level caps preserve existing readback behavior; the
+worker-budget compiler alone enables strict echo validation. Control failures retain scoped
 acknowledged resource references for exact cleanup, without automatic creation
 retry or an exact-spend claim.
 
@@ -1012,7 +1013,7 @@ advertises hard internal model-request or output limits. Missing controls remain
 omitted for unconfigured callers.
 
 
-Budgeted OpenAI creation returns a provisioning acknowledgement with its scoped
+Explicitly budgeted OpenAI worker creation returns a provisioning acknowledgement with its scoped
 session reference and control echo. The host retains that receipt before using
 the driver's single spend-control validator; retrieval validates independently.
 Execution checks retrieve the session again, so a provisioning receipt does not

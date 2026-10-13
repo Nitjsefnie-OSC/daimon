@@ -271,7 +271,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     if deployment.worker_materialization and request.worker is None:
         raise AdmissionDenied(reason="backend_unsupported")
     spend_limit = deployment.spend_limit_usd_cents
+    worker_budget_requested = False
     if request.worker is not None and request.worker.limits.native_budget_usd is not None:
+        worker_budget_requested = True
         request.worker.limits.require_native_dispatch(request.now())
         with localcontext() as context:
             context.prec = 80
@@ -437,6 +439,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             multi_agent_enabled=False,
             container_size="small",
             spend_limit_usd_cents=spend_limit,
+            require_spend_control_echo=worker_budget_requested,
         ),
     )
 

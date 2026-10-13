@@ -171,12 +171,12 @@ class OpenAISessions:
                 "requested_revision": rev,
                 "effective_revision": rev,
                 "state": "provisioning"
-                if creating and self._controls.spend_limit_usd_cents is not None
+                if creating and self._controls.require_spend_control_echo
                 else states[status],
                 "active_root_turn": active,
                 "required_actions": required_actions(raw),
                 "native": {"spend_control": raw.get("spend_control")}
-                if self._controls.spend_limit_usd_cents is not None
+                if self._controls.require_spend_control_echo
                 else None,
             }
         )
@@ -186,7 +186,7 @@ class OpenAISessions:
 
     def validate_spend_control(self, session: Session) -> None:
         """Creation receipts are retained before an untrusted control echo is checked."""
-        if self._controls.spend_limit_usd_cents is None:
+        if not self._controls.require_spend_control_echo:
             return
         control = session.native.get("spend_control") if isinstance(session.native, dict) else None
         limit = control.get("limit") if isinstance(control, dict) else None
