@@ -2697,3 +2697,10 @@ install the compatible completion reader and the normal runner's fresh root
 checks. Native dispatch and its budget watchdog remain separate installation
 prerequisites; absent hooks keep spawn unavailable. A run-wide stop does not
 publish an armed completion wait.
+Discord installs the completion decision in its existing guarded continuation
+caller only when fleet is enabled. The normal admission and responder checks
+still apply. The same root validator fences card/preparation entry, the prepared
+session/account and the runner's input; that input hook disables replacement
+recovery. Other wake reasons and fleet-disabled calls keep their existing path.
+Original-run tool authority, collection certification, run-end cleanup and the
+deployed compatible-reader/rollback floor require their separate owner proofs.

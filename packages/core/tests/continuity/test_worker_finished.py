@@ -36,6 +36,7 @@ from daimon.core.continuity.wakes import (
     WAKE_RUN_LEASE,
     WAKE_UNAVAILABLE_DELAY,
     FrozenWorkerBatch,
+    WorkerFinishedRootChanged,
     abandon_interrupted_wakes,
     arm_worker_finished,
     claim_wake,
@@ -43,6 +44,7 @@ from daimon.core.continuity.wakes import (
     enqueue_wake,
     enqueue_worker_finished,
     list_dispatchable_wakes,
+    require_worker_finished_root,
     settle_wake,
     start_wake,
     worker_finished_key,
@@ -751,10 +753,13 @@ async def test_durable_decision_seeds_the_original_root_and_dispatches_once(pool
         (ThreadSession, "channel_id", (), "other"),
     ],
 )
+@pytest.mark.parametrize("sending", [False, True])
 async def test_missing_stale_or_incomplete_root_facts_never_authorize_a_turn(
-    pooled, table, field, path, value
+    pooled, table, field, path, value, sending
 ):
     run, row, _, _, _ = await _ready_root(pooled)
+    if sending:
+        await _start_root_wait(pooled, row)
     async with pooled.begin() as db:
         record = (await db.scalars(select(table).where(table.tenant_id == run.tenant_id))).first()
         changed = getattr(record, field) if path else value
@@ -774,7 +779,11 @@ async def test_missing_stale_or_incomplete_root_facts_never_authorize_a_turn(
         )
         if field == "requested_work":
             row = await get_continuation(db, idempotency_key=row.idempotency_key)
-    assert await decide_worker_finished(pooled, row, _NOW) is None
+    if sending:
+        with pytest.raises(WorkerFinishedRootChanged):
+            await _completion_fence(pooled, run, row)
+    else:
+        assert await decide_worker_finished(pooled, row, _NOW) is None
 
 
 @pytest.mark.parametrize("stale", ["binding", "deadline"])
@@ -810,3 +819,64 @@ async def test_live_root_turn_defers_and_keeps_the_same_wait(pooled, busy):
         )
         await store.release_lease(lease)
     assert (await decide_worker_finished(pooled, row, _NOW)).action == "skip_turn_running"
+
+
+async def _start_root_wait(pooled, row):
+    claim = await claim_wake(pooled, idempotency_key=row.idempotency_key, now=_NOW)
+    assert claim is not None
+    assert await start_wake(pooled, claim, now=_NOW)
+
+
+async def _completion_fence(pooled, run, row, **changes):
+    arguments = dict(
+        session_id=run.orchestrator_session_id,
+        account_id=run.orchestrator_account_id,
+        agent_id=row.target_ma_agent_id,
+        now=_NOW,
+    )
+    arguments.update(changes)
+    await require_worker_finished_root(pooled, row, **arguments)
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+async def test_started_completion_fence_accepts_its_original_root_and_own_active_turn(
+    pooled, provider
+):
+    run, row, store, slot, ref = await _ready_root(pooled, provider)
+    await _start_root_wait(pooled, row)
+    lease = await store.acquire_lease(
+        slot, holder="completion", turn_id="completion", now=_NOW, ttl=timedelta(minutes=5)
+    )
+    await store.append_events(
+        ref,
+        [_root_event(ref, "session.status_running", {"root_turn_id": "completion"})],
+        fence=lease,
+        cursor="completion",
+        now=_NOW,
+    )
+    async with pooled.begin() as db:
+        await db.execute(
+            update(ThreadSession)
+            .where(ThreadSession.tenant_id == run.tenant_id)
+            .values(active_turn_message_id="completion")
+        )
+    await _completion_fence(pooled, run, row)
+    assert await decide_worker_finished(pooled, row, _NOW) is None
+
+
+@pytest.mark.parametrize("claim_only", [False, True])
+async def test_completion_fence_refuses_without_the_real_start_fence(pooled, claim_only):
+    run, row, _, _, _ = await _ready_root(pooled)
+    if claim_only:
+        assert await claim_wake(pooled, idempotency_key=row.idempotency_key, now=_NOW)
+    with pytest.raises(WorkerFinishedRootChanged):
+        await _completion_fence(pooled, run, row)
+
+
+@pytest.mark.parametrize("field", ["session_id", "account_id", "agent_id"])
+async def test_completion_fence_rejects_changed_preparation(pooled, field):
+    run, row, _, _, _ = await _ready_root(pooled)
+    await _start_root_wait(pooled, row)
+    value = uuid.uuid4() if field == "account_id" else "changed"
+    with pytest.raises(WorkerFinishedRootChanged):
+        await _completion_fence(pooled, run, row, **{field: value})

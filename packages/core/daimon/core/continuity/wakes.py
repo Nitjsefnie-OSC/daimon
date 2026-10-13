@@ -43,6 +43,7 @@ from daimon.core.continuity.continuation import (
     ContinuationRequest,
     require_writable_reason,
 )
+from daimon.core.errors import DaimonError
 from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker, run_settled
 from daimon.core.stores import accounts, fleet, mux_state, task_continuations, thread_sessions
 from daimon.core.stores.domain import TaskContinuationRow
@@ -74,6 +75,7 @@ __all__ = [
     "WAKE_RUN_LEASE",
     "WAKE_UNAVAILABLE_DELAY",
     "FrozenWorkerBatch",
+    "WorkerFinishedRootChanged",
     "WakeClaim",
     "WakeOpener",
     "WakeThread",
@@ -83,6 +85,7 @@ __all__ = [
     "cancel_wake",
     "claim_wake",
     "decide_worker_finished",
+    "require_worker_finished_root",
     "enqueue_wake",
     "enqueue_worker_finished",
     "list_dispatchable_wakes",
@@ -267,10 +270,51 @@ def _retained_batch(run: FleetRun, workers: Sequence[FleetWorker], row: TaskCont
     return batch
 
 
+class WorkerFinishedRootChanged(DaimonError):
+    """The completion turn cannot send to its exact original root."""
+
+
 async def decide_worker_finished(
     sessionmaker: async_sessionmaker[AsyncSession],
     row: TaskContinuationRow,
     now: datetime,
+) -> ContinuationDecision | None:
+    """Re-read the frozen root before normal runner admission; this grants no send."""
+    return await _decide_worker_finished(sessionmaker, row, now)
+
+
+async def require_worker_finished_root(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    row: TaskContinuationRow,
+    *,
+    session_id: str,
+    account_id: uuid.UUID,
+    agent_id: str,
+    now: datetime,
+) -> None:
+    """Fence a started completion before preparation and the normal runner's send.
+
+    Its own active marker and slot lease are expected after binding. All original
+    root/intent checks remain the decision owner's; this is not authorization.
+    """
+    decision = await _decide_worker_finished(sessionmaker, row, now, started=True)
+    if decision is not None:
+        batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
+        if (session_id, account_id, agent_id) == (
+            batch.session_id,
+            row.requester_account_id,
+            row.target_ma_agent_id,
+        ):
+            return
+    raise WorkerFinishedRootChanged("Original fleet root is unavailable")
+
+
+async def _decide_worker_finished(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    row: TaskContinuationRow,
+    now: datetime,
+    *,
+    started: bool = False,
 ) -> ContinuationDecision | None:
     """Re-read the frozen root before normal runner admission; this grants no send.
 
@@ -287,7 +331,11 @@ async def decide_worker_finished(
                 for key in (*ContinuationRequest.model_fields, "id")
             ):
                 return None
-            if retained.status not in {"pending", "claimed"} or retained.started_at is not None:
+            if retained.status not in {"pending", "claimed"}:
+                return None
+            if (retained.started_at is not None) != started:
+                return None
+            if started and retained.status != "claimed":
                 return None
             if retained.available_at is None or retained.available_at > now:
                 return None
@@ -357,9 +405,11 @@ async def decide_worker_finished(
                 or live.ma_agent_id != row.target_ma_agent_id
             ):
                 return None
-            if live is not None and live.active_turn_message_id is not None:
+            if not started and live is not None and live.active_turn_message_id is not None:
                 return ContinuationDecision(action="skip_turn_running")
-            if projection.state != "idle" or projection.active_root_turn is not None or lease:
+            if not started and (
+                projection.state != "idle" or projection.active_root_turn is not None or lease
+            ):
                 return ContinuationDecision(action="skip_turn_running")
     except (FleetConflict, ValidationError, ValueError):
         return None
