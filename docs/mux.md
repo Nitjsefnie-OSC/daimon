@@ -2455,3 +2455,15 @@ A sandbox declaration removes its environment and execution builtins and prevent
 The existing provider preparation request can carry the canonical resolved worker beside its actual source and scoped counterpart. The worker is hidden from representation and absent by default. Carrying a resolved spec alone is not an execution grant: the shared source proof and registered native plan must independently verify and consume the same restrictions before a worker can run.
 
 OpenAI hosted worker plans require an explicit persistent-memory drop, an authorized Bash grant, known hosted network/package policy, explicit empty template inputs and no inherited resource mounts. Readback compares the exact resolved agent and environment, including protected instructions, attachments and metadata stamps. Residual template files, opaque environment configuration and unbound MCP credentials refuse. A no-tools or no-sandbox declaration cannot silently retain hosted Bash. Conversation-only worker execution remains refused until session creation can consume the real first input with a durable acknowledgment that prevents a second send. Ordinary channel plans and unsupported seal, read-only and publishing restrictions retain their behavior.
+
+Gemini's deployment owner checks the exact resolved worker instructions, tools,
+skill pins and native catalog readback before its preparer consumes the checked
+native identity. A Gemini worker must declare persistent memory dropped. A
+sandbox drop uses an explicitly authored remote environment without sources
+and removes execution tools; it does not remove the provider-hosted runtime.
+Retained session resources, unsupported environment policies and custom host
+functions refuse. Seals, shared ownership, publishing restrictions and transfer
+remain admission constraints; dropping memory leaves the admission's readonly
+ceiling intact. Ordinary agent switches without a resolved worker remain
+refused. These provider checks complement the shared source and resource proof,
+whose completion is required before fleet execution is available.
