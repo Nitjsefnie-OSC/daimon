@@ -894,3 +894,35 @@ may include `test_*.py` or
 probe budget examples and mux package documentation. Testing helpers remain in
 the separate development-only testing distribution; the tests/data/docs are
 outside its package.
+
+### H6 staging receipt and request boundary
+
+`ProbePlan.h6` binds the exact `H6-ANTHROPIC`, `H6-OPENAI` or `H6-GEMINI`
+cell to an attempt/leg, verified source/deployment/GO/envelope/quote/scope
+references, the installed config/ledger, an aware deadline, a reviewed cash
+bound and exact HTTPS request routes. A cell's target is independent of the
+provider charged for predecessor, admin, setup, cleanup and smoke calls.
+Ordinary plan, spend and tape serialization is unchanged when these fields are absent.
+
+Pass an explicit underlying transport to `run_probe`, and give the SDK's
+HTTPX client `transport=recorder`. `Recorder` rechecks the existing reservation
+before forwarding, records redacted request metadata, and refuses duplicate
+writes, unknown routes, expired/changed/released bindings and exhausted request
+inventory. Merely calling `record()` after I/O is insufficient. Unknown spend
+retains the reviewed bound and blocks another leg; failed legs consume the attempt.
+
+`H6Receipt` validates five native/visible turn joins, unchanged follow-up
+bindings, fresh-thread identities, pinned models/footers and exact reply-marker
+hashes, with every closed receipt-reference family. The caller's `verify_h6`
+artifact reader must independently validate the real preview/admin/CAS/audit,
+setting/revert, native/delivery, usage and cleanup artifacts and signed manifest.
+It raises on missing or foreign proof and returns `None`, never a boolean approval.
+Absent proof, reader or known actual accounting produces typed PENDING.
+
+These offline contracts grant no authority and earn no staging points. The live
+entry still needs the exact lead SIGN/PIN, fresh N8 quote/native bounds, all
+deployment and tenant bindings and real artifact capture. Native HTTP request
+counts do not bound Managed Agents internal inference, and this local wrapper
+does not automatically attach to a remotely deployed Discord adapter or smoke.
+Those actual request edges must be bound before a live run. No new SDK clients,
+credential loaders, ledger, staging runner or product hooks are installed.

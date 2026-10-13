@@ -3,17 +3,37 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import get_args
 
+import httpx
 import pytest
-from daimon.testing.conformance.budget import BudgetRefused, TokenUsage
-from daimon.testing.conformance.live_probe import ProbeOutcome, ProbeRunError, run_probe
+from daimon.testing.conformance.budget import (
+    H6_MODELS,
+    ActualSpend,
+    BudgetLedgerError,
+    BudgetRefused,
+    MeasuredRequest,
+    ProbePlan,
+    TokenUsage,
+)
+from daimon.testing.conformance.live_probe import (
+    H6EvidenceKind,
+    H6Receipt,
+    H6TurnReceipt,
+    ProbeOutcome,
+    ProbeRunError,
+    run_probe,
+)
 from daimon.testing.conformance.recording import Recorder, RecordingError, RequestMetadata
 from daimon.testing.conformance.runner import Result
+from pydantic import ValidationError
 
-from packages.testing.tests.conformance.test_budget import plan, receipts, setup_guard
+from packages.testing.tests.conformance.test_budget import plan, receipts, setup_guard, staging_plan
 
 
 async def outcome(recorder: Recorder, tokens: int = 250_000) -> ProbeOutcome:
@@ -183,3 +203,300 @@ async def test_unsafe_normalized_event_refuses_export_but_keeps_receipt(tmp_path
     assert receipts(guard)[-1].status == "failed"
     assert receipts(guard)[-1].cost_estimate_usd == 1
     assert not path.exists()
+
+
+def known_staging_spend(admitted: ProbePlan) -> ActualSpend:
+    return ActualSpend(
+        usage_complete=True,
+        containers=(),
+        requests=(
+            MeasuredRequest(
+                id="offline-request",
+                observed_at=datetime.now(UTC),
+                pricing_basis="standard-global",
+                tokens=TokenUsage(
+                    input_tokens=10,
+                    output_tokens=1,
+                    input_cached_tokens=0,
+                    input_cache_write_tokens=0,
+                ),
+            ),
+        ),
+    )
+
+
+def cell_proof(fixture_id: str = "H6-OPENAI") -> H6Receipt:
+    target = fixture_id.removeprefix("H6-").lower()
+    predecessor = {"anthropic": "gemini", "openai": "anthropic", "gemini": "openai"}[target]
+    turns = []
+    for index, provider, slot, suffix in zip(
+        range(5),
+        (predecessor, target, predecessor, predecessor, target),
+        (0, 1, 0, 2, 1),
+        ("baseline", "target", "retained-before-revert", "reverted-new", "retained-after-revert"),
+        strict=True,
+    ):
+        digest = hashlib.sha256(f"H6-offline-attempt-{suffix}".encode()).hexdigest()
+        turns.append(
+            H6TurnReceipt(
+                provider=provider,
+                model=H6_MODELS[provider],
+                thread_id=f"thread-{slot}",
+                session_id=f"session-{slot}",
+                binding_id=f"binding-{slot}",
+                root_id=f"root-{index}",
+                input_id=f"input-{index}",
+                message_ids=(f"message-{index}",),
+                footer_provider=provider,
+                footer_model=H6_MODELS[provider],
+                native_reply_sha256=digest,
+                visible_reply_sha256=digest,
+            )
+        )
+    return H6Receipt(
+        fixture_id=fixture_id,
+        attempt_id="offline-attempt",
+        scope_sha256="f" * 64,
+        turns=tuple(turns),
+        evidence=tuple((kind, "a" * 64) for kind in get_args(H6EvidenceKind)),
+    )
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+async def test_staging_real_transport_edge_keeps_partial_cell_pending(
+    tmp_path: Path, provider: str
+) -> None:
+    guard = setup_guard(tmp_path, providers=tuple(H6_MODELS))
+    admitted = staging_plan(guard, provider=provider, fixture_id=f"H6-{provider.upper()}")
+    calls = []
+
+    def wire(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"id": "upstream", "status": "completed"})
+
+    async def invoke(recorder: Recorder) -> ProbeOutcome:
+        async with httpx.AsyncClient(transport=recorder, trust_env=False) as client:
+            response = await client.post(
+                "https://offline.invalid/v1/messages",
+                json={"model": admitted.model},
+                headers={"authorization": "Bearer offline-canary"},
+            )
+            assert response.status_code == 200
+        return ProbeOutcome(
+            result=Result(admitted.fixture_id, "pass", ("partial turn",)),
+            actual=known_staging_spend(admitted),
+        )
+
+    result = await run_probe(
+        guard, admitted, tmp_path / "edge.json", invoke, transport=httpx.MockTransport(wire)
+    )
+    assert calls == ["/v1/messages"] and result.result.status == "pending"
+    assert result.receipt.accounting_status == "actual" and result.receipt.held_usd == 0
+    tape = json.loads(result.recording.read_text())
+    assert tape["fixture_id"] == admitted.fixture_id and tape["provider"] == provider
+    assert len(tape["request_edges"]) == 1 and "offline-canary" not in result.recording.read_text()
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_transport",
+        "bypass_transport",
+        "deadline",
+        "config",
+        "released",
+        "foreign",
+        "origin",
+        "route",
+        "duplicate_write",
+        "count",
+        "userinfo",
+        "fragment",
+    ],
+)
+async def test_staging_guard_refuses_before_next_underlying_io(tmp_path: Path, damage: str) -> None:
+    guard = setup_guard(tmp_path)
+    admitted = staging_plan(guard)
+    calls = []
+
+    def wire(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"id": "upstream"})
+
+    async def invoke(recorder: Recorder) -> ProbeOutcome:
+        if damage == "bypass_transport":
+            recorder.record(RequestMetadata(method="POST", path="/v1/messages"), ())
+            return ProbeOutcome(result=Result(admitted.fixture_id, "pass", ("unbound",)))
+        if damage == "config":
+            data = json.loads(guard.config_path.read_text())
+            data["providers"]["openai"]["cap_usd"] = "9"
+            guard.config_path.write_text(json.dumps(data))
+        if damage == "released":
+            row = guard.report()[-1]
+            from daimon.testing.conformance.budget import Reservation
+
+            guard.settle(
+                Reservation(receipt=row, price=row.price),
+                status="completed",
+                limits=admitted.limits,
+            )
+        async with httpx.AsyncClient(transport=recorder, trust_env=False) as client:
+            if damage in ("duplicate_write", "count"):
+                await client.post("https://offline.invalid/v1/messages")
+            url = {
+                "origin": "https://foreign.invalid/v1/messages",
+                "route": "https://offline.invalid/foreign",
+                "userinfo": "https://user:secret@offline.invalid/v1/messages",
+                "fragment": "https://offline.invalid/v1/messages#secret",
+            }.get(damage, "https://offline.invalid/v1/messages")
+            await client.post(url)
+        return ProbeOutcome(result=Result(admitted.fixture_id, "pass", ()))
+
+    if damage == "deadline":
+        admitted = ProbePlan.model_validate(
+            {
+                **admitted.model_dump(),
+                "h6": {
+                    **admitted.h6.model_dump(),
+                    "deadline": datetime.now(UTC) - timedelta(seconds=1),
+                },
+            }
+        )
+    if damage == "foreign":
+        admitted = ProbePlan.model_validate(
+            {**admitted.model_dump(), "h6": {**admitted.h6.model_dump(), "ledger_id": "0" * 32}}
+        )
+    with pytest.raises((ProbeRunError, BudgetRefused, BudgetLedgerError)):
+        await run_probe(
+            guard,
+            admitted,
+            tmp_path / "refused.json",
+            invoke,
+            transport=None if damage == "missing_transport" else httpx.MockTransport(wire),
+        )
+    assert len(calls) == (1 if damage in ("duplicate_write", "count") else 0)
+    assert all(row.actual_usd is None for row in receipts(guard) if row.status != "blocked")
+
+
+@pytest.mark.parametrize("fixture_id", ["H6-ANTHROPIC", "H6-OPENAI", "H6-GEMINI"])
+def test_staging_whole_cell_shape_json_roundtrip(fixture_id: str) -> None:
+    proof = cell_proof(fixture_id)
+    assert H6Receipt.model_validate_json(proof.model_dump_json()) == proof
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_turn",
+        "scope",
+        "missing_reference",
+        "duplicate_reference",
+        "footer",
+        "model",
+        "native_reply",
+        "visible_reply",
+        "retained_thread",
+        "retained_session",
+        "retained_binding",
+        "fresh_thread",
+        "fresh_session",
+        "root",
+        "input",
+        "message",
+    ],
+)
+def test_staging_shape_rejects_incomplete_or_foreign_native_visible_join(damage: str) -> None:
+    raw = cell_proof().model_dump()
+    if damage == "missing_turn":
+        raw["turns"] = raw["turns"][:-1]
+    elif damage == "scope":
+        raw["scope_sha256"] = "unbound"
+    elif damage == "missing_reference":
+        raw["evidence"] = raw["evidence"][:-1]
+    elif damage == "duplicate_reference":
+        raw["evidence"] = (*raw["evidence"], raw["evidence"][0])
+    else:
+        field = {
+            "footer": "footer_provider",
+            "model": "model",
+            "native_reply": "native_reply_sha256",
+            "visible_reply": "visible_reply_sha256",
+            "retained_thread": "thread_id",
+            "retained_session": "session_id",
+            "retained_binding": "binding_id",
+            "fresh_thread": "thread_id",
+            "fresh_session": "session_id",
+            "root": "root_id",
+            "input": "input_id",
+            "message": "message_ids",
+        }[damage]
+        index = 3 if damage.startswith("fresh_") else 2 if damage.startswith("retained_") else 1
+        raw["turns"][index][field] = (
+            raw["turns"][0][field]
+            if damage in ("fresh_thread", "fresh_session", "root", "input", "message")
+            else ("0" * 64 if "reply" in damage else "foreign")
+        )
+    with pytest.raises(ValidationError):
+        H6Receipt.model_validate_json(json.dumps(raw))
+
+
+@pytest.mark.parametrize(
+    "binding", ["absent", "reader", "false", "foreign", "unknown", "fail", "cancelled"]
+)
+async def test_staging_complete_schema_needs_bound_artifact_reader_and_actual_spend(
+    tmp_path: Path, binding: str
+) -> None:
+    # This drives a mock request and proves the harness contract, never staging.
+    guard = setup_guard(tmp_path)
+    admitted = staging_plan(guard)
+    proof = cell_proof()
+    seen = []
+
+    def verifier(value: H6Receipt) -> None:
+        seen.append(value)
+        if binding == "false":
+            return False
+        assert value == H6Receipt.model_validate_json(proof.model_dump_json())
+
+    async def invoke(recorder: Recorder) -> ProbeOutcome:
+        async with httpx.AsyncClient(transport=recorder, trust_env=False) as client:
+            await client.post("https://offline.invalid/v1/messages")
+        if binding == "cancelled":
+            raise asyncio.CancelledError
+        raw = proof.model_dump()
+        if binding == "foreign":
+            raw["scope_sha256"] = "0" * 64
+        return ProbeOutcome(
+            result=Result(
+                admitted.fixture_id, "fail" if binding == "fail" else "pass", ("offline contract",)
+            ),
+            actual=None if binding == "unknown" else known_staging_spend(admitted),
+            h6=H6Receipt.model_validate(raw),
+        )
+
+    command = run_probe(
+        guard,
+        admitted,
+        tmp_path / "proof.json",
+        invoke,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200)),
+        verify_h6=None if binding == "absent" else verifier,
+    )
+    if binding in ("false", "foreign", "cancelled"):
+        with pytest.raises(asyncio.CancelledError if binding == "cancelled" else ProbeRunError):
+            await command
+        assert receipts(guard)[-1].status in ("failed", "cancelled")
+    else:
+        result = await command
+        assert result.result.status == (
+            "pass" if binding == "reader" else "fail" if binding == "fail" else "pending"
+        )
+        assert bool(seen) is (binding != "absent")
+        if binding == "fail":
+            assert result.receipt.status == "failed"
+        if binding == "unknown":
+            assert (
+                result.receipt.actual_usd is None
+                and result.receipt.held_usd == admitted.h6.maximum_hold_usd
+            )
+    assert len(receipts(guard)) == 2
