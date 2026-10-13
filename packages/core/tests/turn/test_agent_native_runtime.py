@@ -20,6 +20,7 @@ from mux.drivers.gemini.transport import SDKTransport as GeminiSDKTransport
 from mux.drivers.openai import deployment as openai_transport
 from mux.drivers.openai.transport import SDKTransport
 from pydantic import PostgresDsn, SecretStr
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .test_native_counterpart import (
     application as application,
@@ -41,6 +42,15 @@ from .test_native_counterpart import (
 )
 from .test_openai_host import Wire as OpenAIWire
 from .test_openai_worker_plan import target as target
+
+
+@pytest.fixture
+def db_session_factory(db_preflight, db_engine, db_clean):
+    """Worker claims and native uncertainty commit on separate pooled connections."""
+    from daimon.testing.db import require_owned_sessionmaker
+
+    require_owned_sessionmaker(db_engine)
+    return async_sessionmaker(db_engine, expire_on_commit=False)
 
 
 @pytest.fixture
@@ -1414,3 +1424,513 @@ async def test_normalized_source_prefix_is_consumed_by_actual_preparation(
     selected = await read_preparation_counterpart(request)
     assert selected.counterpart.agent.spec == worker.spec
     assert selected.source.effective_spec.system == "Retained instructions"
+
+
+@pytest.fixture
+async def claimed_worker_request(explicit_worker_request, monkeypatch):
+    from decimal import Decimal
+
+    from daimon.core.authz import Surface
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.stores import access_policy, fleet, mux_state, tenant_ledger, tenants
+    from daimon.core.turn.admission import AdmissionGrant
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+    from mux.contracts.config import BackendConfig
+    from mux.contracts.resources import ProviderBinding
+
+    from ..test_fleet_budget import tariffs
+    from ..test_fleet_permissions import POLICY, parent
+
+    request, _, owned, transport = explicit_worker_request
+    root = parent(owned.wire.provider)
+    root = replace(
+        root,
+        fleet=replace(request.worker.permissions.fleet, depth=0, scope=owned.request.scope),
+        agent_id=request.worker.permissions.agent_id,
+        spec=owned.retained.agent.spec,
+        base_system=owned.retained.agent.spec.system,
+        limits=request.worker.limits,
+    )
+    sm = request.deps.sessionmaker
+    async with sm.begin() as db:
+        await access_policy.set_access_policy(db, tenant_id=request.tenant_id, policy=POLICY)
+        await tenants.set_funding_mode(db, tenant_id=request.tenant_id, funding_mode="prepaid")
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=request.tenant_id,
+            delta_usd=Decimal("10"),
+            reason="trial_credit",
+            idempotency_key="worker-origin-credit",
+        )
+        await mux_state.put_config_revision(db, request.admission.backend_revision, origin="agent")
+        binding = ProviderBinding(
+            id="orchestrator-binding",
+            thread=root.fleet.root,
+            legacy_account_id=str(root.fleet.account_id),
+            provider=root.spec.model.provider,
+            profile=root.backend_grants[0].profile,
+            native_refs={"session": "orchestrator-session"},
+            generation=1,
+            config_revision=request.admission.backend_revision.local,
+        )
+        await mux_state.put_binding(db, binding, expected_generation=0)
+        run = await fleet.create_run(
+            db,
+            tenant_id=request.tenant_id,
+            orchestrator_account_id=root.fleet.account_id,
+            orchestrator_session_id="orchestrator-session",
+            orchestrator_binding_id=binding.id,
+            platform=request.platform,
+            channel_id=root.fleet.root.channel.channel_id,
+            thread_id=root.fleet.root.thread_id,
+            operation_key="worker-origin-run",
+            total_budget_usd=root.limits.budget_usd,
+            deadline_at=root.limits.deadline,
+            max_workers=2,
+            created_by="host",
+        )
+    root = replace(root, fleet=replace(root.fleet, run_id=run.id))
+    source = await capture_preparation_source(
+        replace(request, scope=root.fleet.scope, source=None, worker=None)
+    )
+    resolved = resolve_worker_spec(
+        root,
+        request.worker.spec,
+        policy=POLICY,
+        now=request.now(),
+        backend=BackendConfig.model_validate(
+            request.admission.backend_revision.model_dump(include=set(BackendConfig.model_fields))
+        ),
+        resources=request.worker.resources,
+        environment=request.worker.environment,
+        limits=request.worker.limits,
+        captured_source=source,
+    )
+    counterpart = await owned.resources.backend.agents.create(
+        resolved.permissions.fleet.scope, resolved.spec, key="claimed-worker-counterpart"
+    )
+    retained = await owned.resources.catalog.get_agent(
+        resolved.permissions.fleet.scope, owned.retained.catalog_id
+    )
+    assert retained is not None
+    retained = await owned.resources.catalog.put_agent(
+        resolved.permissions.fleet.scope,
+        retained.catalog_id,
+        counterpart,
+        expected_revision=retained.local_revision,
+    )
+    plan = type(owned.plan).model_validate(json.loads(owned.manifest_path.read_text())[0])
+    plan = plan.model_copy(
+        update={
+            "system": resolved.spec.system,
+            "agent_id": counterpart.ref.id,
+            "counterpart_catalog_revision": retained.local_revision,
+        }
+    )
+    owned.manifest_path.write_text(json.dumps([plan.model_dump(mode="json")]))
+    owned.wire.native_id = counterpart.ref.id
+    owned.wire.requests.clear()
+    async with sm.begin() as db:
+        await fleet.add_worker(
+            db,
+            tenant_id=request.tenant_id,
+            run_id=run.id,
+            ordinal=0,
+            role="researcher",
+            spec=resolved.spec.model_dump(mode="json"),
+            spec_digest=resolved.digest,
+            backend=resolved.backend.backend,
+            profile=resolved.backend.profile,
+            model=resolved.spec.model.id,
+            budget_usd=resolved.limits.budget_usd,
+            deadline_at=resolved.limits.deadline,
+            max_turns=resolved.limits.max_turns,
+        )
+    pool = fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1)
+    worker = await pool.claim(sm, tenant_id=request.tenant_id, run_id=run.id)
+    assert worker is not None and worker.status == "starting"
+    grant = AdmissionGrant(
+        tenant_id=request.tenant_id,
+        subject=root.subject,
+        surface=Surface.CHANNEL,
+        turn_place=root.fleet.place,
+        agent=root.agent,
+        run_place=root.fleet.place,
+        channel_id=root.fleet.root.channel.channel_id,
+        thread_id=root.fleet.root.thread_id,
+        is_dm=False,
+    )
+    selected = replace(
+        request,
+        scope=resolved.permissions.fleet.scope,
+        worker=resolved,
+        admission=replace(request.admission, grant=grant),
+        deps=replace(request.deps, state_store=mux_state.PostgresStateStore(sm)),
+    )
+    native_requests = []
+
+    def native(call):
+        assert (call.method, call.url.path) in {
+            ("POST", "/v1beta/interactions"),
+            ("GET", "/v1beta/interactions/worker-result"),
+        }
+        native_requests.append(call)
+        return httpx.Response(
+            200,
+            json={
+                "id": "worker-result",
+                "status": "completed",
+                "outputs": [{"type": "text", "text": "verified-worker-result"}],
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": "verified-worker-result"}],
+                    }
+                ],
+                "usage": {
+                    "total_input_tokens": 12,
+                    "total_output_tokens": 3,
+                    "total_thought_tokens": 0,
+                },
+            },
+        )
+
+    sdk = build_gemini_client(transport=httpx.MockTransport(native), api_key="offline")
+    async with AsyncExitStack() as stack:
+        stack.callback(sdk.close)
+        stack.push_async_callback(sdk.aio.aclose)
+        selected, _ = install_runtime(selected, owned, monkeypatch, GeminiSDKTransport(sdk))
+        try:
+            yield selected, root, worker, tariffs(root), owned, native_requests
+        finally:
+            pool.release()
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_claimed_worker_opaque_source_is_refused_before_funding_or_native_input(
+    claimed_worker_request,
+    monkeypatch,
+):
+    import asyncio
+
+    from daimon.core import sessions
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from daimon.core.stores import fleet
+    from mux.contracts.extensions import ExtensionConfig
+
+    request, root, worker, prices, owned, calls = claimed_worker_request
+    project = sessions.project_session_resources
+
+    async def opaque(*args, **kwargs):
+        source = await project(*args, **kwargs)
+        assert source.effective_spec.extensions
+        spec = source.effective_spec.model_copy(
+            update={
+                "extensions": tuple(source.effective_spec.extensions)
+                + (
+                    ExtensionConfig(
+                        namespace="anthropic.unrepresented_policy", version=1, value={}
+                    ),
+                )
+            }
+        )
+        return source.model_copy(update={"effective_spec": spec})
+
+    monkeypatch.setattr(sessions, "project_session_resources", opaque)
+    with pytest.raises(WorkerSpecRefused) as refused:
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert refused.value.field == "extensions" and refused.value.reason == "unsupported"
+    assert calls == [] and owned.wire.requests == []
+    async with request.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet.lock_budget(
+            db,
+            tenant_id=request.tenant_id,
+            actor_id=root.fleet.account_id,
+            run_id=worker.run_id,
+        )
+        persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
+    assert persisted.status == "starting" and persisted.reserved_usd == 0
+    assert persisted.turns_used == 0 and persisted.binding_id is None and persisted.result is None
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_claimed_worker_runs_through_budget_binding_and_journal_result(
+    claimed_worker_request,
+):
+    import asyncio
+
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import mux_state
+
+    request, root, worker, prices, owned, native_requests = claimed_worker_request
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the assigned task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.id == worker.id and result.status == "succeeded"
+    assert result.turns_used == 1, "only the winning primary input consumes one turn"
+    assert result.result is not None and result.result.excerpt == "verified-worker-result"
+    async with request.deps.sessionmaker() as db:
+        entries = await mux_state.read_events(
+            db,
+            result.result.session_id,
+            after=result.result.sequence - 1,
+            limit=1,
+        )
+    assert len(entries) == 1 and entries[0].type == "agent.message"
+    assert entries[0].id == f"fleet:{worker.id}:result"
+    posts = [call for call in native_requests if call.method == "POST"]
+    assert len(posts) == 1
+    assert json.loads(posts[0].content)["agent"] == owned.wire.native_id
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with request.deps.sessionmaker() as db:
+        outcomes = await list_for_tenant(db, request.tenant_id)
+    assert any(
+        row.origin == "worker"
+        and row.session_id == result.result.session_id
+        and row.reason.value == "completed"
+        for row in outcomes
+    ), "the actual successful worker must also persist its terminal diagnostic"
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "disabled",
+        "expired",
+        "cancelled",
+        "digest",
+        "source",
+        "turns",
+        "model",
+        "funding",
+        "policy",
+        "revision",
+    ],
+)
+async def test_claimed_worker_refuses_invalid_dispatch_before_native_io(
+    claimed_worker_request, fault
+):
+    import asyncio
+    from datetime import timedelta
+
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.errors import TurnError
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.neutral_resources import WorkerSpecRefused
+
+    request, root, worker, prices, owned, calls = claimed_worker_request
+    cancel = asyncio.Event()
+    if fault == "disabled":
+        request = replace(request, deps=replace(request.deps, agent_backends=False))
+    elif fault == "expired":
+        worker = replace(worker, deadline_at=request.now() - timedelta(seconds=1))
+    elif fault == "cancelled":
+        cancel.set()
+    elif fault == "digest":
+        worker = replace(worker, spec_digest="another-intent")
+    elif fault == "source":
+        request = replace(
+            request,
+            admission=replace(
+                request.admission,
+                agent=request.admission.agent.model_copy(
+                    update={"system": "Changed source instructions"}
+                ),
+            ),
+        )
+    elif fault == "turns":
+        worker = replace(worker, turns_used=worker.max_turns)
+    elif fault == "model":
+        worker = replace(worker, model="ungranted-model")
+    elif fault == "funding":
+        from decimal import Decimal
+
+        from daimon.core.stores import tenant_ledger
+
+        async with request.deps.sessionmaker.begin() as db:
+            await tenant_ledger.insert_entry(
+                db,
+                tenant_id=request.tenant_id,
+                delta_usd=Decimal("-10"),
+                reason="usage",
+                idempotency_key="worker-funding-removed",
+            )
+    elif fault == "policy":
+        from daimon.core.access_policy import ChannelRule
+        from daimon.core.stores import access_policy
+
+        async with request.deps.sessionmaker.begin() as db:
+            policy = await access_policy.load_access_policy(db, tenant_id=request.tenant_id)
+            await access_policy.set_access_policy(
+                db,
+                tenant_id=request.tenant_id,
+                policy=policy.model_copy(
+                    update={
+                        "channel_rules": {
+                            root.fleet.root.channel.channel_id: ChannelRule(writers="none"),
+                        }
+                    }
+                ),
+            )
+    elif fault == "revision":
+        from mux.contracts.config import ConfigRevision
+
+        request = replace(
+            request,
+            admission=replace(
+                request.admission,
+                backend_revision=ConfigRevision.create(
+                    request.admission.backend_revision.channel,
+                    999,
+                    root.backend_grants[0],
+                ),
+            ),
+        )
+    with pytest.raises(
+        (FleetConflict, TurnError, AgentBackendRefused, WorkerSpecRefused, asyncio.CancelledError)
+    ) as refused:
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=cancel,
+        )
+    if fault == "policy":
+        assert isinstance(refused.value, WorkerSpecRefused)
+        assert refused.value.reason == "writers_none"
+    assert calls == [] and owned.wire.requests == []
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("fault", ["funding", "cancelled", "expired"])
+async def test_claimed_worker_rechecks_authority_after_binding_before_native_input(
+    claimed_worker_request, monkeypatch, fault
+):
+    import asyncio
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from daimon.core import headless_runner
+    from daimon.core.errors import TurnError
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.stores import fleet, tenant_ledger
+
+    request, root, worker, prices, _, calls = claimed_worker_request
+    cancel = asyncio.Event()
+    clock = request.now()
+    request = replace(request, now=lambda: clock)
+    real_bind = headless_runner.bind_session_impl
+    prepared = []
+
+    async def bind(*args, **kwargs):
+        publish = kwargs["_on_prepared"]
+
+        async def revoke(result):
+            nonlocal clock
+            await publish(result)
+            prepared.append(result)
+            if fault == "funding":
+                async with request.deps.sessionmaker.begin() as db:
+                    await tenant_ledger.insert_entry(
+                        db,
+                        tenant_id=request.tenant_id,
+                        delta_usd=Decimal("-10"),
+                        reason="usage",
+                        idempotency_key="worker-funding-removed-after-binding",
+                    )
+            elif fault == "cancelled":
+                cancel.set()
+            else:
+                clock = worker.deadline_at + timedelta(seconds=1)
+
+        kwargs["_on_prepared"] = revoke
+        return await real_bind(*args, **kwargs)
+
+    monkeypatch.setattr(headless_runner, "bind_session_impl", bind)
+    with pytest.raises((FleetConflict, TurnError, asyncio.CancelledError)):
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=cancel,
+        )
+    assert len(prepared) == 1, "the real binding callback must finish before authority changes"
+    assert calls == [], "revoked authority must prevent the first native model request"
+    async with request.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet.lock_budget(
+            db,
+            tenant_id=request.tenant_id,
+            actor_id=root.fleet.account_id,
+            run_id=worker.run_id,
+        )
+        persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
+    assert persisted.turns_used == 0 and persisted.result is None
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_worker_lost_native_ack_never_reposts_or_counts_a_second_input(
+    claimed_worker_request,
+    monkeypatch,
+):
+    import asyncio
+    from datetime import timedelta
+
+    from daimon.core.errors import TurnError
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import fleet
+
+    request, root, worker, prices, _, calls = claimed_worker_request
+    request = replace(request, deadline=request.now() + timedelta(seconds=5))
+    send = httpx.MockTransport.handle_async_request
+
+    async def lost_ack(transport, native_request):
+        response = await send(transport, native_request)
+        if native_request.method == "POST" and native_request.url.path == "/v1beta/interactions":
+            raise httpx.ReadError("offline lost acknowledgment", request=native_request)
+        return response
+
+    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", lost_ack)
+    with pytest.raises(TurnError) as refused:
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert refused.value.kind == "ceiling"
+    assert len([call for call in calls if call.method == "POST"]) == 1
+    async with request.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet.lock_budget(
+            db,
+            tenant_id=request.tenant_id,
+            actor_id=root.fleet.account_id,
+            run_id=worker.run_id,
+        )
+        persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
+    assert persisted.turns_used == 1 and persisted.result is None
+    assert persisted.status == "running" and persisted.reserved_usd > 0

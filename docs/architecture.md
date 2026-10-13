@@ -1916,8 +1916,9 @@ code fences remain literal examples. Other adapters need no renderer changes.
 
 `turn_outcomes` stores one content-free terminal record per logical turn. A UUID
 follows admission, session binding and execution; a dead-session recovery remains
-one turn. Discord, Slack, their continuation/wizard paths, headless routines and
-CLI runs use the same recorder. Admission and concurrency refusals are recorded
+one turn. Discord, Slack, their continuation/wizard paths, headless routines,
+fleet workers and CLI runs use the same recorder. Fleet workers retain their own
+`worker` origin; their diagnostic never masquerades as an orchestrator or routine. Admission and concurrency refusals are recorded
 even when no model runs. The row contains tenant/account and agent identifiers,
 platform/channel/thread identifiers, the shared `TerminationReason`, UTC start/end
 and monotonic duration, recovery status, exception class, package release and
