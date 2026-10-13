@@ -37,3 +37,43 @@ Ingress receipts also expose actual HTTP message-fetch replies and discord.py's
 parsed message references. Channel bursts retain each authored identity and
 separate production admission; chunk replies bind to an actually emitted SDK
 message. See the source-pinned burst/chunk controls in the ingress contract.
+
+The posted-card renderer accepts an optional persistent button factory. Fleet
+buttons use the registered `FleetControl` dynamic item for both live clicks and
+restart recovery. Their IDs carry the run, worker, version and action; these
+are lookup and compare-and-set identities, never authority. Ordinary private
+form cards retain their existing serialized components.
+
+`DiscordFleetCard` reads canonical fleet rows through the shared
+`FleetOrchestrator.read_snapshot` operation. Its host-injected parent loader
+reloads current permissions on each control click; the card cannot supply root
+facts. The loaded subject must match the clicker; the shared authorization
+owner decides whether that subject may control the orchestrator's run.
+Stop and Resume use the same core operation, scoped versions and stable
+operation keys as the tools. An accepted write retires the old controls and
+draws the current rows; it does not claim native termination or completed cost.
+Complete status rows stay in ordinal order while they fit within Discord's
+4,000-character total text limit, including the headline and budget footer.
+Larger fleets end with one `+N more` line counting the omitted rows. Admission
+and run-level controls cover the whole fleet. Within the component limit, individual
+controls favor the newest active workers; remaining active rows are marked
+status only. One Stop all and Resume all pair uses the run's own version and
+the same shared operation, so admission does not depend on display capacity.
+
+The runtime's optional `fleet_card_factory` is consulted only when fleet
+settings are explicitly enabled. Missing factories leave ordinary turns
+unchanged. The existing render loop updates the fleet card, and its normal
+final-answer path waits for authoritative collection and required reviews.
+Pending or refused results never become an answer from worker excerpts.
+Intermediate sealed answers stay private on every fleet lifecycle path,
+including terminal failure; only the collected final summary is delivered.
+Native execution, durable atomic control, root loading and usage accounting
+remain their existing owners' ports; absent ports refuse rather than succeed.
+
+The host factory accepts an optional `run_id` keyword for recovered-card
+lookup and must rebuild the current root binding from authenticated tenant and
+thread facts. A run handle cannot manufacture that binding. A card is bound at
+turn preparation, so a run spawned mid-turn needs the owner's subsequent wake
+turn to render it. Waiting collection ends that root delivery without an answer;
+the same wake owner must arrange its later reviewed summary. The card does not
+claim that those currently absent owner bindings execute.

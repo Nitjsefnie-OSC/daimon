@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import aiohttp
 import anthropic as _anthropic
@@ -45,6 +45,8 @@ from daimon.adapters.discord.gating import (
 )
 from daimon.adapters.discord.lifecycle import (
     DiscordTurnLifecycle,
+    EditFn,
+    SendFn,
     drain_retained_card_tasks,
     edit_recovered_card,
 )
@@ -219,6 +221,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import discord
 from discord.ext import commands
 from discord.http import HTTPClient
+
+if TYPE_CHECKING:
+    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
 
 log = structlog.get_logger()
 
@@ -794,6 +799,21 @@ class DaimonBot(commands.Bot):
                 error=str(exc)[:300],
             )
 
+    def fleet_card_for(
+        self,
+        *,
+        thread: discord.abc.Messageable,
+        requester_id: int,
+        send: Callable[[], SendFn],
+        edit: EditFn,
+        run_id: uuid.UUID | None = None,
+    ) -> DiscordFleetCard | None:
+        factory = getattr(self.runtime, "fleet_card_factory", None)
+        settings = getattr(self.runtime.settings, "fleet", None)
+        if factory is None or getattr(settings, "enabled", False) is not True:
+            return None
+        return factory(thread, requester_id, send(), edit, run_id=run_id)
+
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
 
@@ -1084,6 +1104,10 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.credential_button import CredentialRequestButton
 
         self.add_dynamic_items(CredentialRequestButton)
+        if getattr(getattr(self.runtime.settings, "fleet", None), "enabled", False) is True:
+            from daimon.adapters.discord.posted_controls.fleet import FleetControl
+
+            self.add_dynamic_items(FleetControl)
 
         # Same rationale as CredentialRequestButton above: the wizard's
         # first screen is posted by the MCP process, and every tap on it
@@ -3483,6 +3507,14 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                fleet_card=self.fleet_card_for(
+                    thread=thread,
+                    requester_id=int(row.requester_external_user_id),
+                    send=lambda: recorder.sender(
+                        thread, turn_card_intent_id=turn_id, transport=transport
+                    ),
+                    edit=_edit_message,
+                ),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -4304,6 +4336,14 @@ class DaimonBot(commands.Bot):
                 trigger_message=message,
                 acknowledgment_managed=True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                fleet_card=self.fleet_card_for(
+                    thread=thread,
+                    requester_id=message.author.id,
+                    send=lambda: recorder.sender(
+                        thread, turn_card_intent_id=turn_id, transport=transport
+                    ),
+                    edit=_edit_message,
+                ),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,

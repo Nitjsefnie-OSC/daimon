@@ -1,5 +1,15 @@
 # Architecture
 
+Opted-in Discord worker fleets use the existing posted-card renderer and Stop
+guard. The card shows each worker's role, backend, model and current state.
+Complete rows stay in ordinal order within Discord's total text limit; large
+fleets show one `+N more` count for the rows that do not fit.
+Stop and Resume reload current root permissions and use the shared fleet
+operation owner with a scoped version and idempotency key. The ordinary
+orchestrator answer is delivered only after authoritative collection and
+required result reviews succeed. Default fleet settings create no card,
+service discovery or additional sender.
+
 With the mux turn path and channel backends enabled, an admin can choose **Model
 backend** in an agent's setup Details on Discord, Slack or Teams. The preview
 lists unsupported skills, connectors and capabilities, shared-thread limits,

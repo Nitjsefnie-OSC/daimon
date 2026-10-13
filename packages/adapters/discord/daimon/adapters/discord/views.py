@@ -19,8 +19,8 @@ the one that dispatches their click (this bot) -- there is no live in-memory
 View instance to attach a non-persistent handler to. `FeedbackButton` is
 persistent for a related but distinct reason: it is delivered into a direct
 message and must still dispatch after this bot process restarts, so there is
-again no live View instance to rely on. Every other interactive component in
-this adapter stays non-persistent.
+again no live View instance to rely on. Opt-in fleet controls likewise use the
+registered `posted_controls.fleet.FleetControl` item to recover after restart.
 """
 
 from __future__ import annotations
@@ -34,6 +34,24 @@ from daimon.adapters.discord.turn_card_recovery import turn_card_custom_id
 import discord
 
 log = structlog.get_logger()
+
+
+async def finish_control(
+    interaction: discord.Interaction,
+    *,
+    view: discord.ui.View | discord.ui.LayoutView,
+    allowed_mentions: discord.AllowedMentions | None = None,
+) -> None:
+    """A completed Stop or Resume uses the existing missing-card boundary."""
+    try:
+        if allowed_mentions is None:
+            await interaction.response.edit_message(view=view)
+        else:
+            await interaction.response.edit_message(view=view, allowed_mentions=allowed_mentions)
+    except discord.HTTPException as err:
+        if err.code != 10008:
+            raise
+        log.info("turn.cancel_message_missing")
 
 
 class GuardedView(discord.ui.View):
@@ -96,9 +114,4 @@ class CancelView(GuardedView):
     ) -> None:
         self._cancel.set()
         self._finalize()
-        try:
-            await interaction.response.edit_message(view=self)
-        except discord.HTTPException as err:
-            if err.code != 10008:
-                raise
-            log.info("turn.cancel_message_missing")
+        await finish_control(interaction, view=self)
