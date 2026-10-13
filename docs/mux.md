@@ -2894,7 +2894,11 @@ This API alone does not install runtime fleet execution or prove main defaults p
 An enabled fleet freezes worker authority from the actual admitted agent's
 current per-agent grant. A missing grant leaves ordinary root input unchanged.
 Revocation or replacement invalidates retained roots by their pinned epoch and
-grant digest. The worker request reader joins the exact original run, origin,
+grant digest. The frozen worker deadline is the minimum of the original request
+bound, grant expiry and finite permission duration; reconstruction cannot extend
+that bound. The retained worker budget is the minimum of the current grant and
+requested permission budget, including trusted loader overrides. The worker
+request reader joins the exact original run, origin,
 account, binding, source revision and current policy; it refuses missing or
 legacy preparation facts and source or environment drift. It retains neutral
 facts, never SDK clients, transports, credential values or accounting callbacks.

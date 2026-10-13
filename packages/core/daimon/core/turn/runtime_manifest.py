@@ -123,12 +123,10 @@ async def _root_context(
 
     parent, binding = root.permissions, root.binding
     facts, scope = parent.fleet, parent.fleet.scope
-    value = (
-        await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
-            UUID(scope.tenant_id), parent.agent_id, now=now
-        )
-        if parent.agent_id is not None
-        else None
+    if parent.agent_id is None:
+        raise WorkerSpecRefused("origin", "stale")
+    value = await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
+        UUID(scope.tenant_id), parent.agent_id, now=now
     )
     if (
         value is None
@@ -295,6 +293,9 @@ async def freeze_prepared_root(
         != (prepared.admission.backend_revision.local if prepared.admission.backend_revision else 0)
     ):
         raise WorkerSpecRefused("origin", "unbound")
+    request = prepared._preparation  # pyright: ignore[reportPrivateUsage]
+    if request is None or prepared.admission.backend_counterpart is not None:
+        raise WorkerSpecRefused("origin", "unbound")
     async with deps.sessionmaker() as db:
         policy = await load_access_policy(db, tenant_id=grant.tenant_id)
     permissions = (
@@ -321,10 +322,11 @@ async def freeze_prepared_root(
             seal_ids=prepared.admission.origin_seal_ids,
         )
     )
-    request = prepared._preparation  # pyright: ignore[reportPrivateUsage]
+    deadline = min(request.deadline, value.expires_at, permissions.limits.deadline)
+    budget = min(value.limits.budget_usd, permissions.limits.budget_usd)
+    limits = permissions.limits.model_copy(update={"deadline": deadline, "budget_usd": budget})
+    permissions = replace(permissions, limits=limits)
     environment = source_environment_record(prepared.admission.environment, scope)
-    if request is None or prepared.admission.backend_counterpart is not None:
-        raise WorkerSpecRefused("origin", "unbound")
     root = _FrozenRoot(
         intent_id=intent_id,
         origin_id=origin_id,

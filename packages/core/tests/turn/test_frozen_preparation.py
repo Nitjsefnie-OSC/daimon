@@ -123,7 +123,7 @@ async def test_stricter_caller_deadline_is_preserved(root_turn):
     assert result.deadline == bound < parent.limits.deadline
 
 
-async def test_default_constructor_uses_current_db_grant_and_actual_source(root_turn):
+async def default_source_turn(root_turn):
     from daimon.core.neutral_resources import AgentFleetGrant
     from daimon.core.sessions import project_session_resources
     from daimon.core.stores import agent_memory_stores
@@ -186,6 +186,12 @@ async def test_default_constructor_uses_current_db_grant_and_actual_source(root_
     deps = replace(deps, fleet_root_grants=None)
     prepared = replace(prepared, _source=source)
     updated = (deps, prepared, *root_turn[2:])
+    return updated, value, source
+
+
+async def test_default_constructor_uses_current_db_grant_and_actual_source(root_turn):
+    updated, value, source = await default_source_turn(root_turn)
+    deps, prepared, _, intent, _, scope, _, transport = updated
     before = len(transport.requests)
     await freeze(updated)
     parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
@@ -445,3 +451,135 @@ async def test_after_source_await_refuses_before_environment_read(root_turn, cha
     assert [(item.method, item.path) for item in trace.requests] == [
         ("GET", "/v1/agents/" + prepared.admission.agent.id),
     ]
+
+
+@pytest.mark.parametrize("mode", ["default", "trusted_loader"])
+async def test_original_short_request_bound_survives_freeze_and_default_reader(root_turn, mode):
+    from decimal import Decimal
+
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores import fleet
+    from daimon.core.stores.fleet import WorkerPool
+
+    value = (await default_source_turn(root_turn))[0] if mode == "default" else root_turn
+    deps, prepared, _, intent, _, scope, _, transport = value
+    original = datetime.now(UTC) + timedelta(seconds=5)
+    prepared = replace(prepared, _preparation=replace(prepared._preparation, deadline=original))
+    before = len(transport.requests)
+    await freeze((deps, prepared, *value[2:]))
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    run, _ = await fleet.run_status(
+        deps.sessionmaker, tenant_id=prepared._source.tenant_id, run_id=parent.fleet.run_id
+    )
+    assert parent.limits.deadline == run.deadline_at == original
+    assert len(transport.requests) == before
+    reconstructed = await read_frozen_preparation(
+        deps, parent, deadline=original + timedelta(minutes=5), now=lambda: datetime.now(UTC)
+    )
+    assert reconstructed.deadline == original
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        captured = await ports.capture_source(parent)
+        assert captured.source.ref == parent.source_agents[0]
+        with pytest.raises(WorkerSpecRefused):
+            await read_frozen_root(
+                deps, scope, intent_id=intent.id, now=original + timedelta(microseconds=1)
+            )
+    finally:
+        await ports.close()
+
+
+@pytest.mark.parametrize("mode", ["default", "trusted_loader"])
+async def test_expired_original_request_cannot_allocate_or_publish_authority(root_turn, mode):
+    from daimon.core._models import FleetRun, MuxOperation
+    from sqlalchemy import func, select
+
+    value = (await default_source_turn(root_turn))[0] if mode == "default" else root_turn
+    deps, prepared, *_ = value
+    prepared = replace(
+        prepared,
+        _preparation=replace(
+            prepared._preparation, deadline=datetime.now(UTC) - timedelta(seconds=1)
+        ),
+    )
+    before = len(value[-1].requests)
+    with pytest.raises(WorkerSpecRefused):
+        await freeze((deps, prepared, *value[2:]))
+    async with deps.sessionmaker() as db:
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == prepared._source.tenant_id)
+            )
+            == 0
+        )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(MuxOperation)
+                .where(MuxOperation.tenant_id == prepared._source.tenant_id)
+            )
+            == 0
+        )
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(deps, value[5], intent_id=value[3].id, now=datetime.now(UTC))
+    from decimal import Decimal
+
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.fleet import WorkerPool
+
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        with pytest.raises(WorkerSpecRefused):
+            await ports.capture_source(value[2][0])
+    finally:
+        await ports.close()
+    assert len(value[-1].requests) == before
+
+
+@pytest.mark.parametrize("requested", ["2", "0.5"])
+async def test_real_grant_bounds_trusted_loader_worker_budget(root_turn, requested):
+    from decimal import Decimal
+
+    from daimon.core.stores import fleet
+
+    deps, prepared, grants, intent, _, scope, _, transport = root_turn
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    current = await service.read_fleet_grant(
+        prepared._source.tenant_id, prepared._source.agent_id, now=datetime.now(UTC)
+    )
+    assert current.limits.budget_usd == Decimal("1")
+    grants[0] = replace(
+        grants[0], limits=grants[0].limits.model_copy(update={"budget_usd": Decimal(requested)})
+    )
+    before = len(transport.requests)
+    await freeze(root_turn)
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    expected = min(Decimal(requested), current.limits.budget_usd)
+    run, _ = await fleet.run_status(
+        deps.sessionmaker, tenant_id=prepared._source.tenant_id, run_id=parent.fleet.run_id
+    )
+    assert parent.limits.budget_usd == run.total_budget_usd == expected
+    assert parent.subject == prepared.admission.grant.subject and not parent.subject.is_admin
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.source.source.ref == parent.source_agents[0]
+    assert all(item.method == "GET" for item in transport.requests[before:])
+    unchanged = await service.read_fleet_grant(
+        prepared._source.tenant_id, prepared._source.agent_id, now=datetime.now(UTC)
+    )
+    assert unchanged == current
