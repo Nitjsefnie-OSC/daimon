@@ -17,7 +17,7 @@ from mux.contracts.ids import Provider
 from mux.contracts.profile import SUPPORTED, Profile
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
-from mux.profiles.gemini import INLINE_REUSE
+from mux.profiles.gemini import INLINE_REUSE, WORKER_MODEL
 from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
 
 PROFILES: Mapping[str, Profile] = {
@@ -93,6 +93,7 @@ __all__ = [
 class BackendSelection:
     config: BackendConfig
     thread_modes: tuple[ThreadMode, ...]
+    allowed_models: tuple[str, ...] | None = None
 
 
 _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
@@ -104,6 +105,7 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
         ("per_caller",),
+        allowed_models=(WORKER_MODEL,),
     ),
 }
 RUNNABLE_PROFILES: frozenset[str] = frozenset(
@@ -131,6 +133,8 @@ def runnable_selection(selection: ResolvedBackend) -> bool:
     resolved = resolve_default(declared.config)
     return (
         selection.profile == resolved.profile
-        and selection.model == resolved.model
+        and (
+            selection.model == resolved.model or selection.model in (declared.allowed_models or ())
+        )
         and selection.thread_mode in declared.thread_modes
     )

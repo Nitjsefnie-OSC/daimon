@@ -11,6 +11,10 @@ from __future__ import annotations
 from mux.contracts.extensions import ExtensionRef
 from mux.contracts.profile import Profile
 
+WORKER_MODEL = "gemini-3.5-flash-lite"
+WORKER_MAX_TOTAL_TOKENS = 4096
+WORKER_MAX_RUNTIME_S = 120
+
 INLINE_REUSE = Profile(
     provider="gemini",
     profile_id="gemini.inline_reuse",

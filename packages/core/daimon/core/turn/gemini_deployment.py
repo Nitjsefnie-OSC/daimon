@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
@@ -48,7 +49,12 @@ from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.core import compile_agent, compile_environment
 from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.errors import ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import INLINE_REUSE
+from mux.profiles.gemini import (
+    INLINE_REUSE,
+    WORKER_MAX_RUNTIME_S,
+    WORKER_MAX_TOTAL_TOKENS,
+    WORKER_MODEL,
+)
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -117,8 +123,8 @@ class GeminiPlan(BaseModel):
             or worker.resources
             or (self.worker_materialization and worker.permissions.seal_ids)
             or revision.profile != self.profile
-            or revision.model != FLASH_PRIMARY
-            or spec.model != ModelRef(provider="gemini", id=FLASH_PRIMARY)
+            or revision.model not in (FLASH_PRIMARY, WORKER_MODEL)
+            or spec.model != ModelRef(provider="gemini", id=revision.model or "")
             or worker.backend.profile != self.profile
             or worker.backend.model != revision.model
             or worker.backend.backend != revision.backend
@@ -173,7 +179,14 @@ class GeminiPlan(BaseModel):
                 raise AdmissionDenied(reason="backend_unsupported")
         except UnsupportedCapability as error:
             raise AdmissionDenied(reason="backend_unsupported") from error
-        return GeminiDeployment(revision.digest, revision.local, self.project, spec, environment)
+        return GeminiDeployment(
+            revision.digest,
+            revision.local,
+            self.project,
+            spec,
+            environment,
+            max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
+        )
 
     async def read_counterpart(
         self,
@@ -239,7 +252,16 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
 
 def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     revision, scope = request.admission.backend_revision, request.scope
-    if revision is None or revision.model != FLASH_PRIMARY or request.deps.state_store is None:
+    if (
+        revision is None
+        or revision.model
+        not in ((FLASH_PRIMARY, WORKER_MODEL) if request.worker is not None else (FLASH_PRIMARY,))
+        or request.deps.state_store is None
+        or (
+            request.worker is not None
+            and request.deadline > request.now() + timedelta(seconds=WORKER_MAX_RUNTIME_S)
+        )
+    ):
         raise AdmissionDenied(reason="backend_unsupported")
     plan = load_gemini_deployment(request)
     agent = AgentSpec(

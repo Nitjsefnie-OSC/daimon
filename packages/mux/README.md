@@ -985,3 +985,8 @@ normalization. Recovery retains previously recorded event IDs and native
 provenance, including journals written with stream IDs before that normalization
 rule; no journal migration is required. Worker allocation and session creation
 reuse the shared preparation and fenced mutation guards.
+Gemini worker sessions can carry an explicit `max_total_tokens` control through
+the existing agent compiler and durable request template. The budget is native
+best-effort behavior, excluding cached tokens. A budgeted worker permits one
+interaction and retains its exact named-agent model, without fallback; ordinary
+Gemini sessions retain their existing behavior.

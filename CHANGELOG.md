@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Preserve recorded OpenAI message IDs across recovery and assign new item IDs during normalization; reuse the fenced session-creation guard for fleet workers.
+- Apply low managed-agent token budgets to Gemini workers and support explicitly granted Flash-Lite worker definitions.
 
 - Reuse verified Gemini worker readback and share native worker publication authority checks.
 - Freeze independent worker batches in the existing wake queue and publish readiness atomically with terminal writes, without reopening legacy unarmed completion writes.
