@@ -3,11 +3,13 @@
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from daimon.core._models import AccountingOutbox, TenantLedger, TurnOutcome, UsageObservation
 from daimon.core.context_prompt import TurnContext
-from daimon.core.stores import mux_state
+from daimon.core.fleet import FleetRun, worker_slot
+from daimon.core.stores import fleet, mux_state
 from daimon.core.stores.domain import TenantLedgerRow
 from mux.contracts.resources import ProviderBinding
 from mux.state.store import binding_slot
@@ -32,6 +34,74 @@ class UsageAccountingRows:
     revisions: tuple[AppliedUsage, ...]
     outbox: tuple[AccountingRevision, ...]
     ledger: tuple[TenantLedgerRow, ...]
+
+
+@dataclass(frozen=True)
+class FleetWorkerAccountingRows:
+    worker_id: UUID
+    worker_version: int
+    reserved_usd: Decimal
+    binding_id: str | None
+    rows: UsageAccountingRows | None
+    issue: Literal["binding_not_accepted", "binding_unavailable"] | None
+
+
+@dataclass(frozen=True)
+class FleetAccountingRows:
+    """Original product exposure and billing facts, never provider actuals.
+
+    A private worker binding attributes its persisted revisions to this run.
+    Root sessions can span runs and are deliberately excluded. Missing bindings
+    remain gaps; no row absence proves free work or releases a reservation.
+    Reserved amounts are total exposure including recorded debits, not separate
+    cash holds to add to those debits. External cash receipt joins are independent.
+    """
+
+    run: FleetRun
+    workers: tuple[FleetWorkerAccountingRows, ...]
+
+
+async def read_fleet_accounting_revisions(
+    session: AsyncSession, *, tenant_id: UUID, run_id: UUID
+) -> FleetAccountingRows:
+    """Read one tenant's exact run through its durable private worker slots.
+
+    Caller owns authorization and a coherent read-only transaction. No flush,
+    claims, locks for update, exposure refresh, repricing or monetary writes.
+    Returned revision bodies are owner facts, not a public export schema.
+    """
+    with session.no_autoflush:
+        run, workers = await fleet.run_status(
+            session, tenant_id=tenant_id, run_id=run_id, for_update=False
+        )
+        result: list[FleetWorkerAccountingRows] = []
+        for worker in workers:
+            slot = worker_slot(run, worker)
+            binding = await mux_state.get_binding(session, slot)
+            issue = None if worker.binding_id is not None else "binding_not_accepted"
+            rows = None
+            if binding is None:
+                issue = "binding_unavailable" if worker.binding_id is not None else issue
+            else:
+                if (
+                    binding_slot(binding) != slot
+                    or binding.provider != worker.backend
+                    or binding.profile != worker.profile
+                    or worker.binding_id not in (None, binding.id)
+                    or not binding.native_refs.get("session")
+                ):
+                    raise ValueError("fleet accounting binding differs from its worker")
+                rows = await read_accounting_revisions(
+                    session, tenant_id=tenant_id, binding=binding
+                )
+                if rows.binding != binding:
+                    raise ValueError("fleet accounting binding changed during capture")
+            result.append(
+                FleetWorkerAccountingRows(
+                    worker.id, worker.version, worker.reserved_usd, worker.binding_id, rows, issue
+                )
+            )
+        return FleetAccountingRows(run, tuple(result))
 
 
 async def read_accounting_revisions(
