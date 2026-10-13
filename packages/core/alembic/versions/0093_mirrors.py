@@ -114,6 +114,12 @@ def upgrade() -> None:
         ["mirror_id", "source_session_key", "created_at"],
     )
     op.create_index("ix_mirror_deliveries_account", "mirror_deliveries", ["source_account_id"])
+    op.create_index(
+        "ix_mirror_deliveries_thread",
+        "mirror_deliveries",
+        ["dest_thread_id"],
+        postgresql_where=sa.text("dest_thread_id IS NOT NULL"),
+    )
 
 
 def downgrade() -> None:

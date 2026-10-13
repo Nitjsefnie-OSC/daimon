@@ -322,6 +322,13 @@ async def get_session_thread(
     )
 
 
+async def is_mirror_thread(session: AsyncSession, *, thread_id: str) -> bool:
+    """Whether a mirror opened `thread_id` for a session's posts."""
+    return bool(
+        await session.scalar(select(exists().where(MirrorDelivery.dest_thread_id == thread_id)))
+    )
+
+
 async def count_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
     return (
         await session.scalar(

@@ -3478,6 +3478,11 @@ class MirrorDelivery(Base):
         ),
         Index("ix_mirror_deliveries_session", "mirror_id", "source_session_key", "created_at"),
         Index("ix_mirror_deliveries_account", "source_account_id"),
+        Index(
+            "ix_mirror_deliveries_thread",
+            "dest_thread_id",
+            postgresql_where=text("dest_thread_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

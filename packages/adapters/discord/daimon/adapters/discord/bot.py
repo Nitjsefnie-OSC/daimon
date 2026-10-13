@@ -119,6 +119,7 @@ from daimon.core.output_delivery import NoticedFiles
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
+from daimon.core.stores import mirrors as mirrors_store
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.discord_message_admissions import (
     claim_message,
@@ -2048,6 +2049,11 @@ class DaimonBot(commands.Bot):
             )
         return self._participant
 
+    async def _in_mirror_thread(self, thread_id: int) -> bool:
+        """A mirror's session thread copies agent-chat Q&A: no reply there starts a turn."""
+        async with self.runtime.sessionmaker() as session:
+            return await mirrors_store.is_mirror_thread(session, thread_id=str(thread_id))
+
     async def _maybe_participate(self, message: discord.Message) -> None:
         """Organic thread participation: an unmentioned human message in a guild thread.
 
@@ -2089,6 +2095,8 @@ class DaimonBot(commands.Bot):
                     mode=resolved.mode.value,
                     tier=resolved.tier,
                 )
+                return
+            if await self._in_mirror_thread(thread_id):
                 return
             tr = await get_tenant_liveness(self.runtime.sessionmaker, tenant_id)
             if tr is None or tr.archived_at is not None or tr.provision_status != "ready":
@@ -2285,7 +2293,7 @@ class DaimonBot(commands.Bot):
                 bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
             )
             resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
-            if resolved.mode is ParticipationMode.ON:
+            if resolved.mode is ParticipationMode.ON or await self._in_mirror_thread(thread_id):
                 self._unmentioned_hint_cooldown.release(thread_id)
                 return
             # A reaction is a post: where the agent may not write (or that

@@ -11,7 +11,8 @@ In a channel, a session's first post opens a thread on a short header and
 later posts go into it; a thread deleted, locked or closed to the bot is
 replaced by a new one. Posts are
 the bot's own with mentions disabled, and they are not recorded as agent
-posts, so a reply to one starts no turn.
+posts, so a reply to one starts no turn; the bot neither follows a mirror's
+session threads nor hints in them (`is_mirror_thread`).
 """
 
 from __future__ import annotations
