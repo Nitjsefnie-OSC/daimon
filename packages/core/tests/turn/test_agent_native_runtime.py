@@ -20,6 +20,7 @@ from mux.drivers.gemini.transport import SDKTransport as GeminiSDKTransport
 from mux.drivers.openai import deployment as openai_transport
 from mux.drivers.openai.transport import SDKTransport
 from pydantic import PostgresDsn, SecretStr
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .test_native_counterpart import (
     application as application,
@@ -41,6 +42,15 @@ from .test_native_counterpart import (
 )
 from .test_openai_host import Wire as OpenAIWire
 from .test_openai_worker_plan import target as target
+
+
+@pytest.fixture
+def db_session_factory(db_preflight, db_engine, db_clean):
+    """Worker claims and native uncertainty commit on separate pooled connections."""
+    from daimon.testing.db import require_owned_sessionmaker
+
+    require_owned_sessionmaker(db_engine)
+    return async_sessionmaker(db_engine, expire_on_commit=False)
 
 
 @pytest.fixture
@@ -1618,7 +1628,11 @@ async def test_claimed_worker_opaque_source_is_refused_before_funding_or_native_
         spec = source.effective_spec.model_copy(
             update={
                 "extensions": tuple(source.effective_spec.extensions)
-                + (ExtensionConfig(namespace="unrepresented.policy", version=1, value={}),)
+                + (
+                    ExtensionConfig(
+                        namespace="anthropic.unrepresented_policy", version=1, value={}
+                    ),
+                )
             }
         )
         return source.model_copy(update={"effective_spec": spec})
@@ -1882,12 +1896,14 @@ async def test_worker_lost_native_ack_never_reposts_or_counts_a_second_input(
     monkeypatch,
 ):
     import asyncio
+    from datetime import timedelta
 
-    from daimon.core.fleet import FleetConflict
+    from daimon.core.errors import TurnError
     from daimon.core.headless_runner import run_worker
     from daimon.core.stores import fleet
 
     request, root, worker, prices, _, calls = claimed_worker_request
+    request = replace(request, deadline=request.now() + timedelta(seconds=5))
     send = httpx.MockTransport.handle_async_request
 
     async def lost_ack(transport, native_request):
@@ -1897,7 +1913,7 @@ async def test_worker_lost_native_ack_never_reposts_or_counts_a_second_input(
         return response
 
     monkeypatch.setattr(httpx.MockTransport, "handle_async_request", lost_ack)
-    with pytest.raises(FleetConflict, match="authoritative successful result"):
+    with pytest.raises(TurnError) as refused:
         await run_worker(
             request,
             parent=root,
@@ -1906,6 +1922,7 @@ async def test_worker_lost_native_ack_never_reposts_or_counts_a_second_input(
             prices=prices,
             cancel=asyncio.Event(),
         )
+    assert refused.value.kind == "ceiling"
     assert len([call for call in calls if call.method == "POST"]) == 1
     async with request.deps.sessionmaker.begin() as db:
         graph, _ = await fleet.lock_budget(

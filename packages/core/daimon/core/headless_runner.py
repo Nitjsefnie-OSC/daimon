@@ -48,6 +48,7 @@ caller (the scheduler's `_fire_one`, which is the boundary).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -497,9 +498,7 @@ async def run_worker(
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     cancel: asyncio.Event,
 ) -> FleetWorker:
-    """Drain the actual claim through fresh canonical and financial admission.
-    The caller owns pool release and the one run-level budget watch.
-    """
+    """Drain a pool claim through canonical admission, the fenced turn and its result."""
     deps, admission = request.deps, request.admission
     revision = admission.backend_revision
     if (
@@ -586,22 +585,24 @@ async def run_worker(
                 markup=deps.markup,
             )
 
-            async def recapture(db: AsyncSession):
-                policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
+            async def recapture(db: AsyncSession | None = None):
                 source = await capture_preparation_source(source_request)
-                if (
-                    normalize(policy=policy, now=request.now(), captured_source=source).digest
-                    != worker.spec_digest
-                ):
-                    raise FleetConflict("worker source intent changed before native dispatch")
-                return await require_admission(db, policy=policy, binding=binding)
+                async with (
+                    deps.sessionmaker.begin() if db is None else contextlib.nullcontext(db)
+                ) as db:
+                    policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
+                    if (
+                        normalize(policy=policy, now=request.now(), captured_source=source).digest
+                        != worker.spec_digest
+                    ):
+                        raise FleetConflict("worker source intent changed before native dispatch")
+                    return await require_admission(db, policy=policy, binding=binding)
 
             async def guard() -> None:
                 remaining_s(bound, now=request.now(), refuse_expired=True)
                 if cancel.is_set():
                     raise asyncio.CancelledError
-                async with deps.sessionmaker.begin() as db:
-                    fresh = await recapture(db)
+                fresh = await recapture()
                 if not fresh.admitted:
                     raise FleetConflict("worker financial admission refused")
                 remaining_s(bound, now=request.now(), refuse_expired=True)
