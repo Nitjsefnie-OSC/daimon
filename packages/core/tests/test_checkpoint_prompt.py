@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
+import tarfile
 import uuid
+from pathlib import Path
 
+import pytest
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_EXCLUDED_GLOBS,
@@ -20,10 +25,13 @@ from daimon.core.checkpoint_prompt import (
     handoff_filename,
     is_handoff_filename,
 )
+from daimon.core.handoff_context import render_handoff_framing
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 
 TRANSFER_ID = uuid.UUID("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
 REPO = "/mnt/repo/analytics"
+# The loose files in /, where the sandbox shell starts: the agent's working directory.
+CWD_FILES = "$(find / -maxdepth 1 -type f ! -name '.*' -printf '%P\\n')"
 
 
 def test_handoff_max_bytes_matches_the_output_delivery_per_file_cap() -> None:
@@ -77,7 +85,7 @@ def test_prompt_writes_an_oversize_exclude_list_before_tarring() -> None:
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=7
     )
     find_index = prompt.index(
-        "find root mnt/session/outputs tmp/work mnt/repo/analytics -type f -size +7M"
+        f"find root mnt/session/outputs tmp/work {CWD_FILES} mnt/repo/analytics -type f -size +7M"
     )
     tar_index = prompt.index("tar czf")
     assert find_index < tar_index, "the exclude list must exist before tar reads it"
@@ -118,7 +126,7 @@ def test_prompt_captures_repo_state_without_a_repo_omitting_the_git_steps() -> N
     assert with_repo.count(f"git -C {REPO} rev-parse HEAD") == 2, (
         "HEAD is echoed before and after the archive so a commit is detectable"
     )
-    assert "-C / root mnt/session/outputs tmp/work mnt/repo/analytics" in with_repo, (
+    assert f"-C / root mnt/session/outputs tmp/work {CWD_FILES} mnt/repo/analytics" in with_repo, (
         "the repo mount is archived alongside $HOME, the outputs directory and /tmp"
     )
 
@@ -149,7 +157,9 @@ def test_prompt_honours_a_non_default_home_dir() -> None:
     )
     assert "/home/claude/HANDOFF.md" in prompt, "the note goes in the given home directory"
     assert "/home/claude/uncommitted.patch" in prompt, "so does the patch"
-    assert "-C / home/claude mnt/session/outputs tmp/work mnt/repo/analytics" in prompt, (
+    assert (
+        f"-C / home/claude mnt/session/outputs tmp/work {CWD_FILES} mnt/repo/analytics" in prompt
+    ), (
         "the tar roots are the given home directory, the outputs directory, /tmp and the "
         "repo, relative to /"
     )
@@ -232,7 +242,7 @@ def test_prompt_captures_uncommitted_changes_when_the_answer_is_copy_or_absent()
         assert f"git -C {REPO} ls-files --others --exclude-standard" in prompt, (
             "untracked files are part of the work being captured"
         )
-        assert "-C / root mnt/session/outputs tmp/work mnt/repo/analytics" in prompt, (
+        assert f"-C / root mnt/session/outputs tmp/work {CWD_FILES} mnt/repo/analytics" in prompt, (
             "and the checkout itself travels"
         )
 
@@ -245,11 +255,11 @@ def test_prompt_leaves_uncommitted_changes_behind_when_the_answer_is_leave() -> 
         "the person chose to leave the changes, so nothing captures them as a patch"
     )
     assert "ls-files --others" not in prompt, "nor lists the untracked files to carry"
-    assert "-C / root mnt/session/outputs tmp/work\n" in f"{prompt}\n", (
+    assert f"-C / root mnt/session/outputs tmp/work {CWD_FILES}\n" in f"{prompt}\n", (
         "the checkout must not be tarred either, or the changes would come across anyway"
     )
     assert "-C / root mnt/session/outputs mnt/repo" not in prompt, "the repo is not a root here"
-    assert "find root mnt/session/outputs tmp/work -type f" in prompt, (
+    assert f"find root mnt/session/outputs tmp/work {CWD_FILES} -type f" in prompt, (
         "and the oversize scan covers only what is archived"
     )
     assert "deliberately being left behind" in prompt, (
@@ -315,7 +325,8 @@ def test_prompt_names_what_travels_and_what_stays_behind_in_words() -> None:
     )
     assert (
         "Only the task's own work travels: the non-hidden entries in /root and /tmp/work, the "
-        "outputs directory, and the working repository if one is mounted." in prompt
+        "files directly in / (where the shell starts), the outputs directory, and the working repository if one is mounted."
+        in prompt
     ), "the prompt must name what travels, not only pass it to tar"
     assert (
         "Credential mounts, hidden directories and language toolchains and their caches "
@@ -378,7 +389,7 @@ def test_prompt_generates_the_whole_tar_command_exactly() -> None:
             "    --exclude='*/__pycache__' \\",
             "    --exclude='*/.cache' \\",
             "    --exclude='*.env' \\",
-            "    -C / root mnt/session/outputs tmp/work mnt/repo/analytics",
+            f"    -C / root mnt/session/outputs tmp/work {CWD_FILES} mnt/repo/analytics",
         ]
     )
     assert expected in prompt, "the generated tar command changed"
@@ -449,6 +460,58 @@ def test_prompt_archives_the_scratch_directory_minus_its_own_exclude_list() -> N
     assert "--exclude='tmp/daimon-handoff-excludes.txt'" in prompt, (
         "the list tar is reading must not end up inside the archive tar is writing"
     )
-    assert "find root mnt/session/outputs tmp/work -type f -size +20M" in prompt, (
+    assert f"find root mnt/session/outputs tmp/work {CWD_FILES} -type f -size +20M" in prompt, (
         "and the oversize scan covers every root it will tar"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_a_file_written_in_the_shell_working_directory_travels_and_restores(
+    tmp_path: Path,
+) -> None:
+    """The sandbox shell starts in /, so `echo … > notes.txt` "in your working
+    directory" writes /notes.txt. Runs the archive step as the sandbox would,
+    against a fake /, and puts the result back the way the successor is told to."""
+    old = tmp_path / "old"
+    (old / "root").mkdir(parents=True)
+    (old / "root" / "HANDOFF.md").write_text("- Files: /qa_keep.txt\n")
+    (old / "mnt" / "session" / "outputs").mkdir(parents=True)
+    (old / "qa_keep.txt").write_text("8e6287d4\n")
+    (old / ".dockerenv").write_text("")
+    (old / "etc").mkdir()
+    (old / "etc" / "hostname").write_text("sandbox\n")
+
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
+    )
+    archive_step = prompt[prompt.index("  cd /\n") : prompt.index("The find step lists")]
+    # Every absolute path in the step, re-rooted at the fake /.
+    script = re.sub(r"(?<=[\s=(])/", f"{old}/", archive_step)
+    subprocess.run(["bash", "-euc", script], check=True, capture_output=True)
+
+    bundle = old / "mnt" / "session" / "outputs" / handoff_filename(TRANSFER_ID)
+    with tarfile.open(bundle) as archive:
+        names = set(archive.getnames())
+        assert "qa_keep.txt" in names, "the file in the shell's working directory travels"
+        assert "root/HANDOFF.md" in names, "alongside the note"
+        assert not any(n.startswith((".dockerenv", "etc")) for n in names), (
+            "but only /'s loose non-hidden files, never its directories or dotfiles"
+        )
+        handoff = tmp_path / "new" / "handoff"
+        archive.extractall(handoff, filter="data")
+
+    framing = render_handoff_framing(
+        model_id="claude-sonnet-5",
+        transfer_kind="full",
+        bundle_mount_path=CHECKPOINT_BUNDLE_MOUNT_PATH,
+        from_agent_name="a",
+        to_agent_name="a",
+        requested_work=None,
+        previous_session=None,
+        not_carried=(),
+    )
+    assert framing.system is not None
+    assert "`handoff/<path>` goes back to `/<path>`" in framing.system.blocks[0]["text"]
+    assert (handoff / "qa_keep.txt").read_text() == "8e6287d4\n", (
+        "so the successor finds it and puts it back at /qa_keep.txt"
     )

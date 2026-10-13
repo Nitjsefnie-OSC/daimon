@@ -30,6 +30,10 @@ matrix §A/§D):
   ``.config``) that is ~100 MB before the task writes anything, so every dot
   entry directly under ``$HOME`` is excluded and only the non-hidden ones are
   carried.
+- The loose non-hidden files directly under ``/`` travel too: ``/`` is where
+  the shell starts, and no environment setting moves it, so a file written
+  "in your working directory" lands there (observed live). Only files, never
+  ``/``'s directories, which are the system itself.
 - ``/tmp/work`` is an archived root too, minus its own dot entries and this
   module's scratch file. It is not where daimon would choose to put working
   files, but it is where an agent asked to "create notes.md" reached for
@@ -103,6 +107,10 @@ _EXCLUDE_LIST_PATH = "/tmp/daimon-handoff-excludes.txt"
 #: pushed an otherwise empty archive over the 20 MiB cap.
 CHECKPOINT_SCRATCH_DIR = "/tmp/work"
 
+#: The files a task wrote in the shell's starting directory, ``/``, as tar and
+#: find arguments relative to it. Evaluated by the sandbox shell.
+_CWD_FILES = "$(find / -maxdepth 1 -type f ! -name '.*' -printf '%P\\n')"
+
 _SHA1_LINE = re.compile(r"^\s*([0-9a-f]{40})\s*$", re.MULTILINE)
 
 _TOO_LARGE_LINE = re.compile(rf"^\s*{HANDOFF_TOO_LARGE_MARKER}\s+(\d+)\s*$", re.MULTILINE)
@@ -161,7 +169,7 @@ def build_checkpoint_prompt(
     home_root = _relative_to_root(home_dir)
     outputs_root = _relative_to_root(CHECKPOINT_OUTPUTS_DIR)
     scratch_root = _relative_to_root(CHECKPOINT_SCRATCH_DIR)
-    roots = [home_root, outputs_root, scratch_root]
+    roots = [home_root, outputs_root, scratch_root, _CWD_FILES]
     if repo_mount_path is not None and not leave_unsaved:
         roots.append(_relative_to_root(repo_mount_path))
     roots_argument = " ".join(roots)
@@ -209,7 +217,8 @@ def build_checkpoint_prompt(
         f"{HANDOFF_FILENAME_PREFIX}. Do exactly the steps below, in order, and add no steps "
         "of your own. Do not open or read any image file.",
         "Only the task's own work travels: the non-hidden entries in "
-        f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the outputs directory, and the working "
+        f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the files directly in / (where the shell "
+        "starts), the outputs directory, and the working "
         "repository if one is mounted. Credential mounts, hidden directories and language "
         "toolchains and their caches stay behind. The commands below already exclude every one "
         "of them; run them as written and add nothing.",
