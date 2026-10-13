@@ -10,9 +10,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast
 from uuid import UUID
 
+from daimon.core.errors import TurnError
+from daimon.core.turn.ceiling import remaining_s, turn_deadline
+from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding
+from mux.errors import UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
 from pydantic import (
     AfterValidator,
@@ -320,15 +324,9 @@ def classify_source_obligations(
     return frozenset(missing)
 
 
-async def read_preparation_counterpart(
-    request: ProviderPreparationRequest,
-) -> ProviderPreparationRequest:
-    """Capture complete source intent and refuse every unproved preservation obligation."""
-    from daimon.core.errors import TurnError
+async def prepare_source(request: ProviderPreparationRequest) -> ProviderPreparationRequest:
+    """Prepare scoped source intent; native output verification remains mandatory."""
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.turn.ceiling import remaining_s, turn_deadline
-    from daimon.core.turn.errors import AdmissionDenied
-    from mux.errors import UnsupportedCapability
 
     revision = request.admission.backend_revision
     if (
@@ -356,68 +354,83 @@ async def read_preparation_counterpart(
         ),
     )
 
-    try:
-        timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
-        source = await asyncio.wait_for(capture_preparation_source(request), timeout=timeout)
+    timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+    source = await asyncio.wait_for(capture_preparation_source(request), timeout=timeout)
+    if (
+        source.tenant_id != request.tenant_id
+        or source.agent_id
+        != derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
+        or source.resource_scope != request.scope
+        or source.source is None
+        or source.source.ref.kind != "agent"
+        or source.source.ref.tenant_id != request.scope.tenant_id
+        or source.source.lifecycle != "active"
+        or source.source.ref.id != request.admission.agent.id
+        or source.source.revision.local != request.admission.agent.version
+    ):
+        raise UnsupportedCapability(("source_context",), revision.profile)
+    # Capture is evidence of source intent, not evidence that a target preserved it.
+    spec = source.effective_spec
+    if spec is None:
+        raise UnsupportedCapability(("source_definition",), revision.profile)
+    worker = request.worker
+    if worker is not None:
+        fleet = worker.permissions.fleet
         if (
-            source.tenant_id != request.tenant_id
-            or source.agent_id
-            != derive_agent_uuid(
-                tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+            fleet.scope != request.scope
+            or not fleet.enabled
+            or not fleet.active
+            or fleet.depth != 1
+            or fleet.account_id != request.admission.account_id
+            or fleet.root.channel != revision.channel
+            or (worker.source_agent is None and worker.permissions.agent_id != source.agent_id)
+            or worker.backend.profile != revision.profile
+            or worker.backend.backend != revision.backend
+            or worker.backend.model != revision.model
+            or dict(worker.backend.requires) != dict(revision.requires)
+            or worker.backend.thread_mode != revision.thread_mode
+            or worker.permissions.spec != worker.spec
+            or worker.permissions.resources != worker.resources
+            or worker.permissions.environment != worker.environment
+            or worker.permissions.limits != worker.limits
+            or worker.permissions.subject.is_admin
+            or (request.admission.memory_read_only and not worker.permissions.memory_read_only)
+            or not request.admission.origin_seal_ids <= worker.permissions.seal_ids
+            or (
+                worker.source_agent is not None
+                and worker.source_agent != (source.source.ref, source.source.revision)
             )
-            or source.resource_scope != request.scope
-            or source.source is None
-            or source.source.ref.kind != "agent"
-            or source.source.ref.tenant_id != request.scope.tenant_id
-            or source.source.lifecycle != "active"
-            or source.source.ref.id != request.admission.agent.id
-            or source.source.revision.local != request.admission.agent.version
         ):
-            raise UnsupportedCapability(("source_context",), revision.profile)
-        # Capture is evidence of source intent, not evidence that a target preserved it.
-        spec = source.effective_spec
-        if spec is None:
-            raise UnsupportedCapability(("source_definition",), revision.profile)
-        worker = request.worker
-        if worker is not None:
-            fleet = worker.permissions.fleet
-            if (
-                fleet.scope != request.scope
-                or not fleet.enabled
-                or not fleet.active
-                or fleet.depth != 1
-                or fleet.account_id != request.admission.account_id
-                or fleet.root.channel != revision.channel
-                or (worker.source_agent is None and worker.permissions.agent_id != source.agent_id)
-                or worker.backend.profile != revision.profile
-                or worker.backend.backend != revision.backend
-                or worker.backend.model != revision.model
-                or dict(worker.backend.requires) != dict(revision.requires)
-                or worker.backend.thread_mode != revision.thread_mode
-                or worker.permissions.spec != worker.spec
-                or worker.permissions.resources != worker.resources
-                or worker.permissions.environment != worker.environment
-                or worker.permissions.limits != worker.limits
-                or worker.permissions.subject.is_admin
-                or (request.admission.memory_read_only and not worker.permissions.memory_read_only)
-                or not request.admission.origin_seal_ids <= worker.permissions.seal_ids
-                or (
-                    worker.source_agent is not None
-                    and worker.source_agent != (source.source.ref, source.source.revision)
-                )
-            ):
-                raise UnsupportedCapability(("worker_context",), revision.profile)
-        target = worker.spec if worker is not None else None
-        missing = classify_source_obligations(
-            source,
-            target,
-            environment=worker.environment if worker else None,
-            resources=worker.resources if worker else (),
-            asks_before_publishing=request.admission.asks_before_publishing,
+            raise UnsupportedCapability(("worker_context",), revision.profile)
+    target = worker.spec if worker is not None else None
+    missing = classify_source_obligations(
+        source,
+        target,
+        environment=worker.environment if worker else None,
+        resources=worker.resources if worker else (),
+        asks_before_publishing=request.admission.asks_before_publishing,
+    )
+    if missing:
+        raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
+    return replace(request, source=source)
+
+
+async def read_preparation_counterpart(
+    request: ProviderPreparationRequest,
+) -> ProviderPreparationRequest:
+    """Verify the prepared source's owned native counterpart before handoff."""
+
+    try:
+        selected = await prepare_source(request)
+        request = replace(request, deadline=selected.deadline)
+        source, revision, worker = (
+            selected.source,
+            selected.admission.backend_revision,
+            selected.worker,
         )
-        if missing:
-            raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
-        selected = replace(request, source=source)
+        if source is None or revision is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        target = worker.spec if worker is not None else None
         runtime = selected.deps.turn_runtimes.get(revision.profile)
         if runtime is None or runtime.read_agent_counterpart is None:
             raise UnsupportedCapability(("native_counterpart",), revision.profile)
@@ -527,7 +540,6 @@ def select_runtime_manifest[Plan: CounterpartPlan](
     request: ProviderPreparationRequest, plan_type: type[Plan]
 ) -> Plan:
     """Select exactly one installed scope/configuration grant before credential discovery."""
-    from daimon.core.turn.errors import AdmissionDenied
 
     revision = request.admission.backend_revision
     if revision is None:
@@ -565,7 +577,6 @@ def validate_counterpart_request(
 ) -> ConfigRevision:
     """Validate the same immutable source/configuration pins before native allocation."""
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.turn.errors import AdmissionDenied
 
     try:
         validate_counterpart_pins(plan, worker_materialization=worker_materialization)
@@ -663,7 +674,6 @@ async def read_counterpart(
     Readback detects drift; it does not create a native CAS guarantee.
     """
     from daimon.core.skills.ingest import SkillIngestError
-    from daimon.core.turn.errors import AdmissionDenied
     from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
     from mux.profiles import get_profile
 

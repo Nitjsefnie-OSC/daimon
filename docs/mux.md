@@ -2653,3 +2653,12 @@ interrupted proof restores a known receipt and resumes readback. Rejected sessio
 are archived through the bounded orphan owner only after independent identity and
 tenant/account ownership proof. Foreign or unproved sessions are never archived.
 Ordinary session calls keep their existing request and lazy-memory behavior.
+
+Explicitly selected Anthropic fleet workers can allocate a fresh native agent
+under the existing private-slot lease and claimed operation. The captured source,
+compiled agent readback and verified warm session must remain exact before the
+binding is published and input is sent. The root must grant the original scoped
+warm memory resource; readonly narrowing is retained. Cold memory and
+unrepresented credential, file, repository or application resources refuse.
+Ordinary turns and deployments without explicit backend selection retain their
+existing path.
