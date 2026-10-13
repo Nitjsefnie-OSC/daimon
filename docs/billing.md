@@ -1058,4 +1058,23 @@ returns disjoint token floors at provider list price without markup, existing
 signed customer ledger debits including markup, and pending revisions. The
 floor and debit amounts overlap and must not be added. The orchestrator rollup
 creates no second debit. Token floors omit unknown infrastructure and rates. A zero floor or settled latest observation
-is not proof of complete final usage and never releases an admitted bound.
+alone is not proof of complete final usage or permission to release an admitted bound.
+
+
+Fleet monetary interfaces are opt-in host seams; ordinary turns do not call
+them. `channel_budget.admit_fleet_worker` is the single transactional spawn and
+reservation entry point. Its producer retains ambiguous charges at their whole
+bound, releasing only a cancelled worker with proof it was never claimed or
+allocated and has no native accounting evidence. The graph covers live or
+unsettled runs plus the requested run for terminal readback; overrun latches
+belong to the current run, while other holds reduce available tenant funds.
+
+Native preparation requires fresh `require_fleet_worker_admission` readback,
+including the shared tariff check. Hosts composing fleet row writers acquire
+`stores.fleet.lock_budget` before any run or worker lock, then commit before
+native I/O. Financial locking uses the tenant's existing ledger foreign key;
+unrelated ordinary writes continue. The budget watcher has no separate worker
+deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
+admission, replacement inventory and exact final settlement remain unavailable
+here. These interfaces create no ledger charge or provider-native hard cap;
+other runs' undebited native floors are discovered by their own refresh.

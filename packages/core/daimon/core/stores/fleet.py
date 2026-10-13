@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
+from daimon.core._models import Account
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
 from daimon.core.fleet import (
@@ -39,7 +40,7 @@ from daimon.core.fleet import (
     check_result,
     worker_slot,
 )
-from daimon.core.stores import mux_state
+from daimon.core.stores import mux_state, tenant_ledger
 from pydantic import JsonValue
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -649,3 +650,136 @@ class WorkerPool:
 
     def release(self) -> None:
         self._slots.release()
+
+
+type BudgetGraph = tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...]
+
+
+async def lock_budget(
+    session: AsyncSession, *, tenant_id: uuid.UUID, actor_id: uuid.UUID, run_id: uuid.UUID
+) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
+    """Join the caller's financial transaction before any fleet row transition.
+
+    Same tenant lock as pool claims, then the financial owner's tenant row,
+    actor, runs and workers. Ordinary ledger inserts use their existing foreign
+    key lock; no global table lock or additional writer query is required.
+    Every caller composing fleet row writers must acquire this first, before
+    either a run or worker lock. Include only live/unsettled runs and the
+    requested run for terminal readback. Return original allocation stamps.
+    """
+    if not session.in_transaction():
+        raise FleetConflict("fleet budget requires an active transaction")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"fleet:{tenant_id}"},
+    )
+    # Same tenant/account order as audit and erasure.
+    tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id)
+    actor = await session.scalar(
+        select(Account.id)
+        .where(Account.id == actor_id, Account.tenant_id == tenant_id)
+        .with_for_update(read=True, key_share=True)
+    )
+    if tenant is None or actor is None:
+        raise FleetConflict("financial admission requires a live tenant actor")
+    runs = tuple(
+        await session.scalars(
+            select(FleetRunRow)
+            .where(
+                FleetRunRow.tenant_id == tenant_id,
+                (FleetRunRow.id == run_id)
+                | FleetRunRow.status.in_(RUN_TRANSITIONS)
+                | (FleetRunRow.reserved_usd > FleetRunRow.observed_usd),
+            )
+            .order_by(FleetRunRow.id)
+            .with_for_update()
+        )
+    )
+    workers = tuple(
+        await session.scalars(
+            select(FleetWorkerRow)
+            .where(
+                FleetWorkerRow.tenant_id == tenant_id,
+                FleetWorkerRow.run_id.in_(run.id for run in runs),
+            )
+            .order_by(FleetWorkerRow.id)
+            .with_for_update()
+        )
+    )
+    return (
+        tuple(
+            (_run(run), tuple(_worker(w) for w in workers if w.run_id == run.id)) for run in runs
+        ),
+        {w.id: w.started_at for w in workers},
+    )
+
+
+async def save_budget(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    graph: BudgetGraph,
+    exposures: Mapping[uuid.UUID, Decimal],
+    debits: Mapping[uuid.UUID, Decimal],
+    zero_spend: frozenset[uuid.UUID] = frozenset(),
+) -> BudgetGraph:
+    """Persist exposure selected by the sole monetary producer.
+
+    Caller has lock_budget's transaction/graph. Run sums are derived in SQL,
+    with the same exact Numeric basis as the rows, never ambient Decimal math.
+    No status, result, usage outbox or tenant debit is changed here.
+    Only the producer's proven never-allocated evidence class may decrease.
+    """
+    if not session.in_transaction():
+        raise FleetConflict("fleet budget requires an active transaction")
+    for run, workers in graph:
+        for worker in workers:
+            amount = _amount(exposures[worker.id])
+            if amount < worker.reserved_usd and worker.id not in zero_spend:
+                raise FleetConflict("unknown worker exposure cannot be released")
+            if amount == worker.reserved_usd:
+                continue
+            changed = await session.scalar(
+                update(FleetWorkerRow)
+                .where(
+                    FleetWorkerRow.tenant_id == tenant_id,
+                    FleetWorkerRow.id == worker.id,
+                    FleetWorkerRow.version == worker.version,
+                )
+                .values(
+                    reserved_usd=amount, version=FleetWorkerRow.version + 1, updated_at=func.now()
+                )
+                .returning(FleetWorkerRow.id)
+            )
+            if changed is None:
+                raise FleetConflict("worker changed during monetary update")
+        total = await session.scalar(
+            select(func.coalesce(func.sum(FleetWorkerRow.reserved_usd), 0)).where(
+                FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.run_id == run.id
+            )
+        )
+        observed = _amount(debits[run.id])
+        if total == run.reserved_usd and observed == run.observed_usd:
+            continue
+        changed = await session.scalar(
+            update(FleetRunRow)
+            .where(
+                FleetRunRow.tenant_id == tenant_id,
+                FleetRunRow.id == run.id,
+                FleetRunRow.version == run.version,
+            )
+            .values(
+                reserved_usd=total,
+                observed_usd=observed,
+                version=FleetRunRow.version + 1,
+                updated_at=func.now(),
+            )
+            .returning(FleetRunRow.id)
+        )
+        if changed is None:
+            raise FleetConflict("run changed during monetary update")
+    # Already-held locks are retained; do not acquire the funds lock twice.
+    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
+    for run, _ in graph:
+        result.append(await run_status(session, tenant_id=tenant_id, run_id=run.id))
+    return tuple(result)

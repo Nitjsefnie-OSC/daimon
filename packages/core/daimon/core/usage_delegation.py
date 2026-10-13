@@ -18,7 +18,6 @@ from daimon.core.pricing import ModelRates, ProviderPrice, minimum_cost_of, prov
 from daimon.core.stores.accounting_outbox import settled_amount
 from daimon.core.stores.root_usage import lock_root_usage
 from daimon.core.stores.turn_usage import read_accounting_revisions
-from daimon.core.turn.outcomes import current_outcome
 from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from daimon.core.usage_recording import TurnLedgerReason
 from mux.contracts.ids import ModelRef, ResourceRef, Scope
@@ -281,6 +280,8 @@ async def record_root_usage(
     Returns per-observation claim booleans in canonical-ID order; False may be
     replay or pending, as with record_provider_usage. Caller owns admission.
     """
+    from daimon.core.turn.outcomes import current_outcome
+
     if scope.session.tenant_id != str(tenant_id):
         raise ScopeViolation(scope.session.id, "root usage belongs to another tenant")
     if infrastructure_usd is not None and (
