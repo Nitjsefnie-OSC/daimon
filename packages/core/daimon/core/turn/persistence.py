@@ -8,20 +8,24 @@ import secrets
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from anthropic import APIStatusError
-from mux.contracts.events import Event, NativeProvenance
+from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, OperationStatus
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic.transport import single_attempt_mutation
 from mux.errors import ProviderError, ScopeViolation
-from mux.state.journal import JournalAppend, JournalEntry
-from mux.state.lease import Lease, StaleFence
+from mux.state.journal import JournalAppend, JournalEntry, is_authoritative
+from mux.state.lease import Lease, Slot, StaleFence
 from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore, binding_slot
 from pydantic import BaseModel, JsonValue
+
+if TYPE_CHECKING:
+    from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer
+
 
 current_persistence: ContextVar[TurnPersistence | None] = ContextVar(
     "turn_persistence", default=None
@@ -43,17 +47,20 @@ class TurnPersistence:
     def __init__(
         self,
         store: StateStore,
-        binding: ProviderBinding,
+        binding: ProviderBinding | None,
         scope: Scope,
         *,
         operation_key: str,
+        slot: Slot | None = None,
         holder: str | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         ttl: timedelta = timedelta(minutes=5),
         renew_interval_s: float = 60.0,
         send_timeout_s: float = 120.0,
     ) -> None:
-        slot = binding_slot(binding)
+        slot = binding_slot(binding) if binding is not None else slot
+        if slot is None:
+            raise ScopeViolation(operation_key, "preparation requires an explicit private slot")
         if (
             scope.is_platform
             or scope.is_legacy_host_authorized
@@ -61,14 +68,15 @@ class TurnPersistence:
             or slot.account_id not in (None, scope.account_id)
             or not operation_key.strip()
         ):
-            raise ScopeViolation(binding.id, "turn binding is outside the admitted scope")
+            raise ScopeViolation(operation_key, "turn binding is outside the admitted scope")
         if (
             not 0 < send_timeout_s < ttl.total_seconds()
             or not 0 < renew_interval_s < ttl.total_seconds()
         ):
             raise ValueError("send timeout and renewal interval must be below the lease TTL")
         self.store = store
-        self.binding = binding
+        self._binding = binding
+        self._slot = slot
         self.scope = scope
         self.operation_key = operation_key
         self._holder = holder or secrets.token_hex(16)
@@ -77,6 +85,16 @@ class TurnPersistence:
         self._renew_interval_s = renew_interval_s
         self._send_timeout_s = send_timeout_s
         self._lease: Lease | None = None
+
+    @property
+    def slot(self) -> Slot:
+        return self._slot
+
+    @property
+    def binding(self) -> ProviderBinding:
+        if self._binding is None:
+            raise ScopeViolation(self.operation_key, "preparation has no acknowledged binding")
+        return self._binding
 
     @contextlib.contextmanager
     def activate(self) -> Iterator[None]:
@@ -99,14 +117,14 @@ class TurnPersistence:
 
     def _fence(self) -> Lease:
         if self._lease is None:
-            raise ScopeViolation(self.binding.id, "turn does not hold its binding's lease")
+            raise ScopeViolation(self.operation_key, "turn does not hold its binding's lease")
         return self._lease
 
     async def _check_binding(self) -> None:
-        persisted = await self.store.get_binding(binding_slot(self.binding))
-        if persisted != self.binding:
+        persisted = await self.store.get_binding(self._slot)
+        if persisted != self._binding:
             raise ScopeViolation(
-                self.binding.id, "turn binding is not the current persisted binding"
+                self.operation_key, "turn binding is not the current persisted binding"
             )
 
     async def _renew(self) -> None:
@@ -119,7 +137,7 @@ class TurnPersistence:
     async def run[T](self, pump: Callable[[], Coroutine[Any, Any, T]]) -> T:
         await self._check_binding()
         self._lease = await self.store.acquire_lease(
-            binding_slot(self.binding),
+            self._slot,
             holder=self._holder,
             turn_id=self.operation_key,
             now=self._now(),
@@ -150,12 +168,15 @@ class TurnPersistence:
 
     async def mutate[M: BaseModel](
         self,
-        session: ResourceRef,
+        session: ResourceRef | None,
         kind: str,
         request: JsonValue,
         call: Callable[[str], Awaitable[M]],
         response: type[M],
         status: Callable[[M], OperationStatus],
+        *,
+        guard: Callable[[], Awaitable[None]] | None = None,
+        retry_failed: bool = True,
     ) -> M:
         """Intent then send CAS, or restore an acknowledged receipt.
 
@@ -163,8 +184,15 @@ class TurnPersistence:
         predecessor never does, including a crash after provider acceptance
         but before the receipt commit. Request bytes are part of the digest.
         """
-        self.check_session(self.scope, session)
-        digest = request_digest({"session": session.id, "kind": kind, "request": request})
+        if session is not None:
+            self.check_session(self.scope, session)
+        digest = request_digest(
+            {
+                "session": session.id if session is not None else None,
+                "kind": kind,
+                "request": request,
+            }
+        )
         attempt = 0
         while True:
             key = f"{self.operation_key}:{kind}:{attempt}"
@@ -173,16 +201,20 @@ class TurnPersistence:
                 key=key,
                 request_digest=digest,
                 operation_id=key,
-                slot=binding_slot(self.binding),
+                slot=self._slot,
                 now=self._now(),
             )
             record = begun.record
             if record.operation.status == "failed":
+                if not retry_failed:
+                    raise ProviderError(
+                        "upstream", retryable=False, native_code="prior_allocation_refused"
+                    )
                 attempt += 1
                 continue
             if record.operation.status in ("accepted", "processed"):
                 cached = response.model_validate(dict(record.result))
-                if isinstance(cached, CancelReceipt):
+                if isinstance(cached, CancelReceipt) and session is not None:
                     # M0 composes a fresh backend namespace around the same
                     # authorized client on restart. Preserve the native session
                     # and scope, then address it in this backend's namespace.
@@ -191,6 +223,8 @@ class TurnPersistence:
                 return cached
             if record.operation.status != "pending":
                 raise UncertainSend(f"{kind} was already claimed; reconcile before delivery")
+            if guard is not None:
+                await guard()
             try:
                 await self.store.claim_send(self.scope, key, now=self._now(), fence=self._fence())
             except SendClaimed as error:
@@ -285,6 +319,50 @@ class TurnPersistence:
             now=self._now(),
             fence=self._fence(),
             resource=session,
+        )
+
+    async def publish_worker_result(
+        self,
+        run: FleetRun,
+        worker: FleetWorker,
+        session: ResourceRef,
+        *,
+        accepted_event_ids: frozenset[str],
+    ) -> ResultPointer:
+        """Point at an accepted recorded message under this worker's active lease."""
+        from daimon.core.fleet import FleetConflict, append_result
+
+        self.check_session(self.scope, session)
+        lease = self._fence()
+        after = -1
+        result: Event | None = None
+        while events := await self.store.read_events(session.id, after=after):
+            for event in events:
+                if (
+                    event.type == "agent.message"
+                    and is_authoritative(event)
+                    and (
+                        event.id in accepted_event_ids
+                        or event.native.event_id in accepted_event_ids
+                    )
+                    and AgentMessagePayload.model_validate(event.payload).complete
+                ):
+                    result = event
+            after = events[-1].sequence
+        if result is None:
+            raise FleetConflict("worker has no accepted recorded final message")
+        projection = await self.store.projection(session.id)
+        if projection is None:
+            raise FleetConflict("worker has no owned journal projection")
+        return await append_result(
+            self.store,
+            run,
+            worker,
+            session,
+            result,
+            lease=lease,
+            cursor=projection.cursor,
+            now=self._now(),
         )
 
     async def gap(self, session: ResourceRef) -> None:

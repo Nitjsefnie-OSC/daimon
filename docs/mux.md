@@ -2489,3 +2489,12 @@ travels with the preparation request through source capture, counterpart readbac
 source recapture and native preparation. Expiry is checked before successful proof
 and prepared-turn handoffs; exhausted authority uses the existing ceiling refusal.
 The headless caller must pass that bound to the existing turn runner as well.
+
+Worker preparation can use the existing `TurnPersistence` on an explicitly
+authorized private `Slot` before any binding exists. `mutate(session=None, ...)`
+uses the same lease, durable operation and native single-attempt context; no
+placeholder session or binding is created. Allocation callers supply a fresh
+financial guard and set `retry_failed=False`. An acknowledged native resource is
+restored from its real receipt; an unknown or refused attempt never creates again.
+The result seam selects only complete, authoritative journal messages accepted by
+the worker driver and calls the existing fleet result writer under that lease.
