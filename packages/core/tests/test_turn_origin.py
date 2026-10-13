@@ -108,11 +108,26 @@ async def test_queued_message_cannot_settle_preview_created_during_running_turn(
         ), "a fresh yes after the preview turn may approve the pending preview"
 
 
-@pytest.mark.parametrize("phrase", sorted(AFFIRMATIVES))
-def test_every_affirmative_confirms_with_a_mention_commas_and_closing_punctuation(
-    phrase: str,
-) -> None:
+CONSENT_PHRASES = [
+    "yes", "y", "yes please", "yes pls", "yep", "yeah",
+    "ok", "okay", "sure", "go ahead", "do it", "confirm", "approve",
+]  # fmt: skip
+
+
+def test_the_consent_vocabulary_changes_only_on_purpose() -> None:
+    assert frozenset(CONSENT_PHRASES) == AFFIRMATIVES
+
+
+@pytest.mark.parametrize("phrase", CONSENT_PHRASES)
+def test_a_consent_phrase_confirms_only_as_the_whole_message(phrase: str) -> None:
     assert is_affirmative(f"<@123> {phrase.replace(' ', ',  ').upper()}!")
+    for reply in (f"{phrase}?", f"{phrase} but not now", f"{phrase}, after lunch"):
+        assert not is_affirmative(reply), reply
+
+
+@pytest.mark.parametrize("reply", ["yes please don't", "ok?", "sure if safe", "no", ""])
+def test_a_question_condition_or_refusal_does_not_confirm(reply: str) -> None:
+    assert not is_affirmative(reply)
 
 
 @pytest.mark.parametrize(("reply", "approved"), [("<@123> Yes, please!", True), ("yes but", False)])
