@@ -1014,6 +1014,8 @@ run-specific input join exists; prior root history is never dumped. Unsafe
 required results refuse publication. Unknown event payloads retain explicit
 metadata-only omissions. Capture checks exact private
 slots, accepted bindings, provider/profile/session identities and source versions.
+Paired worker facts and persistence rows must agree on both version and error
+code before publication and during offline verification, even with fresh hashes.
 
 Publication creates one fresh 0700 directory containing 0600 `export.json`,
 `manifest.json` and `SHA256SUMS`, using a Linux atomic no-replace rename. It

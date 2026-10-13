@@ -183,8 +183,13 @@ class FleetExportV1(EvidenceModel):
             len(self.worker_rows) != len(workers)
         ):
             refuse()
+        worker_by_id = {capture.worker.id: capture for capture in workers}
         for row in self.worker_rows:
-            if row.deadline_at.tzinfo is None:
+            worker = worker_by_id[row.worker_id].worker
+            if row.deadline_at.tzinfo is None or (row.version, row.error_code) != (
+                worker.version,
+                worker.error_code,
+            ):
                 refuse()
         for capture in workers:
             worker = capture.worker
@@ -217,7 +222,6 @@ class FleetExportV1(EvidenceModel):
                 check_result(run, worker, capture.binding, capture.result, worker.result)
         if self.fleet.wakes or self.fleet.collect is not None or self.fleet.wakes_capture_complete:
             refuse()  # Owner readers are added in their separate consumer slices.
-        worker_by_id = {w.worker.id: w for w in workers}
         seen: set[UUID | None] = set()
         sessions: set[str] = set()
         for journal in self.journals:

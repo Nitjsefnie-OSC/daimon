@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Add a testing-only scoped fleet journal exporter with atomic restricted bundles, offline verification and explicit missing owner evidence.
+- Add a testing-only scoped fleet journal exporter with atomic restricted bundles, verified paired worker generations/failure facts, offline verification and explicit missing owner evidence.
 
 - Pin the minimum completion-wake rollback reader and verify the downgrade lock against a concurrent writer.
 - Keep fleet outcome exports free of private worker specs and opaque native data while preserving result bindings and known failures.

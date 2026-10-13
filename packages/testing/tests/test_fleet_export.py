@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import replace
@@ -380,18 +381,7 @@ async def test_verifier_refuses_mutation_even_with_recomputed_hashes(tmp_path, d
             value["tenant_id"] = str(UUID(int=999))
         else:
             value["journals"][0]["binding"]["native_refs"]["password"] = "secret"
-        body.write_text(json.dumps(value))
-        manifest_path = output / "manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["export_sha256"] = hashlib.sha256(body.read_bytes()).hexdigest()
-        manifest["export_bytes"] = body.stat().st_size
-        manifest_path.write_text(json.dumps(manifest))
-        (output / "SHA256SUMS").write_text(
-            "".join(
-                f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n"
-                for name in ("export.json", "manifest.json")
-            )
-        )
+        rewrite_hashed_bundle(output, value)
     with pytest.raises(exporter.ExportRefused):
         exporter.verify_export(output)
 
@@ -505,3 +495,116 @@ async def test_binary_required_result_refuses_without_publication(tmp_path):
     with pytest.raises(exporter.ExportRefused):
         await capture(reader)
     assert not list(tmp_path.iterdir())
+
+
+def rewrite_hashed_bundle(output, value):
+    """A forger changes canonical data AND all dependent integrity metadata."""
+    body = output / "export.json"
+    body.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    manifest_path = output / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["export_sha256"] = hashlib.sha256(body.read_bytes()).hexdigest()
+    manifest["export_bytes"] = body.stat().st_size
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    (output / "SHA256SUMS").write_text(
+        "".join(
+            f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n"
+            for name in ("export.json", "manifest.json")
+        )
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [("version", 999), ("error_code", "contradictory_error")])
+async def test_paired_worker_mismatches_refuse_publication(tmp_path, field, value):
+    recording = await capture(fixture())
+    row = recording.worker_rows[0].model_copy(update={field: value})
+    inconsistent = recording.model_copy(update={"worker_rows": (row,)})
+    with pytest.raises(exporter.ExportRefused):
+        exporter.publish_export(inconsistent, tmp_path / "export")
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [("version", 999), ("error_code", "contradictory_error")])
+async def test_paired_worker_mismatches_refuse_rehashed_verification(tmp_path, field, value):
+    recording = await capture(fixture())
+    output = tmp_path / "export"
+    exporter.publish_export(recording, output)
+    original = (output / "export.json").read_text()
+    document = json.loads(original)
+    # The forgery must reach the join check, not fail just because of formatting.
+    assert json.dumps(document, ensure_ascii=False, indent=2) + "\n" == original
+    document["worker_rows"][0][field] = value
+    rewrite_hashed_bundle(output, document)
+    with pytest.raises(exporter.ExportRefused):
+        exporter.verify_export(output)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", [None, "preparation_refused"])
+async def test_paired_worker_same_generation_stays_pending(tmp_path, error_code):
+    reader = fixture()
+    reader.workers = (
+        replace(
+            reader.workers[0], error_code=error_code, status="failed" if error_code else "succeeded"
+        ),
+    )
+    recording = await capture(reader)
+    output = tmp_path / "export"
+    exporter.publish_export(recording, output)
+    loaded = exporter.verify_export(output)
+    assert loaded.fleet.workers[0].worker.version == loaded.worker_rows[0].version == 2
+    assert (
+        loaded.fleet.workers[0].worker.error_code == loaded.worker_rows[0].error_code == error_code
+    )
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["status"] == "PENDING" and manifest["scenario_credit"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [("version", 999), ("error_code", "contradictory_error")])
+async def test_paired_worker_mismatches_refuse_under_optimization(tmp_path, field, value):
+    recording = await capture(fixture())
+    control = tmp_path / "control"
+    forged = tmp_path / "forged"
+    exporter.publish_export(recording, control)
+    shutil.copytree(control, forged)
+    document = json.loads((forged / "export.json").read_text())
+    document["worker_rows"][0][field] = value
+    rewrite_hashed_bundle(forged, document)
+    code = """
+import json
+import sys
+from pathlib import Path
+from daimon.testing.fleet_export import verify_export, publish_export, ExportRefused
+control, forged = Path(sys.argv[1]), Path(sys.argv[2])
+field, replacement = sys.argv[3], json.loads(sys.argv[4])
+value = verify_export(control)
+manifest = json.loads((control / 'manifest.json').read_text())
+if manifest['status'] != 'PENDING' or manifest['scenario_credit'] != 0:
+    raise SystemExit('matching control was misclassified')
+row = value.worker_rows[0].model_copy(update={field: replacement})
+invalid = value.model_copy(update={'worker_rows': (row,)})
+try:
+    publish_export(invalid, control.parent / 'invalid')
+except ExportRefused:
+    pass
+else:
+    raise SystemExit('contradictory worker publication accepted')
+if (control.parent / 'invalid').exists():
+    raise SystemExit('contradictory worker artifact published')
+try:
+    verify_export(forged)
+except ExportRefused:
+    pass
+else:
+    raise SystemExit('contradictory rehashed worker artifact accepted')
+"""
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", code, str(control), str(forged), field, json.dumps(value)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
