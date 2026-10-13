@@ -31,6 +31,7 @@ from typing import Any
 from daimon.core._models import (
     AccountingOutbox,
     ChannelConfigRevision,
+    FleetRun,
     Journal,
     JournalSession,
     MuxOperation,
@@ -62,7 +63,7 @@ from mux.state.store import (
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, JsonValue
-from sqlalchemy import ColumnElement, func, select, text, update
+from sqlalchemy import ColumnElement, String, cast, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -506,6 +507,7 @@ async def get_fleet_root_operation(
     *,
     intent_id: uuid.UUID | None = None,
     origin_id: uuid.UUID | None = None,
+    run_id: uuid.UUID | None = None,
     request_digest: str | None = None,
     slot: Slot | None = None,
 ) -> OperationRecord | None:
@@ -516,7 +518,7 @@ async def get_fleet_root_operation(
         MuxOperation.record["result"]["intent_id"].astext == str(intent_id),
     )
     if request_digest is not None:
-        if intent_id is None or origin_id is None or slot is None:
+        if intent_id is None or origin_id is None or slot is None or run_id is not None:
             raise ValueError("complete root reservation required")
         intent = await session.scalar(
             select(TurnCardIntent.id)
@@ -549,6 +551,19 @@ async def get_fleet_root_operation(
             )
             await _save_operation(session, scope, record)
         return record
+    if run_id is not None:
+        if intent_id is not None or origin_id is not None:
+            raise ValueError("exactly one root selector required")
+        run = await session.scalar(
+            select(FleetRun).where(
+                FleetRun.id == run_id,
+                FleetRun.tenant_id == _tenant(scope.tenant_id),
+                FleetRun.orchestrator_account_id == _tenant(scope.account_id),
+            )
+        )
+        if run is None:
+            return None
+        return await get_operation(session, scope, run.operation_key + ":root:0")
     if (intent_id is None) == (origin_id is None):
         raise ValueError("exactly one root selector required")
     if origin_id is not None:
@@ -560,6 +575,42 @@ async def get_fleet_root_operation(
     record = OperationRecord.model_validate(body.record)
     operations.check_owner(record, scope)
     return record
+
+
+async def fleet_root_context_deadline(
+    session: AsyncSession,
+    *,
+    origin_id: uuid.UUID | None = None,
+    intent_id: uuid.UUID | None = None,
+    now: datetime,
+) -> datetime | None:
+    """Bound lifecycle retention by this exact processed root's live run."""
+    if (origin_id is None) == (intent_id is None):
+        raise ValueError("exactly one root selector required")
+    result = MuxOperation.record["result"]
+    run_id = func.coalesce(result["permissions"]["fleet"]["run_id"].astext, result["run_id"].astext)
+    original = func.coalesce(result["root_origin_id"].astext, result["origin_id"].astext)
+    selector = (
+        result["origin_id"].astext == str(origin_id)
+        if origin_id is not None
+        else result["intent_id"].astext == str(intent_id)
+    )
+    return (
+        await session.scalars(
+            select(FleetRun.deadline_at)
+            .join(MuxOperation, cast(FleetRun.id, String) == run_id)
+            .where(
+                MuxOperation.key.startswith("fleet_root:"),
+                MuxOperation.status == "processed",
+                FleetRun.tenant_id == MuxOperation.tenant_id,
+                cast(FleetRun.orchestrator_account_id, String) == MuxOperation.account_id,
+                FleetRun.operation_key == "fleet_root:" + original,
+                FleetRun.status.in_(("running", "collecting")),
+                FleetRun.deadline_at > now,
+                selector,
+            )
+        )
+    ).one_or_none()
 
 
 async def _owned(session: AsyncSession, scope: Scope, key: str) -> OperationRecord:

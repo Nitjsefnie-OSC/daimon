@@ -3851,6 +3851,7 @@ class DaimonBot(commands.Bot):
                     ),
                     active_turn_message_id=marked_message_id,
                     before_send=completion_root if completion_batch is not None else None,
+                    worker_finished=row if completion_batch is not None else None,
                     **provider_action_options(
                         prepared,
                         lambda: discord_provider_action_hook(
@@ -3887,6 +3888,7 @@ class DaimonBot(commands.Bot):
                     intent_id=turn_card_intent.id,
                     expected_message_id=lifecycle_holder[0].card_message_id,
                     allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
+                    keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
                 )
 
         assert outcome is not None
@@ -5044,6 +5046,7 @@ class DaimonBot(commands.Bot):
                 is_setup=admission.config.thread_binding_kind == "setup",
                 message_text=message.content,
                 queued_message=content_override is not None,
+                keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
             ) as origin:
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,
@@ -5125,6 +5128,7 @@ class DaimonBot(commands.Bot):
                     intent_id=turn_card_intent.id,
                     expected_message_id=lifecycle_holder[0].card_message_id,
                     allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
+                    keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
                 )
 
         # Reached only on the non-exceptional path -- any raise inside the try

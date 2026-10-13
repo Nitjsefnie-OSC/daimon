@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Resume opted-in fleet completion turns through their exact original frozen run, preserving grants and finite origin/card lifetimes across idle frames.
+
 - Bind Discord fleet completion wakes to the original session through normal admission, with a fresh root fence before input and no recovery to another session.
 - Add read-only QA resource manifests and independent cleanup readback checks without performing cleanup mutations.
 

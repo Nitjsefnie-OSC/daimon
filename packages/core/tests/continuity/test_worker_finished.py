@@ -759,7 +759,7 @@ async def test_missing_stale_or_incomplete_root_facts_never_authorize_a_turn(
 ):
     run, row, _, _, _ = await _ready_root(pooled)
     if sending:
-        await _start_root_wait(pooled, row)
+        row = await _start_root_wait(pooled, row)
     async with pooled.begin() as db:
         record = (await db.scalars(select(table).where(table.tenant_id == run.tenant_id))).first()
         changed = getattr(record, field) if path else value
@@ -825,6 +825,8 @@ async def _start_root_wait(pooled, row):
     claim = await claim_wake(pooled, idempotency_key=row.idempotency_key, now=_NOW)
     assert claim is not None
     assert await start_wake(pooled, claim, now=_NOW)
+    async with pooled() as db:
+        return await get_continuation(db, idempotency_key=row.idempotency_key)
 
 
 async def _completion_fence(pooled, run, row, **changes):
@@ -843,7 +845,7 @@ async def test_started_completion_fence_accepts_its_original_root_and_own_active
     pooled, provider
 ):
     run, row, store, slot, ref = await _ready_root(pooled, provider)
-    await _start_root_wait(pooled, row)
+    row = await _start_root_wait(pooled, row)
     lease = await store.acquire_lease(
         slot, holder="completion", turn_id="completion", now=_NOW, ttl=timedelta(minutes=5)
     )
@@ -876,7 +878,62 @@ async def test_completion_fence_refuses_without_the_real_start_fence(pooled, cla
 @pytest.mark.parametrize("field", ["session_id", "account_id", "agent_id"])
 async def test_completion_fence_rejects_changed_preparation(pooled, field):
     run, row, _, _, _ = await _ready_root(pooled)
-    await _start_root_wait(pooled, row)
+    row = await _start_root_wait(pooled, row)
     value = uuid.uuid4() if field == "account_id" else "changed"
     with pytest.raises(WorkerFinishedRootChanged):
         await _completion_fence(pooled, run, row, **{field: value})
+
+
+@pytest.mark.parametrize("changed", ["owner", "attempt", "started", "expired"])
+async def test_completion_fence_requires_the_exact_live_started_claim(pooled, changed):
+    run, row, _, _, _ = await _ready_root(pooled)
+    row = await _start_root_wait(pooled, row)
+    if changed == "owner":
+        row = row.model_copy(update={"lease_owner": "another-dispatcher"})
+    elif changed == "attempt":
+        row = row.model_copy(update={"attempts": row.attempts + 1})
+    elif changed == "started":
+        row = row.model_copy(update={"started_at": row.started_at + timedelta(seconds=1)})
+    with pytest.raises(WorkerFinishedRootChanged):
+        await _completion_fence(
+            pooled, run, row, **({"now": row.lease_expires_at} if changed == "expired" else {})
+        )
+
+
+async def test_worker_dispatch_callback_receives_the_persisted_started_claim(pooled):
+    run, queued, _, _, _ = await _ready_root(pooled)
+    receipts = []
+
+    async def run_decision(row, decision):
+        async with pooled() as db:
+            actual = await get_continuation(db, idempotency_key=row.idempotency_key)
+        assert row == actual and row.started_at == _NOW
+        assert row.lease_owner and row.attempts == 1 and row.status == "claimed"
+        await _completion_fence(pooled, run, row)
+        receipts.append(row)
+
+    async def context(row):
+        return None, False
+
+    def no_native(request):
+        raise AssertionError(
+            "A claimed completion callback must not consult native legacy admission"
+        )
+
+    async def notice(row, text, reason):
+        raise AssertionError("The valid completion must dispatch without a notice")
+
+    async with build_fake_anthropic(no_native) as client:
+        await dispatch_pending_continuations(
+            pooled,
+            client,
+            tenant_id=run.tenant_id,
+            platform="discord",
+            thread_id=run.thread_id,
+            now=lambda: _NOW,
+            worker_finished_decision=partial(decide_worker_finished, pooled),
+            run_decision=run_decision,
+            decision_context=context,
+            notice=notice,
+        )
+    assert len(receipts) == 1 and receipts[0].id == queued.id

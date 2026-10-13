@@ -31,11 +31,12 @@ from daimon.core.config import (
     TurnSettings,
 )
 from daimon.core.fleet import FleetRun
-from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
+from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, HostFleetPorts
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import list_events
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_stub_anthropic
 from daimon.testing.pytest_plugin import db_preflight as db_preflight
@@ -48,6 +49,13 @@ from mux.contracts.resources import AgentSpec
 from mux.profiles import backend_selection
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from packages.core.tests.turn.test_frozen_root import (
+    completion_claim,
+    run_root_input,
+    wake_frame,
+)
+from packages.core.tests.turn.test_frozen_root import root_turn as root_turn
 
 RUN = uuid.UUID(int=9001)
 WORKER = uuid.UUID(int=9002)
@@ -701,7 +709,16 @@ async def test_default_factory_does_not_import_or_discover_a_fleet_service(
 
 
 @pytest.mark.parametrize(
-    "fault", ["missing", "foreign", "expired", "wrong_responder", "wrong_thread", "valid"]
+    "fault",
+    [
+        "missing",
+        "foreign",
+        "expired",
+        "wrong_responder",
+        "wrong_thread",
+        "wrong_root_origin",
+        "valid",
+    ],
 )
 async def test_installed_bridge_requires_the_exact_active_origin(
     db_session_factory, db_clean, fault
@@ -738,7 +755,7 @@ async def test_installed_bridge_requires_the_exact_active_origin(
         root,
         fleet=replace(
             root.fleet,
-            origin_id=origin.id,
+            origin_id=uuid.uuid4() if fault == "wrong_root_origin" else origin.id,
             root=root.fleet.root.model_copy(update={"thread_id": "other"})
             if fault == "wrong_thread"
             else root.fleet.root,
@@ -766,8 +783,101 @@ async def test_installed_bridge_requires_the_exact_active_origin(
     else:
         with pytest.raises(
             ToolError,
-            match="caller_root_mismatch" if fault == "wrong_thread" else "active_origin_required",
+            match="caller_root_mismatch"
+            if fault in ("wrong_thread", "wrong_root_origin")
+            else "active_origin_required",
         ):
             await bridge.status(caller, run_id=RUN, origin_context_id=handle)
         assert owner.mock_calls == []
-        assert loads == ([(origin.id, RUN)] if fault == "wrong_thread" else [])
+        assert loads == (
+            [(origin.id, RUN)] if fault in ("wrong_thread", "wrong_root_origin") else []
+        )
+
+
+async def test_default_bridge_collects_the_original_run_from_a_real_completion_frame(root_turn):
+    from daimon.core.stores import turn_origins
+    from daimon.core.turn.runtime_manifest import read_frozen_root
+    from daimon.core.turn_origin import turn_origin
+
+    deps, prepared, grants, _, seed, scope, _, transport = root_turn
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=seed.tenant_id,
+        account_id=seed.account_id,
+        platform="discord",
+        parent_channel_id=seed.parent_channel_id,
+        thread_id=seed.thread_id,
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+        keep_fleet_root=True,
+    ) as origin:
+        grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
+        value = (*root_turn[:4], origin, *root_turn[5:])
+        await run_root_input(value)
+        original, _ = await read_frozen_root(
+            deps,
+            scope,
+            origin_id=origin.id,
+            now=datetime.now(UTC),
+        )
+
+    async def no_new_authority(*args):
+        raise AssertionError("Completion tools must reuse the original grant")
+
+    deps = replace(deps, fleet_root_grants=no_new_authority)
+    value = (deps, *value[1:])
+    row, worker = await completion_claim(value)
+    ports = HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal(1), deps=deps)
+    bridge = HostFleetToolService(
+        FleetOrchestrator(ports),
+        runtime=replace(runtime(), session_factory=deps.sessionmaker, client=deps.anthropic),
+        deps=deps,
+    )
+    caller = replace(
+        AUTH,
+        tenant_id=origin.tenant_id,
+        account_id=origin.account_id,
+        chat_agent_id=original.agent_id,
+    )
+    async with wake_frame(value) as (intent, current):
+        await run_root_input(value, intent_id=intent.id, completion=row)
+        assert current.id != original.fleet.origin_id
+        reply = await bridge.collect(
+            caller,
+            run_id=original.fleet.run_id,
+            origin_context_id=current.id,
+        )
+        assert reply == {
+            "run_id": str(original.fleet.run_id),
+            "status": "blocked",
+            "reason": "worker_failed",
+        }
+        status = await bridge.status(
+            caller,
+            run_id=original.fleet.run_id,
+            origin_context_id=current.id,
+        )
+        assert status["run_id"] == str(original.fleet.run_id)
+        with pytest.raises(ToolError, match="root_unavailable"):
+            await bridge.collect(caller, run_id=uuid.uuid4(), origin_context_id=current.id)
+    with pytest.raises(ToolError, match="active_origin_required"):
+        await bridge.collect(
+            caller,
+            run_id=original.fleet.run_id,
+            origin_context_id=current.id,
+        )
+    async with deps.sessionmaker() as db:
+        retained = await turn_origins.get_active_origin(
+            db,
+            origin_id=origin.id,
+            tenant_id=origin.tenant_id,
+            account_id=origin.account_id,
+            platform="discord",
+            now=datetime.now(UTC),
+        )
+    assert retained is not None
+    _, workers = await ports.read_run(original.fleet.scope, original.fleet.run_id)
+    assert workers == (worker,) and worker.status == "cancelled"
+    assert sum(r.method == "POST" and r.path.endswith("/events") for r in transport.requests) == 2
+    assert sum(r.method == "POST" and r.path == "/v1/sessions" for r in transport.requests) == 1

@@ -335,7 +335,15 @@ async def _decide_worker_finished(
                 return None
             if (retained.started_at is not None) != started:
                 return None
-            if started and retained.status != "claimed":
+            if started and (
+                retained.status != "claimed"
+                or not row.lease_owner
+                or retained.lease_owner != row.lease_owner
+                or retained.attempts != row.attempts
+                or retained.started_at != row.started_at
+                or retained.lease_expires_at is None
+                or retained.lease_expires_at <= now
+            ):
                 return None
             if retained.available_at is None or retained.available_at > now:
                 return None
