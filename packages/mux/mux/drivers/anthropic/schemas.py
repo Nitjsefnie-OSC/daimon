@@ -36,11 +36,14 @@ class ToolConfig(ToolDefaults):
     name: str
 
 
+type _BuiltinToolName = Literal[
+    "bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"
+]
+
+
 class BuiltinToolConfig(ToolDefaults):
-    name: Literal["bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"]
-    type: (
-        Literal["bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"] | None
-    ) = None
+    name: _BuiltinToolName
+    type: _BuiltinToolName | None = None
 
     @model_validator(mode="after")
     def matching_type(self) -> Self:
