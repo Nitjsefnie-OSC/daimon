@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import anthropic as anthropic_pkg
 import structlog
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
+from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
 )
@@ -44,7 +44,7 @@ from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
-from daimon.core.mux_compat import create_agent, legacy_call
+from daimon.core.mux_compat import legacy_call
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
@@ -1149,70 +1149,15 @@ async def bind_session_impl(
         except TimeoutError as error:
             raise ceiling_error() from error
 
+    if worker is not None:
+        raise AdmissionDenied(reason="backend_unsupported")
+
     async def _bind() -> PreparedTurn:
         # Decide the admission again at the moment its session is found,
         # reused, replaced or created: a pin, seal, protection or invoker
         # change since `admit()` applies to this turn, and a seal added in
         # between is stamped on the session (`reauthorize`).
         current = await reauthorize(deps, admission)
-        create_fresh = create_fresh_session
-        if worker is not None:
-            from daimon.core.turn.runtime_manifest import capture_preparation_source
-
-            persistence = current_persistence.get()
-            if (
-                persistence is None
-                or before_native is None
-                or deps.turn_path != "mux"
-                or not deps.channel_backends
-                or not deps.agent_backends
-                or worker.declared_drops
-                or persistence.scope != worker.permissions.fleet.scope
-            ):
-                raise AdmissionDenied(reason="backend_unsupported")
-            selected = ProviderPreparationRequest(
-                deps,
-                current,
-                persistence.scope,
-                tenant_id,
-                platform,
-                external_user_id,
-                thread_id,
-                session_account_id,
-                False,
-                capabilities,
-                transfer,
-                effective_deadline,
-                now,
-                worker=worker,
-            )
-            source = await capture_preparation_source(selected)
-            worker_spec = worker.spec
-            native = await persistence.mutate(
-                None,
-                "agent_create",
-                {
-                    "spec": worker.spec.model_dump(mode="json"),
-                    "worker": worker.digest,
-                    "source": str(source.agent_id),
-                    "source_config": source.configuration_digest,
-                },
-                lambda key: create_agent(
-                    deps.anthropic, worker_spec, scope=persistence.scope, key=key
-                ),
-                BetaManagedAgentsAgent,
-                lambda _: "processed",
-                guard=before_native,
-                retry_failed=False,
-            )
-            current = replace(current, agent=native)
-            create_fresh = functools.partial(
-                create_fresh_session,
-                resource_source=source,
-                worker=worker,
-                before_native=before_native,
-            )
-
         # Imported here, not at module scope: `session_preparation` imports
         # this module for the types above, and importing it back at module
         # scope would make either module unimportable first. The import is
@@ -1246,7 +1191,7 @@ async def bind_session_impl(
             current,
             ops=SessionOps(
                 read_live_row=get_live_thread_session,
-                create_fresh=create_fresh,
+                create_fresh=create_fresh_session,
                 bind_record=bind_recorder,
             ),
             tenant_id=tenant_id,
@@ -1277,21 +1222,6 @@ async def bind_session_impl(
             )
         prepared_turn = await _decide_reuse_again(deps, outcome, now=now)
         await _stamp_reused_seal(deps, prepared_turn, tenant_id=tenant_id, now=now)
-        if worker is not None:
-            scope = worker.permissions.fleet.scope
-            backend = managed_agents(
-                deps.anthropic,
-                scope=scope,
-                resources=frozenset({("session", prepared_turn.ma_session_id)}),
-            )
-            return replace(
-                prepared_turn,
-                _scope=scope,
-                backend=backend,
-                session_ref=resource_ref(
-                    backend, "session", prepared_turn.ma_session_id, scope=scope
-                ),
-            )
         return prepared_turn
 
     try:

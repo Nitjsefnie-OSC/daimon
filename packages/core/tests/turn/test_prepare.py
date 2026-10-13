@@ -1491,12 +1491,12 @@ async def test_worker_session_preparation_uses_one_owned_claim_and_original_sour
 
 
 @pytest.mark.parametrize("outcome", ["ack", "lost_agent_ack", "drops"])
-async def test_worker_binding_uses_canonical_agent_then_existing_source_composer(
+async def test_unproved_native_worker_refuses_before_agent_and_resource_creation(
     db_preflight, db_nullpool_engine, outcome
 ):
     from daimon.core.fleet import spawn_operation_key
     from daimon.core.stores.mux_state import PostgresStateStore
-    from daimon.core.turn.persistence import TurnPersistence, UncertainSend
+    from daimon.core.turn.persistence import TurnPersistence
     from daimon.testing.ma import FakeMemoryStoreState, combine_handlers
     from mux.contracts.config import ConfigRevision
     from mux.contracts.ids import ThreadRef
@@ -1596,23 +1596,6 @@ async def test_worker_binding_uses_canonical_agent_then_existing_source_composer
             return await persistence.run(prepare)
 
     async with deps.anthropic:
-        if outcome == "ack":
-            result = await attempt()
-            assert result.ma_session_id == "sess_new" and result.session_ref.id == "sess_new"
-            assert result._scope == worker.permissions.fleet.scope
-            assert result.admission.agent.id == executing.id
-            assert result.mapping_id is not None
-        elif outcome == "lost_agent_ack":
-            from anthropic import APIConnectionError
-
-            with pytest.raises(APIConnectionError):
-                await attempt()
-            with pytest.raises(UncertainSend):
-                await attempt()
-        else:
-            with pytest.raises(prepare_mod.AdmissionDenied):
-                await attempt()
-    agent_posts = [r for r in calls if r.url.path == "/v1/agents" and r.method == "POST"]
-    assert len(agent_posts) == (outcome != "drops")
-    if outcome != "ack":
-        assert all(r.url.path == "/v1/agents" for r in calls)
+        with pytest.raises(prepare_mod.AdmissionDenied):
+            await attempt()
+    assert calls == []
