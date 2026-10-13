@@ -80,6 +80,7 @@ from pydantic import Field, JsonValue, TypeAdapter, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.turn.admission import AdmissionGrant
     from daimon.core.turn.persistence import TurnPersistence
 
 AgentGate = Callable[[Agent], Awaitable[None]]
@@ -1033,6 +1034,92 @@ def _worker_environment(requested: EnvironmentSpec | None, granted: EnvironmentS
         )
     ):
         raise WorkerSpecRefused("sandbox", "not_subset")
+
+
+def freeze_root_permissions(
+    grants: WorkerPermissions,
+    source: BackendAgent,
+    *,
+    admission: AdmissionGrant,
+    policy: TenantAccessPolicy,
+    now: datetime,
+) -> WorkerPermissions:
+    """Pin host-owned finite grants to an admitted, captured root execution.
+
+    The caller joins the verified origin, binding and intent before this call.
+    Neither grants nor source may be built from a worker/tool/card request.
+    No latest-source read, allocation, credential lookup or financial hold occurs.
+    """
+    from daimon.core.channel_backend import check_backend
+
+    fleet, actual, effective = grants.fleet, source.source, source.effective_spec
+    if (
+        admission.tenant_id != source.tenant_id
+        or str(admission.tenant_id) != fleet.scope.tenant_id
+        or grants.subject != admission.subject
+        or grants.agent != admission.agent
+        or fleet.place != admission.run_place
+        or fleet.root.thread_id != admission.thread_id
+        or fleet.root.channel.channel_id != admission.channel_id
+        or source.resource_scope != fleet.scope
+        or grants.agent_id != source.agent_id
+        or actual is None
+        or effective is None
+        or actual.native is None
+        or actual.lifecycle != "active"
+        or actual.archived_at is not None
+        or actual.ref.kind != "agent"
+        or actual.ref.tenant_id != fleet.scope.tenant_id
+        or actual.ref.account_id
+        not in (fleet.scope.account_id, resource_scope(tenant_id=fleet.scope.tenant_id).account_id)
+        or actual.ref.provider != actual.spec.model.provider
+        or grants.source_agents != (actual.ref,)
+        or grants.source_revisions != ((actual.ref, actual.revision),)
+        or source.memory_read_only is None
+        or source.memory_required is None
+        or source.environment is None
+        or dict(grants.spec.metadata or {}) != dict(effective.metadata or {})
+    ):
+        raise WorkerSpecRefused("origin", "unbound")
+    if not grants.backend_grants or not grants.models:
+        raise WorkerSpecRefused("backend", "unbound")
+    if any(model in grants.models[:index] for index, model in enumerate(grants.models)):
+        raise WorkerSpecRefused("backend", "ambiguous")
+    try:
+        for backend in grants.backend_grants:
+            check_backend(
+                ConfigRevision.create(fleet.root.channel, 1, backend),
+                enabled_backends=policy.enabled_backends,
+            )
+    except (DaimonError, InvalidConfig):
+        raise WorkerSpecRefused("backend", "unsupported") from None
+    try:
+        caps = WorkerLimits.model_validate(grants.limits.model_dump())
+    except ValueError:
+        raise WorkerSpecRefused("budget", "unsupported") from None
+    if grants.base_system != grants.spec.system:
+        raise WorkerSpecRefused("system", "unbound")
+    narrowed = resolve_worker_spec(
+        grants,
+        grants.spec,
+        policy=policy,
+        now=now,
+        resources=grants.resources,
+        environment=grants.environment,
+        limits=caps,
+        captured_source=source,
+    ).permissions
+    return replace(
+        narrowed,
+        fleet=fleet,
+        subject=admission.subject,
+        agent=admission.agent,
+        backend_grants=grants.backend_grants,
+        models=grants.models,
+        source_agents=grants.source_agents,
+        source_revisions=grants.source_revisions,
+        agent_id=source.agent_id,
+    )
 
 
 def resolve_worker_spec(

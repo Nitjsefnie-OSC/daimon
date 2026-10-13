@@ -14,6 +14,7 @@ from daimon.core.neutral_resources import (
     WorkerPermissions,
     WorkerSpecRefused,
     audit_worker_action,
+    freeze_root_permissions,
     resolve_worker_spec,
 )
 from mux.contracts.config import BackendConfig
@@ -1533,3 +1534,324 @@ def test_without_capture_instruction_composition_retains_existing_bytes():
     root = replace(root, base_system="Root\n\nProtected rule")
     result = resolve(root, root.spec.model_copy(update={"system": "Root\n\nRole rule"}))
     assert result.spec.system == "Root\n\nProtected rule\n\nRoot\n\nRole rule"
+
+
+def frozen_root_inputs(provider="openai"):
+    from daimon.core.turn.admission import AdmissionGrant
+
+    root, source = captured_worker_source(parent(provider))
+    root = replace(
+        root,
+        source_agents=(source.source.ref,),
+        source_revisions=((source.source.ref, source.source.revision),),
+    )
+    grant = AdmissionGrant(
+        tenant_id=source.tenant_id,
+        subject=root.subject,
+        surface=Surface.CHANNEL,
+        turn_place=root.fleet.place,
+        run_place=root.fleet.place,
+        agent=root.agent,
+        channel_id=root.fleet.root.channel.channel_id,
+        thread_id=root.fleet.root.thread_id,
+        is_dm=False,
+    )
+    return root, source, grant
+
+
+@pytest.mark.parametrize("provider", ("anthropic", "openai", "gemini"))
+def test_freeze_root_preserves_admitted_authority_and_all_finite_grants(provider):
+    root, source, admission = frozen_root_inputs(provider)
+    root = replace(
+        root,
+        fleet=replace(root.fleet, place=replace(root.fleet.place, category_id="category")),
+        subject=replace(root.subject, is_admin=True),
+        models=root.models + (root.spec.model.model_copy(update={"id": "another-finite-model"}),),
+        seal_ids=frozenset({"source-seal"}),
+    )
+    admission = replace(admission, subject=root.subject, run_place=root.fleet.place)
+    result = freeze_root_permissions(root, source, admission=admission, policy=POLICY, now=NOW)
+    assert result.fleet == root.fleet and result.fleet.depth == 0
+    assert result.subject == admission.subject and result.subject.is_admin
+    assert result.agent == admission.agent
+    assert result.models == root.models and result.backend_grants == root.backend_grants
+    assert result.source_revisions == root.source_revisions
+    assert result.source_agents == root.source_agents and result.agent_id == source.agent_id
+    assert result.seal_ids == root.seal_ids and result.memory_read_only
+    assert result.spec == root.spec and result.environment == root.environment
+    assert result.limits == root.limits
+    child = resolve_worker_spec(result, result.spec, policy=POLICY, now=NOW)
+    assert child.permissions.fleet.depth == 1 and not child.permissions.subject.is_admin
+
+
+@pytest.mark.parametrize(
+    "changed",
+    (
+        "tenant",
+        "subject",
+        "agent",
+        "category",
+        "parent",
+        "thread",
+        "account",
+        "source_uuid",
+        "source_scope",
+        "source_ref",
+        "source_revision",
+        "source_account",
+        "source_archived",
+        "source_missing",
+        "effective_missing",
+        "memory_unknown",
+        "environment_missing",
+        "metadata",
+        "budget",
+        "expired",
+        "turns",
+        "models",
+        "backends",
+        "duplicate_model",
+        "prefix",
+    ),
+)
+def test_freeze_root_refuses_foreign_stale_missing_or_unbounded_facts(changed):
+    root, source, admission = frozen_root_inputs()
+    if changed == "tenant":
+        admission = replace(admission, tenant_id=uuid4())
+    elif changed == "subject":
+        admission = replace(admission, subject=replace(admission.subject, is_admin=True))
+    elif changed == "agent":
+        admission = replace(admission, agent=AgentRef.of("neighbour"))
+    elif changed == "category":
+        admission = replace(admission, run_place=replace(admission.run_place, category_id="other"))
+    elif changed == "parent":
+        admission = replace(admission, channel_id="neighbour")
+    elif changed == "thread":
+        admission = replace(admission, thread_id="neighbour")
+    elif changed == "account":
+        root = replace(root, fleet=replace(root.fleet, account_id=uuid4()))
+    elif changed == "source_uuid":
+        source = source.model_copy(update={"agent_id": uuid4()})
+    elif changed == "source_scope":
+        source = source.model_copy(
+            update={
+                "resource_scope": root.fleet.scope.model_copy(
+                    update={"principal_id": "another-caller"}
+                )
+            }
+        )
+    elif changed == "source_ref":
+        root = replace(root, source_agents=())
+    elif changed == "source_revision":
+        root = replace(root, source_revisions=((source.source.ref, Revision(local=2)),))
+    elif changed == "source_account":
+        actual = source.source.model_copy(
+            update={"ref": source.source.ref.model_copy(update={"account_id": str(uuid4())})}
+        )
+        source = source.model_copy(update={"source": actual})
+        root = replace(
+            root, source_agents=(actual.ref,), source_revisions=((actual.ref, actual.revision),)
+        )
+    elif changed == "source_archived":
+        source = source.model_copy(
+            update={"source": source.source.model_copy(update={"lifecycle": "archived"})}
+        )
+    elif changed == "source_missing":
+        source = source.model_copy(update={"source": None})
+    elif changed == "effective_missing":
+        source = source.model_copy(update={"effective_spec": None})
+    elif changed == "memory_unknown":
+        source = source.model_copy(update={"memory_required": None})
+    elif changed == "environment_missing":
+        source = source.model_copy(update={"environment": None})
+    elif changed == "metadata":
+        root = replace(root, spec=root.spec.model_copy(update={"metadata": {"owner": "foreign"}}))
+    elif changed == "budget":
+        root = replace(root, limits=root.limits.model_copy(update={"budget_usd": Decimal("NaN")}))
+    elif changed == "expired":
+        root = replace(root, limits=root.limits.model_copy(update={"deadline": NOW}))
+    elif changed == "turns":
+        root = replace(root, limits=root.limits.model_copy(update={"max_turns": True}))
+    elif changed == "models":
+        root = replace(root, models=())
+    elif changed == "backends":
+        root = replace(root, backend_grants=())
+    elif changed == "duplicate_model":
+        root = replace(root, models=root.models * 2)
+    elif changed == "prefix":
+        root = replace(root, base_system="caller instruction")
+    with pytest.raises(WorkerSpecRefused):
+        freeze_root_permissions(root, source, admission=admission, policy=POLICY, now=NOW)
+
+
+def test_frozen_root_remains_narrow_after_current_policy_or_source_changes():
+    root, source, admission = frozen_root_inputs()
+    frozen = freeze_root_permissions(root, source, admission=admission, policy=POLICY, now=NOW)
+    source = source.model_copy(
+        update={
+            "effective_spec": source.effective_spec.model_copy(
+                update={
+                    "tools": source.effective_spec.tools + (ToolSpec(name="new", kind="builtin"),)
+                }
+            )
+        }
+    )
+    with pytest.raises(WorkerSpecRefused):
+        freeze_root_permissions(root, source, admission=admission, policy=POLICY, now=NOW)
+    with pytest.raises(WorkerSpecRefused):
+        resolve_worker_spec(
+            frozen,
+            frozen.spec.model_copy(update={"tools": source.effective_spec.tools}),
+            policy=POLICY,
+            now=NOW,
+        )
+    with pytest.raises(WorkerSpecRefused):
+        freeze_root_permissions(
+            root,
+            source,
+            admission=admission,
+            policy=TenantAccessPolicy(channel_rules={"channel": ChannelRule(writers="none")}),
+            now=NOW,
+        )
+    assert frozen.spec == root.spec and frozen.models == root.models
+
+
+async def test_root_freeze_uses_actual_sdk_owner_capture_and_owned_resource_projection(
+    db_preflight, db_nullpool_engine
+):
+    from daimon.core.authz import build_agent_ref
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.mux_compat import retrieve_agent
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.turn.admission import AdmissionGrant
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.factories import make_account, make_tenant
+    from daimon.testing.ma import MARouter
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from daimon.testing.ma_transport import ScriptedTransport
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sm)
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    root = parent("openai")
+    scope = root.fleet.scope.model_copy(
+        update={"tenant_id": str(tenant.id), "account_id": str(account.id)}
+    )
+    fleet = replace(
+        root.fleet,
+        scope=scope,
+        account_id=account.id,
+        root=root.fleet.root.model_copy(
+            update={
+                "channel": root.fleet.root.channel.model_copy(update={"tenant_id": str(tenant.id)})
+            }
+        ),
+    )
+    native = ma_agent(
+        id="root-source",
+        name="root",
+        tenant_id=str(tenant.id),
+        system=root.base_system,
+        model="claude-haiku-5-5",
+    )
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents/root-source",
+        lambda request, match: httpx.Response(200, json=native.model_dump(mode="json")),
+    )
+    transport = ScriptedTransport(router=router)
+    async with transport.client() as client:
+        actual = await retrieve_agent(client, native.id, scope=scope)
+        captured = await load_backend_agent(
+            client, sm, tenant_id=tenant.id, agent_name="root", actual_agent=actual
+        )
+        captured = await project_session_resources(
+            captured,
+            agent=actual,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sm,
+            tenant_id=tenant.id,
+            agent_uuid=captured.agent_id,
+            account_id=account.id,
+            resource_scope=scope,
+            memory_read_only=True,
+        )
+    transport.assert_consumed()
+    assert captured.memory_required and captured.memory_store_id is None
+    assert captured.source.native and captured.effective_spec.extensions
+    spec = captured.effective_spec.model_copy(
+        update={
+            "model": root.spec.model,
+            "extensions": None,
+            "tools": (),
+            "skills": (),
+            "mcp_servers": (),
+            "declared_drops": ("memory", "sandbox", "tools"),
+        }
+    )
+    root = replace(
+        root,
+        fleet=fleet,
+        agent=build_agent_ref(actual.name, actual.metadata or {}),
+        spec=spec,
+        base_system=spec.system,
+        environment=None,
+        agent_id=captured.agent_id,
+        source_agents=(captured.source.ref,),
+        source_revisions=((captured.source.ref, captured.source.revision),),
+    )
+    admission = AdmissionGrant(
+        tenant_id=tenant.id,
+        subject=root.subject,
+        surface=Surface.CHANNEL,
+        turn_place=fleet.place,
+        run_place=fleet.place,
+        agent=root.agent,
+        channel_id=fleet.root.channel.channel_id,
+        thread_id=fleet.root.thread_id,
+        is_dm=False,
+    )
+    result = freeze_root_permissions(root, captured, admission=admission, policy=POLICY, now=NOW)
+    assert result.agent_id == captured.agent_id and result.source_revisions == root.source_revisions
+    assert result.spec.declared_drops == spec.declared_drops
+    assert result.environment is None and result.resources == () and result.spec.tools == ()
+    assert [(request.method, request.path) for request in transport.requests] == [
+        ("GET", "/v1/agents/root-source")
+    ]
+    # Unknown native intent remains refused by the same obligation classifier.
+    opaque = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(
+                update={
+                    "extensions": captured.effective_spec.extensions
+                    + (
+                        ExtensionConfig(
+                            namespace="anthropic.unrepresented_intent", version=1, value={}
+                        ),
+                    )
+                }
+            )
+        }
+    )
+    with pytest.raises(WorkerSpecRefused):
+        freeze_root_permissions(root, opaque, admission=admission, policy=POLICY, now=NOW)
+
+
+def test_freeze_checks_nonselected_backend_grants_against_the_original_policy():
+    root, source, admission = frozen_root_inputs("anthropic")
+    other = backend_selection("openai")
+    root = replace(
+        root,
+        backend_grants=root.backend_grants + (other,),
+        models=root.models + (ModelRef(provider=other.backend, id=other.model),),
+    )
+    with pytest.raises(WorkerSpecRefused, match="backend"):
+        freeze_root_permissions(
+            root, source, admission=admission, policy=TenantAccessPolicy(), now=NOW
+        )
+    frozen = freeze_root_permissions(root, source, admission=admission, policy=POLICY, now=NOW)
+    assert frozen.backend_grants == root.backend_grants and frozen.models == root.models
