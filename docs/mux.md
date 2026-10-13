@@ -2359,22 +2359,22 @@ readable worker-completion groundwork while completion publication stays closed.
 Operators must establish this compatible reader release as the deployed and
 permitted rollback floor before installing any producer activation.
 
-Worker-completion production is closed during the rolling release.
-`enqueue_worker_finished` retains its host signature but returns `False`
-before querying or changing a fleet run. The caller's terminal worker update
-can still commit, including at or after the deadline: the run stays at its
-current version, with no collecting transition and no wake. The run owner
-ends an expired run. Generic wake and continuation enqueue helpers raise
-`ContinuationReasonUnavailable` for the new reason before connecting;
-there is no caller override. Existing timer, handoff and input writes retain
-their behavior. A ready worker batch is not moved to collecting and no
-completion wake is published by these helpers.
+Legacy request-based completion writes remain closed. An authorized host can
+freeze an exact worker batch with `arm_worker_finished` in its own transaction.
+The existing continuation row holds the canonical batch, frozen quorum and
+original root binding/session; unready waits are excluded from normal scans.
+`enqueue_worker_finished` passes frozen members and quorum to `fleet.run_settled`
+and offers each ready wait once, in the terminal writer's transaction. Initial
+and review batches have separate deterministic keys; reviews await every member.
+The run stays running so it can admit cross-review. Deadline refusal preserves
+the worker's terminal write. Generic completion enqueue helpers remain refused.
+No caller is installed; run-end cancellation and original-root dispatch remain required.
 
 The prior release aborts an entire queue scan on the new reason, hiding
 unrelated legacy timers. Before enabling completion writes, deploy a separate
 compatible-reader release whose closed queue readers ignore unsupported
 reasons, and prove every reader and permitted rollback version is at least
-that release. The producer and its atomic all/quorum transition are deferred
+that release. Installation of frozen-wait publication remains deferred
 until that boundary is established. Rows must never be relabeled as timers or
 handoffs. Reader tests can inject future rows directly into an isolated test
 schema; those fixtures are not successful host production or fleet execution.
