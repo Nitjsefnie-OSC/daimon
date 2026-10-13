@@ -104,7 +104,7 @@ async def test_published_fresh_recipe_executes_actual_product_turn_without_prewa
         == (
             ("beta", "true"),
             ("limit", "100"),
-            ("order", "asc"),
+            ("order", "desc"),
             ("types[]", "span.model_request_end"),
         )
         and catchups[0].request_json is None,

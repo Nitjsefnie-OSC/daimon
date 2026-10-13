@@ -42,8 +42,11 @@ from daimon.core.defaults.metadata import (
     tenant_scoped_display_title,
 )
 from daimon.core.errors import SkillsListTruncatedError, StoreError
+from daimon.core.ma_resolver import ResolverCache, list_skills_lenient_cached
+from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import agent_permissions, ruled_agents
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.skills.reference_lock import lock_skills_for_attach
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
 from daimon.core.stores.domain import ChannelSkillRow
@@ -237,6 +240,11 @@ def _tenant_bodies(rows: Iterable[SkillListResponse], tenant_id: uuid.UUID) -> d
     return bodies
 
 
+def _lists_held_skills(rows: Iterable[SkillListResponse], agent: BetaManagedAgentsAgent) -> bool:
+    listed = {row.id for row in rows}
+    return all(skill.skill_id in listed for skill in agent.skills if skill.type == "custom")
+
+
 def _find(
     rows: Sequence[SkillListResponse], *, tenant_id: uuid.UUID, skill: str
 ) -> SkillListResponse | None:
@@ -341,6 +349,14 @@ async def add_skill_to_channel(
     )
     if isinstance(choice, str):
         return choice
+    # Held until the caller commits the row, so a concurrent delete either
+    # sees the row or has already deleted the skill (and this raises).
+    await lock_skills_for_attach(
+        session,
+        client,
+        [choice.skill_id],
+        backend_scope=resource_scope(tenant_id=str(tenant_id)),
+    )
     return await add_channel_skill(
         session,
         tenant_id=tenant_id,
@@ -398,11 +414,13 @@ async def turn_channel_skills(
     agent: BetaManagedAgentsAgent,
     agent_names: tuple[str | None, ...],
     rows: Sequence[ChannelSkillRow] | None = None,
+    cache: ResolverCache | None = None,
 ) -> tuple[BetaManagedAgentsCustomSkill, ...]:
     """The extra skills a turn in `channel_id` runs with, decided once per turn.
 
     One DB read; the skills list is read only when the channel adds something,
-    to keep a clashing mount (which would fail the session) out.
+    to keep a clashing mount (which would fail the session) out. With `cache`
+    that list is shared across turns for a few seconds.
     """
     if rows is None:
         async with sessionmaker() as session:
@@ -413,7 +431,15 @@ async def turn_channel_skills(
         return ()
     bodies: dict[str, str] | None
     try:
-        listed, truncated = await list_skills_lenient(client)
+        listed, truncated = await (
+            list_skills_lenient(client)
+            if cache is None
+            else list_skills_lenient_cached(client, cache)
+        )
+        if cache is not None and not truncated and not _lists_held_skills(listed, agent):
+            # The shared listing predates a skill the agent now holds, whose
+            # mount would escape the clash check: read it fresh.
+            listed, truncated = await list_skills_lenient(client)
         bodies = None if truncated else _tenant_bodies(listed, tenant_id)
     except (anthropic.APIError, SkillsListTruncatedError):
         _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))

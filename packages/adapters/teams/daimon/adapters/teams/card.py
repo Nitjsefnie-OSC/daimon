@@ -21,6 +21,7 @@ from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
     format_draft,
+    format_duration,
     format_headline,
     format_tool_lines,
     has_running_tool,
@@ -112,6 +113,7 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
         body.append(TextBlock(text=lines, font_type="Monospace", size="Small", wrap=True))
     if state.draft:
         body.append(TextBlock(text=state.draft, is_subtle=True, wrap=True))
+    body.append(TextBlock(text=format_duration(elapsed), is_subtle=True, size="Small", wrap=True))
     body.append(
         ActionSet(
             actions=[

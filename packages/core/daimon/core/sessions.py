@@ -28,6 +28,9 @@ from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_managed_agents_agent_with_overrides_params import (
     BetaManagedAgentsAgentWithOverridesParams,
 )
+from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import (
+    BetaManagedAgentsMemoryStoreResourceParam,
+)
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -68,7 +71,11 @@ from daimon.core.mcp_vault import (
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
 )
-from daimon.core.memory_resource import ensure_memory_store_and_mount, memory_instructions
+from daimon.core.memory_resource import (
+    ensure_memory_store_and_mount,
+    ensure_personal_memory_store_and_mount,
+    memory_instructions,
+)
 from daimon.core.mux_compat import agent_spec, sdk_agent, source_environment_record
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_ports_compat import (
@@ -83,12 +90,14 @@ from daimon.core.session_snapshot import (
     session_tools,
     snapshot_from_created_session,
 )
+from daimon.core.skills.unresolved import skill_unavailable, unresolved_skill_id
 from daimon.core.stores import (
     agent_files,
     agent_memory_stores,
 )
 from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import AgentRepoBindingRow, BackendAgent
 from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
@@ -97,6 +106,7 @@ from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
 from mux.errors import ScopeViolation, UnsupportedCapability
 from pydantic import SecretStr
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -434,7 +444,11 @@ async def project_session_resources(
             "memory_required": True,
             "memory_store_id": store_id,
             "memory_read_only": memory_read_only,
-            "memory_instructions": memory_instructions(read_only=memory_read_only),
+            # The projection names only the shared store, so it never promises a
+            # personal one beside it.
+            "memory_instructions": memory_instructions(
+                read_only=memory_read_only, personal_mounted=False
+            ),
         }
     )
 
@@ -466,6 +480,23 @@ def _session_metadata(
     return metadata
 
 
+async def _channel_skill_name(
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    *,
+    tenant_id: uuid.UUID | None,
+    skill_id: str,
+) -> str | None:
+    """The name a channel rule recorded for `skill_id`, best-effort (error path only)."""
+    if session_factory is None or tenant_id is None:
+        return None
+    try:
+        async with session_factory() as session:
+            rows = await list_skill_channel_rules(session, skill_id=skill_id)
+    except SQLAlchemyError:
+        return None
+    return next((row.name for row in rows if row.tenant_id == tenant_id), None)
+
+
 async def create_session(
     anthropic: AsyncAnthropic,
     *,
@@ -489,6 +520,7 @@ async def create_session(
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
+    personal_memory: bool = False,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
@@ -570,6 +602,17 @@ async def create_session(
     (``anthropic.APIError`` or ``daimon.core.errors.StoreError``) is logged
     and swallowed rather than propagated — the session is created without
     persistent memory that turn instead of failing outright.
+
+    ``personal_memory`` also mounts the caller's own personal store for this
+    agent (``ensure_personal_memory_store_and_mount``, keyed by ``account_id``),
+    with the same access as the shared one and the same degrade-not-block
+    handling. Only a caller whose session belongs to one verified person
+    passes it: an interactive chat turn (keyed on the caller's account), a hub
+    `ask`/`start_turn` (platform sign-in, owner-only handles) and a routine
+    whose result reaches only its owner (`rule_views.routine_answers_only_owner`,
+    read-only). Every other caller (agent keys, operator and CLI tokens, routines
+    with a destination) leaves it off and mounts the shared store alone, with
+    instructions that forbid recording personal facts.
 
     When the agent has a repo binding, the clone credential is resolved via
     ``daimon.core.github_repo_auth.resolve_clone_token``:
@@ -858,9 +901,30 @@ async def create_session(
                 if repo_resource is not None:
                     resources.append(repo_resource)
 
-            # Memory store (agent memory feature): degrade-not-block. A memory
+            # Memory stores (agent memory feature): degrade-not-block. A memory
             # outage must never take down chat — the session just runs without
-            # persistent memory this turn.
+            # persistent memory this turn. The personal store is resolved
+            # first because the shared store's instructions depend on it.
+            personal_mount: BetaManagedAgentsMemoryStoreResourceParam | None = None
+            if personal_memory and account_id is not None:
+                try:
+                    personal_mount = await ensure_personal_memory_store_and_mount(
+                        anthropic,
+                        session_factory,
+                        tenant_id=tenant_id,
+                        agent_id=agent_uuid,
+                        account_id=account_id,
+                        agent_name=agent.name,
+                        read_only=memory_read_only,
+                    )
+                except (anthropic_pkg.APIError, StoreError) as exc:
+                    _log.warning(
+                        "memory_store.personal_mount_failed",
+                        tenant_id=str(tenant_id),
+                        agent_uuid=str(agent_uuid),
+                        agent_name=agent.name,
+                        error=str(exc),
+                    )
             try:
                 memory_mount = await ensure_memory_store_and_mount(
                     anthropic,
@@ -869,6 +933,7 @@ async def create_session(
                     agent_id=agent_uuid,
                     agent_name=resource_agent.name,
                     read_only=memory_read_only,
+                    personal_mounted=personal_mount is not None,
                 )
                 resources.append(memory_mount)
             except (anthropic_pkg.APIError, StoreError) as exc:
@@ -881,6 +946,8 @@ async def create_session(
                     agent_name=resource_agent.name,
                     error=str(exc),
                 )
+            if personal_mount is not None:
+                resources.append(personal_mount)
 
         # A server somebody connected through OAuth authenticates from the
         # connecting person's vault alone, so mounting it on anyone else's session
@@ -1018,21 +1085,41 @@ async def create_session(
             if before_create is not None:
                 # The caller's last access decision, after every await above.
                 await before_create()
-            created = await create_session_record(
-                anthropic,
-                scope=scope,
-                agent=agent_argument,
-                environment_id=environment.id,
-                metadata=metadata if metadata else None,
-                vault_ids=(
-                    [caller_vault_id, vault_id]
-                    if caller_vault_id is not None and vault_id is not None
-                    else [vault_id]
-                    if vault_id is not None
-                    else None
-                ),
-                resources=resources if resources else None,
-            )
+            try:
+                created = await create_session_record(
+                    anthropic,
+                    scope=scope,
+                    agent=agent_argument,
+                    environment_id=environment.id,
+                    metadata=metadata if metadata else None,
+                    vault_ids=(
+                        [caller_vault_id, vault_id]
+                        if caller_vault_id is not None and vault_id is not None
+                        else [vault_id]
+                        if vault_id is not None
+                        else None
+                    ),
+                    resources=resources if resources else None,
+                )
+            except anthropic_pkg.BadRequestError as error:
+                unresolved = unresolved_skill_id(error)
+                if unresolved is None:
+                    raise
+                # Every turn fails this way until the skill is detached: say which.
+                _log.warning(
+                    "session.skill_unresolved",
+                    agent_id=agent.id,
+                    skill_id=unresolved[0],
+                    version=unresolved[1],
+                )
+                raise skill_unavailable(
+                    skill_id=unresolved[0],
+                    agent=agent,
+                    channel_skills=channel_skills,
+                    channel_skill_name=await _channel_skill_name(
+                        session_factory, tenant_id=tenant_id, skill_id=unresolved[0]
+                    ),
+                ) from error
             if app_access is not None:
                 assert (
                     session_factory is not None and tenant_id is not None and vault_id is not None

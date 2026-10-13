@@ -546,7 +546,7 @@ async def test_pinned_product_turn_executes_real_admission_preparation_and_postg
         == (
             ("beta", "true"),
             ("limit", "100"),
-            ("order", "asc"),
+            ("order", "desc"),
             ("types[]", "span.model_request_end"),
         )
         and catchups[0].request_json is None,
@@ -659,6 +659,10 @@ async def test_exact_d1_d7_pair_uses_n6_resource_edge_and_real_readback(
                 "GET",
                 "/v1/skills",
                 httpx.Response(200, json={"data": [payload], "next_page": None}),
+            ),
+            # The attach lock checks the skill still exists before attaching it.
+            ScriptedReply(
+                "GET", "/v1/skills/skill_library_product", httpx.Response(200, json=payload)
             ),
         )
         bundle = bundle_from_markdown(

@@ -73,7 +73,11 @@ Deletion does not remove usage and billing records. These records can still
 contain your chat platform user ID and conversation ID. Uploaded skill files at
 Anthropic stay. Daimon deletes skill records owned by your account. Records
 owned by a shared agent stay, but the link to your account is cleared.
-Shared agent memory may still contain information about you. Account deletion
+Shared agent memory may still contain information about you. Your personal
+memory with each agent (where an agent keeps your own preferences) is deleted
+from Anthropic with your account. You can also see it with `/memory mine` (`memory
+mine` on Teams) and clear it with `/memory forget-mine`, which asks you to confirm
+with a code first. Only you can see or clear your own personal memory. Account deletion
 does not remove hosted charts, notebooks or reports. The GitHub
 authorization also stays on your GitHub account. Revoke it in your GitHub
 settings if you want to remove it there.

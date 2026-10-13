@@ -35,6 +35,7 @@ async def _seed_request(
     expires_at: datetime | None = None,
     agent_id: uuid.UUID | None = None,
     origin_thread_id: str | None = None,
+    platform: str | None = None,
 ) -> CredentialRequestRow:
     return await store.create_credential_request(
         session,
@@ -53,6 +54,7 @@ async def _seed_request(
         target_name="tester",
         requested_work=None,
         origin_thread_id=origin_thread_id,
+        platform=platform,
     )
 
 
@@ -570,3 +572,137 @@ async def test_supersede_marks_used_with_replaced_outcome_once(
         )
         is None
     ), "a retired request can no longer be consumed by a late click"
+
+
+async def test_expire_unclicked_spends_only_posted_past_deadline_rows_on_the_platform_once(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(tz=UTC)
+    past = now - timedelta(minutes=1)
+
+    async def seed(*, platform: str, expires_at: datetime, posted: bool) -> CredentialRequestRow:
+        row = await _seed_request(
+            db_session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            expires_at=expires_at,
+            origin_thread_id="thread-1",
+            platform=platform,
+        )
+        if posted:
+            await store.update_credential_request_message(
+                db_session, token=row.token, posted_message_id="msg-1"
+            )
+        return row
+
+    due = await seed(platform="discord", expires_at=past, posted=True)
+    live = await seed(platform="discord", expires_at=now + timedelta(minutes=5), posted=True)
+    never_posted = await seed(platform="discord", expires_at=past, posted=False)
+    other_platform = await seed(platform="slack", expires_at=past, posted=True)
+    clicked = await seed(platform="discord", expires_at=now + timedelta(seconds=1), posted=True)
+    assert await store.consume_credential_request(db_session, token=clicked.token, now=now)
+    later = now + timedelta(minutes=1)
+
+    first = await store.expire_unclicked_credential_requests(
+        db_session, platform="discord", now=later
+    )
+    second = await store.expire_unclicked_credential_requests(
+        db_session, platform="discord", now=later
+    )
+
+    assert [row.token for row in first] == [due.token]
+    assert first[0].used_at == later and first[0].outcome == "expired"
+    assert second == [], "a retired form is retired once"
+    for untouched in (live, never_posted, other_platform):
+        after = await store.peek_credential_request(db_session, token=untouched.token)
+        assert after is not None and after.used_at is None and after.outcome is None
+    after_click = await store.peek_credential_request(db_session, token=clicked.token)
+    assert after_click is not None and after_click.outcome is None, "a clicked form is not expired"
+
+
+async def test_expiry_sweep_and_submit_never_both_spend_one_form() -> None:
+    """Separate connections, both lock orders, and two sweepers at once.
+
+    A submit holding the row (uncommitted) is skipped by the sweep and keeps
+    its own outcome; a sweep holding the row makes a waiting submit return
+    None; two sweepers claim disjoint rows. Scoped to a fresh platform name
+    so parallel workers' rows are never swept here.
+    """
+    dsn = _concurrency_dsn()
+    engines = [create_async_engine(dsn) for _ in range(2)]
+    a, b = (async_sessionmaker(engine, expire_on_commit=False) for engine in engines)
+    platform = f"race-{uuid.uuid4()}"
+    deadline = datetime.now(tz=UTC) + timedelta(minutes=30)
+    before, after = deadline - timedelta(seconds=1), deadline + timedelta(minutes=1)
+
+    async def posted_form() -> str:
+        async with a.begin() as seed:
+            tenant = await make_tenant(seed)
+            account = await make_account(seed, tenant=tenant)
+            row = await _seed_request(
+                seed,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                expires_at=deadline,
+                platform=platform,
+            )
+            await store.update_credential_request_message(
+                seed, token=row.token, posted_message_id="msg"
+            )
+        return row.token
+
+    try:
+        submitting = await posted_form()
+        async with a.begin() as submit:
+            assert await store.consume_credential_request(submit, token=submitting, now=before)
+            async with b.begin() as sweep:
+                assert (
+                    await store.expire_unclicked_credential_requests(
+                        sweep, platform=platform, now=after
+                    )
+                    == []
+                ), "a form being submitted is skipped, not waited on"
+            await store.set_credential_request_outcome(submit, token=submitting, outcome="applied")
+        async with b.begin() as sweep:
+            assert (
+                await store.expire_unclicked_credential_requests(
+                    sweep, platform=platform, now=after
+                )
+                == []
+            )
+        async with a() as check:
+            submitted = await store.peek_credential_request(check, token=submitting)
+        assert submitted is not None and submitted.outcome == "applied"
+
+        expiring = await posted_form()
+        async with b.begin() as sweep:
+            claimed = await store.expire_unclicked_credential_requests(
+                sweep, platform=platform, now=after
+            )
+            assert [row.token for row in claimed] == [expiring]
+
+            async def late_submit() -> CredentialRequestRow | None:
+                async with a.begin() as submit:
+                    return await store.consume_credential_request(
+                        submit, token=expiring, now=before
+                    )
+
+            waiting = asyncio.create_task(late_submit())
+            await asyncio.sleep(0.2)
+            assert not waiting.done(), "the submit waits on the sweep's row lock"
+        assert await waiting is None, "a submit that loses to the sweep spends nothing"
+
+        first, second = await posted_form(), await posted_form()
+        async with a.begin() as sweep_a, b.begin() as sweep_b:
+            got_a = await store.expire_unclicked_credential_requests(
+                sweep_a, platform=platform, now=after, limit=1
+            )
+            got_b = await store.expire_unclicked_credential_requests(
+                sweep_b, platform=platform, now=after, limit=1
+            )
+        assert {got_a[0].token, got_b[0].token} == {first, second}
+    finally:
+        for engine in engines:
+            await engine.dispose()

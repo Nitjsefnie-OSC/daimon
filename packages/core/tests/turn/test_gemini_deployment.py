@@ -1123,7 +1123,7 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
     async def forbidden_anthropic_backfill(*args: object, **kwargs: object) -> None:
         pytest.fail("foreign native sessions must not enter Anthropic billing catch-up")
 
-    monkeypatch.setattr("daimon.core.turn.run.reconcile_unbilled", forbidden_anthropic_backfill)
+    monkeypatch.setattr("daimon.core.turn.run.settle_session", forbidden_anthropic_backfill)
 
     session_id = None
     for index in range(2):

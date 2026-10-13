@@ -109,6 +109,11 @@ It provisions and targets a single local tenant, loads the whole tree, then
 reconciles skills, environments and agents in that order, sweeping in reverse
 afterwards. Existing installs pick the change up through the per-tenant path
 described below, and `verify` is the command that walks all of them.
+Registering a tenant (here, even with `--dry-run`, and on every platform's
+join) fails before any reconcile when its id begins with the same 8 hex
+characters as an existing tenant's, since skill titles name a tenant by
+those: the operator sees an error naming the workspace, and existing tenants
+carry on normally.
 
 Everything that can fail before a write does. Bad YAML, a filename that
 disagrees with a `name`, and an agent referencing a skill directory that does
@@ -129,6 +134,12 @@ fingerprint table described below.
 tree is archived, never hard-deleted; a skill is hard-deleted. Only resources
 stamped as defaults-managed are candidates, so an operator's own agents are
 never touched.
+Skills carry no managed marker, so the skill sweep spares any skill a
+non-archived agent still pins or a channel rule (`channel_skills`) still adds;
+deleting either would fail every turn that mounts it. Each delete is decided
+again under the skill's reference lock, so a reference added after the sweep's
+first look also keeps it. If the channel rules can't be read, the skill sweep
+is skipped and reported as failed rather than run without them.
 
 Apply is not something you only run by hand. It runs at container start and
 from the compose `init` service, and a per-tenant equivalent,
@@ -217,7 +228,8 @@ toolset into each seeded agent, so an apply run without it produces agents
 that differ from a deployed one. Both are in
 [configuration.md](configuration.md).
 
-The seeded Daimon prompt describes opt-in Markdown tables in final replies: Discord renders
-them as PNG attachments and Slack uses native table blocks; Teams shows Markdown tables
+The seeded Daimon prompt describes Markdown tables in final replies: Discord renders
+them as PNG attachments unless the tenant opts out, and Slack uses native table blocks
+when the tenant enables them; Teams shows Markdown tables
 as they are, with no setting. Existing custom agent
 prompts are unchanged; see [platform table rendering](architecture.md#platform-table-rendering).

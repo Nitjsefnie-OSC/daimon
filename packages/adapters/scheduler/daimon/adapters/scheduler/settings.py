@@ -36,15 +36,14 @@ class SchedulerSettings(BaseSettings):
     )
 
     usage_sweep_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Run the headless usage sweep (usage backfill for MCP start_turn "
-            "sessions). Off by default: the current sweep lists every session in "
-            "the shared Managed Agents workspace and drains its request rate "
-            "limit. While off, headless MCP turns are not metered and usage a live adapter "
-            "missed is not recovered; turning it "
-            "back on backfills them, since recording is idempotent and the "
-            "startup pass reads every stamped session still in the workspace."
+            "Run the headless usage sweep: settle the MCP agent-chat sessions "
+            "whose turns nobody read to the end (each headless send leaves a "
+            "settle request; a status read that sees the turn end settles it "
+            "first). It reads only the sessions those requests name. When off, "
+            "such a session is billed the next time a read sees its last turn "
+            "ended."
         ),
     )
 

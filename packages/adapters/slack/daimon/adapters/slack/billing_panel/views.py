@@ -243,8 +243,8 @@ def build_billing_container(
     elements: list[dict[str, Any]] = []
     if state.is_admin:
         elements.append(_topup_select(state))
-        if state.has_redeemable_promo_code:
-            elements.append(_button(REDEEM_CODE, REDEEM_OPEN_ACTION_ID))
+    if state.has_redeemable_promo_code:
+        elements.append(_button(REDEEM_CODE, REDEEM_OPEN_ACTION_ID))
     if state.timed_credit:
         elements.append(_button(EXPIRY_DATES, EXPIRY_OPEN_ACTION_ID))
     if elements:

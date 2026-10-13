@@ -666,7 +666,7 @@ async def capture_run(
             assert request.query == (
                 ("beta", "true"),
                 ("limit", "100"),
-                ("order", "asc"),
+                ("order", "desc"),
                 ("types[]", "span.model_request_end"),
             )
             assert request.body == b""

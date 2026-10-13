@@ -40,7 +40,7 @@ from daimon.adapters.cli.commands.agents import (
 )
 from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime
 from daimon.core import agent_identity
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -49,7 +49,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
-from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.agent_google_binding import get_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
@@ -780,6 +780,16 @@ async def test_agents_archive_clears_scope_rows_naming_the_archived_agent(
             tenant_id=tenant_id,
             agent_name="survivor",
         )
+        await set_access_policy(
+            s,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(
+                agent_rules={
+                    "doomed": AgentRule(runs_in=("c1",)),
+                    "survivor": AgentRule(runs_in=("c2",)),
+                }
+            ),
+        )
 
     agent_data = _agent_json(agent_id="ag_doomed", name="doomed", tenant_id=tenant_id)
 
@@ -804,6 +814,11 @@ async def test_agents_archive_clears_scope_rows_naming_the_archived_agent(
     )
     assert untouched is not None and untouched.agent_name == "survivor", (
         "a channel row naming a different agent must survive the archive"
+    )
+    async with db_session_factory() as s:
+        rules = (await load_access_policy(s, tenant_id=tenant_id)).agent_rules
+    assert rules == {"survivor": AgentRule(runs_in=("c2",))}, (
+        "the archived agent's rule goes with it, or a later agent taking the name inherits it"
     )
 
 

@@ -400,16 +400,20 @@ def anthropic_turn_tape(
         return tape
     if turn.turn != 1:
         raise ValueError("first-pass usage catch-up requires a fresh first-turn tape")
-    # The fresh session's first ascending usage scan.
+    # The turn-end settle of the fresh session: its spans, newest first.
     # Exact query, native spans and dependencies; no global replay allowance.
     catchup = WireReply(
         id="usage-catchup",
         method="GET",
         path=path + "/events",
-        query=(*QUERY, ("limit", "100"), ("order", "asc"), ("types[]", "span.model_request_end")),
+        query=(*QUERY, ("limit", "100"), ("order", "desc"), ("types[]", "span.model_request_end")),
         headers=HEADERS,
         response_json={
-            "data": [event for event in turn.events if event["type"] == "span.model_request_end"],
+            "data": [
+                event
+                for event in reversed(turn.events)
+                if event["type"] == "span.model_request_end"
+            ],
             "next_page": None,
         },
         after=("send", "stream"),

@@ -90,6 +90,7 @@ from daimon.core.session_update_ops import (
     SessionBusy,
     apply_update_ops,
 )
+from daimon.core.skills.unresolved import SkillUnavailable, decode_reason, encode_reason
 from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind
 from daimon.core.stores.session_preparations import (
@@ -410,6 +411,10 @@ async def _run_replacement(
     if preparation.stage == "failed":
         due = retry_after(preparation)
         if now < due:
+            missing = decode_reason(preparation.failure_reason)
+            if missing is not None:
+                # Still backing off a missing skill: say which, as the first refusal did.
+                raise missing
             return PreparationFailure(
                 reasons=reasons, stage=failed_stage(preparation.failure_reason), retry_after=due
             )
@@ -461,9 +466,12 @@ async def _run_replacement(
         )
     except (anthropic_pkg.APIError, DaimonError) as error:
         async with deps.sessionmaker() as session, session.begin():
-            await fail_preparation(
-                session, id=preparation.id, reason=failure_reason(stage, error), now=now
+            reason = (
+                f"{stage}: {encode_reason(error)}"
+                if isinstance(error, SkillUnavailable)
+                else failure_reason(stage, error)
             )
+            await fail_preparation(session, id=preparation.id, reason=reason, now=now)
         log.warning(
             "session_preparation.failed",
             stage=stage,
@@ -474,6 +482,10 @@ async def _run_replacement(
         if isinstance(error, AdmissionDenied | DmSourceSealedError | SessionBusyError):
             # Decided again just before the successor was created: refused or
             # deferred for a seal, not a failed preparation.
+            raise error
+        if isinstance(error, SkillUnavailable):
+            # A skill the successor mounts is gone: asking again fails the same
+            # way, so the turn says which skill to detach instead.
             raise error
         return PreparationFailure(reasons=reasons, stage=stage, retry_after=now)
 
@@ -990,6 +1002,7 @@ async def _prepare_session_for_turn_locked(
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
                 confirmed_tools=backend_switch_tools_for_turn(deps),
+                mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
             )
 
         if isinstance(decision, ReuseAsIs):

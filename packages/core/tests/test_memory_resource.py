@@ -6,16 +6,25 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import anthropic
+import httpx
 import pytest
 from daimon.core.memory_resource import (
     MEMORY_INSTRUCTIONS,
+    PERSONAL_MEMORY_INSTRUCTIONS,
     READ_ONLY_MEMORY_INSTRUCTIONS,
+    READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS,
+    SHARED_ONLY_MEMORY_INSTRUCTIONS,
     archive_memory_store_for_agent,
+    delete_personal_memory_stores_for_account,
     ensure_memory_store_and_mount,
+    ensure_personal_memory_store_and_mount,
 )
 from daimon.core.stores.agent_memory_stores import (
     get_memory_store_id,
+    get_personal_memory_store_id,
     insert_memory_store,
+    insert_personal_memory_store,
 )
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
@@ -48,7 +57,7 @@ async def test_cold_path_creates_store_and_binding(
     assert mount["type"] == "memory_store"
     assert mount["access"] == ("read_only" if read_only else "read_write")
     assert mount["instructions"] == (
-        READ_ONLY_MEMORY_INSTRUCTIONS if read_only else MEMORY_INSTRUCTIONS
+        READ_ONLY_MEMORY_INSTRUCTIONS if read_only else SHARED_ONLY_MEMORY_INSTRUCTIONS
     )
     assert mount["memory_store_id"] in state.stores
     created = state.stores[mount["memory_store_id"]]
@@ -224,3 +233,263 @@ async def test_archive_helper_archives_and_clears(
     await archive_memory_store_for_agent(
         client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id
     )
+
+
+async def test_shared_instructions_point_personal_facts_at_the_personal_store(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """With a personal store beside it, the shared store says where personal facts
+    go; without one, it forbids recording them at all."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    client = build_fake_anthropic(make_fake_memory_store_handler(FakeMemoryStoreState()))
+
+    beside = await ensure_memory_store_and_mount(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        agent_name="daimon",
+        personal_mounted=True,
+    )
+    alone = await ensure_memory_store_and_mount(
+        client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon"
+    )
+
+    assert beside["instructions"] == MEMORY_INSTRUCTIONS
+    assert "personal memory" in MEMORY_INSTRUCTIONS
+    assert alone["instructions"] == SHARED_ONLY_MEMORY_INSTRUCTIONS
+    assert "No personal memory is mounted" in SHARED_ONLY_MEMORY_INSTRUCTIONS
+    assert beside["memory_store_id"] == alone["memory_store_id"], "one shared store per agent"
+    for text in (
+        MEMORY_INSTRUCTIONS,
+        SHARED_ONLY_MEMORY_INSTRUCTIONS,
+        PERSONAL_MEMORY_INSTRUCTIONS,
+        READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS,
+    ):
+        assert len(text) <= 4096, "MA caps per-attachment instructions at 4096 characters"
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_personal_store_is_one_per_person_and_agent(
+    read_only: bool, db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    alice, bob = uuid.uuid4(), uuid.uuid4()
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+
+    async def mount(account_id: uuid.UUID, agent: uuid.UUID = agent_id):
+        return await ensure_personal_memory_store_and_mount(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_id=agent,
+            account_id=account_id,
+            agent_name="daimon",
+            read_only=read_only,
+        )
+
+    first = await mount(alice)
+    again = await mount(alice)
+    other_person = await mount(bob)
+    other_agent = await mount(alice, uuid.uuid4())
+
+    assert first["memory_store_id"] == again["memory_store_id"]
+    assert (
+        len(
+            {
+                first["memory_store_id"],
+                other_person["memory_store_id"],
+                other_agent["memory_store_id"],
+            }
+        )
+        == 3
+    )
+    assert first["access"] == ("read_only" if read_only else "read_write")
+    assert first["instructions"] == (
+        READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS if read_only else PERSONAL_MEMORY_INSTRUCTIONS
+    )
+    created = state.stores[first["memory_store_id"]]
+    assert created["name"] == f"personal {alice}", "mounts at /mnt/memory/personal-<account>/"
+    assert created["metadata"] == {
+        "daimon_tenant": str(tenant.id),
+        "daimon_agent": str(agent_id),
+        "daimon_account": str(alice),
+    }
+    async with db_session_factory() as s:
+        assert (
+            await get_personal_memory_store_id(
+                s, tenant_id=tenant.id, agent_id=agent_id, account_id=alice
+            )
+            == first["memory_store_id"]
+        )
+        assert await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_id) is None, (
+            "a personal store never stands in for the shared one"
+        )
+
+
+async def test_archive_helper_archives_every_personal_store_of_the_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id, kept_agent = uuid.uuid4(), uuid.uuid4()
+    alice = uuid.uuid4()
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+    personal = await ensure_personal_memory_store_and_mount(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        account_id=alice,
+        agent_name="daimon",
+    )
+    kept = await ensure_personal_memory_store_and_mount(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=kept_agent,
+        account_id=alice,
+        agent_name="other",
+    )
+
+    await archive_memory_store_for_agent(
+        client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id
+    )
+
+    assert state.stores[personal["memory_store_id"]]["archived_at"] is not None
+    assert state.stores[kept["memory_store_id"]]["archived_at"] is None
+    async with db_session_factory() as s:
+        assert (
+            await get_personal_memory_store_id(
+                s, tenant_id=tenant.id, agent_id=agent_id, account_id=alice
+            )
+            is None
+        )
+
+
+async def test_account_erasure_deletes_only_that_persons_stores(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    alice, bob = uuid.uuid4(), uuid.uuid4()
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+    shared = await ensure_memory_store_and_mount(
+        client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon"
+    )
+    mounts = {}
+    for account_id in (alice, bob):
+        mounts[account_id] = await ensure_personal_memory_store_and_mount(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            account_id=account_id,
+            agent_name="daimon",
+        )
+
+    assert await delete_personal_memory_stores_for_account(
+        client, db_session_factory, account_id=alice
+    )
+
+    assert mounts[alice]["memory_store_id"] not in state.stores, "deleted, not archived"
+    assert mounts[bob]["memory_store_id"] in state.stores
+    assert shared["memory_store_id"] in state.stores
+    async with db_session_factory() as s:
+        assert (
+            await get_personal_memory_store_id(
+                s, tenant_id=tenant.id, agent_id=agent_id, account_id=alice
+            )
+            is None
+        )
+
+
+async def test_account_erasure_keeps_the_binding_of_a_store_it_could_not_delete(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    agent_id, alice = uuid.uuid4(), uuid.uuid4()
+    await insert_personal_memory_store(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        account_id=alice,
+        memory_store_id="memstore_STUCK",
+    )
+    await db_session.commit()
+
+    def unavailable(request):
+        return httpx.Response(503, json={"type": "error", "error": {"type": "overloaded_error"}})
+
+    client = build_fake_anthropic(unavailable).with_options(max_retries=0)
+
+    assert not await delete_personal_memory_stores_for_account(
+        client, db_session_factory, account_id=alice
+    )
+    async with db_session_factory() as s:
+        assert (
+            await get_personal_memory_store_id(
+                s, tenant_id=tenant.id, agent_id=agent_id, account_id=alice
+            )
+            == "memstore_STUCK"
+        ), "the binding is the record of the store still to delete"
+
+
+async def test_one_failed_personal_archive_does_not_leave_the_others_live(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores.agent_memory_stores import list_personal_memory_stores_for_account
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    alice, bob = uuid.uuid4(), uuid.uuid4()
+    state = FakeMemoryStoreState()
+    handler = make_fake_memory_store_handler(state)
+    stuck: set[str] = set()
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and any(
+            request.url.path == f"/v1/memory_stores/{sid}/archive" for sid in stuck
+        ):
+            return httpx.Response(400, json={"type": "error", "error": {"type": "api_error"}})
+        return handler(request)
+
+    client = build_fake_anthropic(flaky)
+    shared = await ensure_memory_store_and_mount(
+        client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon"
+    )
+    mounts = {}
+    for account_id in (alice, bob):
+        mounts[account_id] = await ensure_personal_memory_store_and_mount(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            account_id=account_id,
+            agent_name="daimon",
+        )
+    stuck.add(mounts[alice]["memory_store_id"])
+
+    with pytest.raises(anthropic.APIError):
+        await archive_memory_store_for_agent(
+            client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id
+        )
+
+    assert state.stores[mounts[bob]["memory_store_id"]]["archived_at"] is not None
+    assert state.stores[shared["memory_store_id"]]["archived_at"] is not None
+    async with db_session_factory() as s:
+        assert await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_id) is None
+        for account_id in (alice, bob):
+            inventory = await list_personal_memory_stores_for_account(s, account_id=account_id)
+            assert [store for _, _, store in inventory] == [
+                mounts[account_id]["memory_store_id"]
+            ], "every personal store stays in the erasure inventory"

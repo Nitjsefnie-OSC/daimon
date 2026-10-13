@@ -210,6 +210,11 @@ async def test_real_ingress_confirms_persisted_rule_and_reacts_without_native_tu
     assert not bot._processing and not bot._pending
 
 
+def _notices(bot) -> int:
+    """The opt-in notice's own reactions, apart from the default protected-channel signal."""
+    return sum(call.args[2] == "⛔" for call in bot.http.add_reaction.await_args_list)
+
+
 @pytest.mark.parametrize("enabled,owner", [(False, True), (True, False), (False, False)])
 async def test_disabled_or_non_owner_does_not_allocate_or_call_notice(
     bot, enabled, owner, monkeypatch
@@ -222,7 +227,8 @@ async def test_disabled_or_non_owner_does_not_allocate_or_call_notice(
     await bot.on_message(message(bot))
     callback.assert_not_awaited()
     assert not hasattr(bot, "_writers_none_notice_limiter")
-    bot.http.add_reaction.assert_not_awaited()
+    # Off, the opt-in notice never reacts; the default protected-channel signal may.
+    assert _notices(bot) == 0
 
 
 async def test_unknown_protection_is_never_relabelled_as_confirmed(bot, monkeypatch):
@@ -316,7 +322,7 @@ async def test_late_admission_denial_keeps_real_rule_and_prompt_gates(
 
     monkeypatch.setattr(module, "admit", refused)
     await bot._orchestrate(message(bot, thread_id=70), "60", TENANT, unprompted=unprompted)
-    assert bot.http.add_reaction.await_count == int(enabled and not unprompted and confirmed)
+    assert _notices(bot) == int(enabled and not unprompted and confirmed)
     if enabled and not unprompted and confirmed:
         bot.http.add_reaction.assert_awaited_once_with(70, 101, "⛔")
     if not enabled or unprompted:

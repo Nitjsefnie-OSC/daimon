@@ -23,7 +23,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import upsert_credential_encrypted
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import update_agent
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from mux.errors import ScopeViolation
 
@@ -96,12 +96,12 @@ async def attach_imported_skills(
         )
         if collision is not None:
             raise DaimonError(f"cannot attach: {collision}")
-        return await update_agent(
+        return await guarded_agent_update(
             runtime.anthropic,
-            fresh.id,
-            version=fresh.version,
-            payload={"skills": merged},
-            scope=resource_scope(tenant_id=str(tenant_id)),
+            runtime.sessionmaker,
+            fresh,
+            skills=merged,
+            backend_scope=resource_scope(tenant_id=str(tenant_id)),
         )
 
     try:

@@ -325,7 +325,7 @@ async def test_source_ingress_and_title(
             assert context is not None
             assert receipt.gateway_messages[0].payload_json == json.dumps(context)
             assert not receipt.naming_calls and not receipt.naming_meters
-            assert created.name == "Chat with qa-agent"
+            assert created.name == "Chat with daimon"  # the bot, never the agent
             assert (
                 len(created.name) <= 60
                 and re.search(
@@ -1222,7 +1222,12 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
                 if p.message.channel_id == messages[2]["id"] and p.operation == "send"
             ]
             assert len(third_posts) == 1  # reuse the already-existing card, never a notice
-            assert not any(p.operation == "edit" for p in waiting.ingress.posts)
+            # The running turns' cards keep their elapsed timer moving; the waiting
+            # turn's card is never edited while it waits.
+            assert not any(
+                p.operation == "edit" and p.message.channel_id == messages[2]["id"]
+                for p in waiting.ingress.posts
+            )
             assert all("Queued" not in post_text(waiting, m["id"]) for m in messages[:2])
             assert not re.search(r"(?i)too many chats in flight|try again later", text)
             clock.advance(29)

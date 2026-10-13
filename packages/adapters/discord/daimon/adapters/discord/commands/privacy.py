@@ -47,7 +47,7 @@ class PrivacyCog(commands.Cog):
         # The slash-command description is Discord API metadata registered once at
         # cog-init time (before tree.sync()) — not re-rendered per invocation like the
         # panel body, so the operator-configured name is read here instead of at
-        # call-time (SPEC req 9).
+        # call-time.
         runtime = cast(DiscordRuntime, bot.runtime)  # type: ignore[attr-defined]  # DaimonBot.runtime not on Bot type
         bot_display_name = (
             runtime.settings.discord.bot_display_name

@@ -33,7 +33,6 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.scoped_config_write import clear_agent_references
 
 if TYPE_CHECKING:
     from cryptography.fernet import MultiFernet
@@ -79,7 +78,7 @@ async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str
 
     Channel and workspace scope rows naming the agent are cleared as part of the
     delete, so turn resolution falls through the cascade instead of resolving to
-    a deleted agent.
+    a deleted agent, and its agent rule is dropped with them.
     """
     agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
     if agent is None:
@@ -103,11 +102,12 @@ async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str
         log_context={"tenant_id": str(tenant_id), "agent_name": name, "ma_agent_id": agent.id},
     )
     # After the MA archive, never before: a failure here leaves an archived
-    # agent with stale scope rows rather than a live agent with cleared ones.
+    # agent with a stale rule and scope rows rather than a live agent with cleared ones.
     # Deliberately unguarded — a failure must reach the action's error boundary
     # rather than degrade silently.
-    async with runtime.sessionmaker.begin() as session:
-        await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
+    await agent_lifecycle.forget_archived_agent(
+        runtime.sessionmaker, tenant_id=tenant_id, name=name, agent=agent
+    )
 
 
 async def load_agent_inline_pat(runtime: SlackRuntime, *, agent_id: uuid.UUID) -> str | None:

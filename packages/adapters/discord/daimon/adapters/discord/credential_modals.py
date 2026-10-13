@@ -164,7 +164,6 @@ from daimon.core.mcp_token_connect import (
     connect_mcp_server_with_token,
 )
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import update_agent
 from daimon.core.operation_policy import PolicyOutcome, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
@@ -174,6 +173,7 @@ from daimon.core.posted_controls import (
     card_text,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
@@ -1331,12 +1331,12 @@ class SkillRepoModal(discord.ui.Modal):
                     "That skill overlaps an attached skill. "
                     "Ask an admin to check the skill setup before attaching it."
                 )
-            return await update_agent(
+            return await guarded_agent_update(
                 self._runtime.anthropic,
-                fresh.id,
-                version=fresh.version,
-                payload={"skills": merged},
-                scope=resource_scope(tenant_id=str(tenant_id)),
+                self._runtime.sessionmaker,
+                fresh,
+                skills=merged,
+                backend_scope=resource_scope(tenant_id=str(tenant_id)),
             )
 
         try:

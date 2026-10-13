@@ -48,7 +48,7 @@ The Discord process also reports Discord 429 retries by route and longest retry 
 A Discord mention gets a best-effort 👀 reaction before turn admission resolves
 its agent and environment. The reaction clears when the turn completes, fails
 or is cancelled. A queued follow-up uses ⌛ instead, cleared after its batch
-settles. An opening mention gets no reply in the parent channel while its thread
+settles. A mention waiting for a turn slot also gets ⌛, cleared when the wait ends. An opening mention gets no reply in the parent channel while its thread
 opens, and its existing acknowledgment covers naming and creation. A thread
 that cannot be opened gets one plain reply under the mention.
 
@@ -62,6 +62,17 @@ long skill imports throttled by the Skills API. Completion replaces that notice
 with success or a safe error; only a finished failure restores the form. Confirmed partial progress stays on the card. Successful saves consume
 the request and resume waiting work once; failed attempts do not queue work.
 Browser OAuth flows have their own lifecycle.
+
+On Discord, a form nobody clicks is retired by the bot's request-expiry poller
+(`daimon.core.github_request_expiry`, the same 60-second loop that settles
+GitHub access waits, started where the wake poller runs). Each tick spends at
+most 20 posted, unused, past-deadline requests, newest first, with outcome
+`expired`, then re-renders each card into its expired state: "⌛ This form
+expired." and how to ask again, with no button. The edit is best effort: a
+card that cannot be edited stays spent, and a late click on it still gets the
+expired reply and edits the card again. A backlog, slow GitHub delivery or slow
+card edits can push a card past its first minute. Slack and Teams cards are
+still corrected only by a late click.
 
 ## The shape
 
@@ -275,10 +286,12 @@ across the posting process. Failed attempts consume the cooldown; no fallback
 message is sent. Limits are process-local and reset on restart.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
-application-owned webhook post in the same tenant and channel. With agent
-identity off, the reply must be to a turn post the bot itself sent (the card or
-any chunk of the answer), so a reply to the second message of a long answer
-counts like a reply to the first, pinged or not. The usual
+application-owned webhook post in the same tenant and channel. Recorded posts
+are the agent's tool posts, a turn's card and answer (a setup-wizard turn's
+included) and a routine's delivered result. With agent
+identity off, the reply must be to a turn post or routine result the bot itself
+sent (the card or any chunk of the answer), so a reply to the second message of
+a long answer counts like a reply to the first, pinged or not. The usual
 admission path follows either trigger. Agent turn posts use a pool of up to
 three application-owned webhooks per text or forum channel, with each thread
 assigned by its ID; built-in Daimon posts use the bot. If a webhook is
@@ -469,7 +482,10 @@ Each adapter process keeps its slots in one `TurnQueue`
 is not refused: it joins its tenant's queue (`DAIMON_TURN_QUEUE__*`), posts the
 ordinary "Working on it…" card with Stop, and waits after the card and before
 `bind_session` (`wait_for_slot` in `packages/core/daimon/core/turn/slots.py`).
-Nothing on the card says it is queued. A released slot goes, in the same
+Nothing on the card says it is queued; on Discord the mention gets ⌛ for the
+live wait (`wait_for_slot`'s `on_queued`), cleared once the wait ends; both
+reaction calls run in the background, so they never delay Stop, the max wait or
+a granted slot. A released slot goes, in the same
 synchronous span, to the first tenant in round-robin order that has a waiting
 turn and a free tenant slot; within a tenant the queue is FIFO. A slot covers
 one turn: it is returned when the turn ends (`release_turn_slot`), and each
@@ -512,7 +528,13 @@ thread's uncached parent is fetched for its category only when a category
 has a rule and the channel isn't already closed, and cached so
 admission doesn't fetch it again. Anything but `unprotected` drops the turn
 with only a log line, and the entries' error boundaries post only when the
-state is `unprotected`. The entries are Discord `on_message`, organic thread
+state is `unprotected`. The one exception is a Discord mention whose state is
+`protected` (at `on_message` or as admission's `writers_none` refusal) whose rule
+positively matches (`turn/protection.py` `confirmed_protection`, which never
+counts an unresolved category): it gets a 🔒 reaction and a DM to its author
+naming the rule and who can change it, once per person and channel per
+`protected_channel_notice_cooldown_min` (`DaimonBot._signal_protected_channel`).
+`unknown`, a fail-closed refusal and a startup replay stay silent. The entries are Discord `on_message`, organic thread
 participation, wizard submit and continuation turns, and Slack
 `_handle_app_mention` (with a second check in `_orchestrate` after it claims
 the thread, and on its ephemeral shed notice), and Teams `_handle` and
@@ -709,7 +731,10 @@ answering nowhere else); a channel's own agent keeps its rule until that
 channel's readers change. An agent without a rule runs anywhere, so dropping
 one is explicit (`--anywhere`, `runs_in: null`). `access-policy set --clear`
 needs `--drop-agent-rules` while agent rules exist. Rule names must match an
-agent of the tenant. Every supplied id is validated before writing: Discord
+agent of the tenant. Archiving an agent drops its rule in the same step as
+clearing the channel defaults naming it, and a channel copy never takes a
+name that still has a rule; a rule left by an agent archived some other way is
+dropped with `--anywhere`, the only change allowed once no agent has the name. Every supplied id is validated before writing: Discord
 ids are 15–21 decimal digits; Slack user ids start with `U` or `W`, channel
 ids with `C` or `G`, followed by uppercase letters or digits (a Slack thread
 rule is keyed `channel_id:thread_ts` and only takes `readers: inside`). A
@@ -979,6 +1004,45 @@ same list (`session_snapshot.session_skills`), so adding or removing one
 replaces the conversation's session on its next message. Routines, headless
 runs and MCP chat don't use them.
 
+**Deleting a skill — `packages/core/daimon/core/skills/attachments.py`.** A
+session resolves every skill its agent pins and its channel adds, so a deleted
+skill that something still names fails every turn there. `daimon skills
+delete` and the `delete_skill` MCP tool look for references first (any
+non-archived agent, since skills are workspace-wide, and every `channel_skills`
+row) and refuse while there are any, naming the agents and channels and how to
+detach. The MCP refusal names only the caller's own workspace's agents and
+channels and counts the rest. `daimon skills delete --force` detaches the skill
+from each agent (keeping their other skills at the versions they pin) and each
+channel rule, in every tenant (`--tenant`/`--guild` only picks the skill's
+name), then deletes it; its confirmation gives those counts and how many are
+outside the selected tenant. Chat has no force.
+
+Deleting and attaching are serialized per skill
+(`packages/core/daimon/core/skills/reference_lock.py`): a delete takes a
+Postgres advisory lock on the skill id exclusively and holds it from its final
+reference check through the provider delete (`delete_skill_unless_attached`).
+Every delete goes through it: the CLI, MCP, the defaults sweep, the defaults
+duplicate cleanup (a same-title duplicate still in use is kept), the skill-repo
+sync's orphan cleanup (the synced agent's own pin is retired with the skill;
+any other agent or channel rule keeps the skill and its registry row), and the
+skills backfill. Every write that adds a skill reference takes the same lock
+shared and checks the skill still exists first: a channel rule
+(`add_skill_to_channel`, held until the row commits) and any agent create or
+update that adds a skill (`guarded_agent_update` / `skill_attach_guard`: skill
+add, repo sync attach, the skill-repo credential forms, `update_agent`, fork,
+`reconcile_agent` — defaults, `daimon agents create`/`update`, the panels and
+`create_agent` — the report reader variant, and the backfill re-pin).
+`reconcile_agent` and `ensure_reader_variant` take the lock scope as a
+required argument; the defaults reconcile passes its own lock session. An
+attach that waited for a delete is refused ("was deleted just now"; a reader
+variant is rebuilt once from its source as it is now); a delete that waited for
+an attach sees the new reference. If a session is still
+refused for a missing skill (`Could not resolve one or more skills`),
+`create_session` raises `SkillUnavailable`, a `UserFacingError` that names the
+skill and says to remove it from the agent or channel, instead of the generic
+"AI service couldn't accept the request"; a replacement session re-raises it
+rather than suggesting a retry.
+
 **Skill uploads.** One skill can be added to one agent by hand
 (`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
 it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,
@@ -1001,17 +1065,30 @@ upload must take a new name. Its `user_skills` row has `source = "upload"`, an o
 origin is `owner/repo/path@branch`, never the URL as typed) and the adding
 account, so no repo sync replaces, deletes or re-attaches it, and removing the
 skill forgets it. `add_skill` previews first and adds only when called again
-with the preview's hash, which is bound to the target agent, and only after the
-person presses Approve on the confirmation card (below). The server checks the
-card can exist: the confirm needs a verified origin whose live session runs the
-origin's responder with `add_skill` on `always_ask` (`has_confirmation_gate`),
-as MA reports the session or, only when it reports the agent's own tools
-(leaving the per-session overrides out), as the bind recorded sending them. Without that, as with tool safety off, an
-`agent_chat` session or one whose tools have not caught up yet, a chat
-confirm adds nothing; the preview and the refusal say which case it was and
-point to Add skill in
-the setup panels' Details (Discord takes a paste or a file, Slack a paste),
-where the person's own submit is the approval. The `skill_add` and
+with the preview's hash, which is bound to the target agent; the model's word
+alone never adds it. With confirmation cards on, the person presses Approve on
+the card (below). The server checks the card can exist: the confirm needs a
+verified origin whose live session runs the origin's responder with
+`add_skill` on `always_ask` (`has_confirmation_gate`), as MA reports the
+session or, only when it reports the agent's own tools (leaving the
+per-session overrides out), as the bind recorded sending them. Where the
+deployment turned cards off (tool safety off), a chat preview is recorded
+instead, bound to the person, thread, target agent and previewed content. The
+person's next direct message in that thread settles it
+(`resolve_pending_skill_adds`): if the whole message, after mentions and a
+closing `.` and `!` are removed and commas and spaces collapsed, is one of
+`yes`, `y`, `yes please`, `yes pls`, `yep`, `yeah`, `ok`, `okay`, `sure`,
+`go ahead`, `do it`, `confirm` or `approve` (any case), it approves the add
+for the turn that message started, once, within 15 minutes; any other reply,
+including a question (`ok?`) or a condition (`yes but not now`,
+`sure, after lunch`), cancels it. A message queued behind a running turn
+leaves the preview open. Only Discord passes the person's message to the
+turn today; Slack and Teams do not, so there a reply never confirms. In an
+`agent_chat` session, or one whose tools have not caught up with tool safety
+yet, a chat confirm adds nothing; the preview and the refusal say which case
+it was and point to Add skill in the setup panels' Details (Discord takes a
+paste or a file, Slack a paste), where the person's own submit is the
+approval. The `skill_add` and
 `skill_remove` operations follow the shared-agent rule
 (`authorize(CHANGE_SHARED_AGENT)`, spec family): built-in agents never, server
 admins on any other, channel admins on agents of theirs local to their channels, anyone
@@ -1077,6 +1154,12 @@ per-hook cost contract:
 `on_render` is the answer-text delivery path and may talk to the network,
 because it runs on its own task and cannot stall the pump; `on_sse_event` is
 awaited inline in the consume loop and must stay a cheap local tap.
+The render loop calls `on_render` on every tick (2 s on the chat paths),
+whether or not the turn state changed, so a card's elapsed time keeps moving
+while a long tool call produces no events. Each adapter's own debounce decides
+which calls become platform edits: 10 s on Discord, 5 s on Slack and Teams. The
+finalizers' render after the terminal event stays guarded, so it runs only if
+that event changed the state.
 
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement
@@ -1582,7 +1665,11 @@ admission before any of this runs.
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
   `/oauth/github/confirm`. The browser flow checks the confirming person's
-  GitHub admin access before authorizing tenant repositories. These routes
+  GitHub permission before authorizing tenant repositories: read, triage, write,
+  maintain or admin lets them offer a repo, and the access they can give is capped by
+  that permission (read or triage gives read, write, maintain or admin allows
+  write) and by the App installation's own permissions. Each repo row records
+  the permission (`authorized_permission`). These routes
   are absent when GitHub connection is unconfigured.
   Discord `/github home` and Slack `/github`, plus agent setup on Discord,
   Slack, and Teams, show GitHub repositories without grant controls. Each agent's
@@ -1608,21 +1695,34 @@ admission before any of this runs.
   or unavailable status, including repos the signed-in GitHub account cannot
   edit. The person may add repos, remove repos, and select or clear the one
   working repo, then confirm with **Save changes**. **Add repos** opens a
-  centered dialog on desktop and a bottom sheet on mobile. Tick repos, select
-  **Add 1 repo** (or **Add N repos**) in the dialog, then **Save changes** on the
-  page. When the card came from a chat ask that named one repo, the dialog
-  opens with that repo already ticked if the person can add it. Each addition has
-  its own access choice, defaulting to Read only. Added and removed rows stay
+  centered dialog on desktop and a bottom sheet on mobile. Tick repos one by one,
+  or use the filter box (a case-insensitive match on the full repo name),
+  **Select all N shown** (only the repos the filter shows), **Clear**, or one
+  **Everything in <owner>** button per GitHub account the App is installed on.
+  One access choice, Read only (the default) or Read and write, covers the whole
+  selection; each repo is capped at the signed-in person's own GitHub permission
+  and the installation's, and a repo capped at read shows a "Read only on GitHub"
+  tag when Read and write is chosen. The dialog lists every repo GitHub
+  returns, with no limit per addition. Select **Grant N repos** (N is the live
+  count) in the dialog, then **Grant N repos** (or **Save changes** when
+  only removing) on the page. When the card came from a chat ask that named one
+  repo, the dialog opens with that repo already ticked if the person can add
+  it. Added and removed rows stay
   visible as pending changes, and removals can be undone before saving.
-  Working-repo actions live on the repo row. Adding permits at most ten repos
-  per save and never lowers existing access.
+  Working-repo actions live on the repo row. Adding never lowers existing
+  access.
   Canceling shows **No changes saved** and leaves connected repos unchanged.
   A missing working or skill repo remains visible as a setup requirement.
   Repos that need more access can be confirmed again to finish setup.
   The invitation requester must still manage the agent when the page opens
-  and when it saves. The signed-in GitHub account needs current admin access
-  to each affected repo, including the previous working repo when changing
-  or clearing that selection. Other repos stay visible without edit controls.
+  and when it saves. The signed-in GitHub account needs current read access
+  or better to each affected repo, including the previous working repo when
+  changing or clearing that selection. Read and triage permission offer only
+  Read only for a repo and the save refuses Read and write from them; write,
+  maintain and admin permission offer both. A repo the agent needs at write is
+  added at read for someone who cannot write, and stays listed as still needed.
+  The dialog notes how many repos are hidden because the account has no
+  permission on them. Other repos stay visible without edit controls.
   Each save consumes one invitation and applies its changes in one database
   transaction. A signed snapshot rejects edits made against an outdated page;
   the person reloads if chat has changed the repo list or working selection.
@@ -1721,9 +1821,7 @@ signed upload token.
 A browser (`Accept: text/html`) opening an unavailable document link gets a
 static “Link unavailable” HTML page instead of a JSON error: unresolved
 `GET /n/{slug}/` requests (404) and refused `GET /r/{slug}` requests (403).
-Other clients keep the JSON error unless `DAIMON_NOTEBOOK__HTML_LINK_ERRORS`
-or `DAIMON_REPORT__HTML_LINK_ERRORS` is `true`, which gives every client the
-page. Token and expiry checks, successful pages, and API/file/admin
+Other clients keep the JSON error. Token and expiry checks, successful pages, and API/file/admin
 responses retain their existing behavior.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach Daimon over HTTP with capability tokens, and the
@@ -1743,10 +1841,12 @@ balance admission emits a warning instead of a refusal for operator-funded
 tenants; usage recording and configured caps continue through the same path.
 
 `daimon promo create|list|revoke|redemptions` manages deployment-wide promo
-codes. Admins redeem them from `/billing` on Discord and Slack (a Redeem code
-button, shown only while a code is redeemable, and a modal), the Teams
-`billing` card (a Redeem code action opening a code field, shown the same way) or with the MCP
-tool `redeem_promo_code`; each surface calls
+codes. Admins redeem server-wide codes, and any member a channel code
+(`--channel-cap`) into the channel they are in, from `/billing` on Discord and
+Slack (a Redeem code button, shown only while a code the viewer may redeem is
+redeemable, and a modal), the Teams `billing` card (a Redeem code action
+opening a code field, shown the same way) or, server-wide codes only, with the
+MCP tool `redeem_promo_code`; each surface calls
 `daimon.core.promo_credit.redeem_promo_code`. Scheduler housekeeping settles
 timed credit windows through `daimon.core.promo_settlement`. See
 [billing.md](billing.md#promo-codes).
@@ -1823,7 +1923,7 @@ The core driver calls an optional `on_acknowledgment` lifecycle hook with
 `accepted` after the initial event send and `done` after successful answer
 delivery. Missing hooks are no-ops; reaction failures are bounded and do not
 fail the turn. Discord and Slack acknowledge admitted mentions with eyes; queued Discord
-follow-ups use an hourglass. These markers clear on every terminal path.
+follow-ups and mentions waiting for a turn slot use an hourglass. These markers clear on every terminal path.
 Opted-in tenants also get a check mark on success. Unprompted Discord turns stay silent; failures and cancellation
 do not get a completion marker. Continuations without a trigger message skip
 reactions.
@@ -1836,7 +1936,11 @@ An unprompted Discord turn cancelled before it has an answer stays silent.
 Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 `{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
 answer as a fresh thread reply mentioning only the requester. Missing or false
-entries keep the existing in-place answer. Discord adds eyes before admission;
+entries keep the existing in-place answer. On Discord the fresh answer carries the
+turn's summary line; the status card above it shows "Done." without the summary and
+is then deleted, so a card that cannot be deleted never repeats the summary. If the
+answer fails before its summary is posted, the card keeps the summary instead.
+Discord adds eyes before admission;
 Slack adds eyes at admission. Both clear eyes independently of completion pings.
 Recovery lifecycles retain this policy;
 continuity notices and feedback target the new answer. Teams posts the answer fresh (with
@@ -1889,12 +1993,93 @@ Uncommitted workspace files are not transferred on this restricted replacement.
 
 Memory content is managed directly by the MA memory store. This safeguard does not
 add per-memory author/origin records or rollback tooling.
+
+### Shared and personal memory
+
+An agent has two kinds of memory store (`packages/core/daimon/core/memory_resource.py`):
+
+- **Shared**: one per agent (`agent_memory_store`). Every session of the agent mounts
+  it, for every person and channel. Its instructions keep it to team and agent
+  knowledge: conventions, project facts, how tools and skills behave.
+- **Personal**: one per agent and person (`agent_personal_memory_store`, keyed by
+  account). It is created on that person's first new chat session and mounted at
+  `/mnt/memory/personal-<account id>/` beside the shared store. Its instructions keep
+  it to that person's preferences and facts about them, and forbid copying from it
+  into the shared store.
+
+A chat session is already keyed on the caller's account (`thread_sessions`), so only
+that person's own sessions (channel threads, DMs, on every platform) mount their
+personal store. Another person's session never has it mounted and cannot read it;
+the separation does not depend on the agent following its instructions. Only the
+choice of which store a fact is written to depends on the instructions.
+
+The personal mount has the same access as the shared one: read-only in channels with
+limited readers and in DMs under `dm_memory_read_only`. A session without a personal
+store gets shared-store instructions saying that no personal memory is mounted and
+nothing personal is to be recorded. Who else gets one:
+
+- **Routines**: only a routine whose result reaches nobody but its owner
+  (`rule_views.routine_answers_only_owner`: no destination and no channel, so made in a
+  DM or with no origin) mounts its owner's personal store, read-only like all routine
+  memory. Any routine with a destination posts where others read it and gets the shared
+  store alone. The scheduler decides this from the routine row at every fire, so adding
+  a destination stops it at the next run. The agent can still call a posting tool itself;
+  its instructions say not to quote personal memory where others will read it.
+- **MCP**: the hub's `ask` and `start_turn` mount the caller's personal store. A hub
+  caller is a person: the hub token comes from Daimon's OAuth proxy after a Discord or
+  Slack sign-in, `HubIdentityMiddleware` checks its signature, issuer, audience and
+  platform, `_auth_for` builds the identity for that person's own account in the tenant
+  (re-reading the account and tenant), and only that account can use the session handle.
+  A per-agent key, an operator or CLI token and an internal caller get the shared store
+  alone: a key is the agent, its sessions are the agent's, and whoever holds it is not
+  established as one person.
+- **CLI**: `daimon sessions create` identifies the operator by `$USER`
+  (`cli.local_user`), which is configuration rather than a verified person, so it gets
+  no personal store.
+
+MA attaches memory stores only when a session is created. A live session recorded
+without a personal store is reused, not replaced, after the caller's store exists
+(`session_compat`); the store is mounted on the caller's next new session. A session
+whose recorded personal store differs from the caller's current one is replaced.
+Existing shared memory is never moved or split.
+`daimon memory personal-report [--platform P --workspace W]` scans every shared store
+for entries that look personal (a mention or a name with a preference word, first-person
+preferences, per-person paths; `daimon.core.memory_personal_scan`) and prints per agent
+the number of memories, how many look personal and a few redacted examples (preference
+words kept, names, mentions, e-mail addresses and every other word masked). It only lists
+and reads memories; deciding what to do with them is left to the operator.
+
+`/memory` (Discord, Slack) and `memory` (Teams) still show the shared store read-only.
+`mine` lists the caller's own personal store and `mine /<path>` shows one file;
+`forget-mine` shows what would be deleted and a six-character code, and
+`forget-mine <code>` deletes every memory in that store. The store is always the one of
+the person who typed the command, resolved from their own account; no argument names
+an account. The code is a hash of the store and each memory's id, path and content
+hash, so a store that changed since the preview needs a new code. The confirmation lists
+the store once, checks the code against that listing and deletes only the memories in it,
+each with its listed content hash as the API's `expected_content_sha256` precondition. A
+memory written or rewritten in between (by a live conversation) is kept, and the reply
+says how many were kept. Deleted
+memories keep their MA version history for MA's retention period (30 days); account
+deletion deletes the whole store.
+
+Deleting an agent archives its shared store and every personal store, each on its own so
+one failure leaves the rest archived. A personal binding is then only stamped
+`archived_at`, never dropped: an archived store still holds that person's memories, and
+the row is how account deletion finds it. Account deletion deletes every personal store
+the person has at Anthropic, archived ones included, and drops each binding once its store
+is gone. The bindings have no foreign key to `accounts`, so they outlive the account row:
+the scheduler's privacy sweep (`sweep_erased_personal_memory`) deletes the stores of any
+erased account that still has bindings. That covers a failed upstream delete, an erasure
+run without an Anthropic client, and an account with no principal left to queue session
+deletion.
+
 ### Platform table rendering
 
-Enable per tenant with `DAIMON_TABLE_RENDERING`, a JSON map of tenant UUIDs to
-booleans. Teams renders Markdown tables natively, so the setting does nothing
-there. Missing/false preserves current plain-text delivery. UUID keys are
-validated at startup. Core `tables.render_tables` parses pipe-delimited Markdown tables outside fenced
+`DAIMON_TABLE_RENDERING` is a JSON map of tenant UUIDs to booleans. Discord
+renders tables unless the tenant is set to false; Slack renders them only when
+set to true. Teams renders Markdown tables natively, so the setting does nothing
+there. UUID keys are validated at startup. Core `tables.render_tables` parses pipe-delimited Markdown tables outside fenced
 code and accepts an optional async platform hook. Without a hook the input is
 returned unchanged. Both adapter helpers also default to disabled. Hook failures
 and oversized tables retain their raw text. Rejected Discord attachment edits
@@ -1903,7 +2088,8 @@ keeps already-delivered chunks in place and retries only the rejected table.
 The shared bound is 20 columns, 100 rows including the header, and 10000 cell
 characters; at most ten tables render per answer.
 
-Discord renders final-answer tables off-thread as PNG attachments using bundled
+Discord renders final-answer tables off-thread as PNG attachments, each with the
+raw Markdown (up to 1024 characters) as its description, using bundled
 Inter fonts (including wizard submissions and their recovery turns), navy headers, light alternating rows, and horizontal rules. Wide
 cells wrap without truncation, all-numeric body columns align right even without
 an explicit `---:` marker, and a pixel budget

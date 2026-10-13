@@ -53,6 +53,7 @@ from daimon.core.neutral_resources import HostAgentCopy, NeutralResourceHost
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_skills
+from daimon.core.skills.reference_lock import added_custom_skill_ids, skill_attach_guard
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
@@ -282,9 +283,14 @@ async def copy_agent(
     )
     if "skills" in fork_params:
         fork_params["skills"] = split.kept
-    created = await create_agent(
-        anthropic, fork_params, scope=resource_scope(tenant_id=str(tenant_id))
-    )
+    # The copy keeps skills shared by id; hold them against a concurrent delete.
+    shared = added_custom_skill_ids(before=(), after=split.kept)
+    async with skill_attach_guard(
+        sessionmaker, anthropic, shared, backend_scope=resource_scope(tenant_id=str(tenant_id))
+    ):
+        created = await create_agent(
+            anthropic, fork_params, scope=resource_scope(tenant_id=str(tenant_id))
+        )
     queue_agent_face(
         sessionmaker,
         tenant_id=tenant_id,

@@ -300,18 +300,36 @@ async def test_dry_run_enumerates_rows_without_writing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("channel_adds_legacy", [False, True])
 async def test_apply_creates_seeded_skill_and_repins_agent(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession], channel_adds_legacy: bool
 ) -> None:
     """apply: seeded skill re-created under canonical title; agent re-pinned; legacy deleted
-    only after re-pin (delete request appears AFTER agents.update requests in log)."""
+    only after re-pin (delete request appears AFTER agents.update requests in log).
+
+    A legacy skill a channel rule still adds is kept: deleting it fails that channel.
+    """
     from daimon.core.ma_identity import derive_tenant_uuid
+    from daimon.core.stores.channel_skills import add_channel_skill
 
     ws_id = "guild_apply_seeded"
     await provision_tenant(db_session_factory, platform="discord", workspace_id=ws_id)
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=ws_id)
 
     legacy_skill_id = "skill_0seeded000"
+    if channel_adds_legacy:
+        async with db_session_factory() as session, session.begin():
+            await add_channel_skill(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id="555",
+                skill_id=legacy_skill_id,
+                version="1",
+                name="cli-auth",
+                owner_agent_name=None,
+                actor_account_id=None,
+            )
     legacy_title = "cli-auth"  # exists in defaults/skills/
     new_skill_id = "skill_0new_seeded0"
     canonical_title = tenant_scoped_display_title(tenant_id=tenant_id, name="cli-auth")
@@ -447,6 +465,10 @@ async def test_apply_creates_seeded_skill_and_repins_agent(
     assert legacy_skill_id not in new_ids, (
         f"re-pin must remove legacy id from skills; got {new_ids}"
     )
+
+    if channel_adds_legacy:
+        assert delete_calls == [], "a legacy skill a channel rule adds must not be deleted"
+        return
 
     # Assert delete-last ordering: re-pin update (POST) comes BEFORE delete
     repin_idx = next(

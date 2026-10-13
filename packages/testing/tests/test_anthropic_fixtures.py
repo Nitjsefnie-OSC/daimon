@@ -82,10 +82,13 @@ async def test_main_824_catchup_reads_recorded_usage_after_the_real_sdk_turn() -
             render_interval_s=3600,
         )
         assert state.error is None and lifecycle.terminal_success
-        native_spans = [event for event in turn.events if event["type"] == "span.model_request_end"]
+        # The turn-end settle reads the session's spans newest first.
+        native_spans = [
+            event for event in reversed(turn.events) if event["type"] == "span.model_request_end"
+        ]
         assert tape.replies[-1].response_json == {"data": native_spans, "next_page": None}
         page = await replay.client.beta.sessions.events.list(
-            identity, limit=100, order="asc", types=["span.model_request_end"]
+            identity, limit=100, order="desc", types=["span.model_request_end"]
         )
         assert [event.model_dump(mode="json") for event in page.data] == [
             BetaManagedAgentsSpanModelRequestEndEvent.model_validate(event).model_dump(mode="json")
@@ -95,7 +98,7 @@ async def test_main_824_catchup_reads_recorded_usage_after_the_real_sdk_turn() -
         replay.wire.assert_consumed()
         with pytest.raises(APIConnectionError):
             await replay.client.beta.sessions.events.list(
-                identity, limit=100, order="asc", types=["span.model_request_end"]
+                identity, limit=100, order="desc", types=["span.model_request_end"]
             )
         assert len(replay.wire.violations) == 1
 
@@ -117,7 +120,7 @@ def test_main_824_catchup_does_not_allow_foreign_or_mismatched_reads(mutant: str
         query[{"limit": "limit", "type": "types[]", "order": "order"}[mutant]] = {
             "limit": "1",
             "type": "agent.message",
-            "order": "desc",
+            "order": "asc",
         }[mutant]
     wire = WireReplay(tape)
     request = httpx.Request(

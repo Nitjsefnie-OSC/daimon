@@ -134,7 +134,7 @@ async def get_bindings_for_repo(
 
     Install-agnostic: returns ALL tenants' bindings for the repo.
     Normalizes the lookup key the same way set_binding normalizes the write key,
-    so a webhook's 'owner/repo' always matches stored rows (Pitfall 2 fix).
+    so a webhook's 'owner/repo' always matches stored rows.
     """
     normalized = _normalize_owner_repo(repo_url)
     result = await session.execute(

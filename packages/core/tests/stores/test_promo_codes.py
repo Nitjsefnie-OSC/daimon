@@ -57,3 +57,26 @@ async def test_a_revoked_code_is_not_redeemable(db_session: AsyncSession) -> Non
     assert not await promo_store.has_redeemable_promo_code(db_session, now=NOW), (
         "a revoked code should not count"
     )
+
+
+async def test_members_only_see_channel_codes_as_redeemable(db_session: AsyncSession) -> None:
+    """A server-wide code is redeemable for an admin only; a channel code for anyone."""
+    await promo_store.insert_promo_code(
+        db_session,
+        code_hash="server",
+        terms=build_promo_code_terms(amount_usd=Decimal("5"), timed=False),
+    )
+    assert await promo_store.has_redeemable_promo_code(db_session, now=NOW)
+    assert not await promo_store.has_redeemable_promo_code(
+        db_session, now=NOW, channel_codes_only=True
+    ), "a server-wide code gives a member nothing to redeem"
+    await promo_store.insert_promo_code(
+        db_session,
+        code_hash="channel",
+        terms=build_promo_code_terms(
+            amount_usd=Decimal("5"), timed=False, channel_cap_usd=Decimal("10")
+        ),
+    )
+    assert await promo_store.has_redeemable_promo_code(
+        db_session, now=NOW, channel_codes_only=True
+    ), "a channel code is redeemable by members"

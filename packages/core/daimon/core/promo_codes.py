@@ -31,7 +31,17 @@ _LOOK_ALIKES = str.maketrans({"O": "0", "I": "1", "L": "1"})
 MAX_PROMO_AMOUNT_USD = Decimal("999999.99")
 
 PromoRefusal = Literal[
-    "invalid", "revoked", "not_started", "expired", "exhausted", "already_redeemed", "throttled"
+    "invalid",
+    "revoked",
+    "not_started",
+    "expired",
+    "exhausted",
+    "already_redeemed",
+    "throttled",
+    "admin_only",
+    "needs_channel",
+    "already_redeemed_in_channel",
+    "channel_cap_reached",
 ]
 """Why a redemption was refused."""
 
@@ -43,6 +53,10 @@ _REFUSAL_TEXT: dict[PromoRefusal, str] = {
     "exhausted": "That code has been fully redeemed.",
     "already_redeemed": "That code was already redeemed here.",
     "throttled": "Too many failed attempts. Try again in a few minutes.",
+    "admin_only": "Only an admin can redeem that code, because it adds credit for everyone here.",
+    "needs_channel": "That code adds to a channel's budget. Redeem it from the channel, not a DM.",
+    "already_redeemed_in_channel": "You already redeemed that code in this channel.",
+    "channel_cap_reached": "That code has already added all it can to this channel.",
 }
 
 
@@ -116,6 +130,7 @@ class PromoCodeTerms:
     redeem_starts_at: datetime | None
     redeem_ends_at: datetime | None
     max_redemptions: int | None
+    channel_cap_usd: Decimal | None = None
 
 
 def build_promo_code_terms(
@@ -128,8 +143,13 @@ def build_promo_code_terms(
     redeem_ends_at: datetime | None = None,
     max_redemptions: int | None = None,
     note: str | None = None,
+    channel_cap_usd: Decimal | None = None,
 ) -> PromoCodeTerms:
-    """Validate operator input. A timed code's redemption ends with its credit by default."""
+    """Validate operator input. A timed code's redemption ends with its credit by default.
+
+    ``channel_cap_usd`` makes a channel code: any member redeems it into their
+    own channel's budget, once each, until the channel has taken this much.
+    """
     if not amount_usd.is_finite() or amount_usd <= 0:
         raise PromoCodeError("amount must be a positive dollar amount")
     if amount_usd > MAX_PROMO_AMOUNT_USD:
@@ -155,6 +175,16 @@ def build_promo_code_terms(
         raise PromoCodeError("the redemption start must be before the redemption end")
     if max_redemptions is not None and max_redemptions < 1:
         raise PromoCodeError("max redemptions must be at least 1")
+    if channel_cap_usd is not None:
+        if timed:
+            raise PromoCodeError("a channel cap needs a credit code, not a timed one")
+        if not channel_cap_usd.is_finite() or channel_cap_usd < amount_usd:
+            raise PromoCodeError("the channel cap must be at least the amount")
+        if channel_cap_usd > MAX_PROMO_AMOUNT_USD:
+            raise PromoCodeError(f"the channel cap must be at most ${MAX_PROMO_AMOUNT_USD:,}")
+        cap_exponent = channel_cap_usd.as_tuple().exponent
+        if isinstance(cap_exponent, int) and cap_exponent < -2:
+            raise PromoCodeError("the channel cap must have at most two decimal places")
     return PromoCodeTerms(
         amount_usd=amount_usd,
         kind="timed" if timed else "credit",
@@ -164,7 +194,23 @@ def build_promo_code_terms(
         redeem_starts_at=redeem_starts_at,
         redeem_ends_at=redeem_ends_at,
         max_redemptions=max_redemptions,
+        channel_cap_usd=channel_cap_usd,
     )
+
+
+def is_channel_code(code: PromoCodeRow) -> bool:
+    """A channel code lands in the redeeming member's channel budget, not the server balance."""
+    return code.channel_cap_usd is not None
+
+
+def channel_cap_refusal(
+    code: PromoCodeRow, *, channel_redeemed_usd: Decimal
+) -> PromoRefusal | None:
+    """Whether one more redemption would take the channel past the code's cap."""
+    cap = code.channel_cap_usd
+    if cap is not None and channel_redeemed_usd + code.amount_usd > cap:
+        return "channel_cap_reached"
+    return None
 
 
 def redeem_refusal(code: PromoCodeRow, *, now: datetime) -> PromoRefusal | None:

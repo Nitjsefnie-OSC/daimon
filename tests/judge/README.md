@@ -92,7 +92,7 @@ Focused verification: `uv run pytest tests/judge/test_catalog_runner.py`.
 
 The matrix report separates the ordinary product profile from an explicit
 `opt-in-product` QA profile. `daimon.testing.product_profiles` controls exactly
-seven settings: notebook/report `html_link_errors`, MCP
+five settings: MCP
 `require_routine_destination`, Discord `credential_form_expiry` / `writers_none_notice` /
 `tenant_cap_waiting_card`, and turn `native_footer_cost`. It copies
 declared fields without reconstructing settings from the environment, changing
@@ -107,7 +107,7 @@ profiles within every cell, and exposes `default_board`, `opt_in_board` and
 `opt_in_scored_counts`. An opt-in PASS is labelled **PASS under opt-in profile**;
 it never increases the default PASS tally. Missing flag declarations are
 `PRODUCT_PROFILE_UNAVAILABLE` with no opt-in dispatch. If a callback only selects
-a profile without applying all seven settings, its board stays unbound/PENDING
+a profile without applying all five settings, its board stays unbound/PENDING
 and retains actual request/evidence diagnostics. Exceptions after execution starts
 propagate instead of being turned into invented empty execution receipts.
 
@@ -465,7 +465,7 @@ do not become invented empty successful executions.
 profile context and refuses shared mutable observers, admin bindings or
 credential callbacks before the second execution. The CLI uses it for fresh
 disposable HTTP apps per profile. Default factories use `profile=None`; opt-in
-factories apply the seven-switch public declaration. Both frozen matrices retain
+factories apply the five-switch public declaration. Both frozen matrices retain
 source hashes and assertions; unavailable surfaces remain typed PENDING.
 
 ## Agent backend staging QA preparation

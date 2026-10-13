@@ -1,6 +1,7 @@
 """Promo codes, their per-tenant redemptions, and refused-attempt counts.
 
-Codes are deployment-level; redemptions and failures are tenant-scoped. The
+Codes are deployment-level; redemptions are tenant-scoped (a channel code's
+per channel and person), and refused attempts are counted per person. The
 caller owns the transaction. Per `guideline:architecture` nothing is
 swallowed here.
 """
@@ -13,7 +14,13 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
 
-from daimon.core._models import PromoCode, PromoRedeemFailure, PromoRedemption, Tenant
+from daimon.core._models import (
+    PromoChannelRedemption,
+    PromoCode,
+    PromoRedeemFailure,
+    PromoRedemption,
+    Tenant,
+)
 from daimon.core.promo_codes import PromoCodeTerms
 from daimon.core.stores.domain import PromoCodeRow, PromoRedemptionRow, TimedPromoGrantRow
 from sqlalchemy import ColumnElement, Select, delete, exists, func, or_, select, text, update
@@ -38,6 +45,7 @@ async def insert_promo_code(
             redeem_starts_at=terms.redeem_starts_at,
             redeem_ends_at=terms.redeem_ends_at,
             max_redemptions=terms.max_redemptions,
+            channel_cap_usd=terms.channel_cap_usd,
         )
         .on_conflict_do_nothing(index_elements=["code_hash"])
         .returning(PromoCode)
@@ -56,11 +64,18 @@ async def get_promo_code(session: AsyncSession, promo_code_id: uuid.UUID) -> Pro
     return None if orm is None else PromoCodeRow.model_validate(orm)
 
 
-async def has_redeemable_promo_code(session: AsyncSession, *, now: datetime) -> bool:
-    """Whether any code could be redeemed at ``now``; mirrors ``redeem_refusal``."""
+async def has_redeemable_promo_code(
+    session: AsyncSession, *, now: datetime, channel_codes_only: bool = False
+) -> bool:
+    """Whether any code could be redeemed at ``now``; mirrors ``redeem_refusal``.
+
+    ``channel_codes_only``: only codes a member may redeem into a channel.
+    """
+    channel_only = [PromoCode.channel_cap_usd.is_not(None)] if channel_codes_only else []
     redeemable = (
         select(PromoCode.id)
         .where(
+            *channel_only,
             PromoCode.revoked_at.is_(None),
             or_(PromoCode.redeem_starts_at.is_(None), PromoCode.redeem_starts_at <= now),
             or_(PromoCode.redeem_ends_at.is_(None), PromoCode.redeem_ends_at > now),
@@ -99,11 +114,44 @@ async def revoke_promo_code(
 async def has_redemption(
     session: AsyncSession, *, promo_code_id: uuid.UUID, tenant_id: uuid.UUID
 ) -> bool:
+    """Whether the tenant redeemed the code server-wide."""
     stmt = select(
         exists().where(
             PromoRedemption.promo_code_id == promo_code_id,
             PromoRedemption.tenant_id == tenant_id,
         )
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def has_channel_redemption(
+    session: AsyncSession,
+    *,
+    promo_code_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    account_id: uuid.UUID,
+) -> bool:
+    """Whether this person already redeemed the code into this channel."""
+    stmt = select(
+        exists().where(
+            PromoChannelRedemption.promo_code_id == promo_code_id,
+            PromoChannelRedemption.tenant_id == tenant_id,
+            PromoChannelRedemption.channel_id == channel_id,
+            PromoChannelRedemption.redeemed_by_account_id == account_id,
+        )
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def count_channel_redemptions(
+    session: AsyncSession, *, promo_code_id: uuid.UUID, tenant_id: uuid.UUID, channel_id: str
+) -> int:
+    """How many times the code was redeemed into this channel, by anyone."""
+    stmt = select(func.count()).where(
+        PromoChannelRedemption.promo_code_id == promo_code_id,
+        PromoChannelRedemption.tenant_id == tenant_id,
+        PromoChannelRedemption.channel_id == channel_id,
     )
     return (await session.execute(stmt)).scalar_one()
 
@@ -117,7 +165,7 @@ async def insert_redemption(
     now: datetime,
     granted: bool,
 ) -> bool:
-    """Record the tenant's redemption and count it. False when it already redeemed."""
+    """Record the tenant's server-wide redemption and count it. False when it already redeemed."""
     stmt = (
         pg_insert(PromoRedemption)
         .values(
@@ -132,18 +180,51 @@ async def insert_redemption(
     result = cast(CursorResult[Any], await session.execute(stmt))
     if result.rowcount == 0:
         return False
+    await _count_redemption(session, promo_code_id)
+    return True
+
+
+async def insert_channel_redemption(
+    session: AsyncSession,
+    *,
+    promo_code_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    account_id: uuid.UUID,
+    now: datetime,
+) -> bool:
+    """Record one person's redemption into a channel and count it. False when they already did."""
+    stmt = (
+        pg_insert(PromoChannelRedemption)
+        .values(
+            promo_code_id=promo_code_id,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            redeemed_by_account_id=account_id,
+            redeemed_at=now,
+        )
+        .on_conflict_do_nothing(constraint="uq_promo_channel_redemptions_person")
+    )
+    result = cast(CursorResult[Any], await session.execute(stmt))
+    if result.rowcount == 0:
+        return False
+    await _count_redemption(session, promo_code_id)
+    return True
+
+
+async def _count_redemption(session: AsyncSession, promo_code_id: uuid.UUID) -> None:
     await session.execute(
         update(PromoCode)
         .where(PromoCode.id == promo_code_id)
         .values(redeemed_count=PromoCode.redeemed_count + 1)
     )
-    return True
 
 
 async def list_redemptions(
     session: AsyncSession, *, promo_code_id: uuid.UUID
 ) -> list[PromoRedemptionRow]:
-    stmt = (
+    """Every redemption of the code, server-wide and into channels, oldest first."""
+    server = (
         select(
             PromoRedemption.id,
             PromoRedemption.promo_code_id,
@@ -158,44 +239,83 @@ async def list_redemptions(
         )
         .join(Tenant, Tenant.id == PromoRedemption.tenant_id)
         .where(PromoRedemption.promo_code_id == promo_code_id)
-        .order_by(PromoRedemption.redeemed_at, PromoRedemption.id)
     )
-    rows = (await session.execute(stmt)).mappings()
-    return [PromoRedemptionRow.model_validate(dict(row)) for row in rows]
+    channel = (
+        select(
+            PromoChannelRedemption.id,
+            PromoChannelRedemption.promo_code_id,
+            PromoChannelRedemption.tenant_id,
+            Tenant.platform.label("tenant_platform"),
+            Tenant.external_id.label("tenant_external_id"),
+            PromoChannelRedemption.redeemed_by_account_id,
+            PromoChannelRedemption.redeemed_at,
+            PromoChannelRedemption.redeemed_at.label("granted_at"),
+            PromoChannelRedemption.channel_id,
+        )
+        .join(Tenant, Tenant.id == PromoChannelRedemption.tenant_id)
+        .where(PromoChannelRedemption.promo_code_id == promo_code_id)
+    )
+    rows = [
+        PromoRedemptionRow.model_validate(dict(r))
+        for r in (await session.execute(server)).mappings()
+    ]
+    rows += [
+        PromoRedemptionRow.model_validate(dict(r) | {"expired_at": None, "expired_usd": None})
+        for r in (await session.execute(channel)).mappings()
+    ]
+    return sorted(rows, key=lambda row: (row.redeemed_at, str(row.id)))
 
 
-async def lock_tenant_redemptions(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
-    """Serialize one tenant's redemption attempts for this transaction.
+async def lock_redeemer(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID | None
+) -> None:
+    """Serialize one person's redemption attempts for this transaction.
 
     Without it, concurrent guesses all read the same failure count and slip
-    past the throttle together. Hashed inside Postgres (``hashtextextended``).
+    past the throttle together. Per person, so one member's attempts never
+    wait on or count against anyone else's. Hashed inside Postgres
+    (``hashtextextended``).
     """
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"promo_redeem:{tenant_id}"},
+        {"key": f"promo_redeem:{tenant_id}:{account_id or '-'}"},
     )
 
 
+def _redeemer(tenant_id: uuid.UUID, account_id: uuid.UUID | None) -> list[ColumnElement[bool]]:
+    who = (
+        PromoRedeemFailure.account_id.is_(None)
+        if account_id is None
+        else PromoRedeemFailure.account_id == account_id
+    )
+    return [PromoRedeemFailure.tenant_id == tenant_id, who]
+
+
 async def count_redeem_failures(
-    session: AsyncSession, *, tenant_id: uuid.UUID, since: datetime
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID | None, since: datetime
 ) -> int:
+    """One person's refused attempts since ``since``; no account is one shared bucket."""
     stmt = select(func.count()).where(
-        PromoRedeemFailure.tenant_id == tenant_id, PromoRedeemFailure.attempted_at >= since
+        *_redeemer(tenant_id, account_id), PromoRedeemFailure.attempted_at >= since
     )
     return (await session.execute(stmt)).scalar_one()
 
 
 async def record_redeem_failure(
-    session: AsyncSession, *, tenant_id: uuid.UUID, now: datetime, prune_before: datetime
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    now: datetime,
+    prune_before: datetime,
 ) -> None:
-    """Count one refused attempt and drop this tenant's attempts outside the window."""
+    """Count one refused attempt and drop this person's attempts outside the window."""
     await session.execute(
         delete(PromoRedeemFailure).where(
-            PromoRedeemFailure.tenant_id == tenant_id,
-            PromoRedeemFailure.attempted_at < prune_before,
+            *_redeemer(tenant_id, account_id), PromoRedeemFailure.attempted_at < prune_before
         )
     )
-    session.add(PromoRedeemFailure(tenant_id=tenant_id, attempted_at=now))
+    session.add(PromoRedeemFailure(tenant_id=tenant_id, account_id=account_id, attempted_at=now))
     await session.flush()
 
 

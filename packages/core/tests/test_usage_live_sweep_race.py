@@ -1,4 +1,4 @@
-"""Postgres behavior when a live turn and MA history sweep record one event."""
+"""Postgres behavior when a live turn and a settle record one event."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.tenant_balance import debit_amount
-from daimon.core.usage_sweep import sweep_headless_usage
+from daimon.core.usage_sweep import SettleResult, settle_stamped_session
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -171,11 +171,6 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
     router = MARouter()
     router.add(
         "GET",
-        r"/v1/sessions",
-        lambda req, m: list_response([session_shape.model_dump(mode="json")]),
-    )
-    router.add(
-        "GET",
         r"/v1/sessions/[^/]+/events",
         lambda req, m: list_response([event.model_dump(mode="json")]),
     )
@@ -231,7 +226,7 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
 
     monkeypatch.setattr(usage_events, "record", hold_live_insert)
     live_task: asyncio.Task[None] | None = None
-    sweep_task: asyncio.Task[int] | None = None
+    sweep_task: asyncio.Task[SettleResult | None] | None = None
     try:
         live_task = asyncio.create_task(
             usage_recording.record_turn_usage(
@@ -247,7 +242,9 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
         )
         await asyncio.wait_for(live_inserted.wait(), timeout=10)
         sweep_task = asyncio.create_task(
-            sweep_headless_usage(client, writer_sessionmaker, markup=Decimal("1.0"))
+            settle_stamped_session(
+                client, writer_sessionmaker, session_shape, markup=Decimal("1.0")
+            )
         )
 
         async with asyncio.timeout(10):
@@ -264,9 +261,10 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
                         break
                 await asyncio.sleep(0.01)
         release_live.set()
-        swept_count = await sweep_task
+        settled = await sweep_task
         await live_task
-        assert swept_count == 1, "sweep should process the shared MA event"
+        assert settled is not None and len(settled.unbilled) == 1, "the settle read the event"
+        assert settled.debited == 0, "the live writer won the key"
     finally:
         release_live.set()
         if live_task is not None:

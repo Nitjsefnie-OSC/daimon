@@ -247,10 +247,7 @@ def create_proxy_router(state: AdminState) -> APIRouter:
             if (
                 request.method == "GET"
                 and path == ""
-                and (
-                    state.settings.html_link_errors
-                    or _browser_navigation(request.headers.get("accept"))
-                )
+                and _browser_navigation(request.headers.get("accept"))
             ):
                 return HTMLResponse(_LINK_UNAVAILABLE_HTML, status_code=status.HTTP_404_NOT_FOUND)
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no active notebook: {slug}")

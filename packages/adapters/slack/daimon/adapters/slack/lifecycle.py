@@ -14,7 +14,7 @@ Design decisions:
 - Final answer rendered as a native markdown block (DEFAULT path,
   locked by live-workspace probe).
 - text= always passed alongside blocks= to satisfy Slack's notification
-  fallback requirement (Pitfall 3).
+  fallback requirement.
 - The Block Kit flush rides the render tick (`on_render`), not `on_sse_event`:
   the driver awaits `on_sse_event` inline in its consume loop, so a debounced
   `chat.update` living there would stall read-timeout detection and deaden
@@ -382,6 +382,10 @@ class SlackTurnLifecycle:
         if self._terminal:
             return
         now = self._clock()
+        if self._status_ts is not None and now - self._last_flush < _DEBOUNCE_S:
+            # Within the debounce window: skip before rendering, which runs the
+            # mrkdwn conversion on every render tick otherwise.
+            return
         if self._intent_cancel_key is not None:
             cancel_key = self._intent_cancel_key
         elif self._status_ts is None:
@@ -429,7 +433,7 @@ class SlackTurnLifecycle:
                 self._pending_registered = False
             await self.record_post(self._status_ts)
             self._last_flush = now
-        elif now - self._last_flush >= _DEBOUNCE_S:
+        else:
             # Debounce elapsed — update the status message in place.
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,

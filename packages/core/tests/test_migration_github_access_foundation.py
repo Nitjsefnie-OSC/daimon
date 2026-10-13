@@ -34,6 +34,7 @@ async def test_github_access_migration_round_trips(db_session: AsyncSession) -> 
     migration = _load_migration()
     panel_migration = _load_migration("0066_github_panel_notices")
     agent_repos_migration = _load_migration("0079_github_agent_repos")
+    authorized_permission_migration = _load_migration("0094_github_authorized_perm")
     conn = await db_session.connection()
 
     def run(migration_module: object, step: str) -> Callable[[Connection], None]:
@@ -43,6 +44,7 @@ async def test_github_access_migration_round_trips(db_session: AsyncSession) -> 
 
         return inner
 
+    await conn.run_sync(run(authorized_permission_migration, "downgrade"))
     await conn.run_sync(run(agent_repos_migration, "downgrade"))
     await conn.run_sync(run(panel_migration, "downgrade"))
     await conn.run_sync(run(migration, "downgrade"))
@@ -53,6 +55,7 @@ async def test_github_access_migration_round_trips(db_session: AsyncSession) -> 
     await conn.run_sync(run(migration, "upgrade"))
     await conn.run_sync(run(panel_migration, "upgrade"))
     await conn.run_sync(run(agent_repos_migration, "upgrade"))
+    await conn.run_sync(run(authorized_permission_migration, "upgrade"))
     restored = await db_session.scalar(
         text("SELECT to_regclass(current_schema() || '.tenant_github_repos')")
     )

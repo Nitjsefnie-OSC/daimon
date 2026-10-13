@@ -43,6 +43,10 @@ async def test_acquire_returns_connection_when_uncontended() -> None:
         conn = await _acquire_advisory_lock(engine, key)
         assert conn is not None, "uncontended acquire must return a held connection"
         try:
+            assert not conn.in_transaction(), (
+                "the held connection must not sit idle in a transaction, "
+                "or concurrent index builds wait on it forever"
+            )
             # Verify the lock is actually held by this connection.
             result = await conn.execute(
                 text("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=:k"),

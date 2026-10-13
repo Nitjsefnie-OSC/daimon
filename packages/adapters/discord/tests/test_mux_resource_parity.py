@@ -146,7 +146,8 @@ async def test_imported_skill_attachment_keeps_requests_retry_limit_and_notice(
         ]
         result = await credentials.SkillRepoModal._attach_to_requested_agent(
             cast(
-                credentials.SkillRepoModal, SimpleNamespace(_runtime=SimpleNamespace(anthropic=new))
+                credentials.SkillRepoModal,
+                SimpleNamespace(_runtime=SimpleNamespace(anthropic=new, sessionmaker=None)),
             ),
             tenant_id=tenant,
             agent_id=UUID("00000000-0000-0000-0000-000000000008"),

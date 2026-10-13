@@ -59,7 +59,8 @@ def apply_flags(profile):
     assert configured.discord.writers_none_notice is True
     assert configured.discord.tenant_cap_waiting_card is True
     for service in ("notebook", "report"):
-        assert profile.apply(HostFlags(), service=service).html_link_errors is True
+        host = HostFlags()
+        assert profile.apply(host, service=service) is host
 
 
 def board(*, first="FAIL", profile="default") -> ExecutionReport:
@@ -218,7 +219,7 @@ async def test_missing_flags_or_fixture_binding_produce_no_opt_in_dispatch_or_de
 ):
     def available(self):
         if self.name == "opt-in-product" and missing_fields:
-            raise profiles.ProductProfileUnavailable(("notebook.html_link_errors",))
+            raise profiles.ProductProfileUnavailable(("core.turn.native_footer_cost",))
 
     monkeypatch.setattr(profiles.QAProductProfile, "require_available", available)
     opted = AsyncMock(side_effect=AssertionError("must not dispatch"))

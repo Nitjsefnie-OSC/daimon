@@ -54,10 +54,16 @@ from daimon.core.session_preparation import (
     prepare_session_for_turn,
 )
 from daimon.core.session_snapshot import hash_env_bytes, hash_tools
+from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+from daimon.core.stores.agent_memory_stores import (
+    get_memory_store_id,
+    get_personal_memory_store_id,
+)
 from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.stores.channel_skills import add_channel_skill
 from daimon.core.stores.domain import AccountRow, Role, TenantRow, ThreadSessionRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -82,7 +88,7 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_fresh_session,
 )
-from daimon.core.usage_sweep import sweep_headless_usage
+from daimon.core.usage_sweep import settle_stamped_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     FakeMAState,
@@ -168,6 +174,8 @@ class _Transport:
         self.calls: list[tuple[str, str]] = []
         self.updates: list[dict[str, Any]] = []
         self.fail_session_create = False
+        self.fail_message = "boom"
+        self.fail_shared_memory_create = False
         self.retrieve_error: int | None = None
         _register(self.state, _agent())
 
@@ -200,6 +208,18 @@ class _Transport:
                 and path.count("/") == 3
             ):
                 self.updates.append(json.loads(request.content))
+            if (
+                self.fail_shared_memory_create
+                and (request.method, path) == ("POST", "/v1/memory_stores")
+                and not json.loads(request.content)["name"].startswith("personal ")
+            ):
+                return httpx.Response(
+                    400,
+                    json={
+                        "type": "error",
+                        "error": {"type": "invalid_request_error", "message": "outage"},
+                    },
+                )
             if self.fail_session_create and (request.method, request.url.path) == (
                 "POST",
                 "/v1/sessions",
@@ -210,7 +230,10 @@ class _Transport:
                     400,
                     json={
                         "type": "error",
-                        "error": {"type": "invalid_request_error", "message": "boom"},
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": self.fail_message,
+                        },
                     },
                 )
             raise NotHandled
@@ -223,6 +246,19 @@ class _Transport:
                 make_fake_ma_handler(self.state.ma),
             )
         )
+
+
+async def _settle_every_session(
+    deps: TurnDeps, transport: Any, sessionmaker: async_sessionmaker[AsyncSession]
+) -> int:
+    """Settle every session the fake holds by its stamps; the calls debited."""
+    debited = 0
+    for session in list(transport.state.sessions.values()):
+        result = await settle_stamped_session(
+            deps.anthropic, sessionmaker, session, markup=Decimal("1"), max_pages=None
+        )
+        debited += result.debited if result is not None else 0
+    return debited
 
 
 def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport) -> TurnDeps:
@@ -561,7 +597,7 @@ async def test_missed_usage_after_budget_channel_change_is_recovered_to_current_
     )
     # The MA event exists, but the live recorder never saw it.
     transport.state.events[second.ma_session_id].append(event.model_dump(mode="json"))
-    assert await sweep_headless_usage(deps.anthropic, db_session_factory, markup=Decimal("1")) == 1
+    assert await _settle_every_session(deps, transport, db_session_factory) == 1
     async with db_session_factory() as session:
         usage = (await session.scalars(select(UsageEvent))).one()
         debit = (await session.scalars(select(TenantLedger))).one()
@@ -799,11 +835,7 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
     await second._record(event=new_event)
     transport.state.events[second.ma_session_id].append(new_event.model_dump(mode="json"))
     assert observation._samples[(second.ma_session_id, new_event.id)].cost is not None
-    # The fake list endpoint excludes archived sessions by default. Expose the
-    # predecessor to exercise the sweep's attribution when its log is listed.
-    old = transport.state.sessions[first.ma_session_id]
-    transport.state.sessions[first.ma_session_id] = old.model_copy(update={"archived_at": None})
-    assert await sweep_headless_usage(deps.anthropic, db_session_factory, markup=Decimal("1")) == 1
+    assert await _settle_every_session(deps, transport, db_session_factory) == 1
     async with db_session_factory() as session:
         rows = (await session.scalars(select(UsageEvent).order_by(UsageEvent.id))).all()
         debits = (await session.scalars(select(TenantLedger).order_by(TenantLedger.id))).all()
@@ -1426,6 +1458,110 @@ async def test_a_failed_replacement_backs_off_and_leaves_the_old_session_live(
     assert transport.creates == creates_after_failure + 1, (
         "once the backoff expires the replacement is attempted again"
     )
+
+
+async def test_a_replacement_for_a_deleted_channel_skill_names_it_instead_of_retrying(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Finding #6: a channel skill that no longer exists fails the replacement.
+
+    Asking again fails the same way, so the turn is refused with copy naming
+    the skill and how to detach it, not "Ask again to retry".
+    """
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await add_channel_skill(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="chan-1",
+        skill_id="skill_gone",
+        version="1791633132940669",
+        name="qa-haiku-canary",
+        owner_agent_name=None,
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+
+    transport.fail_session_create = True
+    transport.fail_message = (
+        'Could not resolve one or more skills: skill "skill_gone" version '
+        '"1791633132940669" not found'
+    )
+    extra = (
+        BetaManagedAgentsCustomSkill(
+            type="custom", skill_id="skill_gone", version="1791633132940669"
+        ),
+    )
+    with pytest.raises(SkillUnavailable) as refused:
+        await _prepare(
+            deps,
+            replace(_admission(account=account), channel_skills=extra),
+            tenant=tenant,
+            account=account,
+        )
+
+    message = str(refused.value)
+    assert refused.value.attached_to == "channel"
+    assert '"qa-haiku-canary"' in message and "remove_channel_skill" in message
+    assert "Ask again to retry" not in message
+    still_live = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert still_live is not None and still_live.ma_session_id == first.ma_session_id
+
+
+async def test_the_missing_skill_message_holds_through_the_replacement_backoff(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+) -> None:
+    """PR #857 review: a retry inside the backoff names the skill too, without calling MA.
+
+    Separate connections, as in production: the failed preparation's stored
+    reason must survive the first refusal being raised.
+    """
+    sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await add_channel_skill(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="chan-1",
+        skill_id="skill_gone",
+        version="1",
+        name="qa-haiku-canary",
+        owner_agent_name=None,
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(sessionmaker, transport)
+    first = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    transport.fail_session_create = True
+    transport.fail_message = (
+        'Could not resolve one or more skills: skill "skill_gone" version "1" not found'
+    )
+    admission = replace(
+        _admission(account=account),
+        channel_skills=(
+            BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_gone", version="1"),
+        ),
+    )
+    with pytest.raises(SkillUnavailable, match="qa-haiku-canary"):
+        await _prepare(deps, admission, tenant=tenant, account=account)
+    creates = transport.creates
+
+    with pytest.raises(SkillUnavailable, match="qa-haiku-canary") as again:
+        await _prepare(deps, admission, tenant=tenant, account=account)
+
+    assert again.value.attached_to == "channel"
+    assert transport.creates == creates, "the backoff still holds: no new create"
+    live = await _live_row(sessionmaker, tenant=tenant, account=account)
+    assert live is not None and live.ma_session_id == first.ma_session_id
 
 
 async def test_two_concurrent_preparations_for_one_caller_create_exactly_one_session(
@@ -2680,11 +2816,15 @@ async def test_inherited_sealed_transcript_keeps_read_only_memory_after_unseal(
     )
     new = await deps.anthropic.beta.sessions.retrieve(handed.ma_session_id)
     old = await deps.anthropic.beta.sessions.retrieve(first.ma_session_id)
-    assert [r.access for r in old.resources if r.type == "memory_store"] == ["read_only"]
+    # Shared and personal mounts alike: a sealed origin keeps both read-only.
+    assert [r.access for r in old.resources if r.type == "memory_store"] == [
+        "read_only",
+        "read_only",
+    ]
     assert _sealed_stamp(transport, handed.ma_session_id) == "channel-1"
     assert handed.admission.memory_read_only
     new_memory = [r.access for r in new.resources if r.type == "memory_store"]
-    assert new_memory == ["read_only"], (
+    assert new_memory == ["read_only", "read_only"], (
         "sealed content is carried into the new agent with writable shared memory"
     )
 
@@ -2880,7 +3020,7 @@ async def test_unseal_during_preparation_retains_inherited_memory_restriction(
         r.access
         for r in transport.state.sessions[successor.ma_session_id].resources
         if r.type == "memory_store"
-    ] == ["read_only"]
+    ] == ["read_only", "read_only"]
 
 
 async def test_prepared_turn_cannot_resume_retired_session(db_session, db_nullpool_engine):
@@ -2999,7 +3139,7 @@ async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_eng
         r.access
         for r in transport.state.sessions[successor.ma_session_id].resources
         if r.type == "memory_store"
-    ] == ["read_only"]
+    ] == ["read_only", "read_only"]
 
 
 async def test_handoff_waits_for_an_inflight_handle_send(
@@ -3890,3 +4030,116 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
         await deps.anthropic.close()
         await admission_deps.anthropic.close()
         await engine.dispose()
+
+
+async def test_chat_sessions_in_one_thread_each_mount_only_their_callers_personal_store(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    prepared = {}
+    for account in (alice, bob):
+        turn = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+        assert isinstance(turn, PreparedTurn)
+        prepared[account.id] = turn
+
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_agent().id)
+    async with db_session_factory() as session:
+        shared = await get_memory_store_id(session, tenant_id=tenant.id, agent_id=agent_uuid)
+        personal = {
+            account.id: await get_personal_memory_store_id(
+                session, tenant_id=tenant.id, agent_id=agent_uuid, account_id=account.id
+            )
+            for account in (alice, bob)
+        }
+    for account in (alice, bob):
+        session_id = prepared[account.id].ma_session_id
+        mounted = {
+            r.memory_store_id
+            for r in transport.state.sessions[session_id].resources
+            if r.type == "memory_store"
+        }
+        assert mounted == {shared, personal[account.id]}, "own store and the shared one, only"
+        row = await _live_row(db_session_factory, tenant=tenant, account=account)
+        assert row is not None and row.effective_config is not None
+        assert row.effective_config.memory_store_id == shared
+        assert row.effective_config.personal_memory_store_id == personal[account.id]
+
+
+async def test_a_session_from_before_personal_memory_is_reused_not_replaced(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Deploying personal memory must not end live conversations. A session
+    recorded without a personal store keeps running, with no MA call, even once
+    the caller has one; only a new session mounts it."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    admission = _admission(account=account)
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
+    async with db_session_factory() as session, session.begin():
+        # What a row recorded before this change holds: no personal store.
+        await session.execute(
+            text(
+                "UPDATE thread_sessions SET effective_config = "
+                "effective_config - 'personal_memory_store_id' WHERE id = :id"
+            ),
+            {"id": first.mapping_id},
+        )
+    before = len(transport.calls)
+
+    second = await _prepare(deps, admission, tenant=tenant, account=account)
+
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id and second.reused
+    assert second.continuity == ContinuityOutcome()
+    assert transport.calls[before:] == []
+
+
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "active"])
+async def test_a_writable_personal_only_mount_is_not_reused_for_a_read_only_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    active: bool,
+) -> None:
+    """The shared store failed to provision, so the session holds only the caller's
+    writable personal store. Once the caller's turn must be read-only (a seal, or
+    the DM policy), an idle session is replaced and an active one refuses the
+    turn, exactly as for a writable shared mount."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    transport.fail_shared_memory_create = True
+    deps = _deps(db_session_factory, transport)
+    admission = _admission(account=account)
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    mounted = transport.state.sessions[first.ma_session_id].resources
+    assert [r.access for r in mounted if r.type == "memory_store"] == ["read_write"]
+    if active:
+        row = await _live_row(db_session_factory, tenant=tenant, account=account)
+        assert row is not None
+        async with db_session_factory.begin() as session:
+            await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
+
+    second = await _prepare(
+        deps, replace(admission, memory_read_only=True), tenant=tenant, account=account
+    )
+
+    if active:
+        assert isinstance(second, PreparationBusy), "never run it on writable personal memory"
+    else:
+        assert isinstance(second, PreparedTurn) and second.ma_session_id != first.ma_session_id
+        fresh = transport.state.sessions[second.ma_session_id].resources
+        assert [r.access for r in fresh if r.type == "memory_store"] == ["read_only"]

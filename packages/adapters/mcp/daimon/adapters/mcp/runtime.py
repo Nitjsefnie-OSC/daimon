@@ -14,9 +14,11 @@ from typing import TYPE_CHECKING, Protocol
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.auth.group_members import GroupLookups
+from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.artifacts import ArtifactStore
 from daimon.core.config import Settings
+from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from google import genai
@@ -58,6 +60,10 @@ class McpRuntime:
     teams_client: TeamsBotClient | None = field(default=None)
     # Re-checks stored Slack groups and Teams teams outside a chat turn; None checks none.
     group_lookups: GroupLookups | None = field(default=None)
+    resolver_cache: ResolverCache = field(default_factory=new_resolver_cache)
+    # None (tests) lets slack_sdk open a throwaway session per call.
+    slack_http: SlackHttpSession | None = field(default=None)
+
     # The explicit operator deployment capability for OpenAI agents. None (the
     # default) keeps every tool on its existing Anthropic path.
     resource_hosts: McpResourceHostFactory | None = field(default=None)

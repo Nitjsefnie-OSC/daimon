@@ -129,6 +129,13 @@ def with_agent_rule(
     return _rebuilt(policy, agent_rules=rules)
 
 
+def without_agent_rules(policy: TenantAccessPolicy, names: Iterable[str]) -> TenantAccessPolicy:
+    """The policy with no rule on any of `names`, as when their agent is archived. Pure."""
+    for name in names:
+        policy = with_agent_rule(policy, name, AgentRule())
+    return policy
+
+
 def runs_only_in(policy: TenantAccessPolicy, channel_id: str) -> tuple[str, ...]:
     """Names whose rule runs them in `channel_id` alone, sorted: its own agents
     while its readers are own."""
@@ -628,6 +635,7 @@ __all__ = [
     "session_homes",
     "session_readable_from",
     "with_agent_rule",
+    "without_agent_rules",
     "with_category_rule",
     "with_channel_rule",
 ]

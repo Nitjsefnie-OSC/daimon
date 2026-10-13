@@ -59,6 +59,7 @@ from daimon.core.skills.ingest import (
     bundle_from_upload,
     require_upload_suffix,
 )
+from daimon.core.skills.reference_lock import added_custom_skill_ids, skill_attach_guard
 from daimon.core.skills.service import StoredSkillUpload, UploadedSkill, add_skill
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
@@ -443,6 +444,7 @@ class _AnthropicSkillAddHost:
     async def attach(self, skill_id: str) -> bool:
         return await _attach(
             self.client,
+            self.sessionmaker,
             tenant_id=self.tenant_id,
             agent_id=self.agent_id,
             skill_id=skill_id,
@@ -531,6 +533,7 @@ async def _refuse_mount_clash(
 
 async def _attach(
     client: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
     agent_id: str,
@@ -556,24 +559,32 @@ async def _attach(
             raise SkillIngestError(f"Uploaded, but not attached: {collision}")
         attached = True
         if any(tool.type == "agent_toolset_20260401" for tool in fresh.tools):
-            return await update_agent(
-                client,
-                fresh.id,
-                version=fresh.version,
-                payload={"skills": merged},
-                scope=resource_scope(tenant_id=str(tenant_id)),
-            )
+            added = added_custom_skill_ids(before=fresh.skills, after=merged)
+            async with skill_attach_guard(
+                sessionmaker, client, added, backend_scope=resource_scope(tenant_id=str(tenant_id))
+            ):
+                return await update_agent(
+                    client,
+                    fresh.id,
+                    version=fresh.version,
+                    payload={"skills": merged},
+                    scope=resource_scope(tenant_id=str(tenant_id)),
+                )
         # A skill needs the base toolset's read tool, or sessions fail to start.
         tools = merge_default_agent_toolset(
             [tool.model_dump(mode="json", exclude_none=True) for tool in fresh.tools]  # type: ignore[arg-type]  # dumped dicts satisfy the Tool TypedDict shape
         )
-        return await update_agent(
-            client,
-            fresh.id,
-            version=fresh.version,
-            payload={"skills": merged, "tools": tools},
-            scope=resource_scope(tenant_id=str(tenant_id)),
-        )
+        added = added_custom_skill_ids(before=fresh.skills, after=merged)
+        async with skill_attach_guard(
+            sessionmaker, client, added, backend_scope=resource_scope(tenant_id=str(tenant_id))
+        ):
+            return await update_agent(
+                client,
+                fresh.id,
+                version=fresh.version,
+                payload={"skills": merged, "tools": tools},
+                scope=resource_scope(tenant_id=str(tenant_id)),
+            )
 
     await update_agent_with_version_retry(
         client, agent_id, _apply, scope=resource_scope(tenant_id=str(tenant_id))

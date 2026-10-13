@@ -101,13 +101,13 @@ from daimon.core.mcp_token_connect import (
     connect_mcp_server_with_token,
 )
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import update_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
@@ -1233,12 +1233,12 @@ async def _attach_skills_to_requested_agent(
         )
         if collision is not None:
             raise DaimonError(f"cannot attach: {collision}")
-        return await update_agent(
+        return await guarded_agent_update(
             runtime.anthropic,
-            fresh.id,
-            version=fresh.version,
-            payload={"skills": merged},
-            scope=resource_scope(tenant_id=str(tenant_id)),
+            runtime.sessionmaker,
+            fresh,
+            skills=merged,
+            backend_scope=resource_scope(tenant_id=str(tenant_id)),
         )
 
     try:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
@@ -67,6 +68,7 @@ from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.testing import list_response, ma_agent
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import skill_response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -688,6 +690,9 @@ async def test_skill_repo_submission_writes_the_skill_credential_not_the_working
             if request.method in ("POST", "PATCH"):
                 updates.append(json.loads(request.content))
             return httpx.Response(200, json=agent.model_dump(mode="json"))
+        skill = re.fullmatch(r"/v1/skills/([^/]+)", request.url.path)
+        if skill is not None:  # the attach's existence check
+            return httpx.Response(200, json=skill_response(skill.group(1)))
         return list_response([agent.model_dump(mode="json")])
 
     runtime = _build_runtime(fernet_key, db_session_factory, anthropic_handler=handler)

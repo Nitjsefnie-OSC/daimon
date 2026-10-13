@@ -181,12 +181,13 @@ def build_turn_router(
         return sse_response(events)
 
     def _history(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
-        # Post-turn billing reads completed spans, with timestamp bounds for catch-up.
+        # Post-turn billing reads completed spans, with timestamp bounds for catch-up:
+        # the turn-end settle reads newest first, the usage walk oldest first.
         # Replay the exact stream objects, never mint fresh events on a read.
         params = request.url.params
         if (
             params.get_list("beta") != ["true"]
-            or params.get_list("order") != ["asc"]
+            or params.get_list("order") not in (["asc"], ["desc"])
             or params.get_list("limit") != ["100"]
             or params.get_list("types[]") != ["span.model_request_end"]
         ):
@@ -199,7 +200,7 @@ def build_turn_router(
         types = params.get_list("types[]")
         if types:
             events = [event for event in events if event["type"] in types]
-        events.sort(key=lambda event: event["processed_at"])
+        events.sort(key=lambda event: event["processed_at"], reverse=params["order"] == "desc")
         for key in ("created_at[gte]", "created_at[lt]"):
             if (bound := params.get(key)) is not None:
                 at = datetime.fromisoformat(bound)

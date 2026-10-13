@@ -86,6 +86,8 @@ async def test_add_skill_preserves_the_pre_refactor_sdk_request_bytes(
                 httpx.Response(200, json=agent.model_dump(mode="json")),
             ),
             ScriptedReply("GET", "/v1/skills", list_response([skill])),
+            # The attach lock's existence check on the skill it pins.
+            ScriptedReply("GET", "/v1/skills/sk_uploaded", httpx.Response(200, json=skill)),
             ScriptedReply(
                 "POST",
                 "/v1/agents/ag_upload",
@@ -105,6 +107,7 @@ async def test_add_skill_preserves_the_pre_refactor_sdk_request_bytes(
         )
         await sdk.beta.agents.retrieve(agent.id)
         await sdk.beta.skills.list(limit=1000)
+        await sdk.beta.skills.retrieve("sk_uploaded")
         pins: list[BetaManagedAgentsSkillParams] = [{"type": "custom", "skill_id": "sk_uploaded"}]
         if with_toolset:
             await sdk.beta.agents.update(agent.id, skills=pins, version=agent.version)
@@ -186,7 +189,7 @@ async def test_fork_partition_preserves_sdk_trace_and_raw_shared_pins(
         page = await sdk.beta.skills.list(limit=1000)
         # Both actual SDK rows accept null native version metadata.
         assert all(row.latest_version is None for row in page.data)
-        _agents = [row async for row in sdk.beta.agents.list(include_archived=False)]
+        _agents = [row async for row in sdk.beta.agents.list(include_archived=False, limit=100)]
     async with migrated.client() as sdk:
         split = await _split_scoped_skills(
             sdk, db_session_factory, tenant_id=tenant.id, source_name="source", skills=pins

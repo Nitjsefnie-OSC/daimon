@@ -14,8 +14,8 @@ Two responsibilities:
    updates the open modal to the post-delete status view.
 
 Port of packages/adapters/discord/daimon/adapters/discord/privacy_panel/modal.py:50-98.
-Slack-specific: response_action lives in SocketModeResponse.payload (RESEARCH §Pattern 2),
-not an HTTP body. Catch site follows S3 (DaimonError | anthropic.APIError | SlackApiError).
+Slack-specific: response_action lives in SocketModeResponse.payload,
+not an HTTP body. Catch site covers (DaimonError | anthropic.APIError | SlackApiError).
 """
 
 from __future__ import annotations

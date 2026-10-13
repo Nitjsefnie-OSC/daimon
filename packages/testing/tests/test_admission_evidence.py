@@ -251,6 +251,8 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
             _ingress_clock=None,
             runtime=SimpleNamespace(turn_deps=deps, settings=SimpleNamespace(discord=None)),
             _wait_for_orphan_recovery=AsyncMock(),
+            # The default protected-channel signal is a platform reaction, never a native send.
+            _signal_protected_channel=AsyncMock(),
         ),
     )
 

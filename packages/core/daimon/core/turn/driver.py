@@ -915,9 +915,11 @@ async def _pump(
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
     async def _render_once(state: TurnState) -> None:
-        delta = _diff(prev_cell[0], state)
-        if delta.is_empty():
+        if _diff(prev_cell[0], state).is_empty():
             return
+        await _deliver(state)
+
+    async def _deliver(state: TurnState) -> None:
         # Named boundary (guideline:architecture): rendering is delivery,
         # not correctness, and the adapter exceptions it must survive are
         # open-ended (discord.HTTPException, Slack API errors, whatever a
@@ -927,9 +929,8 @@ async def _pump(
         # BaseException drain site in this module.
         #
         # On failure: log and return WITHOUT advancing `prev_cell[0]`. The
-        # next tick re-diffs from the unchanged anchor and naturally
-        # retries the identical delta -- no retry counter, no backoff, no
-        # extra state. This function always returns `None` either way, and
+        # next tick delivers the state again -- no retry counter, no
+        # backoff, no extra state. This function always returns `None` either way, and
         # every finalizer proceeds to its `on_terminal_*` call regardless,
         # so a render failure can never change the turn's own outcome.
         try:
@@ -946,9 +947,12 @@ async def _pump(
         prev_cell[0] = state
 
     async def _render_loop() -> None:
+        # Every tick delivers, changed or not: a long tool call changes
+        # nothing, yet the card's elapsed time must keep moving. Each
+        # adapter's own debounce decides which calls become platform edits.
         while True:
             await asyncio.sleep(render_interval_s)
-            await _render_once(state_cell[0])
+            await _deliver(state_cell[0])
 
     render_task = asyncio.create_task(_render_loop(), name="turn.render_loop")
 

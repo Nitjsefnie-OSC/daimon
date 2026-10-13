@@ -20,9 +20,16 @@ import structlog
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.core.continuity.messages import ConfigurationChange
-from daimon.core.credential_requests import build_skill_repo_target
+from daimon.core.credential_requests import build_skill_repo_target, mint_request_token
+from daimon.core.github_request_expiry import retire_expired_forms_once
 from daimon.core.posted_controls import RECEIVED_FOOTER, CardState
+from daimon.core.stores.credential_requests import (
+    create_credential_request,
+    update_credential_request_message,
+)
 from daimon.core.stores.domain import CredentialRequestRow
+from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
 
@@ -210,3 +217,61 @@ async def test_unnamed_row_falls_back_to_neutral_names() -> None:
     assert "the agent" in text and "Daimon" in text, (
         "a row minted without display names still renders readable copy"
     )
+
+
+async def test_edit_swallows_a_transport_timeout() -> None:
+    client = _client()
+    _card(client).edit = AsyncMock(side_effect=TimeoutError())
+
+    with structlog.testing.capture_logs() as captured:
+        await edit_posted_card(client, row=_row(), state="expired")
+
+    assert [(entry["event"], entry["err_type"]) for entry in captured] == [
+        ("posted_card.edit_failed", "TimeoutError")
+    ]
+
+
+async def test_expiry_poller_still_retires_every_card_when_one_edit_times_out(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """One card's transport failure must not leave the batch's other cards live."""
+    platform = f"discord-{uuid.uuid4()}"
+    past = datetime.now(UTC) - timedelta(minutes=1)
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        for message_id in ("501", "502"):
+            row = await create_credential_request(
+                session,
+                token=mint_request_token(),
+                kind="env",
+                tenant_id=tenant.id,
+                agent_id=uuid.uuid4(),
+                account_id=account.id,
+                target="ACME_API_KEY",
+                mcp_server_url=None,
+                requester_platform_user_id="100000000000000001",
+                channel_id="333",
+                expires_at=past,
+                idempotency_key=uuid.uuid4(),
+                target_ma_agent_id="ag_helper",
+                target_name="Helper",
+                requested_work=None,
+                platform=platform,
+                origin_thread_id="333",
+            )
+            await update_credential_request_message(
+                session, token=row.token, posted_message_id=message_id
+            )
+    client = _client()
+    _card(client).edit = AsyncMock(side_effect=[TimeoutError(), None])
+
+    retired = await retire_expired_forms_once(
+        db_session_factory,
+        platform=platform,  # pyright: ignore[reportArgumentType]  # a per-test platform keeps parallel workers' rows out
+        retire=lambda row: edit_posted_card(client, row=row, state="expired"),
+    )
+
+    assert retired == 2
+    assert _card(client).edit.await_count == 2, "the second card is still edited"
+    assert "This form expired." in _text(_card(client).edit.await_args.kwargs["view"])

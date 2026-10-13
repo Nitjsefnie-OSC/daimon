@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, MutableMapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -47,7 +47,12 @@ from daimon.core.mcp_vault import (
     hold_agent_vault_lock,
 )
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import list_credentials, store_credential, update_credential
+from daimon.core.mux_compat import (
+    list_credentials,
+    retrieve_vault,
+    store_credential,
+    update_credential,
+)
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from mux.contracts.ids import Scope
@@ -64,6 +69,9 @@ log = structlog.get_logger(__name__)
 # ``add_external_mcp_credential``) reads as "unknown version" and is refreshed
 # once, which self-heals vaults already holding a stale token.
 METADATA_VERSION_KEY = "daimon_token_version"
+
+# (account_id, agent_id, public_url) -> the vault ``ensure_agent_mcp_vault`` returned.
+type McpVaultIds = MutableMapping[tuple[uuid.UUID, uuid.UUID, str], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +379,7 @@ async def sync_agent_mcp_credentials(
     public_url: str,
     now: dt.datetime,
     exclude_github_copilot: bool = False,
+    vault_ids: McpVaultIds | None = None,
 ) -> None:
     """Ensure this caller's vault holds the agent's external MCP credentials.
 
@@ -386,6 +395,10 @@ async def sync_agent_mcp_credentials(
 
     Cheap for the common case: the DB read gates every MA call, so an agent with
     no external MCP servers pays one indexed query and nothing else.
+
+    ``vault_ids`` remembers the vault ``ensure_agent_mcp_vault`` returned, so
+    later turns skip its walk over every vault in the workspace. A cached
+    vault that has since been deleted or archived is resolved again.
     """
     credentials = await resolve_agent_mcp_credentials(
         sessionmaker=sessionmaker,
@@ -401,23 +414,46 @@ async def sync_agent_mcp_credentials(
         )
     if not credentials:
         return
-    vault_id = await ensure_agent_mcp_vault(
-        client,
-        account_id=account_id,
-        agent_id=agent_id,
-        jwt_secret=jwt_secret,
-        public_url=public_url,
-        now=now,
-        session_factory=sessionmaker,
-        scope=resource_scope(tenant_id=str(tenant_id), account_id=str(account_id)),
-    )
-    async with hold_agent_vault_lock(sessionmaker, account_id=account_id, agent_id=agent_id):
-        await mirror_credentials_into_vault(
+    scope = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
+
+    async def ensure() -> str:
+        return await ensure_agent_mcp_vault(
             client,
-            vault_id=vault_id,
-            credentials=credentials,
-            scope=resource_scope(tenant_id=str(tenant_id), account_id=str(account_id)),
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=jwt_secret,
+            public_url=public_url,
+            now=now,
+            session_factory=sessionmaker,
+            scope=scope,
         )
+
+    async def mirror(vault_id: str) -> None:
+        async with hold_agent_vault_lock(sessionmaker, account_id=account_id, agent_id=agent_id):
+            await mirror_credentials_into_vault(
+                client, vault_id=vault_id, credentials=credentials, scope=scope
+            )
+
+    if vault_ids is None:
+        await mirror(await ensure())
+        return
+    key = (account_id, agent_id, public_url)
+    vault_id = vault_ids.get(key)
+    if vault_id is None or not await _vault_is_live(client, vault_id, scope=scope):
+        vault_ids[key] = vault_id = await ensure()
+    await mirror(vault_id)
+
+
+async def _vault_is_live(client: AsyncAnthropic, vault_id: str, *, scope: Scope) -> bool:
+    """Whether a cached vault still takes credentials: neither deleted nor archived.
+
+    One retrieve, where `ensure_agent_mcp_vault` walks every vault in the workspace.
+    """
+    try:
+        vault = await retrieve_vault(client, vault_id, scope=scope)
+    except anthropic.NotFoundError:
+        return False
+    return vault.archived_at is None
 
 
 async def resolve_hidden_mcp_server_names(

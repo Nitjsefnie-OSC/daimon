@@ -196,7 +196,9 @@ async def test_named_vault_walk_keeps_lazy_sdk_pages_and_exact_name_filter(
         replies.append(("GET", "/v1/vaults", 200, {"data": [body], "next_page": None}))
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
-        expected = [v async for v in before.beta.vaults.list() if v.display_name == VAULT_NAME]
+        expected = [
+            v async for v in before.beta.vaults.list(limit=100) if v.display_name == VAULT_NAME
+        ]
         actual = [v async for v in resource_ports.walk_named_vaults(after, VAULT_NAME, scope=SCOPE)]
         for a, b in zip(expected, actual, strict=True):
             same_model(a, b)
@@ -286,7 +288,9 @@ async def test_public_vault_summary_keeps_oldest_matching_vault_and_legacy_url(
     ]
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
-        matching = [v async for v in before.beta.vaults.list() if v.display_name == VAULT_NAME]
+        matching = [
+            v async for v in before.beta.vaults.list(limit=100) if v.display_name == VAULT_NAME
+        ]
         identity = min(matching, key=lambda v: v.created_at).id
         expected = [
             vault.VaultCredentialSummary.model_validate(c.model_dump(mode="json"))
@@ -372,7 +376,7 @@ async def test_public_repo_binding_keeps_vault_write_commit_compensation_and_old
     ]
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
-        _ = [v async for v in before.beta.vaults.list() if v.display_name == VAULT_NAME]
+        _ = [v async for v in before.beta.vaults.list(limit=100) if v.display_name == VAULT_NAME]
         await before.beta.vaults.credentials.create(
             vault_id="vault",
             auth={
@@ -456,7 +460,7 @@ async def test_public_clear_binding_keeps_vault_delete_before_database_clear(
     ]
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
-        _ = [v async for v in before.beta.vaults.list() if v.display_name == VAULT_NAME]
+        _ = [v async for v in before.beta.vaults.list(limit=100) if v.display_name == VAULT_NAME]
         await before.beta.vaults.credentials.delete("old", vault_id="vault")
         actual = await self_edit._clear_repo_binding_impl(runtime(after), AUTH)  # pyright: ignore[reportPrivateUsage]
         assert actual == {"cleared": True}
@@ -498,7 +502,7 @@ async def test_public_skill_version_count_keeps_partial_rows_and_sdk_stop_rules(
     ]
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
-        count = len([v async for v in before.beta.skills.versions.list("skill")])
+        count = len([v async for v in before.beta.skills.versions.list("skill", limit=100)])
         actual = await skills._get_impl(runtime(after), AUTH, "test")  # pyright: ignore[reportPrivateUsage]
         assert actual == skills.SkillDetail(
             name="test",

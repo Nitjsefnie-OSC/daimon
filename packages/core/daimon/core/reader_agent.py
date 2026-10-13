@@ -38,6 +38,12 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_agent, update_agent
+from daimon.core.skills.reference_lock import (
+    ReferenceScope,
+    SkillDeletedWhileAttaching,
+    added_custom_skill_ids,
+    skill_attach_guard,
+)
 from daimon.core.specs import AgentSpec, SkillRef, dump_agent_spec
 
 # Skill seeded from the defaults tree (its SKILL.md lands in a later plan)
@@ -45,7 +51,7 @@ from daimon.core.specs import AgentSpec, SkillRef, dump_agent_spec
 READER_SKILL_NAME = "report-reader"
 
 # Appended to the source agent's system prompt. Prose the model reads, not a
-# spec citation — carries the five clauses SPEC §1.7 names for a reader
+# spec citation — carries the five clauses the spec names for a reader
 # variant's behaviour.
 READER_BLOCK = """
 
@@ -112,15 +118,45 @@ async def ensure_reader_variant(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     source_name: str,
+    references: ReferenceScope | None,
 ) -> BetaManagedAgentsAgent:
-    """Find, create or update the reader variant of `source_name`, on MA only.
+    """Find, create or update the reader variant of `source_name`.
 
-    Deliberate deviation from SPEC §1.7's literal signature: the spec writes
-    `ensure_reader_variant(anthropic, session_factory, *, ...)`, but nothing
-    in this function's work touches the database — resolving the source,
-    deriving the spec, resolving skill refs and creating or updating the
-    agent are all Managed Agents calls. `guideline:architecture` forbids
-    taking a collaborator you do not use, so `session_factory` is omitted.
+    The variant copies the source's skills, so its write takes the shared
+    skill reference lock (`references`, see `reference_lock`) for every
+    skill it adds and checks each still exists. A copy taken before a
+    concurrent delete detached and deleted a skill is refused there; the
+    variant is then rebuilt once from the source as it is now.
+    """
+    try:
+        return await _ensure_reader_variant(
+            anthropic,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            source_name=source_name,
+            references=references,
+        )
+    except SkillDeletedWhileAttaching:
+        return await _ensure_reader_variant(
+            anthropic,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            source_name=source_name,
+            references=references,
+        )
+
+
+async def _ensure_reader_variant(
+    anthropic: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    source_name: str,
+    references: ReferenceScope | None,
+) -> BetaManagedAgentsAgent:
+    """Find, create or update the reader variant of `source_name`.
+
+    Every step but the reference lock is a Managed Agents call.
 
     Reuse is keyed on `daimon_reader_of`, a fingerprint of the *source's*
     shape: `daimon_spec_hash` off the source's own metadata when it carries
@@ -216,11 +252,17 @@ async def ensure_reader_variant(
 
     if match is None:
         # No `queue_agent_face`: a reader answers a published report and never posts in chat.
-        return await create_agent(
+        async with skill_attach_guard(
+            references,
             anthropic,
-            {**dump_agent_spec(reader_spec), "skills": resolved_skills, "metadata": metadata},
-            scope=backend_scope,
-        )
+            added_custom_skill_ids(before=(), after=resolved_skills),
+            backend_scope=backend_scope,
+        ):
+            return await create_agent(
+                anthropic,
+                {**dump_agent_spec(reader_spec), "skills": resolved_skills, "metadata": metadata},
+                scope=backend_scope,
+            )
 
     if (
         match.metadata.get(MA_METADATA_KEY_READER_OF) == reader_of
@@ -233,16 +275,18 @@ async def ensure_reader_variant(
         return match
 
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
-        return await update_agent(
-            anthropic,
-            fresh.id,
-            payload={
-                **dump_agent_spec(reader_spec),
-                "skills": resolved_skills,
-                "metadata": cast("dict[str, str | None]", metadata),
-            },
-            version=fresh.version,
-            scope=backend_scope,
-        )
+        added = added_custom_skill_ids(before=fresh.skills, after=resolved_skills)
+        async with skill_attach_guard(references, anthropic, added, backend_scope=backend_scope):
+            return await update_agent(
+                anthropic,
+                fresh.id,
+                payload={
+                    **dump_agent_spec(reader_spec),
+                    "skills": resolved_skills,
+                    "metadata": cast("dict[str, str | None]", metadata),
+                },
+                version=fresh.version,
+                scope=backend_scope,
+            )
 
     return await update_agent_with_version_retry(anthropic, match.id, _apply, scope=backend_scope)

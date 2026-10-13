@@ -20,8 +20,6 @@ _FLAGS = (
     ("core", "discord.writers_none_notice", "daimon.core.config", "DiscordSettings"),
     ("core", "discord.tenant_cap_waiting_card", "daimon.core.config", "DiscordSettings"),
     ("core", "turn.native_footer_cost", "daimon.core.config", "TurnSettings"),
-    ("notebook", "html_link_errors", "notebook_host.config", "Settings"),
-    ("report", "html_link_errors", "report_host.config", "Settings"),
 )
 
 
@@ -55,7 +53,7 @@ class QAProductProfile:
 
     @property
     def flags(self) -> dict[str, bool]:
-        """Exactly the seven granted switches; no table/tools/backend overrides."""
+        """Exactly the five granted switches; no table/tools/backend overrides."""
         return {
             f"{service}.{field}": self.name == "opt-in-product" for service, field, *_ in _FLAGS
         }

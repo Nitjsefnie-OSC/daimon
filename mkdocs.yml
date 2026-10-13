@@ -18,6 +18,7 @@ nav:
   - Configuration: configuration.md
   - MCP tools: mcp-tools.md
   - Permissions: permissions.md
+  - Isolation: isolation.md
   - Routines: routines.md
   - Billing: billing.md
   - Defaults: defaults.md

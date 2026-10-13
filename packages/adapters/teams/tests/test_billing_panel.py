@@ -25,7 +25,6 @@ from daimon.adapters.teams.billing_panel import (
     LOOKUP_ADMIN_ONLY,
     NOT_CONFIGURED,
     PICK_A_PERSON,
-    REDEEM_ADMIN_ONLY,
     UNKNOWN_AMOUNT,
     channel_labels,
     panel_card,
@@ -39,9 +38,16 @@ from daimon.core import platform_names
 from daimon.core.billing_panel import BillingPanelState, MemberRow
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
+from daimon.core.promo_codes import (
+    build_promo_code_terms,
+    describe_refusal,
+    hash_promo_code,
+    normalize_promo_code,
+)
 from daimon.core.promo_credit import ActiveTimedCredit
+from daimon.core.stores import channel_budgets as budget_store
 from daimon.core.stores import promo_codes as promo_store
+from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import ChannelBudgetRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import (
@@ -51,10 +57,12 @@ from daimon.core.stores.platform_names import (
     upsert_channel_names,
     upsert_user_names,
 )
+from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_channel_budget, make_usage_event
 from pydantic import SecretStr
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -170,12 +178,19 @@ async def test_a_top_up_without_payments_says_so(
     )
 
 
-async def _promo(db_factory: async_sessionmaker[AsyncSession], code: str) -> None:
+async def _promo(
+    db_factory: async_sessionmaker[AsyncSession],
+    code: str,
+    *,
+    channel_cap_usd: Decimal | None = None,
+) -> None:
     async with db_factory.begin() as session:
         await promo_store.insert_promo_code(
             session,
             code_hash=hash_promo_code(normalize_promo_code(code)),
-            terms=build_promo_code_terms(amount_usd=Decimal("10"), timed=False),
+            terms=build_promo_code_terms(
+                amount_usd=Decimal("10"), timed=False, channel_cap_usd=channel_cap_usd
+            ),
         )
 
 
@@ -194,10 +209,86 @@ async def test_an_admin_redeems_a_promo_code_from_the_card(
         redeemed = await post_activity(service, _click("redeem", code="spring-2026"))
 
     assert '"op": "redeem"' in admin and '"op": "redeem"' not in member, "admins only"
-    assert forwarded["value"] == REDEEM_ADMIN_ONLY and empty["value"] == ENTER_CODE
+    assert forwarded["value"] == describe_refusal("admin_only") and empty["value"] == ENTER_CODE
     assert isinstance(wrong["value"], str) and wrong["value"], "a refusal is said, the card kept"
     card = json.dumps(redeemed, ensure_ascii=False)
     assert "Added **$10.00** of credit" in card and "Top spenders" in card
+
+
+async def test_a_member_redeems_a_channel_code_into_the_channel_they_typed_in(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A channel code raises the budget of the channel `billing` was typed in, once per person."""
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        await make_channel_budget(session, tenant=tenant, platform="teams", channel_id=CHANNEL_ID)
+    await _promo(db_session_factory, "TEAM-ROOM-2026", channel_cap_usd=Decimal("20"))
+    member = OTHER_AAD_OBJECT_ID
+    async with _running(db_session_factory, teams_api_fake) as service:
+        await post_activity(service, make_channel_activity(text="billing", aad_object_id=member))
+        async with asyncio.timeout(10):
+            while not (
+                chat := [r for r in teams_api_fake.activity_requests if DIRECT_CHAT_ID in r.url]
+            ):
+                await asyncio.sleep(0.01)
+        card = json.dumps(chat[0].body, ensure_ascii=False)
+        found = re.search(r'"place": "([^"]+)"', card)
+        assert found is not None and '"op": "redeem"' in card, "a member is offered redemption"
+        redeemed = await post_activity(
+            service, _click("redeem", user=member, code="team-room-2026", place=found[1])
+        )
+        again = await post_activity(
+            service, _click("redeem", user=member, code="TEAM-ROOM-2026", place=found[1])
+        )
+        in_chat = await post_activity(service, _click("redeem", user=member, code="TEAM-ROOM-2026"))
+
+    text = json.dumps(redeemed, ensure_ascii=False)
+    assert "Added **$10.00** to this channel's budget" in text and "**$15.00**" in text
+    assert again["value"] == describe_refusal("already_redeemed_in_channel")
+    assert in_chat["value"] == describe_refusal("needs_channel"), "no channel in a personal chat"
+    async with db_session_factory() as session:
+        budget = await budget_store.get_channel_budget(
+            session, tenant_id=tenant_id, platform="teams", channel_id=CHANNEL_ID
+        )
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
+    assert budget is not None and budget.limit_usd == Decimal("15"), "the limit rose by $10"
+    assert balance >= Decimal("10"), "the credit is in the ledger"
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=tenant_id)
+    assert [(e.outcome, e.reason, e.target_channel_id) for e in events] == [
+        ("allowed", "completed", CHANNEL_ID),
+        ("denied", "promo:already_redeemed_in_channel", CHANNEL_ID),
+        ("denied", "promo:needs_channel", None),
+    ], "every attempt is audited with the channel it was made in"
+    assert {e.platform_user_id for e in events} == {member}
+
+
+async def test_a_redeem_that_fails_or_is_empty_is_audited(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty code and an operational failure each leave an audit row, like a refusal."""
+
+    async def lost(*_args: object, **_kwargs: object) -> None:
+        raise OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+
+    async with _running(db_session_factory, teams_api_fake) as service:
+        await _command(service, teams_api_fake, AAD_OBJECT_ID)
+        empty = await post_activity(service, _click("redeem", code=" "))
+        monkeypatch.setattr(billing_panel, "redeem_promo_code", lost)
+        failed = await post_activity(service, _click("redeem", code="SPRING-2026"))
+
+    assert empty["value"] == ENTER_CODE and isinstance(failed["value"], str)
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=tenant_id)
+    assert [(e.outcome, e.reason) for e in events] == [
+        ("denied", "empty_code"),
+        ("error", "failed"),
+    ]
 
 
 def _budget_status(channel_id: str, spent: str) -> ChannelBudgetStatus:

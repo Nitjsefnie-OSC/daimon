@@ -25,6 +25,7 @@ from .conftest import (
     make_retries_exhausted,
     make_status_idle,
     make_status_terminated,
+    make_tool_use,
 )
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
@@ -288,6 +289,39 @@ async def test_run_turn_always_fires_final_render_before_terminal_success() -> N
     assert len(lc.terminal_success) == 1
 
 
+async def test_render_loop_rerenders_unchanged_state_during_a_long_tool_call() -> None:
+    """A running tool call changes nothing for a long time; the render loop
+    must still hand the unchanged state to on_render so the card's elapsed
+    time moves, instead of leaving the card frozen until the tool returns."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_tool_use(event_id="tool", name="bash")),
+            DelayThenYield(0.1, make_status_idle(event_id="idle", stop_reason=make_end_turn())),
+        ]
+    ]
+    lc = RecordingLifecycle()
+
+    await asyncio.wait_for(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=asyncio.Event(),
+            render_interval_s=0.005,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        2,
+    )
+
+    running = [s for s in lc.renders if s.stop_reason is None and s.content]
+    assert len(running) >= 3, "the unchanged running state must keep being rendered"
+    assert all(s.content == running[0].content for s in running)
+    assert lc.renders[-1].stop_reason is not None, "the terminal state is still rendered last"
+
+
 async def test_reconnect_refolds_from_empty_and_continues_the_turn() -> None:
     """On APIConnectionError the driver replays full history, re-folds from
     empty, and reattaches. State is bit-identical to a live-only run."""
@@ -514,9 +548,9 @@ async def test_interrupt_during_replay_raises_interrupted_without_posting_user_i
     # plain `def` (not `async def`).
     original_list = fa.beta.sessions.events.list
 
-    def _list_triggering_cancel(*, session_id: str):
+    def _list_triggering_cancel(*, session_id: str, limit: int):
         cancel.set()
-        return original_list(session_id=session_id)
+        return original_list(session_id=session_id, limit=limit)
 
     fa.beta.sessions.events.list = _list_triggering_cancel  # type: ignore[assignment]
 

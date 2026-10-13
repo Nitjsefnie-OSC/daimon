@@ -62,6 +62,53 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _SENTINEL_REF = object()  # opaque message reference
 
 
+class _VisibleMessage:
+    """A posted message as the thread shows it: its content and embeds."""
+
+    def __init__(self, message_id: int) -> None:
+        self.id = message_id
+        self.content: str | None = None
+        self.embeds: list[discord.Embed] = []
+
+    def apply(self, kwargs: dict[str, Any]) -> None:
+        if "content" in kwargs:
+            self.content = kwargs["content"]
+        if "embeds" in kwargs:
+            self.embeds = list(kwargs["embeds"] or [])
+        if "embed" in kwargs:
+            self.embeds = [kwargs["embed"]] if kwargs["embed"] is not None else []
+
+
+class _VisibleThread:
+    """A thread that keeps what each send, edit and delete leaves on screen."""
+
+    def __init__(self) -> None:
+        self.messages: dict[int, _VisibleMessage] = {}
+        self._next_id = 1
+
+    async def send(self, **kwargs: Any) -> _VisibleMessage:
+        message = _VisibleMessage(self._next_id)
+        self._next_id += 1
+        message.apply(kwargs)
+        self.messages[message.id] = message
+        return message
+
+    async def edit(self, ref: _VisibleMessage, **kwargs: Any) -> None:
+        self.messages[ref.id].apply(kwargs)
+
+    async def delete(self, ref: _VisibleMessage) -> None:
+        del self.messages[ref.id]
+
+    def summary_footers(self) -> list[tuple[int, str]]:
+        """Each visible finished-turn summary, by the message carrying it."""
+        return [
+            (message.id, embed.footer.text)
+            for message in self.messages.values()
+            for embed in message.embeds
+            if embed.footer.text and GAP in embed.footer.text
+        ]
+
+
 @pytest.mark.parametrize("replacement_source", ["missing", "transport"])
 async def test_terminal_waits_for_missing_card_replacement_across_handover(
     replacement_source: str,
@@ -416,10 +463,10 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
     monkeypatch.setattr(turn_runner, "decide_before_send", lambda *args: None)
     reconciled: list[str] = []
 
-    async def fake_reconcile(*, managed_session_id: str, **_kwargs: Any) -> None:
-        reconciled.append(managed_session_id)
+    async def fake_settle(_anthropic: Any, _sessionmaker: Any, session_id: str, **_: Any) -> None:
+        reconciled.append(session_id)
 
-    monkeypatch.setattr(turn_runner, "reconcile_unbilled", fake_reconcile)
+    monkeypatch.setattr(turn_runner, "settle_session", fake_settle)
     result = await turn_runner.run_prepared_turn_impl(
         deps,
         prepared,
@@ -838,6 +885,22 @@ class TestDebounce:
         assert len(edits) == 1, "edit should fire after debounce elapsed"
         assert edits[0][0] is _SENTINEL_REF, "edit should use stored message ref"
 
+    async def test_unchanged_render_after_debounce_moves_the_elapsed_timer(self) -> None:
+        """During a long tool call the driver re-renders the unchanged state;
+        once the debounce has passed, that edit carries a later elapsed time."""
+        now = [100.0]
+        lc, sends, edits = _make_lifecycle(clock=lambda: now[0])
+        running = _running_tool_turn("bash")
+
+        await lc.on_render(running)
+        now[0] += 12.0
+        await lc.on_render(running)
+        now[0] += 12.0
+        await lc.on_render(running)
+
+        assert len(sends) == 1
+        assert [e[1]["embeds"][0].footer.text for e in edits] == ["12s", "24s"]
+
     async def test_terminal_flushes_immediately_with_no_render_tick(self) -> None:
         """Terminal success bypasses on_render and the debounce entirely --
         _flush_terminal is called directly by the terminal hook."""
@@ -1066,6 +1129,91 @@ class TestCleanReplace:
         assert deleted == [card], "the card above the answer is removed"
         assert lc.watermark_message_id == "1"
         assert lc.delivered_answer_chunk_ids == ("2",)
+
+    @pytest.mark.parametrize("delete_fails", [False, True], ids=["card_deleted", "delete_fails"])
+    @pytest.mark.parametrize("answer", ["short answer", "x " * 2500], ids=["one_chunk", "split"])
+    async def test_completion_ping_never_shows_the_summary_twice(
+        self, delete_fails: bool, answer: str
+    ) -> None:
+        """#787: the summary footer sits on one message, even when the card stays.
+
+        The card is deleted only after the answer is posted, best effort. Until
+        then, and for good if the delete fails, it is on screen above the answer.
+        """
+        thread = _VisibleThread()
+        most_footers = 0
+
+        async def send(**kwargs: Any) -> object:
+            nonlocal most_footers
+            sent = await thread.send(**kwargs)
+            most_footers = max(most_footers, len(thread.summary_footers()))
+            return sent
+
+        async def delete(ref: Any) -> None:
+            if delete_fails:
+                raise discord.ClientException("webhook lookup unavailable")
+            await thread.delete(ref)
+
+        lc = DiscordTurnLifecycle(
+            send=send,
+            edit=thread.edit,
+            delete=delete,
+            agent_name="test-agent",
+            model_id="claude-sonnet-4-6",
+            requester_id=123,
+            notify_on_completion=True,
+        )
+        await lc.post_initial()
+        await lc.on_terminal_success(_make_success_state(answer))
+
+        assert len(thread.summary_footers()) == 1, thread.summary_footers()
+        assert most_footers <= 1, "the card and the answer showed the summary at once"
+        assert lc.feedback_message_id is not None
+        assert thread.summary_footers()[0][0] == int(lc.feedback_message_id)
+
+    @pytest.mark.parametrize(
+        ("answer", "failing_send"),
+        [("short answer", 2), ("x " * 2500, 2), ("x " * 2500, 3)],
+        ids=["one_chunk_first_send", "split_first_send", "split_later_send"],
+    )
+    async def test_completion_ping_keeps_the_summary_when_the_answer_fails(
+        self, answer: str, failing_send: int
+    ) -> None:
+        """#787: a pinged answer that fails before its summary is up leaves it on the card.
+
+        Send 1 is the card; send 2 is the answer's first chunk. The card stays
+        and is the turn's terminal render, so a repair reasserts the summary too.
+        """
+        thread = _VisibleThread()
+        sends = 0
+
+        async def send(**kwargs: Any) -> _VisibleMessage:
+            nonlocal sends
+            sends += 1
+            if sends == failing_send:
+                raise discord.HTTPException(
+                    types.SimpleNamespace(status=503, reason="unavailable"),  # pyright: ignore[reportArgumentType]
+                    "send failed",
+                )
+            return await thread.send(**kwargs)
+
+        lc = DiscordTurnLifecycle(
+            send=send,  # pyright: ignore[reportArgumentType]
+            edit=thread.edit,  # pyright: ignore[reportArgumentType]
+            delete=thread.delete,  # pyright: ignore[reportArgumentType]
+            agent_name="test-agent",
+            model_id="claude-sonnet-4-6",
+            requester_id=123,
+            notify_on_completion=True,
+        )
+        await lc.post_initial()
+        with pytest.raises(discord.HTTPException):
+            await lc.on_terminal_success(_make_success_state(answer))
+
+        card_id = 1
+        assert [message_id for message_id, _ in thread.summary_footers()] == [card_id]
+        assert lc._card_writes.terminal[card_id]["embeds"] == [lc._terminal_embed]
+        assert lc.feedback_message_id == str(card_id)
 
     async def test_final_answer_with_everyone_disables_all_mention_channels(self) -> None:
         """T-22-01: a final answer containing ``@everyone`` (reachable via prompt

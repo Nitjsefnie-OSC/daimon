@@ -35,6 +35,11 @@ from daimon.core.defaults.spec_merge import (
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, create_agent, update_agent
+from daimon.core.skills.reference_lock import (
+    ReferenceScope,
+    added_custom_skill_ids,
+    skill_attach_guard,
+)
 from daimon.core.specs import AgentSpec, dump_agent_spec
 
 _log = structlog.get_logger(__name__)
@@ -50,8 +55,14 @@ async def reconcile_agent(
     public_url: str | None = None,
     managed: bool = True,
     skills_view: list[SkillListResponse] | None = None,
+    references: ReferenceScope | None,
 ) -> ResourceOutcome:
     """Reconcile a single agent against MA.
+
+    `references` is where the write takes the shared skill reference lock
+    (`reference_lock`) for every skill it adds, so a concurrent delete can't
+    leave this agent pinning a deleted skill. Required so no writer forgets
+    it; None only where there is no database (unit tests).
 
     `managed=True` (default) stamps `daimon_managed=true` in the agent's
     metadata so the sweep (defaults apply) can find and archive resources
@@ -196,17 +207,21 @@ async def reconcile_agent(
                     update={"mcp_servers": merged_servers, "tools": merged_tools}
                 )
             merged_skills = merge_skills_with_ma(resolved_skills, fresh)
-            return await update_agent(
-                client,
-                fresh.id,
-                version=fresh.version,
-                payload={
-                    **dump_agent_spec(local_spec),
-                    "skills": merged_skills,
-                    "metadata": metadata,
-                },
-                scope=resource_scope(tenant_id=str(tenant_id)),
-            )
+            added = added_custom_skill_ids(before=fresh.skills, after=merged_skills)
+            async with skill_attach_guard(
+                references, client, added, backend_scope=resource_scope(tenant_id=str(tenant_id))
+            ):
+                return await update_agent(
+                    client,
+                    fresh.id,
+                    version=fresh.version,
+                    payload={
+                        **dump_agent_spec(local_spec),
+                        "skills": merged_skills,
+                        "metadata": metadata,
+                    },
+                    scope=resource_scope(tenant_id=str(tenant_id)),
+                )
 
         updated = await update_agent_with_version_retry(
             client, ma_match.id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
@@ -217,11 +232,17 @@ async def reconcile_agent(
 
     if dry_run:
         return ResourceOutcome(kind="agent", name=spec.name, action=Action.CREATED)
-    created = await create_agent(
+    async with skill_attach_guard(
+        references,
         client,
-        {**dump_agent_spec(spec), "skills": resolved_skills, "metadata": metadata},
-        scope=resource_scope(tenant_id=str(tenant_id)),
-    )
+        added_custom_skill_ids(before=(), after=resolved_skills),
+        backend_scope=resource_scope(tenant_id=str(tenant_id)),
+    ):
+        created = await create_agent(
+            client,
+            {**dump_agent_spec(spec), "skills": resolved_skills, "metadata": metadata},
+            scope=resource_scope(tenant_id=str(tenant_id)),
+        )
     return ResourceOutcome(
         kind="agent", name=spec.name, action=Action.CREATED, anthropic_id=created.id
     )

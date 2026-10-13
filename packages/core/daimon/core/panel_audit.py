@@ -57,6 +57,7 @@ async def record_panel_write(
     agent_name: str | None = None,
     token_kind: str | None = None,
     token_jti: uuid.UUID | None = None,
+    target_channel_id: str | None = None,
 ) -> None:
     """Append one panel write's row in its own transaction; never raises on a DB failure.
 
@@ -82,6 +83,7 @@ async def record_panel_write(
                 reason=reason,
                 token_kind=token_kind,
                 token_jti=token_jti,
+                target_channel_id=target_channel_id,
             )
     except SQLAlchemyError as exc:  # boundary: a lost audit row must not fail the click
         log.warning(

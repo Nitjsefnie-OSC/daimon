@@ -58,7 +58,7 @@ __all__ = [
     "requester_manages_agent",
 ]
 
-CONNECT_COPY = "Choose repos on GitHub. If someone else manages them, send them this link."
+CONNECT_COPY = "Choose repos on GitHub. If someone else has access to them, send them this link."
 
 
 async def can_manage_agent_github(

@@ -19,7 +19,7 @@ skill an agent references 400s every one of that agent's turns.
 Duplicate skills sharing a display_title (a race-prone artifact, observed in
 production with two cli-auth skills created 54ms apart) are deleted inline,
 mirroring the env/agent reconcilers — newest by created_at is canonical, older
-duplicates go through `delete_skill_and_versions`.
+duplicates go through `delete_skill_unless_attached` (kept while referenced).
 """
 
 from __future__ import annotations
@@ -38,10 +38,10 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DefaultsError
-from daimon.core.ma import delete_skill_and_versions
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_zip import build_skill_zip
+from daimon.core.skills.attachments import delete_skill_unless_attached
 from daimon.core.stores.seeded_skills import load_seeded_skill, record_seeded_skill
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -89,9 +89,27 @@ async def reconcile_skill(
                 canonical_id=ma_match.id if ma_match else None,
                 duplicate_id=dup.id,
             )
-            await delete_skill_and_versions(
-                client, dup.id, scope=resource_scope(tenant_id=str(tenant_id))
-            )
+            # Under the duplicate's reference lock: a duplicate an agent or a
+            # channel rule still uses is kept, or its turns would all fail.
+            dedup_scope = resource_scope(tenant_id=str(tenant_id))
+            if db_session is None:
+                async with session_factory() as dedup_session, dedup_session.begin():
+                    outcome = await delete_skill_unless_attached(
+                        client, dedup_session, skill_id=dup.id, detach=False, scope=dedup_scope
+                    )
+            else:
+                outcome = await delete_skill_unless_attached(
+                    client, db_session, skill_id=dup.id, detach=False, scope=dedup_scope
+                )
+            if not outcome.deleted:
+                _log.warning(
+                    "reconcile.duplicate_kept_in_use",
+                    kind="skill",
+                    name=spec.name,
+                    duplicate_id=dup.id,
+                    agents=len(outcome.attachments.agents),
+                    channels=len(outcome.attachments.channels),
+                )
 
     pkg = build_skill_zip(skill_dir)
     try:

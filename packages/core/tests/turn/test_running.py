@@ -1,4 +1,4 @@
-"""`RunningTurns`: the process registry shutdown drains read (#16)."""
+"""`RunningTurns`: the process registry shutdown drains read."""
 
 from __future__ import annotations
 
@@ -45,3 +45,16 @@ async def test_concurrent_turns_are_counted_separately_and_finished_ones_are_not
     release.set()
     await asyncio.gather(first, second)
     assert running.count() == 0
+
+
+async def test_a_loop_callback_outside_any_task_is_not_counted() -> None:
+    running = RunningTurns()
+    counts: list[int] = []
+
+    def callback() -> None:
+        with running.track():
+            counts.append(running.count())
+
+    asyncio.get_running_loop().call_soon(callback)
+    await asyncio.sleep(0)
+    assert counts == [0]

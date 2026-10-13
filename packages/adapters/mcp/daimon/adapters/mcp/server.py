@@ -43,6 +43,7 @@ from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
+from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools import (
     agent_chat,
     agents,
@@ -302,6 +303,8 @@ def create_mcp_app(
         else None
     )
     discord = effective_settings.discord
+    # Opened on first use and closed in the lifespan, like the loop it needs.
+    slack_http = SlackHttpSession()
     group_lookups = GroupLookups(
         sessionmaker=effective_sessionmaker,
         fernet=fernet,
@@ -311,6 +314,7 @@ def create_mcp_app(
         )
         if discord is not None
         else None,
+        slack_http=slack_http,
     )
 
     effective_auth = auth
@@ -385,6 +389,7 @@ def create_mcp_app(
                 yield
         finally:
             await identity_middleware.drain_audit()
+            await slack_http.close()
 
     # Session state is keyed per request (StripSessionIdMiddleware, below) and
     # kept a day: bound it. Nothing needs it past the request.
@@ -449,6 +454,7 @@ def create_mcp_app(
         artifact_store=artifact_store,
         teams_client=teams_client,
         group_lookups=group_lookups,
+        slack_http=slack_http,
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)

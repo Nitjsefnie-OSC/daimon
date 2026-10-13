@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
@@ -27,9 +28,17 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_CHANNEL,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
+from daimon.core.memory_resource import (
+    MEMORY_INSTRUCTIONS,
+    PERSONAL_MEMORY_INSTRUCTIONS,
+    READ_ONLY_MEMORY_INSTRUCTIONS,
+    READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS,
+    SHARED_ONLY_MEMORY_INSTRUCTIONS,
+)
 from daimon.core.sessions import create_session
+from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import agent_github_binding as github_binding_store
 from daimon.core.stores import agent_repo_binding as repo_binding_store
 from daimon.core.stores import credential_requests as requests_store
@@ -140,6 +149,98 @@ async def test_create_session_propagates_ma_error() -> None:
             client,
             agent=agent,
             environment=env,
+        )
+
+
+def _unresolved_skill_400(skill_id: str, version: str) -> Callable[[httpx.Request], httpx.Response]:
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": (
+                        "Could not resolve one or more skills: "
+                        f'skill "{skill_id}" version "{version}" not found'
+                    ),
+                },
+            },
+        )
+
+    return _handler
+
+
+async def test_create_session_names_a_deleted_agent_skill() -> None:
+    """Finding #11: a deleted skill the agent pins fails with copy naming it, not a bare 400."""
+    agent = ma_agent(
+        id="ag_strand",
+        name="qa-fork",
+        skills=[{"type": "custom", "skill_id": "skill_01PBRj", "version": "latest"}],
+    )
+    client = build_fake_anthropic_http(_unresolved_skill_400("skill_01PBRj", "latest"))
+
+    with pytest.raises(SkillUnavailable) as refused:
+        await create_session(client, agent=agent, environment=_make_env())
+
+    message = str(refused.value)
+    assert isinstance(refused.value, UserFacingError), "every adapter shows this copy as written"
+    assert refused.value.attached_to == "agent"
+    assert '"skill_01PBRj"' in message and "qa-fork" in message
+    assert "remove_skill" in message
+    assert "couldn't accept the request" not in message
+
+
+async def test_create_session_names_a_deleted_channel_skill_from_its_rule(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel's deleted skill is named from the rule that added it."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.stores.channel_skills import add_channel_skill
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        await add_channel_skill(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="555",
+            skill_id="skill_chan",
+            version="17916",
+            name="qa-haiku-canary",
+            owner_agent_name=None,
+            actor_account_id=None,
+        )
+    client = build_fake_anthropic_http(_unresolved_skill_400("skill_chan", "17916"))
+
+    with pytest.raises(SkillUnavailable) as refused:
+        await create_session(
+            client,
+            agent=_make_agent(),
+            environment=_make_env(),
+            tenant_id=tenant.id,
+            session_factory=db_session_factory,
+            channel_skills=(
+                BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_chan", version="17916"),
+            ),
+        )
+
+    assert refused.value.attached_to == "channel"
+    assert '"qa-haiku-canary" (skill_chan)' in str(refused.value)
+    assert "remove_channel_skill" in str(refused.value)
+
+
+async def test_create_session_keeps_other_400s_unchanged() -> None:
+    import anthropic
+
+    def _bad(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400, json={"type": "error", "error": {"type": "invalid_request_error", "message": "x"}}
+        )
+
+    with pytest.raises(anthropic.BadRequestError):
+        await create_session(
+            build_fake_anthropic_http(_bad), agent=_make_agent(), environment=_make_env()
         )
 
 
@@ -2077,6 +2178,153 @@ async def test_create_session_degrades_when_memory_provisioning_fails(
     assert session is not None
     assert all(r.get("type") != "memory_store" for r in captured.get("resources", [])), (
         "failed memory provisioning must degrade to a memory-less session, not raise"
+    )
+
+
+def _capturing_memory_client(
+    mem_state: FakeMemoryStoreState,
+    bodies: list[dict[str, Any]],
+    *,
+    refuse_personal: bool = False,
+) -> AsyncAnthropic:
+    """Memory-store endpoints plus a session create that records its body."""
+    memory_handler = make_fake_memory_store_handler(mem_state)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (
+            refuse_personal
+            and request.method == "POST"
+            and request.url.path == "/v1/memory_stores"
+            and str(json_body(request).get("name", "")).startswith("personal ")
+        ):
+            return httpx.Response(
+                500, json={"type": "error", "error": {"type": "api_error", "message": "boom"}}
+            )
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
+        if request.method == "POST" and request.url.path.endswith("/v1/sessions"):
+            body = json_body(request)
+            bodies.append(body)
+            return httpx.Response(
+                200,
+                json=_session_body(
+                    session_id=f"sess_{len(bodies)}",
+                    agent_id=body["agent"],
+                    environment_id=body["environment_id"],
+                ),
+            )
+        raise AssertionError(f"unexpected call: {request.method} {request.url.path}")
+
+    return build_fake_anthropic_http(handler)
+
+
+def _memory_mounts(body: dict[str, Any]) -> list[dict[str, Any]]:
+    return [r for r in body.get("resources", []) if r.get("type") == "memory_store"]
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_personal_memory_mounts_the_callers_own_store_beside_the_shared_one(
+    read_only: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two people talking to one agent share its store and each get their own.
+    Neither session carries the other's personal store: the isolation is the
+    mount, not the prompt."""
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    agent_uuid = uuid.uuid4()
+    mem_state = FakeMemoryStoreState()
+    bodies: list[dict[str, Any]] = []
+    client = _capturing_memory_client(mem_state, bodies)
+
+    for account in (alice, bob):
+        await create_session(
+            client,
+            agent=_make_agent(anthropic_id="ag_personal", name="daimon-personal"),
+            environment=_make_env(anthropic_id="env_personal"),
+            account_id=account.id,
+            tenant_id=tenant.id,
+            agent_uuid=agent_uuid,
+            session_factory=db_session_factory,
+            memory_read_only=read_only,
+            personal_memory=True,
+        )
+
+    (alice_shared, alice_personal), (bob_shared, bob_personal) = (
+        _memory_mounts(body) for body in bodies
+    )
+    assert alice_shared["memory_store_id"] == bob_shared["memory_store_id"]
+    assert alice_personal["memory_store_id"] != bob_personal["memory_store_id"]
+    assert mem_state.stores[alice_personal["memory_store_id"]]["metadata"]["daimon_account"] == (
+        str(alice.id)
+    )
+    access = "read_only" if read_only else "read_write"
+    assert {m["access"] for m in (alice_shared, alice_personal)} == {access}, (
+        "a read-only conversation keeps the personal store read-only too"
+    )
+    assert alice_shared["instructions"] == (
+        READ_ONLY_MEMORY_INSTRUCTIONS if read_only else MEMORY_INSTRUCTIONS
+    )
+    assert alice_personal["instructions"] == (
+        READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS if read_only else PERSONAL_MEMORY_INSTRUCTIONS
+    )
+
+
+async def test_without_personal_memory_only_the_shared_store_is_mounted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Routines, MCP and CLI sessions: the shared store alone, telling the agent
+    not to record anything personal."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    mem_state = FakeMemoryStoreState()
+    bodies: list[dict[str, Any]] = []
+
+    await create_session(
+        _capturing_memory_client(mem_state, bodies),
+        agent=_make_agent(anthropic_id="ag_shared_only"),
+        environment=_make_env(anthropic_id="env_shared_only"),
+        account_id=account.id,
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        session_factory=db_session_factory,
+    )
+
+    (shared,) = _memory_mounts(bodies[0])
+    assert shared["instructions"] == SHARED_ONLY_MEMORY_INSTRUCTIONS
+    assert len(mem_state.stores) == 1, "no personal store is provisioned"
+
+
+async def test_a_personal_store_outage_degrades_to_shared_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    bodies: list[dict[str, Any]] = []
+
+    await create_session(
+        _capturing_memory_client(FakeMemoryStoreState(), bodies, refuse_personal=True),
+        agent=_make_agent(anthropic_id="ag_personal_down"),
+        environment=_make_env(anthropic_id="env_personal_down"),
+        account_id=account.id,
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        session_factory=db_session_factory,
+        personal_memory=True,
+    )
+
+    (shared,) = _memory_mounts(bodies[0])
+    assert shared["instructions"] == SHARED_ONLY_MEMORY_INSTRUCTIONS, (
+        "with no personal store the shared one must not point personal facts anywhere"
     )
 
 

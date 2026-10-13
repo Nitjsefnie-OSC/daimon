@@ -31,7 +31,7 @@ Session assembly is delegated to `create_session` in `daimon.core.sessions`
 (the same collapse that unified the MCP `start_turn` path) — this is the
 single source of truth for vault/PAT/env-mount/repo-resource assembly AND
 the `daimon_tenant`/`daimon_account` metadata stamp that
-`daimon.core.usage_sweep.sweep_headless_usage` requires to bill a session.
+`daimon.core.usage_sweep.session_billing` requires to bill a session.
 `run_turn` keeps its string `agent_id`/`environment_id` signature (the
 scheduler only has ids) and bridges to `create_session`'s SDK-object
 signature via neutral agent/environment retrieval ports and the M0 SDK codecs
@@ -175,6 +175,7 @@ async def run_turn(
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
+    personal_memory: bool = False,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -204,6 +205,7 @@ async def run_turn(
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
             model_override=model_override,
+            personal_memory=personal_memory,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -233,6 +235,7 @@ async def run_turn(
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
                 model_override=model_override,
+                personal_memory=personal_memory,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -266,6 +269,7 @@ async def run_turn_impl(
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
+    personal_memory: bool = False,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -281,8 +285,8 @@ async def run_turn_impl(
        case; missing either raises ``ValueError`` (no fallback to an
        account-scoped vault). ``create_session`` also stamps the
        session's ``metadata`` with ``daimon_tenant``/``daimon_account`` when
-       given, which is what makes the session visible to
-       ``usage_sweep.sweep_headless_usage``. The repo binding is
+       given, which is what ``usage_sweep.session_billing`` bills the
+       session by. The repo binding is
        fetched unconditionally inside ``create_session`` — the operator
        ``github_fallback_pat`` clones ``anon:`` (verified-public) bindings
        even without a per-agent PAT.
@@ -337,6 +341,11 @@ async def run_turn_impl(
     so the usage sweep attributes any spend it replays to that channel's budget.
     ``origin_place`` stamps where the routine fires (`routine_origin`), so its
     transcript reads only where a turn there would, and only by its owner.
+
+    ``personal_memory`` also mounts ``account_id``'s personal store, with the
+    same (read-only, for a routine) access as the shared one. The scheduler
+    sets it only for a routine whose result reaches nobody but its owner,
+    decided again at every fire (`rule_views.routine_answers_only_owner`).
     """
     turn_scope: Scope | None = None
     if load_turn_settings().path == "mux":
@@ -404,6 +413,10 @@ async def run_turn_impl(
             requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
+            # Only a routine whose result reaches nobody but its owner
+            # (`rule_views.routine_answers_only_owner`); read-only like the
+            # shared mount, since a routine's memory is always read-only.
+            personal_memory=personal_memory,
             tool_safety=tool_safety,
             budget_channel_id=budget_channel_id,
             origin_channel_id=origin_place.channel_id if origin_place is not None else None,

@@ -108,7 +108,10 @@ async def test_skill_attach_callsite_preserves_version_retry(monkeypatch, confli
                 ],
             )
         note = await skills._attach_synced_skills(
-            SimpleNamespace(client=new), AUTH, agent_name="test-agent", skill_ids={"added"}
+            SimpleNamespace(client=new, session_factory=None),
+            AUTH,
+            agent_name="test-agent",
+            skill_ids={"added"},
         )
     assert note == "Attached to 'test-agent'."
     assert_equal(before, after)

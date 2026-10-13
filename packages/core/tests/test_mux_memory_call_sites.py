@@ -204,7 +204,11 @@ async def test_memory_archive_keeps_request_and_clears_binding_after_404(
     async def clear(*args: object, **kwargs: Any) -> None:
         cleared.append(kwargs)
 
+    async def no_personal(*args: object, **kwargs: object) -> list[tuple[uuid.UUID, str]]:
+        return []
+
     monkeypatch.setattr(host, "get_memory_store_id", binding)
+    monkeypatch.setattr(host, "list_personal_memory_stores_for_agent", no_personal)
     monkeypatch.setattr(host, "clear_memory_store", clear)
     original_archive = archive_memory_store
 
@@ -298,7 +302,7 @@ async def test_reader_variant_keeps_create_update_payloads_and_warm_no_io(
             fresh = await before.beta.agents.retrieve("reader")
             await before.beta.agents.update("reader", version=fresh.version, **payload)
         actual = await host.ensure_reader_variant(
-            after, tenant_id=TENANT, account_id=account, source_name="alpha"
+            after, tenant_id=TENANT, account_id=account, source_name="alpha", references=None
         )
         assert actual.id == "reader"
         if operation == "warm":

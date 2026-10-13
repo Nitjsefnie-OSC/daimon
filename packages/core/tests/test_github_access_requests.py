@@ -7,10 +7,22 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from daimon.core._models import Account, GitHubAccessRequest, Tenant, TenantGitHubRepo
+from daimon.core._models import (
+    Account,
+    CredentialRequest,
+    GitHubAccessRequest,
+    Tenant,
+    TenantGitHubRepo,
+)
+from daimon.core.credential_requests import mint_request_token
 from daimon.core.github_request_cards import admin_card, requester_card
-from daimon.core.github_request_expiry import poll_expired_requests_once
+from daimon.core.github_request_expiry import (
+    poll_expired_requests_once,
+    retire_expired_forms_once,
+)
 from daimon.core.stores import github_access, github_app_installations
+from daimon.core.stores.credential_requests import create_credential_request
+from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.github_access_requests import (
     cancel_request,
     claim_due_expiry_group,
@@ -34,6 +46,7 @@ from daimon.core.stores.github_request_actions import (
     finish_confirmed_requests,
 )
 from daimon.core.stores.task_continuations import get_continuation
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -637,3 +650,50 @@ async def test_expired_card_cannot_decide_new_request(db_session: AsyncSession) 
         status="ready",
         now=later,
     )
+
+
+@pytest.mark.asyncio
+async def test_expiry_poller_retires_each_unclicked_form_card_once(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    now = datetime.now(UTC)
+    token = mint_request_token()
+    await create_credential_request(
+        db_session,
+        token=token,
+        kind="env",
+        tenant_id=tenant_id,
+        agent_id=uuid.uuid4(),
+        account_id=account_id,
+        target="ACME_API_KEY",
+        mcp_server_url=None,
+        requester_platform_user_id="person",
+        channel_id="thread",
+        expires_at=now - timedelta(minutes=1),
+        idempotency_key=uuid.uuid4(),
+        target_ma_agent_id="ag_helper",
+        target_name="Helper",
+        requested_work=None,
+        platform="discord",
+        origin_thread_id="thread",
+    )
+    await db_session.execute(
+        update(CredentialRequest)
+        .where(CredentialRequest.token == token)
+        .values(posted_message_id="card")
+    )
+    retired: list[tuple[str | None, str | None]] = []
+
+    async def retire(row: CredentialRequestRow) -> None:
+        retired.append((row.posted_message_id, row.outcome))
+
+    for _ in range(2):
+        await retire_expired_forms_once(
+            db_session_factory, platform="discord", retire=retire, now=now
+        )
+
+    assert retired == [("card", "expired")]
