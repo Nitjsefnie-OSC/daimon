@@ -171,3 +171,13 @@ def test_a_channel_admin_of_one_member_does_not_hold_a_space_agent() -> None:
         for standing in (AgentStanding(), AgentStanding(created_for_channel_id="a")):
             holds = channel_admin_holds(policy, subject=subject, agent=X, standing=standing)
             assert holds is allowed, f"held only with every member; {standing}"
+
+
+def test_a_space_agent_run_in_no_channel_is_gated_by_every_members_budget() -> None:
+    """A Space has no budget, so a hub or agent-chat run is held to each member's."""
+    space_agent = agent_permissions(_policy(), ("x",))
+    assert space_agent.budget_gate_ids(_policy(), None) == ("a", "b"), "every member gates it"
+    assert space_agent.budget_gate_ids(_policy(), "a") == ("a",), "a run in a is a's"
+    own = TenantAccessPolicy(channel_rules={"c": OWN}, agent_rules={"y": AgentRule(runs_in=("c",))})
+    assert agent_permissions(own, ("y",)).budget_gate_ids(own, None) == ("c",), "home channel"
+    assert agent_permissions(own, ("z",)).budget_gate_ids(own, None) == (), "no channel, no gate"

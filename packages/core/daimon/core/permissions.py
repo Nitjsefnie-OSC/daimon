@@ -448,6 +448,23 @@ class AgentPermissions:
         channel the run is in, as a Space has no budget of its own."""
         return None if is_space_key(self.home) else self.home
 
+    def budget_gate_ids(
+        self, policy: TenantAccessPolicy, run_channel_id: str | None
+    ) -> tuple[str, ...]:
+        """The channels whose budgets gate a run in `run_channel_id` (None: no channel).
+
+        The run is charged to one channel (`budget_channel`, else where it runs),
+        and only that one gates it. An own Space's agent run in no channel is
+        charged to none, as a Space has no budget yet, so it is gated by every
+        member's: one over its budget stops it.
+        """
+        charged = self.budget_channel or run_channel_id
+        if charged is not None:
+            return (charged,)
+        if self.home is not None and is_space_key(self.home):
+            return tuple(sorted(home_channel_ids(policy, self.home)))
+        return ()
+
     def runs_within(self, channel_ids: Collection[str]) -> bool:
         """Whether every rule on it names only `channel_ids`; False with no rule
         or one naming no channel."""
