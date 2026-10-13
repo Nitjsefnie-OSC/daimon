@@ -2803,3 +2803,261 @@ async def test_projection_uses_composer_vault_copilot_and_app_filters(
     assert not transport.requests and not transport.violations
     for output in (repr(projected), projected.model_dump_json()):
         assert "private-" not in output and "owned-repo-credential" not in output
+
+
+async def worker_source_context(db_nullpool_engine):
+    from dataclasses import replace
+
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.sessions import project_session_resources
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.contracts.ids import ChannelRef, Scope, ThreadRef
+    from mux.contracts.resources import AgentSpec
+
+    from .test_fleet_permissions import POLICY, parent
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    original = ma_agent(
+        id="original-source",
+        tenant_id=str(tenant.id),
+        name="source",
+        system="Protected root instruction",
+    )
+    environment = ma_environment(tenant_id=str(tenant.id))
+    root = parent()
+    root = replace(
+        root,
+        spec=AgentSpec(
+            name="worker",
+            model=root.spec.model,
+            system=root.base_system,
+            metadata={"daimon_tenant": str(tenant.id)},
+        ),
+        fleet=replace(
+            root.fleet,
+            scope=Scope(
+                tenant_id=str(tenant.id),
+                account_id=str(account.id),
+                principal_id="caller",
+                authorization_id="root",
+            ),
+            account_id=account.id,
+            root=ThreadRef(
+                channel=ChannelRef(
+                    tenant_id=str(tenant.id), platform="discord", channel_id="channel"
+                ),
+                thread_id="thread",
+            ),
+        ),
+    )
+    worker = resolve_worker_spec(
+        root, root.spec, policy=POLICY, now=datetime(2026, 10, 12, 18, tzinfo=UTC)
+    )
+    trace = ScriptedTransport()
+    async with trace.client() as client:
+        captured = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=original
+        )
+        projected = await project_session_resources(
+            captured,
+            agent=original,
+            environment=environment,
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=captured.agent_id,
+            account_id=account.id,
+            memory_read_only=True,
+            resource_scope=worker.permissions.fleet.scope,
+        )
+    assert captured.agent_id == derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=original.id)
+    return sessions, tenant.id, account.id, original, environment, worker, projected
+
+
+async def test_worker_executes_new_agent_with_original_source_memory_and_resource_identity(
+    db_preflight, db_nullpool_engine
+):
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.agent_memory_stores import get_memory_store_id
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    (
+        sessions,
+        tenant_id,
+        account_id,
+        original,
+        environment,
+        worker,
+        source,
+    ) = await worker_source_context(db_nullpool_engine)
+    executing = ma_agent(
+        id="actual-worker",
+        tenant_id=str(tenant_id),
+        name="worker",
+        model=worker.spec.model.id,
+        system=worker.spec.system,
+    )
+    memory = FakeMemoryStoreState()
+    transport = ScriptedTransport(router=None)
+    # Real SDK memory provisioning and session creation, with the real scoped store.
+    from daimon.testing.ma import MARouter
+
+    router = MARouter()
+    handler = combine_handlers(make_fake_memory_store_handler(memory), _session_create_handler())
+    for method in ("GET", "POST", "DELETE"):
+        router.add(method, r"/v1/.*", lambda request, match: handler(request))
+    transport.router = router
+    guards = []
+
+    async def fence():
+        guards.append("fresh")
+
+    async with transport.client() as client:
+        created = await create_session(
+            client,
+            agent=executing,
+            environment=environment,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            agent_uuid=source.agent_id,
+            session_factory=sessions,
+            resource_source=source,
+            worker=worker,
+            before_create=fence,
+            memory_read_only=True,
+        )
+    transport.assert_consumed()
+    assert created.agent.id == executing.id
+    session_request = next(
+        request.json() for request in transport.requests if request.path == "/v1/sessions"
+    )
+    assert session_request["agent"] == executing.id
+    assert guards == ["fresh", "fresh"]
+    async with sessions() as db:
+        source_memory = await get_memory_store_id(db, tenant_id=tenant_id, agent_id=source.agent_id)
+        assert source_memory is not None
+        assert (
+            await get_memory_store_id(
+                db,
+                tenant_id=tenant_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=executing.id),
+            )
+            is None
+        )
+    mount = next(
+        resource for resource in session_request["resources"] if resource["type"] == "memory_store"
+    )
+    assert mount["memory_store_id"] == source_memory and mount["access"] == "read_only"
+
+
+@pytest.mark.parametrize(
+    "changed", ["source_uuid", "tenant", "account", "snapshot", "guard", "drops"]
+)
+async def test_worker_source_context_refuses_before_resources_or_native_io(
+    db_preflight, db_nullpool_engine, changed
+):
+    from dataclasses import replace
+
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.errors import ScopeViolation, UnsupportedCapability
+
+    (
+        sessions,
+        tenant_id,
+        account_id,
+        original,
+        environment,
+        worker,
+        source,
+    ) = await worker_source_context(db_nullpool_engine)
+    executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
+    source_uuid = source.agent_id
+
+    async def fence():
+        raise DaimonError("fresh source authority refused")
+
+    if changed != "guard":
+
+        async def fence():
+            pass
+
+    if changed == "source_uuid":
+        source_uuid = uuid.uuid4()
+    elif changed == "tenant":
+        tenant_id = uuid.uuid4()
+    elif changed == "account":
+        account_id = uuid.uuid4()
+    elif changed == "snapshot":
+        source = source.model_copy(
+            update={"source": source.source.model_copy(update={"native": None})}
+        )
+    elif changed == "drops":
+        worker = replace(
+            worker, spec=worker.spec.model_copy(update={"declared_drops": ("memory",)})
+        )
+    trace = ScriptedTransport()
+    async with trace.client() as client:
+        with pytest.raises((ScopeViolation, UnsupportedCapability, DaimonError)):
+            await create_session(
+                client,
+                agent=executing,
+                environment=environment,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                agent_uuid=source_uuid,
+                session_factory=sessions,
+                resource_source=source,
+                worker=worker,
+                before_create=fence,
+                memory_read_only=True,
+            )
+    assert trace.requests == []
+
+
+async def test_worker_never_silently_loses_retained_memory_on_materialization_failure(
+    db_preflight, db_nullpool_engine, monkeypatch
+):
+    from daimon.core.errors import StoreError
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    (
+        sessions,
+        tenant_id,
+        account_id,
+        original,
+        environment,
+        worker,
+        source,
+    ) = await worker_source_context(db_nullpool_engine)
+    executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
+
+    async def missing(*args, **kwargs):
+        raise StoreError("retained memory unavailable")
+
+    async def fence():
+        pass
+
+    monkeypatch.setattr("daimon.core.sessions.ensure_memory_store_and_mount", missing)
+    trace = ScriptedTransport()
+    async with trace.client() as client:
+        with pytest.raises(StoreError):
+            await create_session(
+                client,
+                agent=executing,
+                environment=environment,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                agent_uuid=source.agent_id,
+                session_factory=sessions,
+                resource_source=source,
+                worker=worker,
+                before_create=fence,
+                memory_read_only=True,
+            )
+    assert trace.requests == []

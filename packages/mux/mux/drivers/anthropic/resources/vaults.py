@@ -34,6 +34,7 @@ from mux.drivers.anthropic.resources._secrets import (
     credential_request,
     unavailable_secret,
 )
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import UnsupportedCapability
 
 
@@ -202,7 +203,9 @@ class AnthropicVaults:
         authorize(self._authorization, scope, "vault")
         return self._vault(
             scope,
-            await provider_call(self._client.beta.vaults.create(display_name=display_name)),
+            await provider_call(
+                mutation_client(self._client).beta.vaults.create(display_name=display_name)
+            ),
             display_name=display_name,
         )
 
@@ -272,7 +275,7 @@ class AnthropicVaults:
             scope,
             config,
             self._secrets,
-            lambda kwargs: self._client.beta.vaults.credentials.create(
+            lambda kwargs: mutation_client(self._client).beta.vaults.credentials.create(
                 vault_id=vault.id, **cast(CredentialCreateParams, kwargs)
             ),
         )

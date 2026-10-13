@@ -254,7 +254,6 @@ async def test_worker_source_refusal_and_cancel_precede_allocation_revision(owne
 
 
 async def test_clone_uses_actual_source_identity_and_keeps_distinct_root_authority(owned):
-    from dataclasses import replace
     from datetime import UTC, datetime
     from uuid import uuid4
 
@@ -278,7 +277,7 @@ async def test_clone_uses_actual_source_identity_and_keeps_distinct_root_authori
         spec=fresh.spec,
     )
     worker, channel = canonical_worker(root_agent, "openai", source)
-    actual_source = replace(root_agent, agent_id=uuid4(), source=source)
+    actual_source = root_agent.model_copy(update={"agent_id": uuid4(), "source": source})
     assert worker.permissions.agent_id != actual_source.agent_id
 
     async def verify(selection, origin, candidate):

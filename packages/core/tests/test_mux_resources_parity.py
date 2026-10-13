@@ -551,7 +551,7 @@ async def test_skill_walks_keep_sdk_terminal_page_stop_rule(path, stop_case):
 async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
     from dataclasses import replace
 
-    from mux.contracts.ids import ResourceRef, Revision
+    from mux.contracts.ids import ResourceRef, Revision, SkillRef
     from mux.contracts.resources import Agent, AgentSpec, ToolSpec
 
     from .test_fleet_permissions import parent, resolve
@@ -570,7 +570,7 @@ async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
                 "input_schema": {"type": "object", "properties": {}},
             }
         ],
-        "skills": [],
+        "skills": [{"type": "anthropic", "skill_id": "xlsx", "version": "1"}],
         "mcp_servers": [],
         "metadata": {"daimon_tenant": root.fleet.scope.tenant_id},
     }
@@ -587,7 +587,7 @@ async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
                 input_schema={"type": "object", "properties": {}},
             ),
         ),
-        skills=(),
+        skills=(SkillRef(id="xlsx", source="anthropic", version="1"),),
         mcp_servers=(),
         metadata={"daimon_tenant": root.fleet.scope.tenant_id},
     )
@@ -616,6 +616,9 @@ async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
         name="worker",
         model=root.spec.model.id,
         system=requested.system,
+        description=requested.description,
+        tools=payload["tools"],
+        skills=payload["skills"],
         metadata=payload["metadata"],
     ).model_dump(mode="json")
     from daimon.testing.ma_transport import ScriptedReply
@@ -623,11 +626,12 @@ async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
     before.queue(ScriptedReply("POST", "/v1/agents", httpx.Response(200, json=native)))
     after.queue(ScriptedReply("POST", "/v1/agents", httpx.Response(200, json=native)))
     async with before.client() as old, after.client() as new:
-        await old.beta.agents.create(**payload)
+        expected = await old.beta.agents.create(**payload)
         actual = await create_agent(
             new, worker.spec, scope=worker.permissions.fleet.scope, key="claimed-worker"
         )
         assert actual.id == "actual-worker"
+        assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
     before.assert_consumed()
     after.assert_consumed()
     assert before.requests[0].body == after.requests[0].body
@@ -661,6 +665,55 @@ async def test_claimed_agent_create_disables_sdk_retry_without_changing_shared_c
                 scope=platform_scope("offline retry proof"),
                 key="claimed",
             )
+        assert client.max_retries == 8
+    trace.assert_consumed()
+    assert len(trace.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "kind,path", [("memory", "/v1/memory_stores"), ("vault", "/v1/vaults"), ("file", "/v1/files")]
+)
+async def test_claimed_worker_resource_creates_make_one_native_attempt(kind, path):
+    from daimon.core.mux_backend import managed_agents
+    from daimon.testing.ma_transport import ScriptedReply
+    from mux.contracts.ports import MemoryStores, Vaults
+    from mux.drivers.anthropic.transport import single_attempt_mutation
+    from mux.errors import ProviderError
+
+    trace = ScriptedTransport()
+    trace.queue(
+        ScriptedReply(
+            "POST",
+            path,
+            httpx.Response(
+                500,
+                json={
+                    "type": "error",
+                    "error": {"type": "api_error", "message": "lost resource ACK"},
+                },
+            ),
+        )
+    )
+    scope = platform_scope("offline claimed resource boundary")
+    async with trace.client(max_retries=8) as client:
+        backend = managed_agents(client, scope=scope)
+        with single_attempt_mutation(), pytest.raises(ProviderError):
+            if kind == "memory":
+                await backend.extension(
+                    MemoryStores, namespace="anthropic.memory_stores", version=1
+                ).create(scope, "source-memory", "Root memory", key="claimed")
+            elif kind == "vault":
+                await backend.extension(Vaults, namespace="anthropic.vaults", version=1).create(
+                    scope, "source-vault", key="claimed"
+                )
+            else:
+
+                async def content():
+                    yield b"source-file"
+
+                await backend.artifacts.upload(
+                    scope, content(), filename="source.txt", media_type="text/plain", key="claimed"
+                )
         assert client.max_retries == 8
     trace.assert_consumed()
     assert len(trace.requests) == 1

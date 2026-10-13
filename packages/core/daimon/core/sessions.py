@@ -69,7 +69,7 @@ from daimon.core.mcp_vault import (
     hold_agent_vault_lock,
 )
 from daimon.core.memory_resource import ensure_memory_store_and_mount, memory_instructions
-from daimon.core.mux_compat import agent_spec, source_environment_record
+from daimon.core.mux_compat import agent_spec, sdk_agent, source_environment_record
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_ports_compat import (
     archive_session_record,
@@ -95,13 +95,14 @@ from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
-from mux.errors import ScopeViolation
+from mux.errors import ScopeViolation, UnsupportedCapability
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     # Type-only: importing `daimon.core.turn` at runtime would cycle back here
     # through `daimon.core.turn.prepare`.
+    from daimon.core.neutral_resources import ResolvedWorkerSpec
     from daimon.core.turn.posture import ExemptReason
 
 _log = structlog.get_logger(__name__)
@@ -196,6 +197,38 @@ def _session_mcp_credential(url: str, *, app_mode: bool) -> bool:
     return not app_mode or url != GITHUB_COPILOT_MCP_URL
 
 
+def _check_resource_source(
+    source: BackendAgent,
+    agent: BetaManagedAgentsAgent,
+    environment: BetaEnvironment,
+    tenant_id: uuid.UUID,
+    agent_uuid: uuid.UUID,
+    account_id: uuid.UUID | None,
+    resource_scope: Scope,
+) -> None:
+    actual = source.source
+    if (
+        actual is None
+        or source.tenant_id != tenant_id
+        or source.agent_id != agent_uuid
+        or agent_uuid != derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+        or actual.ref.id != agent.id
+        or actual.ref.tenant_id != str(tenant_id)
+        or actual.revision.native != str(agent.version)
+        or actual.native != agent.model_dump(mode="json", exclude_unset=True)
+        or resource_scope.tenant_id != str(tenant_id)
+        or resource_scope.is_platform
+        or resource_scope.is_legacy_host_authorized
+        or (account_id is not None and resource_scope.account_id != str(account_id))
+        or environment.archived_at is not None
+        or (environment.metadata or {}).get(MA_METADATA_KEY_TENANT, str(tenant_id))
+        != str(tenant_id)
+    ):
+        raise ScopeViolation(
+            "source-preparation", "source context differs from authorized identity"
+        )
+
+
 async def project_session_resources(
     source: BackendAgent,
     *,
@@ -227,27 +260,9 @@ async def project_session_resources(
     The result describes source intent, never preservation or execution authority.
     Every target mapping remains unproven until the existing preparation seam proves it.
     """
-    actual = source.source
-    if (
-        actual is None
-        or source.tenant_id != tenant_id
-        or source.agent_id != agent_uuid
-        or agent_uuid != derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
-        or actual.ref.id != agent.id
-        or actual.ref.tenant_id != str(tenant_id)
-        or actual.revision.native != str(agent.version)
-        or actual.native != agent.model_dump(mode="json", exclude_unset=True)
-        or resource_scope.tenant_id != str(tenant_id)
-        or resource_scope.is_platform
-        or resource_scope.is_legacy_host_authorized
-        or (account_id is not None and resource_scope.account_id != str(account_id))
-        or environment.archived_at is not None
-        or (environment.metadata or {}).get(MA_METADATA_KEY_TENANT, str(tenant_id))
-        != str(tenant_id)
-    ):
-        raise ScopeViolation(
-            "source-preparation", "source context differs from authorized identity"
-        )
+    _check_resource_source(
+        source, agent, environment, tenant_id, agent_uuid, account_id, resource_scope
+    )
     scope = resource_scope
     app_mode = await _session_app_mode(session_factory, tenant_id=tenant_id, agent_id=agent_uuid)
     caller_vault = _caller_mcp_vault_required(
@@ -486,6 +501,8 @@ async def create_session(
     before_create: Callable[[], Awaitable[None]] | None = None,
     channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
     model_override: str | None = None,
+    resource_source: BackendAgent | None = None,
+    worker: ResolvedWorkerSpec | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -588,6 +605,34 @@ async def create_session(
     scope = session_scope(
         tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_session"
     )
+    resource_agent = agent
+    if resource_source is not None or worker is not None:
+        if (
+            resource_source is None
+            or worker is None
+            or before_create is None
+            or tenant_id is None
+            or account_id is None
+            or agent_uuid is None
+            or session_factory is None
+            or resource_source.resource_scope is None
+            or resource_source.source is None
+            or resource_source.source.native is None
+            or resource_source.resource_scope != worker.permissions.fleet.scope
+            or (resource_source.memory_read_only and not memory_read_only)
+        ):
+            raise ScopeViolation(
+                "worker-resources", "captured source and owned preparation required"
+            )
+        if worker.declared_drops:
+            raise UnsupportedCapability(("native_worker_resource_drop",), worker.backend.profile)
+        resource_agent = sdk_agent(resource_source.source)
+        scope = resource_source.resource_scope
+        _check_resource_source(
+            resource_source, resource_agent, environment, tenant_id, agent_uuid, account_id, scope
+        )
+        # Source authority is refreshed before resource effects and at the existing final fence.
+        await before_create()
     app_mode = False
     if tenant_id is not None and agent_uuid is not None and session_factory is not None:
         app_mode = await _session_app_mode(
@@ -709,6 +754,8 @@ async def create_session(
                         anthropic, vault_id=vault_id, token=per_agent_pat, scope=scope
                     )
             except anthropic_pkg.APIError as exc:
+                if resource_source is not None:
+                    raise
                 _log.warning(
                     "copilot_credential.mount_failed",
                     vault_id=vault_id,
@@ -820,16 +867,18 @@ async def create_session(
                     session_factory,
                     tenant_id=tenant_id,
                     agent_id=agent_uuid,
-                    agent_name=agent.name,
+                    agent_name=resource_agent.name,
                     read_only=memory_read_only,
                 )
                 resources.append(memory_mount)
             except (anthropic_pkg.APIError, StoreError) as exc:
+                if resource_source is not None:
+                    raise
                 _log.warning(
                     "memory_store.mount_failed",
                     tenant_id=str(tenant_id),
                     agent_uuid=str(agent_uuid),
-                    agent_name=agent.name,
+                    agent_name=resource_agent.name,
                     error=str(exc),
                 )
 
