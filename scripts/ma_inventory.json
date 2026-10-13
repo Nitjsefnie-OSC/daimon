@@ -4643,6 +4643,19 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
+      "line": 629,
+      "end": 629,
+      "scope": "test_canonical_worker_agent_create_preserves_actual_sdk_bytes",
+      "category": "test",
+      "resource": "agents.create",
+      "call": "old.beta.agents.create(**payload)",
+      "request_keys": [],
+      "response_access": [
+        "expected.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_resources_parity.py",
       "line": 271,
       "end": 271,
       "scope": "test_remaining_defaults_requests_match",
@@ -6279,8 +6292,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 129,
-      "end": 129,
+      "line": 130,
+      "end": 130,
       "scope": "update_agent_ignored",
       "category": "production",
       "resource": "agents.update",
@@ -6290,8 +6303,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 293,
-      "end": 293,
+      "line": 296,
+      "end": 296,
       "scope": "walk",
       "category": "production",
       "resource": "agents.list",
@@ -6301,19 +6314,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 218,
-      "end": 218,
+      "line": 219,
+      "end": 221,
       "scope": "create",
       "category": "production",
       "resource": "agents.create",
-      "call": "self._client.beta.agents.create(**cast(AgentCreateParams, agent_payload(spec)))",
+      "call": "mutation_client(self._client).beta.agents.create(**cast(AgentCreateParams, agent_payload(spec)))",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 226,
-      "end": 226,
+      "line": 229,
+      "end": 229,
       "scope": "retrieve",
       "category": "production",
       "resource": "agents.retrieve",
@@ -6323,8 +6336,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 241,
-      "end": 241,
+      "line": 244,
+      "end": 244,
       "scope": "list",
       "category": "production",
       "resource": "agents.list",
@@ -6334,8 +6347,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 262,
-      "end": 262,
+      "line": 265,
+      "end": 265,
       "scope": "update",
       "category": "production",
       "resource": "agents.update",
@@ -6345,8 +6358,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 270,
-      "end": 270,
+      "line": 273,
+      "end": 273,
       "scope": "archive",
       "category": "production",
       "resource": "agents.archive",
@@ -6356,8 +6369,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 120,
-      "end": 122,
+      "line": 121,
+      "end": 123,
       "scope": "walk_session_native",
       "category": "production",
       "resource": "files.list",
@@ -6367,41 +6380,41 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 100,
-      "end": 100,
+      "line": 101,
+      "end": 101,
       "scope": "_upload_file",
       "category": "production",
       "resource": "files.upload",
-      "call": "self._client.beta.files.upload(file=(filename, content, media_type))",
+      "call": "mutation_client(self._client).beta.files.upload(file=(filename, content, media_type))",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 109,
-      "end": 109,
+      "line": 110,
+      "end": 110,
       "scope": "upload_native",
       "category": "production",
       "resource": "files.upload",
-      "call": "self._client.beta.files.upload(file=(filename, body, media_type))",
+      "call": "mutation_client(self._client).beta.files.upload(file=(filename, body, media_type))",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 132,
-      "end": 138,
+      "line": 133,
+      "end": 139,
       "scope": "send",
       "category": "production",
       "resource": "files.upload",
-      "call": "self._client.beta.files.upload(file=(cast(str, kwargs['filename']), io.BytesIO(cast(bytes, kwargs['content'])), cast(str, kwargs['media_type'])))",
+      "call": "mutation_client(self._client).beta.files.upload(file=(cast(str, kwargs['filename']), io.BytesIO(cast(bytes, kwargs['content'])), cast(str, kwargs['media_type'])))",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 145,
-      "end": 145,
+      "line": 146,
+      "end": 146,
       "scope": "_retrieve_metadata",
       "category": "production",
       "resource": "files.retrieve_metadata",
@@ -6411,8 +6424,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 165,
-      "end": 165,
+      "line": 166,
+      "end": 166,
       "scope": "list",
       "category": "production",
       "resource": "files.list",
@@ -6422,8 +6435,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 175,
-      "end": 175,
+      "line": 176,
+      "end": 176,
       "scope": "download",
       "category": "production",
       "resource": "files.download",
@@ -6433,8 +6446,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 189,
-      "end": 189,
+      "line": 190,
+      "end": 190,
       "scope": "delete",
       "category": "production",
       "resource": "files.delete",
@@ -6532,8 +6545,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 132,
-      "end": 132,
+      "line": 133,
+      "end": 133,
       "scope": "list",
       "category": "production",
       "resource": "memory_stores.list",
@@ -6543,19 +6556,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 150,
-      "end": 152,
+      "line": 151,
+      "end": 153,
       "scope": "create_native",
       "category": "production",
       "resource": "memory_stores.create",
-      "call": "self._client.beta.memory_stores.create(**cast(MemoryStoreCreateParams, config.model_dump(exclude_unset=True)))",
+      "call": "mutation_client(self._client).beta.memory_stores.create(**cast(MemoryStoreCreateParams, config.model_dump(exclude_unset=True)))",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 168,
-      "end": 168,
+      "line": 169,
+      "end": 169,
       "scope": "_walk_sdk",
       "category": "production",
       "resource": "memory_stores.memories.list",
@@ -6565,8 +6578,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 203,
-      "end": 203,
+      "line": 204,
+      "end": 204,
       "scope": "memories",
       "category": "production",
       "resource": "memory_stores.memories.list",
@@ -6576,8 +6589,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 218,
-      "end": 220,
+      "line": 219,
+      "end": 221,
       "scope": "_read_sdk",
       "category": "production",
       "resource": "memory_stores.memories.retrieve",
@@ -6587,8 +6600,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 253,
-      "end": 253,
+      "line": 254,
+      "end": 254,
       "scope": "archive",
       "category": "production",
       "resource": "memory_stores.archive",
@@ -6598,8 +6611,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 258,
-      "end": 258,
+      "line": 259,
+      "end": 259,
       "scope": "delete",
       "category": "production",
       "resource": "memory_stores.delete",
@@ -6609,8 +6622,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 120,
-      "end": 120,
+      "line": 121,
+      "end": 121,
       "scope": "retrieve",
       "category": "production",
       "resource": "memory_stores.retrieve",
@@ -6620,8 +6633,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 245,
-      "end": 247,
+      "line": 246,
+      "end": 248,
       "scope": "write",
       "category": "production",
       "resource": "memory_stores.memories.create",
@@ -7009,8 +7022,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 164,
-      "end": 164,
+      "line": 165,
+      "end": 165,
       "scope": "walk_named",
       "category": "production",
       "resource": "vaults.list",
@@ -7020,8 +7033,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 174,
-      "end": 174,
+      "line": 175,
+      "end": 175,
       "scope": "credential_walk_native",
       "category": "production",
       "resource": "vaults.credentials.list",
@@ -7031,8 +7044,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 195,
-      "end": 195,
+      "line": 196,
+      "end": 196,
       "scope": "walk",
       "category": "production",
       "resource": "vaults.list",
@@ -7042,8 +7055,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 247,
-      "end": 247,
+      "line": 250,
+      "end": 250,
       "scope": "credential_walk",
       "category": "production",
       "resource": "vaults.credentials.list",
@@ -7053,8 +7066,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 229,
-      "end": 229,
+      "line": 232,
+      "end": 232,
       "scope": "list",
       "category": "production",
       "resource": "vaults.list",
@@ -7064,8 +7077,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 338,
-      "end": 338,
+      "line": 341,
+      "end": 341,
       "scope": "remove",
       "category": "production",
       "resource": "vaults.credentials.delete",
@@ -7075,8 +7088,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 345,
-      "end": 345,
+      "line": 348,
+      "end": 348,
       "scope": "archive",
       "category": "production",
       "resource": "vaults.archive",
@@ -7086,30 +7099,30 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 205,
-      "end": 205,
+      "line": 207,
+      "end": 207,
       "scope": "create",
       "category": "production",
       "resource": "vaults.create",
-      "call": "self._client.beta.vaults.create(display_name=display_name)",
+      "call": "mutation_client(self._client).beta.vaults.create(display_name=display_name)",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 275,
-      "end": 277,
+      "line": 278,
+      "end": 280,
       "scope": "_send_credential",
       "category": "production",
       "resource": "vaults.credentials.create",
-      "call": "self._client.beta.vaults.credentials.create(vault_id=vault.id, **cast(CredentialCreateParams, kwargs))",
+      "call": "mutation_client(self._client).beta.vaults.credentials.create(vault_id=vault.id, **cast(CredentialCreateParams, kwargs))",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 295,
-      "end": 297,
+      "line": 298,
+      "end": 300,
       "scope": "update_credential",
       "category": "production",
       "resource": "vaults.credentials.update",
@@ -14053,15 +14066,6 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 607,
-      "module": "anthropic.types.beta",
-      "names": [
-        "BetaManagedAgentsVault"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/core/daimon/core/mux_compat.py",
       "line": 617,
       "module": "anthropic.types.beta",
       "names": [
@@ -14071,7 +14075,16 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 634,
+      "line": 627,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 644,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14080,7 +14093,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 650,
+      "line": 660,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14089,7 +14102,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 702,
+      "line": 712,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -16705,6 +16718,15 @@
       "category": "test"
     },
     {
+      "file": "packages/core/tests/test_mux_resources_parity.py",
+      "line": 642,
+      "module": "anthropic",
+      "names": [
+        "InternalServerError"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
       "line": 225,
       "module": "anthropic",
@@ -18502,7 +18524,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 239,
+      "line": 242,
       "module": "anthropic.types.beta.agent_list_params",
       "names": [
         "AgentListParams"
@@ -18646,7 +18668,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/memory_stores.py",
-      "line": 145,
+      "line": 146,
       "module": "anthropic.types.beta.memory_store_create_params",
       "names": [
         "MemoryStoreCreateParams"
