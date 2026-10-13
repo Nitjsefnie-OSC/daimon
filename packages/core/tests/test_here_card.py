@@ -657,3 +657,16 @@ def test_a_space_member_card_names_the_space_and_its_reach() -> None:
         "In Space client with 1 other channel: its own agents read and post across them only"
         in card.text
     ), "/here names the Space"
+    assert card.agent_home == "Space client", "the home reads by name, never its key"
+    alone = with_space(policy, key, space.model_copy(update={"channel_ids": frozenset({"one"})}))
+    lone = assemble_here_card(
+        channel_id="one",
+        agent_name="helper",
+        tier="channel",
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=alone,
+        details=None,
+    )
+    assert "In Space client, with no other channels yet" in lone.text, "never '0 other channels'"

@@ -22,6 +22,7 @@ from daimon.core.permissions import (
     agent_permissions,
     channel_permissions,
     channel_rule,
+    describe_home,
     memory_writable,
     space_of,
 )
@@ -166,6 +167,8 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
 def _space_line(name: str, channels: int, readers: str) -> str:
     # Other channels are counted, not named: naming them would take a
     # platform lookup per channel, and Teams can't always make one.
+    if channels < 2:
+        return f"In Space {name}, with no other channels yet"
     others = f"{channels - 1} other channel{'s' if channels != 2 else ''}"
     if readers == "own":
         return f"In Space {name} with {others}: its own agents read and post across them only"
@@ -371,7 +374,7 @@ def assemble_here_card(
         effective_readers=here.readers,
         effective_writers=here.writers,
         agent_runs_in=shown_runs_in,
-        agent_home=permissions.home,
+        agent_home=describe_home(policy, permissions.home) if permissions.home else None,
         space_line=_space_line(space.name, len(space.channel_ids), space.rule.readers)
         if space is not None
         else None,

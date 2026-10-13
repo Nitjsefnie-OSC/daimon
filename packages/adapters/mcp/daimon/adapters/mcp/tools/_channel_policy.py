@@ -51,7 +51,9 @@ from daimon.core.permissions import (
     any_agent_rules,
     any_own_readers,
     any_readers_limited,
+    describe_home,
     home_of,
+    is_space_key,
     space_reach,
 )
 from daimon.core.security_audit import record_authz_denial
@@ -339,11 +341,13 @@ async def require_reader_source_publishable(
     a rule is the agent rule write check's (`require_pin_write_access`)."""
     policy = await load_channel_policy(runtime, auth)
     names = build_agent_ref(source.name, source.metadata).names
-    if not any_own_readers(policy) or agent_permissions(policy, names).home is None:
+    home = agent_permissions(policy, names).home
+    if not any_own_readers(policy) or home is None:
         return
     record_authz_denial(Action.PUBLISH, "own_agents_only")
+    owner = describe_home(policy, home) if is_space_key(home) else "a channel"
     raise ToolError(
-        f"'{source.name}' is a channel's own agent, so its reader can't be published: a "
+        f"'{source.name}' is {owner}'s own agent, so its reader can't be published: a "
         "link reaches whoever holds it. Tell the caller. Nothing was published. Do not retry."
     )
 

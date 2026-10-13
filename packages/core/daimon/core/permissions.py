@@ -271,6 +271,11 @@ def any_writers_none(policy: TenantAccessPolicy, *, categories_only: bool = Fals
     return any(rule.writers == "none" for rule in rules)
 
 
+def space_channel_ids(policy: TenantAccessPolicy) -> frozenset[str]:
+    """Every channel in a Space."""
+    return frozenset(c for space in policy.spaces.values() for c in space.channel_ids)
+
+
 def own_reader_channels(policy: TenantAccessPolicy) -> tuple[str, ...]:
     """Every channel kept to its own agents."""
     return tuple(i for i, rule in policy.channel_rules.items() if rule.readers == "own")
@@ -706,6 +711,7 @@ __all__ = [
     "home_channel_ids",
     "home_key",
     "is_space_key",
+    "space_channel_ids",
     "space_of",
     "space_reach",
     "dm_source_limited",
