@@ -30,7 +30,7 @@ from daimon.core.stores.domain import (
     TaskContinuationRow,
     UnattendedRequester,
 )
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -162,12 +162,14 @@ async def list_pending_continuations(
     tenant_id: _uuid.UUID,
     platform: str,
     thread_id: str,
+    include_future: bool = False,
 ) -> list[TaskContinuationRow]:
     """Undispatched continuations for one thread that are due now, oldest first.
 
     A wake scheduled for later (`available_at` in the future, by the database
     clock) is left out, so a caller that predates the wake queue can never
-    run it early.
+    run it early. `include_future` is for the host inspecting a frozen wait;
+    it does not claim or start a row.
     """
     rows = (
         await session.execute(
@@ -179,6 +181,7 @@ async def list_pending_continuations(
                 TaskContinuation.thread_id == thread_id,
                 TaskContinuation.status == "pending",
                 or_(
+                    true() if include_future else False,
                     TaskContinuation.available_at.is_(None),
                     TaskContinuation.available_at <= func.now(),
                 ),
@@ -655,3 +658,28 @@ async def list_waiting_requesters(
         )
         for user_id, role, role_ids in rows.tuples()
     ]
+
+
+async def publish_worker_finished_row(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    idempotency_key: _uuid.UUID,
+    expected_available_at: datetime,
+    available_at: datetime,
+) -> bool:
+    """Offer an unready frozen wait once, inside the caller's transaction."""
+    return (
+        await session.execute(
+            update(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.idempotency_key == idempotency_key,
+                TaskContinuation.reason == "worker_finished",
+                TaskContinuation.status == "pending",
+                TaskContinuation.available_at == expected_available_at,
+            )
+            .values(available_at=available_at)
+            .returning(TaskContinuation.id)
+        )
+    ).scalar_one_or_none() is not None

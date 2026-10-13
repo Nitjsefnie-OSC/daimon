@@ -31,12 +31,14 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 import structlog
 from daimon.core.continuity.continuation import ContinuationRequest, require_writable_reason
+from daimon.core.fleet import TERMINAL, FleetRun, FleetWorker
+from daimon.core.stores import fleet, task_continuations
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
@@ -51,7 +53,7 @@ from daimon.core.stores.task_continuations import (
     start_wake_row,
 )
 from daimon.core.turn.ceiling import TURN_CEILING_S
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -63,10 +65,12 @@ __all__ = [
     "WAKE_RETRY_DELAY",
     "WAKE_RUN_LEASE",
     "WAKE_UNAVAILABLE_DELAY",
+    "FrozenWorkerBatch",
     "WakeClaim",
     "WakeOpener",
     "WakeThread",
     "abandon_interrupted_wakes",
+    "arm_worker_finished",
     "busy_retry_at",
     "cancel_wake",
     "claim_wake",
@@ -187,34 +191,168 @@ async def enqueue_wake(
         await _record_wake(session, request, available_at=available_at)
 
 
-def worker_finished_key(run_id: uuid.UUID) -> uuid.UUID:
-    """One durable completion wake for the run's initial worker batch."""
-    return uuid.uuid5(run_id, "worker_finished")
+# A finite timestamp avoids asyncpg's special infinity/datetime.max conversion.
+_UNREADY_AT: Final = datetime(9999, 1, 1, tzinfo=UTC)
 
 
-async def enqueue_worker_finished(
+def worker_finished_key(
+    run_id: uuid.UUID, worker_ids: Sequence[uuid.UUID] | None = None
+) -> uuid.UUID:
+    """A retry-stable identity for one exact batch; None retains the legacy key."""
+    suffix = ""
+    if worker_ids is not None:
+        if not worker_ids or len(set(worker_ids)) != len(worker_ids):
+            raise ValueError("A worker batch must be nonempty and unique")
+        suffix = ":" + ",".join(str(key) for key in sorted(worker_ids, key=str))
+    return uuid.uuid5(run_id, "worker_finished" + suffix)
+
+
+class FrozenWorkerBatch(BaseModel):
+    """Immutable wait facts; readiness does not certify successful results."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    run_id: uuid.UUID
+    worker_ids: tuple[uuid.UUID, ...]
+    quorum: int
+    binding_id: str
+    session_id: str
+
+
+def _batch(run: FleetRun, workers: Sequence[FleetWorker], ids: Sequence[uuid.UUID]):
+    selected = {worker.id: worker for worker in workers}
+    if not ids or len(set(ids)) != len(ids) or not set(ids) <= selected.keys():
+        raise ValueError("Batch workers must be unique members of this run")
+    reviews = {selected[key].reviewer_of is not None for key in ids}
+    if len(reviews) != 1:
+        raise ValueError("Initial and review workers require separate batches")
+    return FrozenWorkerBatch(
+        run_id=run.id,
+        worker_ids=tuple(sorted(ids, key=str)),
+        quorum=len(ids) if True in reviews else min(run.quorum or len(ids), len(ids)),
+        binding_id=run.orchestrator_binding_id,
+        session_id=run.orchestrator_session_id,
+    )
+
+
+def _address_matches(run: FleetRun, request: ContinuationRequest | TaskContinuationRow) -> bool:
+    return (
+        request.reason == "worker_finished"
+        and request.tenant_id == run.tenant_id
+        and request.requester_account_id == run.orchestrator_account_id
+        and request.platform == run.platform
+        and request.parent_channel_id == run.channel_id
+        and request.thread_id == run.thread_id
+    )
+
+
+async def arm_worker_finished(
     session: AsyncSession,
     request: ContinuationRequest,
     *,
     run_id: uuid.UUID,
+    worker_ids: Sequence[uuid.UUID],
+    now: datetime,
+) -> TaskContinuationRow | None:
+    """Freeze a batch in the existing queue, then evaluate already-finished workers.
+
+    Installation requires the compatible reader/rollback floor; no caller is
+    wired by this API. The run stays running so it can admit a review cohort.
+    """
+    if not session.in_transaction():
+        raise ValueError("Arming a worker batch requires an active transaction")
+    if request.idempotency_key != worker_finished_key(run_id, worker_ids):
+        raise ValueError("Worker completion requires the batch's stable wake identity")
+    run, workers = await fleet.run_status(
+        session, tenant_id=request.tenant_id, run_id=run_id, for_update=True
+    )
+    if not _address_matches(run, request):
+        raise ValueError("Worker wait address differs from its original root")
+    batch = _batch(run, workers, worker_ids)
+    payload = batch.model_dump_json()
+    row = await task_continuations.get_continuation(
+        session, idempotency_key=request.idempotency_key
+    )
+    if row is not None:
+        expected = request.model_copy(update={"requested_work": payload})
+        if any(getattr(row, key) != value for key, value in expected.model_dump().items()):
+            raise ValueError("Worker wait exists with a different frozen intent")
+    elif run.status == "running" and now < run.deadline_at:
+        row = await task_continuations.record_continuation(
+            session,
+            **request.model_copy(update={"requested_work": payload}).model_dump(),
+            available_at=_UNREADY_AT,
+        )
+    else:
+        return None
+    await enqueue_worker_finished(session, tenant_id=run.tenant_id, run_id=run_id, now=now)
+    return await task_continuations.get_continuation(session, idempotency_key=row.idempotency_key)
+
+
+async def enqueue_worker_finished(
+    session: AsyncSession,
+    request: ContinuationRequest | None = None,
+    *,
+    tenant_id: uuid.UUID | None = None,
+    run_id: uuid.UUID,
     now: datetime,
 ) -> bool:
-    """Refuse completion writes until compatible queue readers are deployed.
+    """Offer ready frozen batches with the caller's terminal move, without committing.
 
-    The public signature remains available for host integrations, but no run
-    transition or wake is written. False leaves the caller's terminal worker
-    update free to commit, including at or after the deadline. The prior
-    release cannot read this reason; a caller cannot opt past the rolling
-    release boundary. Publication and the readiness transition are deferred
-    together; the run owner remains responsible for ending an expired run.
+    The writer locks the run before changing its worker, then calls here in
+    that same transaction.
+    Deadline refusal never undoes that terminal move. Missing/corrupt waits
+    authorize nothing and do not strand unrelated terminal facts.
     """
     if not session.in_transaction():
         raise ValueError("Worker completion requires an active transaction")
-    if request.reason != "worker_finished" or request.idempotency_key != worker_finished_key(
-        run_id
-    ):
-        raise ValueError("Worker completion requires the run's stable wake identity")
-    return False
+    if request is not None:
+        if request.reason != "worker_finished" or request.idempotency_key != worker_finished_key(
+            run_id
+        ):
+            raise ValueError("Worker completion requires the run's stable wake identity")
+        return False  # Legacy unarmed writes remain closed.
+    if tenant_id is None:
+        raise ValueError("Publishing frozen batches requires the authorized tenant")
+    run, workers = await fleet.run_status(
+        session, tenant_id=tenant_id, run_id=run_id, for_update=True
+    )
+    if run.status != "running" or now >= run.deadline_at:
+        return False
+    rows = await task_continuations.list_pending_continuations(
+        session,
+        tenant_id=tenant_id,
+        platform=run.platform,
+        thread_id=run.thread_id,
+        include_future=True,
+    )
+    published = 0
+    for row in rows:
+        if row.reason != "worker_finished" or row.available_at != _UNREADY_AT:
+            continue
+        try:
+            batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
+            if batch.run_id != run_id:
+                continue
+            expected = _batch(run, workers, batch.worker_ids)
+            if (
+                not _address_matches(run, row)
+                or batch != expected
+                or row.requested_work != batch.model_dump_json()
+                or row.idempotency_key != worker_finished_key(run_id, batch.worker_ids)
+            ):
+                raise ValueError("Frozen batch intent differs from its original run")
+        except (ValidationError, ValueError):
+            log.warning("wake.invalid_worker_batch", idempotency_key=str(row.idempotency_key))
+            continue
+        if sum(w.status in TERMINAL for w in workers if w.id in batch.worker_ids) >= batch.quorum:
+            published += await task_continuations.publish_worker_finished_row(
+                session,
+                tenant_id=tenant_id,
+                idempotency_key=row.idempotency_key,
+                expected_available_at=_UNREADY_AT,
+                available_at=now,
+            )
+    return published > 0
 
 
 async def claim_wake(

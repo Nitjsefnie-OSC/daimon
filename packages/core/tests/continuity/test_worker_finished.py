@@ -23,10 +23,13 @@ from daimon.core.continuity.dispatch import WorkerFinishedDecision, dispatch_pen
 from daimon.core.continuity.wakes import (
     WAKE_RETRY_DELAY,
     WAKE_RUN_LEASE,
+    FrozenWorkerBatch,
     abandon_interrupted_wakes,
+    arm_worker_finished,
     claim_wake,
     enqueue_wake,
     enqueue_worker_finished,
+    list_dispatchable_wakes,
     settle_wake,
     start_wake,
     worker_finished_key,
@@ -58,6 +61,7 @@ async def _run(
     *,
     quorum: int | None = None,
     deadline_at: datetime | None = None,
+    max_workers: int = 2,
 ) -> FleetRun:
     async with sm.begin() as session:
         tenant = await make_tenant(session)
@@ -74,13 +78,18 @@ async def _run(
         operation_key="spawn",
         total_budget_usd=Decimal(4),
         deadline_at=deadline_at or _NOW + timedelta(hours=1),
-        max_workers=2,
+        max_workers=max_workers,
         created_by="authorized-host",
         quorum=quorum,
     )
 
 
-async def _worker(sm: async_sessionmaker[AsyncSession], run: FleetRun, ordinal: int) -> FleetWorker:
+async def _worker(
+    sm: async_sessionmaker[AsyncSession],
+    run: FleetRun,
+    ordinal: int,
+    reviewer_of: uuid.UUID | None = None,
+) -> FleetWorker:
     return await fleet.add_worker(
         sm,
         tenant_id=run.tenant_id,
@@ -95,6 +104,7 @@ async def _worker(sm: async_sessionmaker[AsyncSession], run: FleetRun, ordinal: 
         budget_usd=Decimal(2),
         deadline_at=run.deadline_at,
         max_turns=1,
+        reviewer_of=reviewer_of,
     )
 
 
@@ -436,3 +446,165 @@ async def test_previous_reader_negative_control_still_rejects_injected_future_re
                 now=_NOW,
                 max_attempts=5,
             )
+
+
+async def _arm(session, run, workers, *, now=_NOW):
+    ids = tuple(w.id for w in workers)
+    return await arm_worker_finished(
+        session,
+        _request(run).model_copy(update={"idempotency_key": worker_finished_key(run.id, ids)}),
+        run_id=run.id,
+        worker_ids=ids,
+        now=now,
+    )
+
+
+async def _finish_batch(session, run, worker, *, now=_NOW):
+    await fleet.run_status(session, tenant_id=run.tenant_id, run_id=run.id, for_update=True)
+    await fleet.finish(
+        session,
+        tenant_id=run.tenant_id,
+        worker_id=worker.id,
+        expected_version=worker.version,
+        status="cancelled",
+        error_code="stopped",
+    )
+    return await enqueue_worker_finished(session, tenant_id=run.tenant_id, run_id=run.id, now=now)
+
+
+@pytest.mark.parametrize("quorum", [None, 1])
+async def test_frozen_initial_and_review_waits_do_not_count_each_others_workers(pooled, quorum):
+    run = await _run(pooled, quorum=quorum, max_workers=3)
+    first, late = [await _worker(pooled, run, i) for i in range(2)]
+    async with pooled.begin() as db:
+        initial = await _arm(db, run, [first, late])
+        assert initial is not None
+        assert await _arm(db, run, [late, first]) == initial
+        changed = _request(run).model_copy(
+            update={"idempotency_key": initial.idempotency_key, "target_name": "other"}
+        )
+        with pytest.raises(ValueError, match="different frozen intent"):
+            await arm_worker_finished(
+                db, changed, run_id=run.id, worker_ids=[first.id, late.id], now=_NOW
+            )
+    assert not await list_dispatchable_wakes(
+        pooled, tenant_id=run.tenant_id, platform=run.platform, thread_id=run.thread_id, now=_NOW
+    )
+    async with pooled.begin() as db:
+        assert await _finish_batch(db, run, first) is (quorum == 1)
+    review = await _worker(pooled, run, 2, reviewer_of=first.id)
+    async with pooled.begin() as db:
+        with pytest.raises(ValueError, match="separate batches"):
+            await _arm(db, run, [first, review])
+        second = await _arm(db, run, [review])
+        assert second is not None and second.idempotency_key != initial.idempotency_key
+        batch = FrozenWorkerBatch.model_validate_json(second.requested_work)
+        assert batch.worker_ids == (review.id,) and batch.quorum == 1
+        assert batch.binding_id == run.orchestrator_binding_id
+        assert batch.session_id == run.orchestrator_session_id
+        assert await _finish_batch(db, run, late) is (quorum is None)
+        assert not await enqueue_worker_finished(
+            db, tenant_id=run.tenant_id, run_id=run.id, now=_NOW
+        )
+    async with pooled.begin() as db:
+        assert await _finish_batch(db, run, review)
+        assert not await enqueue_worker_finished(
+            db, tenant_id=run.tenant_id, run_id=run.id, now=_NOW
+        )
+    rows = await list_dispatchable_wakes(
+        pooled, tenant_id=run.tenant_id, platform=run.platform, thread_id=run.thread_id, now=_NOW
+    )
+    assert {r.idempotency_key for r in rows} == {initial.idempotency_key, second.idempotency_key}
+    current, _ = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
+    assert current == run and current.status == "running"
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+async def test_armed_wait_deadline_never_rolls_back_terminal_move(pooled, offset):
+    run = await _run(pooled)
+    worker = await _worker(pooled, run, 0)
+    async with pooled.begin() as db:
+        row = await _arm(db, run, [worker])
+    async with pooled.begin() as db:
+        assert await _finish_batch(
+            db, run, worker, now=run.deadline_at + timedelta(seconds=offset)
+        ) is (offset < 0)
+    _, workers = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
+    assert workers[0].status == "cancelled" and workers[0].version == worker.version + 1
+    async with pooled() as db:
+        actual = await get_continuation(db, idempotency_key=row.idempotency_key)
+    assert (actual.available_at == row.available_at) is (offset >= 0)
+
+
+async def test_arm_and_completion_roll_back_and_completed_before_arm_is_not_lost(pooled):
+    run = await _run(pooled)
+    worker = await _worker(pooled, run, 0)
+    async with pooled() as db, db.begin():
+        assert not await _finish_batch(db, run, worker)
+        row = await _arm(db, run, [worker])
+        assert row.available_at == _NOW
+        await db.rollback()
+    async with pooled() as db:
+        assert await get_continuation(db, idempotency_key=row.idempotency_key) is None
+    async with pooled.begin() as db:
+        assert not await _finish_batch(db, run, worker)
+    async with pooled.begin() as db:
+        row = await _arm(db, run, [worker])
+        assert row.available_at == _NOW
+
+
+@pytest.mark.parametrize("mutation", ["account", "channel", "key", "duplicate", "foreign"])
+async def test_freezing_refuses_changed_address_identity_or_members(pooled, mutation):
+    run = await _run(pooled)
+    worker = await _worker(pooled, run, 0)
+    ids = [worker.id]
+    request = _request(run).model_copy(update={"idempotency_key": worker_finished_key(run.id, ids)})
+    if mutation == "account":
+        request = request.model_copy(update={"requester_account_id": uuid.uuid4()})
+    elif mutation == "channel":
+        request = request.model_copy(update={"parent_channel_id": "other"})
+    elif mutation == "key":
+        request = request.model_copy(update={"idempotency_key": uuid.uuid4()})
+    elif mutation == "duplicate":
+        ids.append(worker.id)
+    else:
+        ids = [uuid.uuid4()]
+        request = request.model_copy(update={"idempotency_key": worker_finished_key(run.id, ids)})
+    async with pooled.begin() as db:
+        with pytest.raises(ValueError):
+            await arm_worker_finished(db, request, run_id=run.id, worker_ids=ids, now=_NOW)
+    assert await _read(pooled, run) is None
+
+
+async def test_racing_terminal_moves_publish_once_and_restart_keeps_the_fence(pooled, db_engine):
+    run = await _run(pooled)
+    workers = [await _worker(pooled, run, i) for i in range(2)]
+    async with pooled.begin() as db:
+        row = await _arm(db, run, workers)
+
+    async def complete(worker):
+        async with pooled.begin() as db:
+            return await _finish_batch(db, run, worker)
+
+    assert sum(await asyncio.gather(*(complete(w) for w in workers))) == 1
+    claim = await claim_wake(pooled, idempotency_key=row.idempotency_key, now=_NOW)
+    takeover_at = _NOW + timedelta(minutes=6)
+    schema = isolated_test_schema(db_engine)
+    assert schema is not None
+    engine = build_test_engine(db_engine.url.render_as_string(hide_password=False), schema)
+    restarted = async_sessionmaker(engine, expire_on_commit=False)
+    require_owned_sessionmaker(restarted)
+    try:
+        reclaimed = await claim_wake(
+            restarted, idempotency_key=row.idempotency_key, now=takeover_at
+        )
+        assert reclaimed is not None and reclaimed.owner != claim.owner
+        assert not await start_wake(pooled, claim, now=takeover_at)
+        assert await start_wake(restarted, reclaimed, now=takeover_at)
+        assert not await claim_wake(
+            pooled,
+            idempotency_key=row.idempotency_key,
+            now=takeover_at + WAKE_RUN_LEASE + timedelta(seconds=1),
+        )
+    finally:
+        await engine.dispose()

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Reuse verified Gemini worker readback and share native worker publication authority checks.
+- Freeze independent worker batches in the existing wake queue and publish readiness atomically with terminal writes, without reopening legacy unarmed completion writes.
+
 - Keep continuation timers and known work readable during queue upgrades by filtering unsupported reasons before batching, validation and lease mutations. Worker-completion publication remains closed.
 - Compose scoped fleet journal reads and financially locked admission through the existing owners; validate result contracts before funding, recover pending dispatch, and validate exact live origins for explicitly installed MCP bridges.
 - Preserve ordinary sealed answers when the trusted Discord fleet resolver proves no active fleet, and record replacement messages through the shared turn-post owner.
