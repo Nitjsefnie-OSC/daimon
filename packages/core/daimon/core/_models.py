@@ -436,6 +436,8 @@ class Routine(Base):
     delivery_lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # What the outbox post is: `result`, or `failure_notice` for a failed run.
+    delivery_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivery_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The text a pending post carries: that fire's result, copied so a writer
     # that only knows `last_result_tail` cannot change what gets posted.

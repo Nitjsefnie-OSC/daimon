@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
+import anthropic
+import httpx
 import pytest
 from daimon.core.errors import TurnError
 from daimon.core.routine_delivery import (
@@ -17,11 +20,11 @@ from daimon.core.routine_delivery import (
 from daimon.core.scheduler import run_one_tick
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
-    FAILURE_NOTICE,
     create_routine,
     get_routine,
     record_result,
 )
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -63,9 +66,14 @@ async def _routine(
     return row
 
 
-async def _fail(sm: async_sessionmaker[AsyncSession], row: RoutineRow, error: str) -> RoutineRow:
+async def _fail(
+    sm: async_sessionmaker[AsyncSession],
+    row: RoutineRow,
+    error: str,
+    reason: TerminationReason | None = TerminationReason.UPSTREAM,
+) -> RoutineRow:
     async with sm() as s, s.begin():
-        await record_failure(s, row.id, error=error)
+        await record_failure(s, row.id, error=error, reason=reason)
     return await _get(sm, row)
 
 
@@ -74,6 +82,28 @@ async def _get(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> Routine
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None
     return fetched
+
+
+class _NoCap:
+    async def is_over_cap(self, tenant_id: object, user_id: str) -> bool:
+        return False
+
+
+async def _tick(
+    sm: async_sessionmaker[AsyncSession],
+    now: datetime,
+    fire: Callable[[RoutineRow], Awaitable[None]],
+) -> None:
+    await run_one_tick(
+        now=now,
+        sm=sm,
+        caps=_NoCap(),
+        fire=fire,
+        max_age=timedelta(minutes=15),
+        max_concurrent_fires=1,
+        dispatch_timeout_s=5.0,
+        wait_for_completion=True,
+    )
 
 
 async def _deliver(sm: async_sessionmaker[AsyncSession]) -> list[str]:
@@ -88,49 +118,86 @@ async def _deliver(sm: async_sessionmaker[AsyncSession]) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    ("error", "expected"),
+    ("reason", "platform", "expected"),
     [
-        (_PDF_ERROR, _MODEL_NOTICE),
-        ("BadRequestError: Error code: 400 - secret detail", _MODEL_NOTICE),
+        (TerminationReason.UPSTREAM, "discord", _MODEL_NOTICE),
         (
-            "timeout: exceeded 3000.0s",
+            TerminationReason.CEILING,
+            "discord",
             "It took too long, so Daimon stopped it.\n\n"
             "It will try again at its next scheduled time.",
         ),
         (
-            "TurnError: ceiling: turn exceeded 45 minutes",
-            "It took too long, so Daimon stopped it.\n\n"
-            "It will try again at its next scheduled time.",
+            TerminationReason.ADMISSION_BALANCE_DEPLETED,
+            "slack",
+            "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
+            "\n\nIt will try again at its next scheduled time.",
         ),
         (
-            "balance_depleted",
+            TerminationReason.ADMISSION_BALANCE_DEPLETED,
+            "teams",
             "Your team's Daimon credit has run out.\n\n"
-            "It will run again at its next scheduled time once an admin adds credit.",
+            "An admin can top up with `billing` in a 1:1 chat with me."
+            "\n\nIt will try again at its next scheduled time.",
         ),
         (
-            "KeyError: 'x'",
+            TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+            "discord",
+            "This channel's budget is used up.\n\nAn admin can raise it."
+            "\n\nIt will try again at its next scheduled time.",
+        ),
+        (
+            TerminationReason.ADMISSION_CAP_EXCEEDED,
+            "discord",
+            "The person who made it has used their monthly limit.\n\n"
+            "It will run again at its next scheduled time once the limit resets or is raised.",
+        ),
+        (
+            TerminationReason.UNKNOWN,
+            "discord",
             "Something went wrong while it was running.\n\n"
             "It will try again at its next scheduled time.",
         ),
     ],
 )
-def test_notice_says_what_failed_in_plain_words(error: str, expected: str) -> None:
-    assert failure_notice_text(error) == expected
-    assert "secret detail" not in expected and "PDF" not in expected, "no raw error text"
+def test_notice_says_what_failed_in_plain_words(
+    reason: TerminationReason, platform: str, expected: str
+) -> None:
+    assert failure_notice_text(reason, platform=platform) == expected
 
 
 @pytest.mark.parametrize(
-    "error",
-    ["scheduler_shutdown", "invoker_not_allowed", "access_policy_unreadable", "own_agents_only"],
+    ("error", "expected"),
+    [
+        (TurnError(kind="upstream", message="The PDF specified was not valid"), _MODEL_NOTICE),
+        (anthropic.APIConnectionError(request=httpx.Request("POST", "https://x")), _MODEL_NOTICE),
+        (KeyError("x"), "Something went wrong while it was running."),
+    ],
 )
-def test_shutdowns_and_policy_refusals_stay_quiet(error: str) -> None:
-    assert failure_notice_text(error) is None
+async def test_a_fire_that_raises_is_classified_where_it_is_caught(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    error: Exception,
+    expected: str,
+) -> None:
+    now = datetime(2026, 10, 11, 9, 0, tzinfo=UTC)
+    row = await _routine(db_session, next_fire_at=now - timedelta(minutes=1))
+
+    async def failing_fire(_row: RoutineRow) -> None:
+        raise error
+
+    await _tick(db_session_factory, now, failing_fire)
+
+    after = await _get(db_session_factory, row)
+    assert after.delivery_kind == "failure_notice"
+    assert after.delivery_payload is not None and after.delivery_payload.startswith(expected)
+    assert "PDF" not in after.delivery_payload, "no raw error text"
 
 
 async def test_failure_notice_reads_as_a_failure_not_a_result(db_session: AsyncSession) -> None:
     saved = await _routine(db_session)
     row = saved.model_copy(
-        update={"delivery_note": FAILURE_NOTICE, "delivery_payload": _MODEL_NOTICE}
+        update={"delivery_kind": "failure_notice", "delivery_payload": _MODEL_NOTICE}
     )
     assert render_fallback_post(row) == (
         "team-020-analyst's daily routine at 09:00 UTC failed, so there's no result this time."
@@ -152,7 +219,7 @@ async def test_a_failed_run_posts_one_notice_per_failing_streak(
     row = await _routine(db_session)
 
     failed = await _fail(sm, row, _PDF_ERROR)
-    assert (failed.delivery_status, failed.delivery_note) == ("pending", FAILURE_NOTICE)
+    assert (failed.delivery_status, failed.delivery_kind) == ("pending", "failure_notice")
     assert failed.delivery_payload == _MODEL_NOTICE
     assert failed.last_error == _PDF_ERROR, "the panel still sees the raw error"
 
@@ -170,10 +237,10 @@ async def test_a_failed_run_posts_one_notice_per_failing_streak(
         await record_result(s, row.id, tail="All green.", error=None, delivery="pending")
     assert len(await _deliver(sm)) == 1, "the success posts its result"
 
-    after_recovery = await _fail(sm, row, "timeout: exceeded 3000.0s")
-    assert (after_recovery.delivery_status, after_recovery.delivery_note) == (
+    after_recovery = await _fail(sm, row, "timeout: exceeded 3000.0s", TerminationReason.CEILING)
+    assert (after_recovery.delivery_status, after_recovery.delivery_kind) == (
         "pending",
-        FAILURE_NOTICE,
+        "failure_notice",
     ), "failing again after a success is a new streak"
 
 
@@ -189,7 +256,7 @@ async def test_a_pending_result_is_not_replaced_by_a_notice(
     failed = await _fail(sm, row, _PDF_ERROR)
 
     assert (failed.delivery_status, failed.delivery_payload) == ("pending", "All green.")
-    assert failed.delivery_note is None
+    assert failed.delivery_kind == "result"
 
 
 async def test_no_notice_without_a_destination_or_for_a_quiet_error(
@@ -201,7 +268,7 @@ async def test_no_notice_without_a_destination_or_for_a_quiet_error(
     assert (await _fail(sm, headless, _PDF_ERROR)).delivery_status is None
 
     deployed = await _routine(db_session)
-    assert (await _fail(sm, deployed, "scheduler_shutdown")).delivery_status is None
+    assert (await _fail(sm, deployed, "scheduler_shutdown", None)).delivery_status is None
 
 
 async def test_a_fire_that_raises_queues_the_notice_through_the_tick(
@@ -214,20 +281,7 @@ async def test_a_fire_that_raises_queues_the_notice_through_the_tick(
     async def failing_fire(_row: RoutineRow) -> None:
         raise TurnError(kind="upstream", message="The PDF specified was not valid")
 
-    class _NoCap:
-        async def is_over_cap(self, tenant_id: object, user_id: str) -> bool:
-            return False
-
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        caps=_NoCap(),
-        fire=failing_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=1,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _tick(db_session_factory, now, failing_fire)
 
     after = await _get(db_session_factory, row)
     assert after.last_error == _PDF_ERROR

@@ -59,7 +59,6 @@ from daimon.adapters.teams.identity import (
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import (
     SEND_TIMEOUT_S,
-    TEAMS_BILLING_COMMAND,
     TEAMS_SEND_ERRORS,
     TeamsSender,
     TeamsTurnLifecycle,
@@ -135,7 +134,7 @@ from daimon.core.turn.errors import (
     TurnNotStarted,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
+from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import protection_state

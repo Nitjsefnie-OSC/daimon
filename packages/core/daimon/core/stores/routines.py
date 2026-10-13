@@ -38,12 +38,6 @@ log = structlog.get_logger(__name__)
 LAST_RESULT_TAIL_MAX = 1000
 """Maximum length of the stored preview; delivery keeps the complete reply."""
 
-FAILURE_NOTICE = "failure_notice"
-"""`delivery_note` of a pending post that tells the destination a run failed.
-
-The poster renders such a payload as a failure notice instead of a result.
-Settling replaces the note as for any post."""
-
 
 async def create_routine(
     session: AsyncSession,
@@ -225,6 +219,7 @@ async def update_routine(
             destination_kind=None,
             destination_id=None,
             delivery_status=None,
+            delivery_kind=None,
             delivery_payload=None,
             delivery_note=None,
         )
@@ -469,6 +464,7 @@ async def record_result(
     if delivery is not None:
         values.update(
             delivery_status=delivery,
+            delivery_kind="result",
             delivery_note=delivery_note,
             delivery_payload=tail if delivery == "pending" else None,
             delivery_lease_owner=None,
@@ -506,7 +502,8 @@ async def queue_failure_notice(
             )
             .values(
                 delivery_status="pending",
-                delivery_note=FAILURE_NOTICE,
+                delivery_kind="failure_notice",
+                delivery_note=None,
                 delivery_payload=notice,
                 delivery_lease_owner=None,
                 delivery_lease_expires_at=None,
@@ -516,6 +513,15 @@ async def queue_failure_notice(
     )
     await session.flush()
     return result.rowcount == 1
+
+
+async def routine_platform(session: AsyncSession, routine_id: _uuid.UUID) -> str | None:
+    """The platform of the routine's tenant, or None for an unknown routine."""
+    return await session.scalar(
+        select(Tenant.platform)
+        .join(Routine, Routine.tenant_id == Tenant.id)
+        .where(Routine.id == routine_id)
+    )
 
 
 def _check_destination(kind: str | None, destination_id: str | None) -> None:

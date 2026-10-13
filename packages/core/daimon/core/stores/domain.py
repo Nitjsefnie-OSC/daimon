@@ -244,6 +244,7 @@ class RoutineRow(BaseModel):
     destination_kind: RoutineDestinationKind | None = None
     destination_id: str | None = None
     delivery_status: RoutineDeliveryStatus | None = None
+    delivery_kind: Literal["result", "failure_notice"] | None = None
     delivery_note: str | None = None
     delivery_payload: str | None = None
     delivered_at: datetime | None = None

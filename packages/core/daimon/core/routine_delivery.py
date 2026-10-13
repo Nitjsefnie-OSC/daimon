@@ -53,13 +53,15 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
-    FAILURE_NOTICE,
     claim_routine_deliveries,
     queue_failure_notice,
     record_result,
+    routine_platform,
     settle_routine_delivery,
 )
+from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
+from daimon.core.turn.termination import TerminationReason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -283,88 +285,60 @@ def destination_shape_error(platform: str, kind: str, destination_id: str) -> st
 
 _NEXT_RUN = "It will try again at its next scheduled time."
 
-#: What a failed run says, by the `last_error` an admission gate records:
-#: what went wrong, then what happens next.
-_GATE_FAILURES: Final[dict[str, tuple[str, str]]] = {
-    "balance_depleted": (
-        "Your team's Daimon credit has run out.",
-        "It will run again at its next scheduled time once an admin adds credit.",
-    ),
-    "channel_budget_exceeded": (
-        "This channel's budget is used up.",
-        "It will run again at its next scheduled time once an admin raises it.",
-    ),
-    "cap_exceeded": (
+#: What a failed run says, by why it ended: what went wrong, then what
+#: happens next. A credit or channel budget refusal says it in the turn
+#: notice's words instead (`render_termination_notice`), then `_NEXT_RUN`.
+_ROUTINE_FAILURES: Final[dict[TerminationReason, tuple[str, str]]] = {
+    TerminationReason.CEILING: ("It took too long, so Daimon stopped it.", _NEXT_RUN),
+    TerminationReason.UPSTREAM: ("The request to the AI model failed.", _NEXT_RUN),
+    TerminationReason.ADMISSION_CAP_EXCEEDED: (
         "The person who made it has used their monthly limit.",
         "It will run again at its next scheduled time once the limit resets or is raised.",
     ),
 }
-
-#: Failures that say nothing to the destination: a deploy cutting a run
-#: short, a routine with no tenant or creator to post for, and every access
-#: policy refusal (posting there for the creator is what the policy denies).
-#: Anything else is a run that started and failed.
-_SILENT_FAILURES: Final[frozenset[str]] = frozenset(
-    {
-        "scheduler_shutdown",
-        "routine has no created_by_user_id",
-        "routine tenant not found",
-        "routine tenant archived",
-        "invoker_not_allowed",
-        "access_policy_unreadable",
-        "runs_elsewhere",
-        "own_agents_only",
-        "writers_none",
-        "external_participant",
-    }
+_OTHER_FAILURE = ("Something went wrong while it was running.", _NEXT_RUN)
+_TURN_NOTICE_FAILURES = (
+    TerminationReason.ADMISSION_BALANCE_DEPLETED,
+    TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
 )
 
 
-#: A model request that failed for good: the driver's upstream error (retries
-#: exhausted, or MA ended the session), or an SDK error raised directly.
-_MODEL_FAILURES: Final[tuple[str, ...]] = (
-    "TurnError: upstream",
-    "APIError",
-    "APIStatusError",
-    "APIConnectionError",
-    "APITimeoutError",
-    "BadRequestError",
-    "RateLimitError",
-    "InternalServerError",
-    "OverloadedError",
-)
+def failure_notice_text(reason: TerminationReason, *, platform: str) -> str:
+    """The notice a failed run posts to its destination.
 
-
-def failure_notice_text(error: str) -> str | None:
-    """The notice a failed run posts to its destination, or `None` to stay quiet.
-
-    Plain words from the closed set of `last_error` values (docs/routines.md):
-    the raw error never reaches the channel, since it can quote a provider
-    message or a file name the readers there should not see.
+    Plain words by why the run ended: the raw error never reaches the
+    channel, since it can quote a provider message or a file name the readers
+    there should not see. `platform` names its billing command.
     """
-    if error in _SILENT_FAILURES:
-        return None
-    if (gate := _GATE_FAILURES.get(error)) is not None:
-        return "\n\n".join(gate)
-    if error.startswith("timeout:") or error.startswith("TurnError: ceiling"):
-        what = "It took too long, so Daimon stopped it."
-    elif error.startswith(_MODEL_FAILURES):
-        what = "The request to the AI model failed."
-    else:
-        what = "Something went wrong while it was running."
-    return f"{what}\n\n{_NEXT_RUN}"
+    billing = TEAMS_BILLING_COMMAND if platform == "teams" else "`/billing`"
+    if reason in _TURN_NOTICE_FAILURES and (
+        notice := render_termination_notice(reason, billing_command=billing)
+    ):
+        return f"{notice.plain_text()}\n\n{_NEXT_RUN}"
+    return "\n\n".join(_ROUTINE_FAILURES.get(reason, _OTHER_FAILURE))
 
 
-async def record_failure(session: AsyncSession, routine_id: uuid.UUID, *, error: str) -> None:
+async def record_failure(
+    session: AsyncSession,
+    routine_id: uuid.UUID,
+    *,
+    error: str,
+    reason: TerminationReason | None,
+) -> None:
     """Record a failed run and, for the first failure in a row, queue a notice.
 
-    The notice goes through the same outbox as a result, so the chat adapter
+    `reason` is why the run ended, classified where it was caught; `None`
+    says nothing to the destination (a deploy cutting the run short). The
+    notice goes through the same outbox as a result, so the chat adapter
     posts it with every check a result gets. One per failing streak: a routine
     that keeps failing stays quiet until a run succeeds (`queue_failure_notice`).
     """
-    notice = failure_notice_text(error)
-    if notice is not None and await queue_failure_notice(session, routine_id, notice=notice):
-        log.info("routine.failure_notice_queued", routine_id=str(routine_id))
+    if reason is not None:
+        notice = failure_notice_text(
+            reason, platform=await routine_platform(session, routine_id) or ""
+        )
+        if await queue_failure_notice(session, routine_id, notice=notice):
+            log.info("routine.failure_notice_queued", routine_id=str(routine_id))
     await record_result(session, routine_id, tail=None, error=error)
 
 
@@ -378,7 +352,7 @@ def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
     """
     payload = (row.delivery_payload or "").strip()
     phrase = routine_phrase(row.cron_expr, row.timezone)
-    if row.delivery_note == FAILURE_NOTICE:
+    if row.delivery_kind == "failure_notice":
         owner = "The" if as_agent else f"{row.agent_name}'s"
         return f"{owner} {phrase} failed, so there's no result this time.\n\n{payload}"
     owner = "the" if as_agent else f"{row.agent_name}'s"
@@ -455,7 +429,7 @@ def render_fallback_dm(row: RoutineRow, reason: str) -> str:
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
     payload = (row.delivery_payload or "").strip()
-    if row.delivery_note == FAILURE_NOTICE:
+    if row.delivery_kind == "failure_notice":
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:
         why = _DM_REASONS.get(reason, _DM_REASONS["destination_unavailable"])

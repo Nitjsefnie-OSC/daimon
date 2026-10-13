@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+import anthropic
 import structlog
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
@@ -19,7 +20,7 @@ from daimon.core.stores.routines import (
     skip_slots_during_fire,
 )
 from daimon.core.turn.outcomes import TurnObservation
-from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -90,12 +91,15 @@ class RoutineDispatcher:
 
 
 async def _record_fire_error(
-    sm: async_sessionmaker[AsyncSession], routine_id: uuid.UUID, msg: str
+    sm: async_sessionmaker[AsyncSession],
+    routine_id: uuid.UUID,
+    msg: str,
+    reason: TerminationReason | None,
 ) -> None:
-    """Record a fire failure on a FRESH session (never reuse fire's session)."""
+    """Record a failure on a FRESH session (never reuse fire's session)."""
     try:
         async with sm() as s, s.begin():
-            await record_failure(s, routine_id, error=msg)
+            await record_failure(s, routine_id, error=msg, reason=reason)
     except Exception:
         log.exception("record_result(error) failed", routine_id=str(routine_id))
 
@@ -164,11 +168,9 @@ async def run_one_tick(
             TurnObservation(
                 sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
             ).finish(reason=TerminationReason.ADMISSION_CAP_EXCEEDED)
-            try:
-                async with sm() as s, s.begin():
-                    await record_failure(s, row.id, error="cap_exceeded")
-            except Exception:
-                log.exception("record_result(cap-block) failed", routine_id=str(row.id))
+            await _record_fire_error(
+                sm, row.id, "cap_exceeded", TerminationReason.ADMISSION_CAP_EXCEEDED
+            )
             continue
         fireable.append(row)
 
@@ -196,15 +198,24 @@ async def run_one_tick(
                     # Capture to Sentry, then keep the existing swallow —
                     # sibling tasks continue and record_result still runs.
                     capture_exception_with_scope(err)
-                    await _record_fire_error(sm, row.id, f"timeout: exceeded {dispatch_timeout_s}s")
+                    timeout = f"timeout: exceeded {dispatch_timeout_s}s"
+                    await _record_fire_error(sm, row.id, timeout, TerminationReason.CEILING)
                 except Exception as err:
                     observation.finish(error=err)
                     capture_exception_with_scope(err)
-                    await _record_fire_error(sm, row.id, f"{type(err).__name__}: {err}"[:500])
+                    # An SDK error raised directly is a model request that failed for good.
+                    reason = (
+                        TerminationReason.UPSTREAM
+                        if isinstance(err, anthropic.APIError)
+                        else termination_reason(err)
+                    )
+                    await _record_fire_error(
+                        sm, row.id, f"{type(err).__name__}: {err}"[:500], reason
+                    )
         except asyncio.CancelledError as err:
             observation.finish(error=err)
             # Includes cancellation while waiting for a dispatch slot.
-            await _record_fire_error(sm, row.id, "scheduler_shutdown")
+            await _record_fire_error(sm, row.id, "scheduler_shutdown", None)
             raise
         finally:
             observation.finish(reason=TerminationReason.UNKNOWN)
