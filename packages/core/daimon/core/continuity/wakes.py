@@ -32,12 +32,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 import structlog
 from daimon.core.continuity.continuation import ContinuationRequest, require_writable_reason
-from daimon.core.fleet import TERMINAL, FleetRun, FleetWorker
+from daimon.core.fleet import FleetRun, FleetWorker, run_settled
 from daimon.core.stores import fleet, task_continuations
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
@@ -344,7 +345,10 @@ async def enqueue_worker_finished(
         except (ValidationError, ValueError):
             log.warning("wake.invalid_worker_batch", idempotency_key=str(row.idempotency_key))
             continue
-        if sum(w.status in TERMINAL for w in workers if w.id in batch.worker_ids) >= batch.quorum:
+        if run_settled(
+            replace(run, quorum=batch.quorum),
+            [worker for worker in workers if worker.id in batch.worker_ids],
+        ):
             published += await task_continuations.publish_worker_finished_row(
                 session,
                 tenant_id=tenant_id,

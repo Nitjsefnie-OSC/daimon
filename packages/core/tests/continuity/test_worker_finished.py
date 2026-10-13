@@ -474,7 +474,7 @@ async def _finish_batch(session, run, worker, *, now=_NOW):
 
 @pytest.mark.parametrize("quorum", [None, 1])
 async def test_frozen_initial_and_review_waits_do_not_count_each_others_workers(pooled, quorum):
-    run = await _run(pooled, quorum=quorum, max_workers=3)
+    run = await _run(pooled, quorum=quorum, max_workers=4)
     first, late = [await _worker(pooled, run, i) for i in range(2)]
     async with pooled.begin() as db:
         initial = await _arm(db, run, [first, late])
@@ -493,13 +493,14 @@ async def test_frozen_initial_and_review_waits_do_not_count_each_others_workers(
     async with pooled.begin() as db:
         assert await _finish_batch(db, run, first) is (quorum == 1)
     review = await _worker(pooled, run, 2, reviewer_of=first.id)
+    other_review = await _worker(pooled, run, 3, reviewer_of=late.id)
     async with pooled.begin() as db:
         with pytest.raises(ValueError, match="separate batches"):
             await _arm(db, run, [first, review])
-        second = await _arm(db, run, [review])
+        second = await _arm(db, run, [review, other_review])
         assert second is not None and second.idempotency_key != initial.idempotency_key
         batch = FrozenWorkerBatch.model_validate_json(second.requested_work)
-        assert batch.worker_ids == (review.id,) and batch.quorum == 1
+        assert set(batch.worker_ids) == {review.id, other_review.id} and batch.quorum == 2
         assert batch.binding_id == run.orchestrator_binding_id
         assert batch.session_id == run.orchestrator_session_id
         assert await _finish_batch(db, run, late) is (quorum is None)
@@ -507,7 +508,8 @@ async def test_frozen_initial_and_review_waits_do_not_count_each_others_workers(
             db, tenant_id=run.tenant_id, run_id=run.id, now=_NOW
         )
     async with pooled.begin() as db:
-        assert await _finish_batch(db, run, review)
+        assert not await _finish_batch(db, run, review)
+        assert await _finish_batch(db, run, other_review)
         assert not await enqueue_worker_finished(
             db, tenant_id=run.tenant_id, run_id=run.id, now=_NOW
         )
@@ -576,8 +578,11 @@ async def test_freezing_refuses_changed_address_identity_or_members(pooled, muta
     assert await _read(pooled, run) is None
 
 
-async def test_racing_terminal_moves_publish_once_and_restart_keeps_the_fence(pooled, db_engine):
-    run = await _run(pooled)
+@pytest.mark.parametrize("quorum", [None, 1])
+async def test_racing_terminal_moves_publish_once_and_restart_keeps_the_fence(
+    pooled, db_engine, quorum
+):
+    run = await _run(pooled, quorum=quorum)
     workers = [await _worker(pooled, run, i) for i in range(2)]
     async with pooled.begin() as db:
         row = await _arm(db, run, workers)

@@ -2363,12 +2363,12 @@ Legacy request-based completion writes remain closed. An authorized host can
 freeze an exact worker batch with `arm_worker_finished` in its own transaction.
 The existing continuation row holds the canonical batch, frozen quorum and
 original root binding/session; unready waits are excluded from normal scans.
-`enqueue_worker_finished` with the authorized tenant checks only stored batches
+`enqueue_worker_finished` passes frozen members and quorum to `fleet.run_settled`
 and offers each ready wait once, in the terminal writer's transaction. Initial
 and review batches have separate deterministic keys; reviews await every member.
 The run stays running so it can admit cross-review. Deadline refusal preserves
 the worker's terminal write. Generic completion enqueue helpers remain refused.
-No production caller is installed by these APIs.
+No caller is installed; run-end cancellation and original-root dispatch remain required.
 
 The prior release aborts an entire queue scan on the new reason, hiding
 unrelated legacy timers. Before enabling completion writes, deploy a separate
