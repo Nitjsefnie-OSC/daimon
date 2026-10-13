@@ -53,12 +53,17 @@ class JournalAppend(Contract):
     projection: ProjectionSnapshot
 
 
+def is_authoritative(event: Event) -> bool:
+    """A recorded or reconciled event; never a preview or a gap."""
+    return event.authority in _AUTHORITATIVE
+
+
 def completes_turn(event: Event) -> bool:
-    return event.type == "session.turn_ended" and event.authority in _AUTHORITATIVE
+    return event.type == "session.turn_ended" and is_authoritative(event)
 
 
 def is_billable(event: Event) -> bool:
-    return event.type == "usage.observed" and event.authority in _AUTHORITATIVE
+    return event.type == "usage.observed" and is_authoritative(event)
 
 
 def empty_projection(session: ResourceRef, now: datetime) -> ProjectionSnapshot:

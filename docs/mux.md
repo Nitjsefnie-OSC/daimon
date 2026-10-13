@@ -2274,3 +2274,15 @@ Backend-switch confirmation is included in a turn's approval posture only when
 the admitted profile supports tool confirmation. Unsupported or unknown support
 keeps the existing required-action termination path without sending an
 unsupported confirmation event.
+
+
+### Fleet worker slots
+
+A fleet worker (`daimon.core.fleet`) is one more private binding slot in the
+state store: its thread is `fleet/<run id>/<ordinal>` under the orchestrator's
+channel, owned by the orchestrator's account, so it never touches a shared slot.
+Its binding, fenced lease, idempotent spawn operation (`fleet:<run>:spawn:<n>`),
+journal and usage are the store's existing ones. The worker's result is one
+journal entry of its own, with an id and source key derived from the worker
+(`fleet:<worker>:result`), so it never repeats an event the turn already
+journaled and a lease successor appending it again is a duplicate.

@@ -43,6 +43,7 @@ typo is silent — check the spelling here.
 - [Turn](#turn)
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
+- [Fleet](#fleet)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
@@ -1257,6 +1258,48 @@ refused with the plain capacity notice.
 
 Seconds a queued turn may wait for a slot. A safeguard only: the turn then leaves the
 queue and its card ends with the ordinary error.
+
+## Fleet
+
+Read from `daimon.core.config.FleetSettings`. Prefix `DAIMON_FLEET__`.
+
+Orchestrated worker fleets (``DAIMON_FLEET__*``). Off by default.
+
+An orchestrator turn fans out to worker turns on any enabled backend. Their concurrency
+is a pool of its own, counted from the durable worker rows, so a fan-out never takes the
+chat turns' slots.
+
+### `DAIMON_FLEET__ENABLED`
+
+`bool` · optional · default `False`
+
+Allow orchestrator turns to start worker fleets. Off by default.
+
+### `DAIMON_FLEET__MAX_WORKERS_PER_RUN`
+
+`int` · optional · default `8`
+
+Most workers one fleet run may start.
+
+### `DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`
+
+`int` · optional · default `3`
+
+Most worker turns one tenant may have starting or running at once, across all its fleet
+runs and processes. Separate from the chat turn cap.
+
+### `DAIMON_FLEET__MAX_CONCURRENT_WORKERS`
+
+`int` · optional · default `6`
+
+Most worker turns one process runs at once, across all tenants.
+
+### `DAIMON_FLEET__MAX_ATTEMPTS`
+
+`int` · optional · default `2`
+
+Most times in total a worker is started when it keeps being lost before its turn is
+sent. A worker whose turn was sent is reconciled, never resent.
 
 ## Tool Safety
 

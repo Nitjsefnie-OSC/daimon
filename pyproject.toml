@@ -174,6 +174,7 @@ source_modules = [
     "daimon.core.env_file",
     "daimon.core.direct_messages",
     "daimon.core.errors",
+    "daimon.core.fleet",
     "daimon.core.fonts",
     "daimon.core.github_app_auth",
     "daimon.core.github_app_session",

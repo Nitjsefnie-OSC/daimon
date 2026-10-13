@@ -2,7 +2,7 @@
 
 Main's 0087_usage_reconcile_progress keeps its id and parent (it may already be
 applied), so 0090 joins it with the neutral-core chain, and 0092 joins that
-with 0091_agent_backend_settings into the single head. Each branch still
+with 0091_agent_backend_settings; later revisions follow that. Each branch still
 reverses and re-applies on its own under the merge.
 """
 
@@ -42,7 +42,9 @@ def _module(name: str) -> ModuleType:
 
 def test_the_merge_sits_under_the_single_head_over_both_branches() -> None:
     script = _script()
-    assert script.get_heads() == [HEAD]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert HEAD in {revision.revision for revision in script.iterate_revisions(heads[0], FORK)}
     head = script.get_revision(HEAD)
     assert head is not None
     assert set(head.down_revision or ()) == {MERGE, AGENT_BACKEND}
