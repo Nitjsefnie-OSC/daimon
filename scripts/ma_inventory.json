@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2658,
+  "files_scanned": 2661,
   "parse_errors": [],
   "calls": [
     {
@@ -3825,8 +3825,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 718,
-      "end": 718,
+      "line": 726,
+      "end": 726,
       "scope": "test_scoped_source_reuse_projects_actual_sdk_retrieve_without_extra_request",
       "category": "test",
       "resource": "agents.retrieve",
@@ -3838,8 +3838,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 752,
-      "end": 752,
+      "line": 760,
+      "end": 760,
       "scope": "test_scoped_source_reuse_refuses_unbound_or_inactive_source_without_extra_request",
       "category": "test",
       "resource": "agents.retrieve",
@@ -3849,8 +3849,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 813,
-      "end": 813,
+      "line": 821,
+      "end": 821,
       "scope": "test_source_loader_retains_full_sdk_intent_without_serializing_it",
       "category": "test",
       "resource": "agents.retrieve",
@@ -3862,8 +3862,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 850,
-      "end": 850,
+      "line": 858,
+      "end": 858,
       "scope": "test_source_projection_missing_unused_sdk_date_keeps_existing_preview",
       "category": "test",
       "resource": "agents.retrieve",
@@ -13205,7 +13205,7 @@
     },
     {
       "file": "packages/core/daimon/core/channel_backend.py",
-      "line": 30,
+      "line": 31,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -13214,7 +13214,7 @@
     },
     {
       "file": "packages/core/daimon/core/channel_backend.py",
-      "line": 31,
+      "line": 32,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
