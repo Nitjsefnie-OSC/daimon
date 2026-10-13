@@ -1379,3 +1379,240 @@ def test_replacement_notice_is_only_for_changes_a_person_notices(
 def test_no_replacement_notice_without_a_replacement_or_a_transfer() -> None:
     assert not ContinuityOutcome().announces_replacement()
     assert not ContinuityOutcome(state="replaced", applied=("model",)).announces_replacement()
+
+
+@pytest.mark.parametrize("outcome", ["ack", "lost_ack", "refused", "model_drift"])
+async def test_worker_session_preparation_uses_one_owned_claim_and_original_source(
+    db_preflight, db_nullpool_engine, outcome
+):
+    from daimon.core.fleet import spawn_operation_key
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.core.turn.persistence import TurnPersistence, UncertainSend
+    from daimon.testing.ma import FakeMemoryStoreState, combine_handlers
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    from ..test_sessions import _session_create_handler, worker_source_context
+
+    sessions, tenant, account, original, environment, worker, source = await worker_source_context(
+        db_nullpool_engine
+    )
+    executing = ma_agent(
+        id="prepared-worker",
+        tenant_id=str(tenant),
+        name=worker.spec.name,
+        model=worker.spec.model.id,
+        system=worker.spec.system,
+    )
+    calls = []
+    memory = FakeMemoryStoreState()
+    handler = combine_handlers(make_fake_memory_store_handler(memory), _session_create_handler())
+
+    def native(request, match):
+        calls.append(request)
+        if request.url.path == "/v1/sessions/sess_new/archive":
+            return httpx.Response(200, json={"id": "sess_new", "type": "session", "archived": True})
+        if outcome == "lost_ack" and request.url.path == "/v1/sessions":
+            raise httpx.ReadError("lost acknowledgement", request=request)
+        response = handler(request)
+        if request.url.path == "/v1/sessions":
+            payload = response.json()
+            payload["agent"]["model"]["id"] = (
+                "different-model" if outcome == "model_drift" else worker.spec.model.id
+            )
+            payload["agent"]["id"] = executing.id
+            return httpx.Response(200, json=payload)
+        return response
+
+    router = MARouter()
+    for method in ("GET", "POST", "DELETE"):
+        router.add(method, r"/v1/.*", native)
+    deps = _deps(sessionmaker=sessions, router=router)
+    deps.anthropic.max_retries = 8
+    admitted = dataclasses.replace(
+        _admission(account_id=account, agent=executing, env=environment), memory_read_only=True
+    )
+    slot = Slot(
+        thread=ThreadRef(channel=worker.permissions.fleet.root.channel, thread_id="private-worker"),
+        account_id=str(account),
+    )
+    store = PostgresStateStore(sessions)
+    key = spawn_operation_key(worker.permissions.fleet.run_id, 0)
+    fences = []
+
+    async def guard():
+        fences.append(True)
+        if outcome == "refused":
+            raise prepare_mod.AdmissionDenied(reason="backend_unsupported")
+
+    async def prepare():
+        return await prepare_mod.create_ma_session(
+            deps,
+            admitted,
+            tenant_id=tenant,
+            resource_source=source,
+            worker=worker,
+            before_native=guard,
+        )
+
+    async def attempt():
+        persistence = TurnPersistence(
+            store, None, worker.permissions.fleet.scope, slot=slot, operation_key=key
+        )
+        with persistence.activate():
+            return await persistence.run(prepare)
+
+    async with deps.anthropic:
+        if outcome == "ack":
+            created = await attempt()
+            replayed = await attempt()
+            assert created.ma_session_id == replayed.ma_session_id == "sess_new"
+            assert created.snapshot.model_id == worker.spec.model.id
+        elif outcome == "lost_ack":
+            from anthropic import APIConnectionError
+
+            with pytest.raises(APIConnectionError):
+                await attempt()
+            with pytest.raises(UncertainSend):
+                await attempt()
+        else:
+            with pytest.raises(prepare_mod.AdmissionDenied):
+                await attempt()
+        assert deps.anthropic.max_retries == 8
+    posts = [r for r in calls if r.method == "POST" and r.url.path == "/v1/sessions"]
+    assert len(posts) == (outcome != "refused")
+    if posts:
+        assert json.loads(posts[0].content)["agent"] == executing.id
+    else:
+        assert calls == []
+    if outcome == "model_drift":
+        assert len([r for r in calls if r.url.path.endswith("/archive")]) == 1
+    assert fences
+
+
+@pytest.mark.parametrize("outcome", ["ack", "lost_agent_ack", "drops"])
+async def test_worker_binding_uses_canonical_agent_then_existing_source_composer(
+    db_preflight, db_nullpool_engine, outcome
+):
+    from daimon.core.fleet import spawn_operation_key
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.core.turn.persistence import TurnPersistence, UncertainSend
+    from daimon.testing.ma import FakeMemoryStoreState, combine_handlers
+    from mux.contracts.config import ConfigRevision
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    from ..test_sessions import _session_create_handler, worker_source_context
+
+    sessions, tenant, account, original, environment, worker, source = await worker_source_context(
+        db_nullpool_engine
+    )
+    if outcome == "drops":
+        worker = dataclasses.replace(
+            worker, spec=worker.spec.model_copy(update={"declared_drops": ("memory",)})
+        )
+    calls = []
+    memory = FakeMemoryStoreState()
+    resources = combine_handlers(make_fake_memory_store_handler(memory), _session_create_handler())
+    executing = ma_agent(
+        id="allocated-worker",
+        tenant_id=str(tenant),
+        name=worker.spec.name,
+        model=worker.spec.model.id,
+        system=worker.spec.system,
+    )
+
+    def native(request, match):
+        calls.append(request)
+        if request.url.path == "/v1/agents":
+            assert json.loads(request.content)["model"] == worker.spec.model.id
+            if outcome == "lost_agent_ack":
+                raise httpx.ReadError("lost agent acknowledgement", request=request)
+            return httpx.Response(200, json=executing.model_dump(mode="json"))
+        response = resources(request)
+        if request.url.path == "/v1/sessions":
+            payload = response.json()
+            payload["agent"] = ma_session_agent(
+                id=executing.id,
+                name=executing.name,
+                model=worker.spec.model.id,
+                system=worker.spec.system,
+            ).model_dump(mode="json")
+            return httpx.Response(200, json=payload)
+        return response
+
+    router = MARouter()
+    for method in ("GET", "POST", "DELETE"):
+        router.add(method, r"/v1/.*", native)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=sessions, router=router),
+        turn_path="mux",
+        channel_backends=True,
+        agent_backends=True,
+    )
+    deps.anthropic.max_retries = 8
+    revision = ConfigRevision.create(worker.permissions.fleet.root.channel, 1, worker.backend)
+    admitted = dataclasses.replace(
+        _admission(account_id=account, agent=original, env=environment),
+        backend_revision=revision,
+        backend_revision_origin="agent",
+        memory_read_only=True,
+        budget_channel_id=revision.channel.channel_id,
+    )
+    slot = Slot(
+        thread=ThreadRef(channel=revision.channel, thread_id="private-worker"),
+        account_id=str(account),
+    )
+    store = PostgresStateStore(sessions)
+
+    async def guard():
+        return None
+
+    async def prepare():
+        return await prepare_mod.bind_session_impl(
+            deps,
+            admitted,
+            tenant_id=tenant,
+            platform="discord",
+            external_user_id="user",
+            thread_id=slot.thread.thread_id,
+            session_account_id=account,
+            reuse_existing=True,
+            worker=worker,
+            before_native=guard,
+            now=lambda: _NOW,
+        )
+
+    async def attempt():
+        persistence = TurnPersistence(
+            store,
+            None,
+            worker.permissions.fleet.scope,
+            slot=slot,
+            operation_key=spawn_operation_key(worker.permissions.fleet.run_id, 0),
+            now=lambda: _NOW,
+        )
+        with persistence.activate():
+            return await persistence.run(prepare)
+
+    async with deps.anthropic:
+        if outcome == "ack":
+            result = await attempt()
+            assert result.ma_session_id == "sess_new" and result.session_ref.id == "sess_new"
+            assert result._scope == worker.permissions.fleet.scope
+            assert result.admission.agent.id == executing.id
+            assert result.mapping_id is not None
+        elif outcome == "lost_agent_ack":
+            from anthropic import APIConnectionError
+
+            with pytest.raises(APIConnectionError):
+                await attempt()
+            with pytest.raises(UncertainSend):
+                await attempt()
+        else:
+            with pytest.raises(prepare_mod.AdmissionDenied):
+                await attempt()
+    agent_posts = [r for r in calls if r.url.path == "/v1/agents" and r.method == "POST"]
+    assert len(agent_posts) == (outcome != "drops")
+    if outcome != "ack":
+        assert all(r.url.path == "/v1/agents" for r in calls)

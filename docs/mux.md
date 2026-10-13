@@ -2499,4 +2499,18 @@ restored from its real receipt; an unknown or refused attempt never creates agai
 The result seam selects only complete, authoritative journal messages accepted by
 the worker driver and calls the existing fleet result writer under that lease.
 
-Source facts are captured through the same preparation request for preservation proof and worker resource composition. Capture does not grant execution or allocation; the existing proof and materializer validate the captured identity and obligations.
+Source facts are captured through the same preparation request for preservation
+proof and worker resource composition. Capture does not grant execution or
+allocation; the existing proof and materializer validate the captured identity
+and obligations. Worker preparation carries its derived scope through the real
+binding and turn codec. Expiry after preparation or its binding callback invokes
+the existing orphan cleanup before refusing the handoff.
+
+Claimed native preparation restores actual acknowledged agent and session
+receipts. Ambiguous or explicitly refused allocation does not create another
+resource. The original source identity selects memory, credentials, repositories
+and environment snapshots; the actual acknowledged worker agent selects
+execution. A session acknowledgement with a different agent, model or environment
+refuses and invokes bounded cleanup. Allocation still requires the caller's fresh
+source-preservation and financial authority; preparation alone is not an
+execution certificate.

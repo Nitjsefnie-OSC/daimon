@@ -11,7 +11,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import admitted_session_scope
-from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
+from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import BindingConflict, ScopeViolation
 from mux.profiles import get_profile
@@ -29,6 +29,7 @@ async def prepared_persistence(
     mapping_id: uuid.UUID | None,
     operation_key: str | None = None,
     session_ref: ResourceRef | None = None,
+    scope: Scope | None = None,
 ) -> TurnPersistence:
     """Adopt existing native ids; publish ownership through put_binding only.
 
@@ -36,7 +37,16 @@ async def prepared_persistence(
     accepting a session/thread from a driver parameter. Shared bindings are
     the account=None slot, with their pinned configuration and stable id.
     """
-    scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id)
+    admitted_scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id)
+    if scope is None:
+        scope = admitted_scope
+    elif (
+        scope.is_platform
+        or scope.is_legacy_host_authorized
+        or (scope.tenant_id, scope.account_id)
+        != (admitted_scope.tenant_id, admitted_scope.account_id)
+    ):
+        raise ScopeViolation(session_id, "prepared scope differs from admitted identity")
     observation = current_outcome.get()
     key = operation_key or str(observation.id if observation is not None else uuid.uuid4())
     store = deps.state_store or mux_state.PostgresStateStore(deps.sessionmaker)
