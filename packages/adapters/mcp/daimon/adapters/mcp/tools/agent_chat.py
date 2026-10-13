@@ -92,6 +92,7 @@ from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_a
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mirror_events import EventSurface
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -1090,6 +1091,7 @@ async def _ask_impl(
     recheck: Callable[[], Awaitable[None]] | None = None,
     personal_memory: bool = False,
     on_read: OnRead | None = None,
+    surface: EventSurface = "agent_chat",
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
@@ -1184,7 +1186,7 @@ async def _ask_impl(
                     handle=handle,
                     question=message,
                     answer=final_text,
-                    personal=personal_memory,
+                    surface=surface,
                     read_seal=source_seal,
                     now=now(),
                 )
@@ -1322,8 +1324,8 @@ def register_agent_chat_tools(
         embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one. ``shared_to``
-        names the channels a workspace mirror copies the question and answer to;
-        tell the user when it is not empty.
+        names the workspace mirrors that copy the question and answer to another
+        channel; tell the user when it is not empty.
         """
         auth = await _check_admission(
             ctx,

@@ -243,6 +243,7 @@ def register_mirror_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``origin_context_id``. A channel kept to its own
         agents only takes its own agents' conversations. Calling it again with
         the same ``name`` replaces that mirror and resumes it if paused.
+        ``name`` is shown to askers, so name it for where it posts.
         ``max_answer_chars`` cuts long text.
         """
         return await _create_mirror_impl(

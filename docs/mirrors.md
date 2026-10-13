@@ -19,8 +19,9 @@ thread starts a turn, even where Daimon follows threads on its own.
 In a channel, each conversation gets one thread, opened on a short header and
 reused for its later questions; a thread deleted, locked or closed to the
 bot is replaced. In a thread,
-posts go straight in. The `ask` result's `shared_to` lists where the answer
-will be posted, so the asker sees it.
+posts go straight in. The `ask` result's `shared_to` lists the names of the
+mirrors that will post it, so the asker sees them: name a mirror for the
+place it posts to.
 
 ## Who decides
 

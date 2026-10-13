@@ -5,9 +5,10 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock
 
+import daimon.adapters.mcp.tools._ask_mirrors as _ask_mirrors
 import daimon.adapters.mcp.tools.mirrors as tools
 import httpx
 import pytest
@@ -235,7 +236,7 @@ async def test_consent_approved_on_a_card_is_recorded_audited_and_listed(
 _SESSION = "sesn_1"
 
 
-def _ma_routes(session_metadata: dict[str, str], status: str) -> MARouter:
+def _ma_routes(session_metadata: dict[str, str], status: Literal["idle", "running"]) -> MARouter:
     """A session of `helper` that answers "Answer" to whatever is sent."""
     router = MARouter()
     session = ma_session(
@@ -275,18 +276,25 @@ async def _ask(
     )
 
 
-async def _consented_mirror(session: AsyncSession, tenant: TenantRow, dest: str = "300") -> None:
+async def _consented_mirror(
+    session: AsyncSession,
+    tenant: TenantRow,
+    dest: str = "300",
+    *,
+    agent: str = "ag_helper",
+    consent: str | None = "the askers agreed",
+) -> None:
     await mirrors_store.upsert_mirror(
         session,
         tenant_id=tenant.id,
         name="qa",
-        source_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_helper"),
+        source_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent),
         source_agent_name="helper",
         source_agent_names=("helper",),
         dest_platform="discord",
         dest_kind="channel",
         dest_id=dest,
-        consent_note="the askers agreed",
+        consent_note=consent,
         max_answer_chars=None,
         account_id=None,
         now=_NOW,
@@ -336,10 +344,50 @@ async def test_ask_queues_the_answer_for_a_mirror_and_says_where(
     queued = await _queued(db_session)
     assert result.message == "Answer", result
     if enabled:
-        assert result.shared_to == ("discord channel 300",), result
+        assert result.shared_to == ("qa",), "the asker sees the mirror's name"
         assert queued[0].payload is not None and queued[0].payload.answer == "Answer", queued
     else:
         assert (result.shared_to, queued) == ((), []), "a disabled deployment queues nothing"
+
+
+@pytest.mark.parametrize("case", ["no_consent", "other_agent", "mirror_step_timed_out"])
+async def test_an_ask_a_mirror_does_not_take_still_answers(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _consented_mirror(
+        db_session,
+        tenant,
+        agent="ag_other" if case == "other_agent" else "ag_helper",
+        consent=None if case == "no_consent" else "the askers agreed",
+    )
+    caller, stamps = await _caller(db_session, tenant)
+    if case == "mirror_step_timed_out":
+        monkeypatch.setattr(_ask_mirrors, "_RECORD_TIMEOUT_S", 0)
+
+    result = await _ask(
+        _runtime(sessionmaker, tenant.id, router=_ma_routes(stamps, "idle")), caller
+    )
+
+    assert (result.message, result.shared_to) == ("Answer", ()), result
+    assert await _queued(db_session) == [], "nothing is queued"
+
+
+async def test_an_ask_that_times_out_queues_nothing(
+    sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _consented_mirror(db_session, tenant)
+    caller, stamps = await _caller(db_session, tenant)
+    runtime = _runtime(sessionmaker, tenant.id, router=_ma_routes(stamps, "running"))
+
+    with pytest.raises(ToolError):
+        await _ask(runtime, caller, timeout_seconds=0)
+
+    assert await _queued(db_session) == [], "an unanswered ask is never mirrored"
 
 
 async def test_a_session_sealed_when_it_ran_keeps_its_seal_after_the_channel_reopens(
