@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -55,7 +55,7 @@ from mux.contracts.config import (
     ResolvedBackend,
     resolve_default,
 )
-from mux.contracts.ids import ChannelRef, Provider
+from mux.contracts.ids import PROVIDERS, ChannelRef, Provider
 from mux.contracts.profile import SUPPORTED, Capability, Profile
 from mux.contracts.resources import AgentSpec
 from mux.errors import InvalidConfig, UnsupportedCapability
@@ -198,6 +198,32 @@ def _digest(facts: object) -> str:
     return hashlib.sha256(
         json.dumps(facts, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
+
+
+def spec_compatibility_items(
+    spec: AgentSpec | BetaManagedAgentsAgent, *, skill_providers: tuple[Provider, ...] = PROVIDERS
+) -> tuple[Iterator[CompatibilityItem], Iterator[CompatibilityItem]]:
+    """Map source skills and MCP requirements once for preview and worker derivation."""
+    if isinstance(spec, AgentSpec):
+        skill_names = (pin.id for pin in spec.skills or ())
+        servers = ((server.name, bool(server.credential_ref)) for server in spec.mcp_servers or ())
+    else:
+        skill_names = (pin.skill_id for pin in spec.skills or ())
+        # The SDK does not expose vault credential intent; retain its conservative requirement.
+        servers = ((server.name, True) for server in spec.mcp_servers or ())
+    return (
+        (
+            CompatibilityItem(name=name, requires=("skills_bundle",), providers=skill_providers)
+            for name in skill_names
+        ),
+        (
+            CompatibilityItem(
+                name=name,
+                requires=("tool_loop", "required_actions", *(("vaults",) if credential else ())),
+            )
+            for name, credential in servers
+        ),
+    )
 
 
 def compatibility_missing(
@@ -665,21 +691,7 @@ async def load_backend_agent(
             raise AgentBackendRefused("agent_not_found")
         row = await resource_host.read(view.revision.catalog_id)
         actual = row.agent
-        skills = tuple(
-            CompatibilityItem(name=pin.id, requires=("skills_bundle",))
-            for pin in actual.spec.skills or ()
-        )
-        mcps = tuple(
-            CompatibilityItem(
-                name=mcp.name,
-                requires=(
-                    "tool_loop",
-                    "required_actions",
-                    *(("vaults",) if mcp.credential_ref else ()),
-                ),
-            )
-            for mcp in actual.spec.mcp_servers or ()
-        )
+        skills, mcps = (tuple(items) for items in spec_compatibility_items(actual.spec))
         facts = actual.spec.model_dump(mode="json")
         return BackendAgent(
             tenant_id=tenant_id,
@@ -722,14 +734,7 @@ async def load_backend_agent(
         raise AgentBackendRefused("agent_not_found")
     # Native SDK projection is hashed only; neither credentials nor URLs leave this edge.
     facts = actual.model_dump(mode="json")
-    skills = tuple(
-        CompatibilityItem(name=pin.skill_id, requires=("skills_bundle",))
-        for pin in actual.skills or ()
-    )
-    mcps = tuple(
-        CompatibilityItem(name=mcp.name, requires=("tool_loop", "required_actions", "vaults"))
-        for mcp in actual.mcp_servers or ()
-    )
+    skills, mcps = (tuple(items) for items in spec_compatibility_items(actual))
     return BackendAgent(
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=actual.id),

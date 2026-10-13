@@ -47,7 +47,6 @@ from daimon.core.errors import DaimonError
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_upload
 from daimon.core.skills.service import AddedSkill, StoredSkillUpload, UploadedSkill, add_skill
 from daimon.core.stores import security_audit
-from daimon.core.stores.domain import CompatibilityItem
 from daimon.core.stores.neutral_catalog import (
     AgentRevision,
     CatalogConflict,
@@ -875,7 +874,11 @@ def resolve_worker_spec(
     Preparation must repeat against fresh host facts and apply the derived port
     and tool grants; a persisted digest is an idempotency key, never authority.
     """
-    from daimon.core.channel_backend import check_backend, compatibility_missing
+    from daimon.core.channel_backend import (
+        check_backend,
+        compatibility_missing,
+        spec_compatibility_items,
+    )
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
     fleet = parent.fleet
@@ -991,30 +994,12 @@ def resolve_worker_spec(
     except DaimonError:
         raise WorkerSpecRefused("backend", "unsupported") from None
     profile = get_profile(selected.profile)
-    for pin in resolved.skills or ():
-        if compatibility_missing(
-            CompatibilityItem(
-                name=pin.id,
-                requires=("skills_bundle",),
-                providers=(parent.spec.model.provider,),
-            ),
-            selected.backend,
-            profile,
-        ):
+    skills, mcps = spec_compatibility_items(resolved, skill_providers=(parent.spec.model.provider,))
+    for item in skills:
+        if compatibility_missing(item, selected.backend, profile):
             raise WorkerSpecRefused("skills", "unsupported")
-    for connection in resolved.mcp_servers or ():
-        if compatibility_missing(
-            CompatibilityItem(
-                name=connection.name,
-                requires=(
-                    "tool_loop",
-                    "required_actions",
-                    *(("vaults",) if connection.credential_ref else ()),
-                ),
-            ),
-            selected.backend,
-            profile,
-        ):
+    for item in mcps:
+        if compatibility_missing(item, selected.backend, profile):
             raise WorkerSpecRefused("mcp", "unsupported")
     if profile.implicit_execution and not any(
         tool.kind == "builtin" and tool.name == profile.execution_tool
