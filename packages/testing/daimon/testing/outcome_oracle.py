@@ -1082,6 +1082,17 @@ def fleet_checks(
         add("Root", "FAIL", "ROOT_INPUT_IDENTITY_MISMATCH")
     for turn in turns:
         checks.append(completion_check(turn, Completion(kind="turn_completed", turn=turn.turn)))
+    if len(w4) == 1 and (review_started := w4[0].native_started_s) is not None:
+        ready_at = [
+            c.terminal.observed_s
+            for c in initial
+            if c.terminal is not None and c.terminal.authority in ("record", "reconciled")
+        ]
+        ready_at.extend(t.started_s for t in turns if t.turn == 2)
+        if capture.wakes:
+            ready_at.append(capture.wakes[0].observed_s)
+        if any(review_started < at for at in ready_at):
+            add("W4", "FAIL", "REVIEW_STARTED_BEFORE_READY_ROOT", w4[0].evidence_id)
     expected_batches = (
         tuple(str(c.worker.id) for c in initial),
         tuple(str(c.worker.id) for c in w4),

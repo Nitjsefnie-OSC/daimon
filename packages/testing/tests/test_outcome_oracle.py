@@ -1073,6 +1073,62 @@ def test_fleet_complete_fixture_and_json_roundtrip_pass():
         assert report.status == "PASS", report.normalized_outcomes
 
 
+@pytest.mark.parametrize("started_s", [12.0, 22.0, 29.0])
+@pytest.mark.parametrize("missing_wakes", [False, True])
+def test_fleet_review_cannot_start_before_ready_cohort_and_resumed_root(started_s, missing_wakes):
+    source, assertion = fleet_recording()
+    source = replace_capture(source, 3, native_started_s=started_s)
+    if missing_wakes:
+        source = replace_fleet(source, wakes=(), wakes_capture_complete=False)
+    restored = RunEvidence.model_validate_json(source.model_dump_json())
+    report = evaluate(restored, [assertion], finding_judge=fixture_finding_judge)
+    assert report.status == "FAIL", report.normalized_outcomes
+    assert any(c.code == "REVIEW_STARTED_BEFORE_READY_ROOT" for c in report.checks)
+
+
+def test_fleet_review_start_is_fenced_by_actual_resumed_root_input():
+    source, assertion = fleet_recording()
+    source = replace_capture(source, 3, native_started_s=27.0)
+    source = replace_fleet(
+        source,
+        wakes=(
+            source.fleet.wakes[0].model_copy(update={"observed_s": 25.0}),
+            source.fleet.wakes[1],
+        ),
+    )
+    restored = RunEvidence.model_validate_json(source.model_dump_json())
+    report = evaluate(restored, [assertion], finding_judge=fixture_finding_judge)
+    assert report.status == "FAIL"
+    assert any(c.code == "REVIEW_STARTED_BEFORE_READY_ROOT" for c in report.checks)
+
+
+@pytest.mark.parametrize("started_s", [30.0, 31.0, 36.0])
+def test_fleet_review_may_start_during_or_after_resumed_root_turn(started_s):
+    source, assertion = fleet_recording()
+    source = replace_capture(source, 3, native_started_s=started_s)
+    restored = RunEvidence.model_validate_json(source.model_dump_json())
+    report = evaluate(restored, [assertion], finding_judge=fixture_finding_judge)
+    assert report.status == "PASS", report.normalized_outcomes
+
+
+def test_fleet_missing_review_start_is_pending():
+    source, assertion = fleet_recording()
+    source = replace_capture(source, 3, native_started_s=None)
+    restored = RunEvidence.model_validate_json(source.model_dump_json())
+    assert evaluate(restored, [assertion], finding_judge=fixture_finding_judge).status == "PENDING"
+
+
+def test_fleet_known_early_review_fails_without_root_or_wake_capture():
+    source, assertion = fleet_recording()
+    source = replace_capture(source, 3, native_started_s=22.0)
+    source = replace_fleet(source, wakes=(), wakes_capture_complete=False)
+    source = source.model_copy(update={"turns": ()})
+    restored = RunEvidence.model_validate_json(source.model_dump_json())
+    report = evaluate(restored, [assertion], finding_judge=fixture_finding_judge)
+    assert report.status == "FAIL"
+    assert any(c.code == "REVIEW_STARTED_BEFORE_READY_ROOT" for c in report.checks)
+
+
 @pytest.mark.parametrize("ordinal", [1, 2, 3])
 def test_fleet_wrong_native_worker_finding_cannot_be_repaired_by_root(ordinal):
     source, assertion = fleet_recording()

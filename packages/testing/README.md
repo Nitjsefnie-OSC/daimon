@@ -40,6 +40,9 @@ installed; an absent or unavailable judge stays PENDING.
 The scorer reuses `core.fleet.check_result` to join native completion, durable
 success and the worker's own result pointer/session/binding. W4 must approve the
 exact W1 digest, with duplicate JSON keys and extra verdict fields refused.
+Its native start must follow the initial cohort's completion, first frozen wake
+and resumed original-root input. Queued dispatch may begin after that root turn
+finishes; missing timing remains PENDING, and a known early start fails.
 The text-contract slice also checks three overlapping native worker intervals,
 two correctly scoped frozen wakes, the original root's three inputs, exact
 collected results, finalized card identity and complete actual Discord delivery.
