@@ -310,13 +310,15 @@ class DatabaseReadPort:
         return await fleet.run_status(self.session, tenant_id=tenant_id, run_id=run_id)
 
     async def get_binding(self, slot: Slot) -> ProviderBinding | None:
-        return await mux_state.get_binding(self.session, slot)
+        return await mux_state.get_binding(self.session, slot, read_persisted=True)
 
     async def projection(self, session_id: str) -> ProjectionSnapshot | None:
-        return await mux_state.projection(self.session, session_id)
+        return await mux_state.projection(self.session, session_id, read_persisted=True)
 
     async def read_events(self, session_id: str, *, after: int, limit: int) -> Sequence[Event]:
-        return await mux_state.read_events(self.session, session_id, after=after, limit=limit)
+        return await mux_state.read_events(
+            self.session, session_id, after=after, limit=limit, read_persisted=True
+        )
 
 
 def root_slot(run: FleetRun) -> Slot:

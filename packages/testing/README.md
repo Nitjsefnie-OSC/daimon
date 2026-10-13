@@ -1004,6 +1004,10 @@ that persisted fleet through the existing core store APIs. The operator supplies
 provider key or admin authority is accepted on the command line. Run it only
 under an authorized export envelope. The database transaction is read-only,
 repeatable read, with a statement timeout and a bounded event inventory.
+The DB reader reuses the stores' authoritative column reads for runs, bindings,
+projections and journal events. Effective dirty/deleted source rows refuse
+before that source is read; pending, unrelated and reverted caller state stays
+unflushed and unchanged. Cached ORM entities never supply exported row facts.
 
 The fixed `export.json` nests the oracle's safe worker facts. Arbitrary worker
 specs and native bodies are excluded. Normalized events share the recorder's
