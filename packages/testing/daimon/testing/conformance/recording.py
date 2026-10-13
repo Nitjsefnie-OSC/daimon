@@ -364,7 +364,8 @@ def _closed_payload(value: object, *, project: bool) -> JsonValue:
     raise RecordingError("event value is outside the fixed normalized schema")
 
 
-def _event(event: object, *, project: bool) -> Event:
+def normalized_event(event: object, *, project: bool) -> Event:
+    """Project or validate one fixed normalized event through the recorder boundary."""
     if not isinstance(event, Event) or event.type not in PAYLOAD_MODELS:
         raise RecordingError("only fixed normalized event types can be recorded")
     try:
@@ -399,7 +400,7 @@ def _normalized_parts(value: JsonValue) -> None:
 def audit_tape(tape: Tape, secrets: tuple[str, ...]) -> None:
     for batch in tape.batches:
         for event in batch.events:
-            _event(event, project=False)
+            normalized_event(event, project=False)
     if len(tape.model_dump_json().encode()) > _MAX_TAPE_BYTES:
         raise RecordingError("normalized tape exceeds size limit")
     scanner = Audit(secrets)
@@ -453,7 +454,7 @@ class Recorder(httpx.AsyncBaseTransport):
                 raise RecordingError("only request metadata can be recorded")
             batch = EventBatch(
                 request=RequestMetadata.model_validate(request.model_dump()),
-                events=tuple(_event(event, project=True) for event in events),
+                events=tuple(normalized_event(event, project=True) for event in events),
             )
             # Defer cross-batch reconstruction until export; never partially save.
             Audit(self.secrets).audit(batch.model_dump(mode="json"))
@@ -538,7 +539,7 @@ class Replay:
         if entry.request != request:
             raise RecordingError("request metadata does not match the recording")
         self.position += 1
-        return tuple(_event(event, project=False) for event in entry.events)
+        return tuple(normalized_event(event, project=False) for event in entry.events)
 
     def finish(self) -> None:
         if self.position != len(self.tape.batches):
