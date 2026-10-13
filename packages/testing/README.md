@@ -1016,6 +1016,10 @@ metadata-only omissions. Capture checks exact private
 slots, accepted bindings, provider/profile/session identities and source versions.
 Paired worker facts and persistence rows must agree on both version and error
 code before publication and during offline verification, even with fresh hashes.
+The credential audit classifies a public review digest only through its typed
+reviewer-to-original-result binding, including unchanged review JSON and journal
+text. Other free-form hex content remains subject to encoded-content refusal;
+raw, joined and decoded credential checks still apply.
 
 Publication creates one fresh 0700 directory containing 0600 `export.json`,
 `manifest.json` and `SHA256SUMS`, using a Linux atomic no-replace rename. It

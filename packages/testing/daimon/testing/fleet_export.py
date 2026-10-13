@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import ctypes
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -46,7 +47,7 @@ from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.contracts.resources import ProjectionSnapshot, ProviderBinding
 from mux.state.lease import Slot
 from mux.state.store import binding_slot
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, JsonValue, ValidationError, model_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -593,37 +594,106 @@ async def _capture_fleet(
     )
 
 
+def _review_text(text: str, digest: str, scanner: Audit) -> bool:
+    context = frozenset((digest,))
+
+    # Preserve duplicate keys for refusal; this is classification, not
+    # the approval oracle. A rejected verdict remains exportable evidence.
+    def unique(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+        fields = dict(pairs)
+        if len(fields) != len(pairs):
+            raise ValueError("duplicate review field")
+        return fields
+
+    try:
+        fields: JsonValue = json.loads(text, object_pairs_hook=unique)
+    except ValueError:
+        return False
+    if not isinstance(fields, dict):
+        return False
+    if set(fields) != {"verdict", "reviewed_digest"} or (
+        fields["reviewed_digest"] != digest or not isinstance(fields["verdict"], str)
+    ):
+        return False
+    scanner.fragments([fields["verdict"], digest], digests={1: context})
+    scanner.fragments([text], digests={0: context})
+    return True
+
+
+def _digest_context(value: FleetExportV1, scanner: Audit) -> dict[tuple[str, ...], frozenset[str]]:
+    """Classify schema hashes and original, pointer-bound review text only."""
+    contexts: dict[tuple[str, ...], frozenset[str]] = {
+        ("source_sha",): frozenset((value.source_sha,))
+    }
+
+    def classify_event(event: Event | None, path: tuple[str, ...], digest: str) -> None:
+        if event is None:
+            return
+        payload = event.typed_payload()
+        if not isinstance(payload, AgentMessagePayload) or any(
+            not isinstance(part, TextPart) for part in payload.content
+        ):
+            return
+        text = "".join(part.text for part in payload.content if isinstance(part, TextPart))
+        if _review_text(text, digest, scanner):
+            for part in range(len(payload.content)):
+                contexts[(*path, "payload", "content", str(part), "text")] = frozenset((digest,))
+
+    by_id = {c.worker.id: c.worker for c in value.fleet.workers}
+    for index, capture in enumerate(value.fleet.workers):
+        worker = capture.worker
+        base = ("fleet", "workers", str(index), "worker")
+        for name, digest in (
+            ("spec_digest", worker.spec_digest),
+            ("result", worker.result.digest if worker.result else None),
+        ):
+            if digest and len(digest) == 64 and set(digest) <= set("0123456789abcdef"):
+                path = (*base, name, "digest") if name == "result" else (*base, name)
+                contexts[path] = frozenset((digest,))
+        target = by_id.get(worker.reviewer_of) if worker.reviewer_of else None
+        review = worker.review
+        if (
+            target is None
+            or target.result is None
+            or review is None
+            or review.format != "review"
+            or review.reviewed_digest != target.result.digest
+        ):
+            continue
+        digest = target.result.digest
+        if len(digest) != 64 or set(digest) - set("0123456789abcdef"):
+            continue
+        context = frozenset((digest,))
+        contexts[(*base, "review", "reviewed_digest")] = context
+
+        classify_event(capture.result, ("fleet", "workers", str(index), "result"), digest)
+        if worker.result and _review_text(worker.result.excerpt, digest, scanner):
+            contexts[(*base, "result", "excerpt")] = context
+        for j, journal in enumerate(value.journals):
+            if journal.worker_id == worker.id:
+                for r, record in enumerate(journal.records):
+                    classify_event(
+                        record.event, ("journals", str(j), "records", str(r), "event"), digest
+                    )
+    return contexts
+
+
 def _checked(export: FleetExportV1) -> bytes:
     # Revalidation also defeats model_construct/model_copy and nested mutation.
     value = FleetExportV1.model_validate_json(export.model_dump_json())
     body = (value.model_dump_json(indent=2) + "\n").encode()
     if len(body) > MAX_BYTES:
         refuse()
-    data = value.model_dump(mode="json")
     scanner = Audit(())
+    data = value.model_dump(mode="json")
     scanner.walk(data, 0)
-    fields = list(string_fields(data))
-    # Reconstruct the full string stream and the text-only stream, without
-    # interpreting known schema hashes as standalone base64 media blobs.
-    streams = (
-        [text for _, text in fields],
-        [text for path, text in fields if path[-1] in ("text", "delta", "content")],
-    )
-    canonical_fields = [
-        text
-        for path, text in fields
-        if not (
-            path[-1] in ("spec_digest", "digest", "source_sha")
-            and len(text) in (40, 64)
-            and set(text) <= set("0123456789abcdef")
+    contexts = _digest_context(value, scanner)
+    fields = list(string_fields(data, indexed=True))
+    for stream in (fields, [(p, t) for p, t in fields if p[-1] in ("text", "delta", "content")]):
+        scanner.fragments(
+            [text for _, text in stream],
+            digests={i: contexts[path] for i, (path, _) in enumerate(stream) if path in contexts},
         )
-    ]
-    scanner.fragments(canonical_fields)
-    scanner.fragments(streams[1])
-    for stream in streams:
-        for separator in ("", "\n"):
-            if scanner.sensitive(separator.join(stream), queries=False):
-                refuse()
     return body
 
 
