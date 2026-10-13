@@ -12,6 +12,8 @@ from uuid import UUID
 
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.profile import Capability
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding
+from mux.profiles import backend_selection, get_profile, native_agent_tools
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -169,6 +171,126 @@ async def capture_preparation_source(request: ProviderPreparationRequest) -> Bac
     )
 
 
+def source_instructions_preserved(required: str | None, system: str | None) -> bool:
+    """Retained source text is an exact prefix, with a paragraph boundary."""
+    return (
+        required is None
+        or system is not None
+        and (system == required or system.startswith(required + "\n\n"))
+    )
+
+
+def compose_source_instructions(
+    required: str | None, system: str | None, *, deduplicate_prefix: bool = False
+) -> str:
+    """Preserve the source prefix once, retaining the target's remaining paragraphs."""
+    if source_instructions_preserved(required, system):
+        return system or ""
+    assert required is not None
+    if not deduplicate_prefix:
+        return required + ("\n\n" + system if system else "")
+    suffix = (system or "").split("\n\n") if system else []
+    common = 0
+    for left, right in zip(required.split("\n\n"), suffix, strict=False):
+        if left != right:
+            break
+        common += 1
+    rest = "\n\n".join(suffix[common:])
+    return required + ("\n\n" + rest if rest else "")
+
+
+def classify_source_obligations(
+    source: BackendAgent,
+    target: AgentSpec | None,
+    *,
+    environment: EnvironmentSpec | None,
+    resources: tuple[ResourceBinding, ...] = (),
+    asks_before_publishing: bool = False,
+) -> frozenset[str]:
+    """One source-preservation rule for pre-allocation normalization and preparation."""
+    spec = source.effective_spec
+    if spec is None:
+        return frozenset({"source_definition"})
+    drops = target.declared_drops if target is not None else ()
+    missing: set[str] = set()
+    if not source_instructions_preserved(spec.system, target.system if target else None):
+        missing.add("instructions")
+    source_tools = tuple(spec.tools or ())
+    if target is not None:
+        from mux.drivers.anthropic.schemas import agent_tools
+
+        for extension in spec.extensions or ():
+            model = extension.value.get("model")
+            if extension.version != 1:
+                missing.add("source_definition")
+            elif extension.namespace == "anthropic.agent_tools":
+                try:
+                    native = agent_tools(extension)
+                    if "tools" not in drops:
+                        source_tools = native.intent()
+                except ValueError:
+                    missing.update(("source_definition", "tools"))
+            elif not (
+                extension.namespace == "anthropic.model_config"
+                and isinstance(model, dict)
+                and set(model) <= {"id", "speed"}
+                and model.get("speed") is None
+                or extension.namespace == "anthropic.multiagent"
+                and extension.value == {"clear": True}
+                or extension.namespace == "anthropic.agent_create_nulls"
+            ):
+                missing.add("source_definition")
+    profile = get_profile(backend_selection(spec.model.provider).profile)
+    tools_required = bool(
+        spec.tools or any(item.value.get("tools") for item in spec.extensions or ())
+    )
+    if asks_before_publishing or (
+        tools_required
+        and "tools" not in drops
+        and (
+            target is None
+            or native_agent_tools(profile, spec.model_copy(update={"tools": source_tools}))
+            != native_agent_tools(profile, target)
+        )
+    ):
+        missing.add("tools")
+    if spec.skills and "skills" not in drops and (target is None or target.skills != spec.skills):
+        missing.add("skills")
+    if (
+        spec.mcp_servers
+        and "mcp" not in drops
+        and "tools" not in drops
+        and (target is None or target.mcp_servers != spec.mcp_servers)
+    ):
+        missing.add("mcp")
+    if source.repository_sources and "repository" not in drops:
+        missing.add("repository")
+    for resource in source.resource_requirements:
+        if resource.target_path is not None and "files" not in drops:
+            missing.add("files")
+        # No installed materializer proves credentials or opaque private resources.
+        missing.add("credentials" if resource.kind == "credential" else "source_definition")
+    if (source.memory_required is not False or source.memory_store_id is not None) and (
+        "memory" not in drops
+    ):
+        missing.add("memory")
+    # Removing execution is explicit; retaining a source environment requires
+    # its complete canonical policy, which native readback must also verify.
+    if target is None or not (
+        ("sandbox" in drops and environment is None and not resources)
+        or (
+            source.environment is not None
+            and environment is not None
+            and environment == source.environment.spec
+            and environment.native_config is None
+        )
+    ):
+        missing.add("environment")
+    if spec.model.options:
+        missing.add("source_definition")
+    return frozenset(missing)
+
+
 async def read_preparation_counterpart(
     request: ProviderPreparationRequest,
 ) -> ProviderPreparationRequest:
@@ -256,79 +378,14 @@ async def read_preparation_counterpart(
                 )
             ):
                 raise UnsupportedCapability(("worker_context",), revision.profile)
-        drops = worker.declared_drops if worker is not None else ()
         target = worker.spec if worker is not None else None
-        missing: set[str] = set()
-        if spec.system is not None and (
-            target is None
-            or target.system is None
-            or not (target.system == spec.system or target.system.startswith(spec.system + "\n\n"))
-        ):
-            missing.add("instructions")
-        if request.admission.asks_before_publishing or (
-            (spec.tools or any(extension.value.get("tools") for extension in spec.extensions or ()))
-            and "tools" not in drops
-            and (target is None or target.tools != spec.tools or spec.extensions)
-        ):
-            missing.add("tools")
-        if (
-            spec.skills
-            and "skills" not in drops
-            and (target is None or target.skills != spec.skills)
-        ):
-            missing.add("skills")
-        if (
-            spec.mcp_servers
-            and "mcp" not in drops
-            and "tools" not in drops
-            and (target is None or target.mcp_servers != spec.mcp_servers)
-        ):
-            missing.add("mcp")
-        if source.repository_sources and "repository" not in drops:
-            missing.add("repository")
-        for resource in source.resource_requirements:
-            if resource.target_path is not None and "files" not in drops:
-                missing.add("files")
-            # No installed materializer proves credentials or opaque private resources.
-            missing.add("credentials" if resource.kind == "credential" else "source_definition")
-        if (source.memory_required is not False or source.memory_store_id is not None) and (
-            "memory" not in drops
-        ):
-            missing.add("memory")
-        # Removing execution is explicit; retaining a source environment requires
-        # its complete canonical policy, which native readback must also verify.
-        if worker is None or not (
-            ("sandbox" in drops and worker.environment is None and not worker.resources)
-            or (
-                source.environment is not None
-                and worker.environment is not None
-                and worker.environment == source.environment.spec
-                and worker.environment.native_config is None
-            )
-        ):
-            missing.add("environment")
-        if worker is not None:
-            for extension in spec.extensions or ():
-                model = extension.value.get("model")
-                if (
-                    (
-                        extension.namespace == "anthropic.agent_tools"
-                        and (not extension.value.get("tools") or "tools" in drops)
-                    )
-                    or (
-                        extension.namespace == "anthropic.model_config"
-                        and isinstance(model, dict)
-                        and set(model) <= {"id", "speed"}
-                        and model.get("speed") is None
-                    )
-                    or (
-                        extension.namespace == "anthropic.multiagent"
-                        and extension.value == {"clear": True}
-                    )
-                    or extension.namespace == "anthropic.agent_create_nulls"
-                ):
-                    continue
-                missing.add("source_definition")
+        missing = classify_source_obligations(
+            source,
+            target,
+            environment=worker.environment if worker else None,
+            resources=worker.resources if worker else (),
+            asks_before_publishing=request.admission.asks_before_publishing,
+        )
         if missing:
             raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
         selected = replace(request, source=source)

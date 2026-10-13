@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from mux.contracts.extensions import ExtensionConfig
+from mux.contracts.resources import ToolSpec
 
 
 class NativeConfig(BaseModel):
@@ -66,6 +67,22 @@ class AgentToolsConfig(NativeConfig):
     """Payload for anthropic.agent_tools@1."""
 
     tools: list[AgentTool]
+
+    def intent(self) -> tuple[ToolSpec, ...]:
+        """Project the closed tool shapes whose complete neutral intent is represented."""
+        result: list[ToolSpec] = []
+        for tool in self.tools:
+            if not isinstance(tool, CustomTool):
+                raise ValueError("native tool controls have no complete neutral projection")
+            result.append(
+                ToolSpec(
+                    name=tool.name,
+                    kind="custom",
+                    description=tool.description,
+                    input_schema=tool.input_schema,
+                )
+            )
+        return tuple(result)
 
 
 class RosterAgent(NativeConfig):

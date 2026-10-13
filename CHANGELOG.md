@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validate prepared scope through one admitted-session identity rule; defer worker allocation until its complete proof and caller land.
 - Keep the accepted first worker input financially monitored after its once-only turn count is recorded.
 - Recheck funded fleet workers against their current persisted binding and financial limits before model input.
+- Share worker source obligation classification with preparation, preserve instruction prefixes once, and refuse unretained memory-store bindings before allocation.
+- Reconcile captured worker source intent with root authority before allocation, retaining represented obligations and refusing opaque native intent.
 - Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 
 - Preserve authorized source resource identity while executing canonical Anthropic workers, refusing unavailable retained resources and unsupported native drops.
