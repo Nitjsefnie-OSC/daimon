@@ -24,15 +24,25 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def lock_funds(session: AsyncSession, *, tenant_id: uuid.UUID) -> uuid.UUID | None:
+async def lock_funds(
+    session: AsyncSession, *, tenant_id: uuid.UUID, financial: bool = True
+) -> uuid.UUID | None:
     """Fence one tenant's append-only funds inside the caller's transaction.
 
     Ledger inserts already take KEY SHARE on this parent through their foreign
     key. FOR UPDATE waits for those inserts and fences subsequent ones until
     commit, without changing writers or blocking another tenant's ledger.
-    Acquire before actor and reservation rows, and never hold over native I/O.
+    Passive refresh takes KEY SHARE instead, protecting tenant lifetime without
+    fencing ordinary writes. Acquire before actor and reservation rows, and
+    never hold over native I/O.
     """
-    return await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+    statement = select(Tenant.id).where(Tenant.id == tenant_id)
+    statement = (
+        statement.with_for_update()
+        if financial
+        else statement.with_for_update(read=True, key_share=True)
+    )
+    return await session.scalar(statement)
 
 
 async def insert_entry(

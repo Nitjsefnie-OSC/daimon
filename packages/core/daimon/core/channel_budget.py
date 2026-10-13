@@ -17,6 +17,7 @@ import asyncio
 import math
 import uuid
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
@@ -382,11 +383,12 @@ async def _produce_fleet_budget(
     session: AsyncSession,
     *,
     parent: WorkerPermissions,
-    worker_id: uuid.UUID,
+    worker_id: uuid.UUID | None,
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
     reserve: bool,
-) -> FleetBudgetUsage:
+    financial: bool,
+) -> dict[uuid.UUID, FleetBudgetUsage]:
     """The sole product producer of held exposure and admission decisions.
 
     Use the store's tenant/actor/run/worker lock order. Read originals, derive
@@ -402,14 +404,17 @@ async def _produce_fleet_budget(
         raise FleetConflict("fleet budget requires tenant authority")
     tenant_id = uuid.UUID(facts.scope.tenant_id)
     graph, started_at = await fleet_store.lock_budget(
-        session, tenant_id=tenant_id, actor_id=facts.account_id, run_id=facts.run_id
+        session,
+        tenant_id=tenant_id,
+        actor_id=facts.account_id,
+        run_id=facts.run_id,
+        financial=financial,
     )
     pair = next((pair for pair in graph if pair[0].id == facts.run_id), None)
     if pair is None:
         raise FleetConflict("fleet run is unavailable")
     run, workers = pair
-    worker = next((w for w in workers if w.id == worker_id), None)
-    if worker is None or (
+    if (worker_id is not None and not any(w.id == worker_id for w in workers)) or (
         run.orchestrator_account_id != facts.account_id
         or facts.scope.account_id != str(run.orchestrator_account_id)
         or (run.platform, run.channel_id, run.thread_id)
@@ -436,26 +441,35 @@ async def _produce_fleet_budget(
     if run.total_budget_usd > parent.limits.budget_usd:
         raise FleetConflict("fleet cap exceeds the authenticated parent budget")
 
-    # The same resolved tariff gate applies before reservation, dispatch and
-    # every refresh, including workers with no native usage binding yet.
-    price = prices.get((worker.backend, worker.model))
-    pricing_unavailable = price is None or (
-        isinstance(price, ProviderPrice)
-        and (
-            not price.verified
-            or (price.provider, price.model) != (worker.backend, worker.model)
-            or price.checked_on > datetime.now(UTC).date()
+    # The shared tariff gate covers each selected worker before reservation,
+    # dispatch or passive refresh, even without a native binding yet.
+    pricing_unavailable: dict[uuid.UUID, bool] = {}
+    for member in workers:
+        price = prices.get((member.backend, member.model))
+        unavailable = price is None or (
+            isinstance(price, ProviderPrice)
+            and (
+                not price.verified
+                or (price.provider, price.model) != (member.backend, member.model)
+                or price.checked_on > datetime.now(UTC).date()
+            )
         )
-    )
-    if isinstance(price, ModelRates):
-        for variant in (price, *((price.long_context,) if price.long_context else ())):
-            for value in (variant.input, variant.output, variant.cache_read, variant.cache_write):
-                rate = Decimal(str(value))
-                pricing_unavailable = pricing_unavailable or not rate.is_finite() or rate < 0
+        if isinstance(price, ModelRates):
+            for variant in (price, *((price.long_context,) if price.long_context else ())):
+                for value in (
+                    variant.input,
+                    variant.output,
+                    variant.cache_read,
+                    variant.cache_write,
+                ):
+                    rate = Decimal(str(value))
+                    unavailable = unavailable or not rate.is_finite() or rate < 0
+        pricing_unavailable[member.id] = unavailable
     floors: dict[uuid.UUID, Decimal] = {}
     exposures: dict[uuid.UUID, Decimal] = {}
     debits: dict[uuid.UUID, Decimal] = {}
     zero_spend: set[uuid.UUID] = set()
+    unpriced_usage = False
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         for other_run, members in graph:
@@ -470,7 +484,7 @@ async def _produce_fleet_budget(
                     markup=markup,
                     price_floor=other_run.id == run.id,
                 )
-                pricing_unavailable = pricing_unavailable or unpriced
+                unpriced_usage = unpriced_usage or unpriced
                 floors[member.id] = floor
                 # An unbound starting/claimed worker is ambiguous. The retained
                 # claim stamp and attempt inventory must also prove no allocation.
@@ -496,7 +510,6 @@ async def _produce_fleet_budget(
             zero_spend=frozenset(zero_spend),
         )
         run, workers = next(pair for pair in graph if pair[0].id == run.id)
-        worker = next(w for w in workers if w.id == worker_id)
         residual = sum((r.reserved_usd - r.observed_usd for r, _ in graph), Decimal(0))
         balance = await tenant_ledger.get_prepaid_balance(session, tenant_id=tenant_id)
         available = None if balance is None else balance - residual
@@ -518,73 +531,85 @@ async def _produce_fleet_budget(
                 Decimal(0),
             )
             channel_available = channel.remaining_usd - held
-        reason = None
-        if run.status != "running" or worker.status not in ("pending", "starting", "running"):
-            reason = "terminal"
-        elif balance is None:
-            reason = "funding_unavailable"
-        elif available is not None and (
-            available < 0 or (reserve and run.total_budget_usd > available + run.reserved_usd)
-        ):
-            reason = "tenant_budget_exceeded"
-        elif channel_available is not None and (
-            channel_available < 0
-            or (reserve and run.total_budget_usd > channel_available + run.reserved_usd)
-        ):
-            reason = "channel_budget_exceeded"
-        elif run.reserved_usd > run.total_budget_usd:
-            reason = "run_budget_exceeded"
-        elif (
-            any(w.reserved_usd > w.budget_usd for w in workers)
-            or floors[worker.id] >= worker.budget_usd
-        ):
-            reason = "worker_budget_exceeded"
-        elif pricing_unavailable:
-            reason = "pricing_unavailable"
-        elif worker.attempts or worker.turns_used:
-            reason = "accepted_attempt_inventory_unavailable"
-        if reserve and reason is None and worker.reserved_usd < worker.budget_usd:
-            delta = worker.budget_usd - worker.reserved_usd
-            if worker.budget_usd <= 0:
-                reason = "worker_budget_exceeded"
-            elif run.reserved_usd + delta > run.total_budget_usd:
-                reason = "run_budget_exceeded"
-            elif available is None or delta > available:
+        result: dict[uuid.UUID, FleetBudgetUsage] = {}
+        selected = workers if worker_id is None else tuple(w for w in workers if w.id == worker_id)
+        worker_overrun = any(w.reserved_usd > w.budget_usd for w in workers)
+        for worker in selected:
+            reason = None
+            if run.status != "running" or worker.status not in ("pending", "starting", "running"):
+                reason = "terminal"
+            elif balance is None:
+                reason = "funding_unavailable"
+            elif available is not None and (
+                available < 0 or (reserve and run.total_budget_usd > available + run.reserved_usd)
+            ):
                 reason = "tenant_budget_exceeded"
-            elif channel_available is not None and delta > channel_available:
+            elif channel_available is not None and (
+                channel_available < 0
+                or (reserve and run.total_budget_usd > channel_available + run.reserved_usd)
+            ):
                 reason = "channel_budget_exceeded"
-            else:
-                exposures[worker.id] = worker.budget_usd
-                graph = await fleet_store.save_budget(
-                    session,
-                    tenant_id=tenant_id,
-                    graph=graph,
-                    exposures=exposures,
-                    debits=debits,
-                    zero_spend=frozenset(zero_spend),
-                )
-                run, workers = next(pair for pair in graph if pair[0].id == run.id)
-                worker = next(w for w in workers if w.id == worker_id)
-                available -= delta
-                if channel_available is not None:
-                    channel_available -= delta
-        admitted = reason is None and worker.reserved_usd >= worker.budget_usd > 0
-    return FleetBudgetUsage(
-        run, worker, floors[worker.id], available, channel_available, admitted, reason
-    )
+            elif run.reserved_usd > run.total_budget_usd:
+                reason = "run_budget_exceeded"
+            elif worker_overrun or floors[worker.id] >= worker.budget_usd:
+                reason = "worker_budget_exceeded"
+            elif pricing_unavailable[worker.id] or unpriced_usage:
+                reason = "pricing_unavailable"
+            elif worker.attempts or worker.turns_used:
+                reason = "accepted_attempt_inventory_unavailable"
+            if reserve and reason is None and worker.reserved_usd < worker.budget_usd:
+                delta = worker.budget_usd - worker.reserved_usd
+                if worker.budget_usd <= 0:
+                    reason = "worker_budget_exceeded"
+                elif run.reserved_usd + delta > run.total_budget_usd:
+                    reason = "run_budget_exceeded"
+                elif available is None or delta > available:
+                    reason = "tenant_budget_exceeded"
+                elif channel_available is not None and delta > channel_available:
+                    reason = "channel_budget_exceeded"
+                else:
+                    exposures[worker.id] = worker.budget_usd
+                    graph = await fleet_store.save_budget(
+                        session,
+                        tenant_id=tenant_id,
+                        graph=graph,
+                        exposures=exposures,
+                        debits=debits,
+                        zero_spend=frozenset(zero_spend),
+                    )
+                    run, workers = next(pair for pair in graph if pair[0].id == run.id)
+                    worker = next(w for w in workers if w.id == worker_id)
+                    available -= delta
+                    if channel_available is not None:
+                        channel_available -= delta
+            admitted = reason is None and worker.reserved_usd >= worker.budget_usd > 0
+            result[worker.id] = FleetBudgetUsage(
+                run, worker, floors[worker.id], available, channel_available, admitted, reason
+            )
+    return result
 
 
 async def produce_fleet_budget(
     session: AsyncSession,
     *,
     parent: WorkerPermissions,
-    worker_id: uuid.UUID,
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
-) -> FleetBudgetUsage:
-    """Refresh durable money from original usage; never implicitly reserve."""
+) -> dict[uuid.UUID, FleetBudgetUsage]:
+    """Refresh one run's worker decisions from one durable graph pass.
+
+    Passive facts never authorize native dispatch. Concurrent ordinary ledger
+    writes may change available funds; fresh admission repeats this producer
+    with the financial fence before allocating anything.
+    """
     return await _produce_fleet_budget(
-        session, parent=parent, worker_id=worker_id, prices=prices, markup=markup, reserve=False
+        session,
+        parent=parent,
+        worker_id=None,
+        prices=prices,
+        markup=markup,
+        reserve=False,
+        financial=False,
     )
 
 
@@ -636,9 +661,17 @@ async def _reserve_fleet_worker(
     # admission repeats the shared root authorization, not its spec compiler.
     if worker.budget_usd > parent.limits.budget_usd:
         raise FleetConflict("worker reservation exceeds parent authority")
-    snapshot = await _produce_fleet_budget(
-        session, parent=parent, worker_id=worker_id, prices=prices, markup=markup, reserve=True
-    )
+    snapshot = (
+        await _produce_fleet_budget(
+            session,
+            parent=parent,
+            worker_id=worker_id,
+            prices=prices,
+            markup=markup,
+            reserve=True,
+            financial=True,
+        )
+    )[worker_id]
     if snapshot.admitted and worker.reserved_usd == 0:
         audit = await audit_worker_action(
             session,
@@ -657,65 +690,70 @@ async def watch_fleet_budget(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     parent: WorkerPermissions,
-    worker_id: uuid.UUID,
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
-    cancelled: asyncio.Event,
+    cancelled: Mapping[uuid.UUID, asyncio.Event],
     finished: asyncio.Event,
     poll_interval: float = 0.25,
     read_timeout: float | None = None,
 ) -> str:
-    """Watch the REAL producer; run_prepared_turn owns the only worker deadline.
+    """One loop per run, fanning out decisions from the same producer graph.
 
-    Equal run exposure from complete reservations is admissible. A worker's
-    spent floor at its bound cancels to prevent further work; run overrun is
-    strictly greater because unknown reservations alone are not spent usage.
+    Poll at four Hz by default, counting producer time inside each interval.
+    run_prepared_turn owns the only worker deadline. Unknown reservations at
+    the run bound remain held; verified worker floors at their bound cancel.
+    Caller supplies this run's cancellation events, including new workers in
+    the same mapping, and sets finished when the run has ended.
     """
     if parent.fleet.enabled is not True or parent.fleet.depth != 0:
         raise FleetConflict("fleet watch requires explicit root opt-in")
     timeout = read_timeout if read_timeout is not None else poll_interval * 8
     if not all(math.isfinite(v) and v > 0 for v in (poll_interval, timeout)):
         raise ValueError("budget poll and read timeout must be positive finite durations")
+    budget_exceeded = False
     try:
-        while not finished.is_set() and not cancelled.is_set():
+        while not finished.is_set():
+            started = asyncio.get_running_loop().time()
+            watched = tuple(cancelled.items())
             try:
                 async with asyncio.timeout(timeout):
                     async with sessionmaker.begin() as session:
-                        usage = await produce_fleet_budget(
+                        usages = await produce_fleet_budget(
                             session,
                             parent=parent,
-                            worker_id=worker_id,
                             prices=prices,
                             markup=markup,
                         )
+                        if any(worker_id not in usages for worker_id, _ in watched):
+                            raise FleetConflict("watched worker is unavailable")
             except Exception as error:
                 log.warning(
                     "fleet.budget_read_unavailable",
                     reason="read_unavailable",
                     error_class=type(error).__name__,
                 )
-                cancelled.set()
+                for event in cancelled.values():
+                    event.set()
                 return "usage_unavailable"
-            if usage.reason == "terminal":
-                cancelled.set()
-                return "terminal"
-            if not usage.admitted:
-                log.warning("fleet.budget_cancel", reason=usage.reason or "not_admitted")
-                cancelled.set()
-                return "budget_exceeded"
-            stop = asyncio.create_task(cancelled.wait())
-            done = asyncio.create_task(finished.wait())
-            try:
-                await asyncio.wait(
-                    (stop, done), timeout=poll_interval, return_when=asyncio.FIRST_COMPLETED
-                )
-            finally:
-                stop.cancel()
-                done.cancel()
-                await asyncio.gather(stop, done, return_exceptions=True)
-        return "finished" if finished.is_set() else "cancelled"
+            for worker_id, event in watched:
+                usage = usages.get(worker_id)
+                if event.is_set() or usage is None:
+                    continue
+                if usage.reason == "terminal":
+                    event.set()
+                elif not usage.admitted:
+                    log.warning("fleet.budget_cancel", reason=usage.reason or "not_admitted")
+                    event.set()
+                    budget_exceeded = True
+            if cancelled and all(event.is_set() for event in cancelled.values()):
+                return "budget_exceeded" if budget_exceeded else "terminal"
+            delay = max(0, poll_interval - (asyncio.get_running_loop().time() - started))
+            with suppress(TimeoutError):
+                await asyncio.wait_for(finished.wait(), timeout=delay)
+        return "finished"
     except asyncio.CancelledError:
-        cancelled.set()
+        for event in cancelled.values():
+            event.set()
         raise
 
 
@@ -745,9 +783,17 @@ async def require_fleet_worker_admission(
     )
     if not decision:
         raise FleetConflict("native dispatch requires current root authority")
-    usage = await produce_fleet_budget(
-        session, parent=parent, worker_id=worker_id, prices=prices, markup=markup
-    )
+    usage = (
+        await _produce_fleet_budget(
+            session,
+            parent=parent,
+            worker_id=worker_id,
+            prices=prices,
+            markup=markup,
+            reserve=False,
+            financial=True,
+        )
+    )[worker_id]
     if usage.worker.status != "starting" or usage.worker.binding_id is not None:
         return replace(usage, admitted=False, reason="not_an_unallocated_pool_claim")
     return usage

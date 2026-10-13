@@ -1073,7 +1073,17 @@ Native preparation requires fresh `require_fleet_worker_admission` readback,
 including the shared tariff check. Hosts composing fleet row writers acquire
 `stores.fleet.lock_budget` before any run or worker lock, then commit before
 native I/O. Financial locking uses the tenant's existing ledger foreign key;
-unrelated ordinary writes continue. The budget watcher has no separate worker
+unrelated ordinary writes continue. Passive `produce_fleet_budget` refresh
+returns a mapping of worker IDs to decisions from one graph pass, retaining
+KEY SHARE on the tenant and account while allowing ordinary chat ledger and
+turn inserts for that same tenant. Its funds snapshot is informational; only
+fresh financial admission uses the tenant FOR UPDATE fence and authorizes
+native allocation.
+
+Hosts start one `watch_fleet_budget` loop per run, passing the run's mapping
+of worker IDs to cancellation events and a run-finished event. It fans out
+these decisions at four Hz by default, including producer time in the interval,
+and fails closed on unavailable usage. The watcher has no separate worker
 deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
 admission, replacement inventory and exact final settlement remain unavailable
 here. These interfaces create no ledger charge or provider-native hard cap;

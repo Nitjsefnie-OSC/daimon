@@ -238,13 +238,14 @@ async def reserve(sm, parent, worker, *, session=None, prices=None):
 
 async def read(sm, parent, worker, *, prices=None):
     async with sm() as db, db.begin():
-        return await produce_fleet_budget(
-            db,
-            parent=parent,
-            worker_id=worker.id,
-            prices=prices if prices is not None else tariffs(parent),
-            markup=Decimal(1),
-        )
+        return (
+            await produce_fleet_budget(
+                db,
+                parent=parent,
+                prices=prices if prices is not None else tariffs(parent),
+                markup=Decimal(1),
+            )
+        )[worker.id]
 
 
 async def usage(sm, parent, run, worker, *, inputs=100, outputs=None, revision=1):
@@ -374,10 +375,9 @@ async def test_watchdog_uses_product_usage_and_retains_hold_on_cancel(sm):
         watch_fleet_budget(
             sessionmaker=sm,
             parent=parent,
-            worker_id=worker.id,
             prices=tariffs(parent),
             markup=Decimal(1),
-            cancelled=cancelled,
+            cancelled={worker.id: cancelled},
             finished=finished,
             poll_interval=0.01,
             read_timeout=3,
@@ -511,10 +511,9 @@ async def test_read_unavailable_logs_and_cancels_without_releasing_hold(sm):
     reason = await watch_fleet_budget(
         sessionmaker=sm,
         parent=parent,
-        worker_id=uuid4(),
         prices=tariffs(parent),
         markup=Decimal(1),
-        cancelled=cancelled,
+        cancelled={uuid4(): cancelled},
         finished=asyncio.Event(),
         poll_interval=0.01,
         read_timeout=3,
@@ -532,10 +531,9 @@ async def test_equal_fully_reserved_run_stays_live_until_driver_finished(sm):
         watch_fleet_budget(
             sessionmaker=sm,
             parent=parent,
-            worker_id=worker.id,
             prices=tariffs(parent),
             markup=Decimal(1),
-            cancelled=cancelled,
+            cancelled={worker.id: cancelled},
             finished=finished,
             poll_interval=0.01,
             read_timeout=3,
@@ -795,10 +793,9 @@ async def test_never_claimed_cancel_releases_zero_spend_and_next_run_can_use_fun
         await watch_fleet_budget(
             sessionmaker=sm,
             parent=parent,
-            worker_id=worker.id,
             prices=tariffs(parent),
             markup=Decimal(1),
-            cancelled=cancelled,
+            cancelled={worker.id: cancelled},
             finished=asyncio.Event(),
             read_timeout=3,
         )
@@ -927,7 +924,7 @@ async def test_unrelated_open_ordinary_write_does_not_cancel_actual_budget_watch
 
     async def observed_read(*args, **kwargs):
         value = await original(*args, **kwargs)
-        assert value.admitted and value.worker_exposure_usd == 1
+        assert value[worker.id].admitted and value[worker.id].worker_exposure_usd == 1
         polled.set()
         return value
 
@@ -944,10 +941,9 @@ async def test_unrelated_open_ordinary_write_does_not_cancel_actual_budget_watch
             watch_fleet_budget(
                 sessionmaker=sm,
                 parent=parent,
-                worker_id=worker.id,
                 prices=tariffs(parent),
                 markup=Decimal(1),
-                cancelled=cancelled,
+                cancelled={worker.id: cancelled},
                 finished=finished,
                 read_timeout=3,
             )
@@ -1002,3 +998,131 @@ async def test_atomic_spawn_reservation_and_audit_roll_back_together(sm):
             markup=Decimal(1),
         )
     assert admitted.admitted and admitted.worker_exposure_usd == 1
+
+
+async def test_one_run_watch_fans_out_floors_without_cancelling_a_funded_sibling(sm, monkeypatch):
+    from daimon.core import channel_budget
+
+    parent, run = await setup(sm)
+    a = await add(sm, parent, budget=".01")
+    b = await add(sm, parent, ordinal=1, budget="1")
+    assert (await reserve(sm, parent, a)).admitted
+    assert (await reserve(sm, parent, b)).admitted
+    await usage(sm, parent, run, a, inputs=5_000, outputs=None)
+    await usage(sm, parent, run, b, inputs=100, outputs=None)
+    cancelled = {a.id: asyncio.Event(), b.id: asyncio.Event()}
+    finished, polled = asyncio.Event(), asyncio.Event()
+    original = channel_budget.produce_fleet_budget
+    passes = 0
+
+    async def observed(*args, **kwargs):
+        nonlocal passes
+        result = await original(*args, **kwargs)
+        passes += 1
+        assert set(result) == {a.id, b.id}
+        assert result[a.id].worker_floor_usd == Decimal(".01")
+        assert result[b.id].admitted
+        polled.set()
+        return result
+
+    monkeypatch.setattr(channel_budget, "produce_fleet_budget", observed)
+    task = asyncio.create_task(
+        watch_fleet_budget(
+            sessionmaker=sm,
+            parent=parent,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            cancelled=cancelled,
+            finished=finished,
+        )
+    )
+    try:
+        await asyncio.wait_for(polled.wait(), 2)
+        await asyncio.wait_for(cancelled[a.id].wait(), 2)
+        assert not cancelled[b.id].is_set() and not task.done()
+        assert passes == 1
+        finished.set()
+        assert await asyncio.wait_for(task, 2) == "finished"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert (await read(sm, parent, a)).worker_exposure_usd == Decimal(".01")
+    assert (await read(sm, parent, b)).worker_exposure_usd == 1
+
+
+@pytest.mark.parametrize("operation", ["refresh", "reserve", "preallocation"])
+async def test_passive_refresh_allows_same_tenant_writes_but_financial_admission_fences(
+    sm, monkeypatch, operation
+):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+    from sqlalchemy.exc import DBAPIError
+
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    assert (await reserve(sm, parent, worker)).admitted
+    if operation == "preallocation":
+        async with sm.begin() as db:
+            claimed = await fleet.claim_worker(db, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+            assert claimed is not None and claimed.id == worker.id
+    locked, release = asyncio.Event(), asyncio.Event()
+    original = tenant_ledger.lock_funds
+
+    async def paused_lock(session, **kwargs):
+        value = await original(session, **kwargs)
+        assert kwargs["financial"] is (operation != "refresh")
+        locked.set()
+        await release.wait()
+        return value
+
+    monkeypatch.setattr(tenant_ledger, "lock_funds", paused_lock)
+
+    async def refresh_or_admit():
+        async with sm.begin() as db:
+            if operation == "refresh":
+                return (
+                    await produce_fleet_budget(
+                        db,
+                        parent=parent,
+                        prices=tariffs(parent),
+                        markup=Decimal(1),
+                    )
+                )[worker.id]
+            if operation == "reserve":
+                return await reserve(sm, parent, worker, session=db)
+            return await require_fleet_worker_admission(
+                db,
+                parent=parent,
+                policy=POLICY,
+                worker_id=worker.id,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+            )
+
+    async def ordinary_write():
+        async with sm.begin() as db:
+            await db.execute(text("SET LOCAL lock_timeout = '100ms'"))
+            await tenant_ledger.insert_entry(
+                db,
+                tenant_id=run.tenant_id,
+                delta_usd=Decimal("-.5"),
+                reason="turn_debit",
+                idempotency_key=f"concurrent:{uuid4()}",
+            )
+
+    task = asyncio.create_task(refresh_or_admit())
+    try:
+        await asyncio.wait_for(locked.wait(), 2)
+        if operation == "refresh":
+            await asyncio.wait_for(ordinary_write(), 2)
+        else:
+            with pytest.raises(DBAPIError) as error:
+                await asyncio.wait_for(ordinary_write(), 2)
+            assert error.value.orig.sqlstate == "55P03"
+        release.set()
+        current = await asyncio.wait_for(task, 3)
+        assert current.admitted
+        assert current.prepaid_available_usd == (Decimal("8.5") if operation == "refresh" else 9)
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

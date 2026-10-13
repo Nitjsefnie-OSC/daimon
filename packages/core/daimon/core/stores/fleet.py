@@ -656,7 +656,12 @@ type BudgetGraph = tuple[tuple[FleetRun, tuple[FleetWorker, ...]], ...]
 
 
 async def lock_budget(
-    session: AsyncSession, *, tenant_id: uuid.UUID, actor_id: uuid.UUID, run_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    run_id: uuid.UUID,
+    financial: bool = True,
 ) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
     """Join the caller's financial transaction before any fleet row transition.
 
@@ -665,7 +670,9 @@ async def lock_budget(
     key lock; no global table lock or additional writer query is required.
     Every caller composing fleet row writers must acquire this first, before
     either a run or worker lock. Include only live/unsettled runs and the
-    requested run for terminal readback. Return original allocation stamps.
+    requested run for terminal readback. Passive refresh uses tenant KEY SHARE;
+    reservation and fresh native admission retain FOR UPDATE. Return original
+    allocation stamps.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
@@ -674,7 +681,7 @@ async def lock_budget(
         {"key": f"fleet:{tenant_id}"},
     )
     # Same tenant/account order as audit and erasure.
-    tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id)
+    tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id, financial=financial)
     actor = await session.scalar(
         select(Account.id)
         .where(Account.id == actor_id, Account.tenant_id == tenant_id)
