@@ -2644,3 +2644,12 @@ It is not a hard spending ceiling. Worker runtime admission refuses a deadline
 more than 120 seconds away. Worker execution retains its admitted deadline,
 cancellation and financial guard; complete measured usage is required for exact
 settlement.
+The session creator accepts complete scoped worker preparation through its existing
+host entry. A root-granted warm memory binding must still match at the memory
+owner's lookup; missing or changed bindings refuse without provisioning.
+The creation operation retains the acknowledgement before independent readback.
+A lost acknowledgement keeps an unknown outcome and cannot allocate again;
+interrupted proof restores a known receipt and resumes readback. Rejected sessions
+are archived through the bounded orphan owner only after independent identity and
+tenant/account ownership proof. Foreign or unproved sessions are never archived.
+Ordinary session calls keep their existing request and lazy-memory behavior.

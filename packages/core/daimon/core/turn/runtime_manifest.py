@@ -274,7 +274,35 @@ def classify_source_obligations(
     if (source.memory_required is not False or source.memory_store_id is not None) and (
         "memory" not in drops
     ):
-        missing.add("memory")
+        from daimon.core.memory_resource import memory_mount
+
+        retained = False
+        if len(resources) == 1 and source.memory_store_id is not None:
+            native, ref = resources[0].native, resources[0].resource
+            retained = (
+                source.source is not None
+                and source.resource_scope is not None
+                and source.memory_read_only is not None
+                and ref is not None
+                and ref.provider == source.source.ref.provider
+                and ref.kind == "memory_store"
+                and ref.id == source.memory_store_id
+                and (ref.tenant_id, ref.account_id)
+                == (source.resource_scope.tenant_id, source.resource_scope.account_id)
+                and native is not None
+                and (native.namespace, native.version) == ("anthropic.session_resource_create", 1)
+                and native.value
+                in (
+                    {"resource": memory_mount(source.memory_store_id, read_only=True)},
+                    {
+                        "resource": memory_mount(
+                            source.memory_store_id, read_only=source.memory_read_only
+                        )
+                    },
+                )
+            )
+        if not retained:
+            missing.add("memory")
     # Removing execution is explicit; retaining a source environment requires
     # its complete canonical policy, which native readback must also verify.
     if target is None or not (

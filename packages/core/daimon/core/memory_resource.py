@@ -30,6 +30,7 @@ from daimon.core.stores.agent_memory_stores import (
     get_memory_store_id,
     insert_memory_store,
 )
+from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -79,17 +80,23 @@ async def ensure_memory_store_and_mount(
     agent_id: uuid.UUID,
     agent_name: str,
     read_only: bool = False,
+    expected_memory_store_id: str | None = None,
 ) -> BetaManagedAgentsMemoryStoreResourceParam:
     """Return the memory-store session resource, provisioning on first use.
 
     Warm path: one DB read, zero API calls. Cold path: one
     memory_stores.create + race-safe insert; on a lost race the just-created
     orphan store is deleted and the winner's id is used.
+    An expected ID requires that exact warm binding, without provisioning.
     """
     backend_scope = resource_scope(tenant_id=str(tenant_id))
     async with session_factory() as session:
         store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
 
+    if expected_memory_store_id is not None and (
+        not expected_memory_store_id or store_id != expected_memory_store_id
+    ):
+        raise ScopeViolation("memory-store", "captured warm binding differs")
     if store_id is None:
         created = await create_memory_store(
             anthropic,
