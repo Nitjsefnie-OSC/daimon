@@ -2804,18 +2804,20 @@ async def test_projection_uses_composer_vault_copilot_and_app_filters(
 
 
 async def worker_source_context(
-    db_nullpool_engine, *, original_tools=(), granted_tools=(), environment_config=None
+    db_nullpool_engine, *, original_tools=(), granted_tools=(), environment_config=None, warm=False
 ):
     from dataclasses import replace
 
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import managed_agents, resource_ref
     from daimon.core.neutral_resources import resolve_worker_spec
     from daimon.core.sessions import project_session_resources
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.ma_transport import ScriptedTransport
+    from mux.contracts.extensions import ExtensionConfig
     from mux.contracts.ids import ChannelRef, Scope, ThreadRef
-    from mux.contracts.resources import AgentSpec
+    from mux.contracts.resources import AgentSpec, ResourceBinding
 
     from .test_fleet_permissions import POLICY, parent
 
@@ -2866,11 +2868,47 @@ async def worker_source_context(
     worker = resolve_worker_spec(
         root, root.spec, policy=POLICY, now=datetime(2026, 10, 12, 18, tzinfo=UTC)
     )
-    trace = ScriptedTransport()
+    from daimon.core.memory_resource import ensure_memory_store_and_mount
+    from daimon.testing.ma import MARouter
+
+    router = MARouter()
+    memory_handler = make_fake_memory_store_handler(FakeMemoryStoreState())
+    router.add("POST", r"/v1/memory_stores", lambda request, match: memory_handler(request))
+    trace = ScriptedTransport(router=router)
     async with trace.client() as client:
         captured = await load_backend_agent(
             client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=original
         )
+        if warm:
+            mount = await ensure_memory_store_and_mount(
+                client,
+                sessions,
+                tenant_id=tenant.id,
+                agent_id=captured.agent_id,
+                agent_name="source",
+                read_only=True,
+            )
+            backend = managed_agents(client, scope=root.fleet.scope)
+            binding = ResourceBinding(
+                id=mount["memory_store_id"],
+                kind="native",
+                resource=resource_ref(
+                    backend, "memory_store", mount["memory_store_id"], scope=root.fleet.scope
+                ),
+                native=ExtensionConfig(
+                    namespace="anthropic.session_resource_create",
+                    version=1,
+                    value={"resource": mount},
+                ),
+            )
+            root = replace(root, resources=(binding,))
+            worker = resolve_worker_spec(
+                root,
+                root.spec,
+                resources=root.resources,
+                policy=POLICY,
+                now=datetime(2026, 10, 12, 18, tzinfo=UTC),
+            )
         projected = await project_session_resources(
             captured,
             agent=original,
@@ -2886,10 +2924,45 @@ async def worker_source_context(
     return sessions, tenant.id, account.id, original, environment, worker, projected
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "session",
+        "agent",
+        "environment",
+        "tenant",
+        "account",
+        "memory",
+        "access",
+        "instructions",
+        "missing_mount",
+        "duplicate_mount",
+        "environment_snapshot",
+        "row",
+        "memory_cleared_before_read",
+        "memory_rebound_before_read",
+        *(
+            f"{stage}_{field}"
+            for stage in ("ack", "get")
+            for field in (
+                "model",
+                "options",
+                "system",
+                "version",
+                "tools",
+                "mcp",
+                "skills",
+                "missing",
+            )
+        ),
+    ],
+)
 async def test_worker_executes_new_agent_with_original_source_memory_and_resource_identity(
-    db_preflight, db_nullpool_engine
+    db_preflight, db_nullpool_engine, fault
 ):
     from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_compat import create_agent
     from daimon.core.stores.agent_memory_stores import get_memory_store_id
     from daimon.testing.ma_transport import ScriptedTransport
 
@@ -2901,7 +2974,7 @@ async def test_worker_executes_new_agent_with_original_source_memory_and_resourc
         environment,
         worker,
         source,
-    ) = await worker_source_context(db_nullpool_engine)
+    ) = await worker_source_context(db_nullpool_engine, warm=True)
     executing = ma_agent(
         id="actual-worker",
         tenant_id=str(tenant_id),
@@ -2909,22 +2982,172 @@ async def test_worker_executes_new_agent_with_original_source_memory_and_resourc
         model=worker.spec.model.id,
         system=worker.spec.system,
     )
-    memory = FakeMemoryStoreState()
     transport = ScriptedTransport(router=None)
-    # Real SDK memory provisioning and session creation, with the real scoped store.
+    # Provisioning already ran through the real SDK/store; readback must preserve its mount.
     from daimon.testing.ma import MARouter
 
     router = MARouter()
-    handler = combine_handlers(make_fake_memory_store_handler(memory), _session_create_handler())
-    for method in ("GET", "POST", "DELETE"):
-        router.add(method, r"/v1/.*", lambda request, match: handler(request))
+    snapshots = {}
+
+    def drift(raw, stage):
+        if fault == f"{stage}_model":
+            raw["agent"]["model"]["id"] = "claude-opus-4-6"
+        elif fault == f"{stage}_options":
+            raw["agent"]["model"]["speed"] = "fast"
+        elif fault == f"{stage}_system":
+            raw["agent"]["system"] = "unapproved protected instructions"
+        elif fault == f"{stage}_version":
+            raw["agent"]["version"] = 99
+        elif fault == f"{stage}_tools":
+            raw["agent"]["tools"] = [{"type": "bash", "name": "bash"}]
+        elif fault == f"{stage}_mcp":
+            raw["agent"]["mcp_servers"] = [
+                {"type": "url", "name": "unapproved", "url": "https://unapproved.invalid/mcp"}
+            ]
+        elif fault == f"{stage}_skills":
+            raw["agent"]["skills"] = [{"type": "custom", "skill_id": "unapproved", "version": "1"}]
+        elif fault == f"{stage}_missing":
+            raw["agent"].pop("model")
+        return raw
+
+    def native(request, match):
+        if request.method == "POST":
+            body = json.loads(request.content)
+            if request.url.path == "/v1/agents":
+                return httpx.Response(
+                    200, json=executing.model_dump(mode="json", exclude_unset=True)
+                )
+            result = _session_create_handler()(request).json()
+            result.update(
+                agent=executing.model_dump(mode="json"),
+                metadata=body["metadata"],
+                resources=body["resources"],
+            )
+            snapshots[result["id"]] = result
+            return httpx.Response(200, json=drift(json.loads(json.dumps(result)), "ack"))
+        if "/environments/" in request.url.path:
+            raw = environment.model_dump(mode="json", exclude_unset=True)
+            if fault == "environment_snapshot":
+                raw["description"] = "changed policy"
+            return httpx.Response(200, json=raw)
+        raw = json.loads(json.dumps(snapshots[request.url.path.rsplit("/", 1)[-1]]))
+        if fault == "session":
+            raw["id"] = "foreign-session"
+        elif fault == "agent":
+            raw["agent"]["id"] = "foreign-agent"
+        elif fault == "environment":
+            raw["environment_id"] = "foreign-environment"
+        elif fault == "tenant":
+            raw["metadata"]["daimon_tenant"] = str(uuid.uuid4())
+        elif fault == "account":
+            raw["metadata"]["daimon_account"] = str(uuid.uuid4())
+        elif fault == "memory":
+            raw["resources"][0]["memory_store_id"] = "foreign-memory"
+        elif fault == "access":
+            raw["resources"][0]["access"] = "read_write"
+        elif fault == "instructions":
+            raw["resources"][0]["instructions"] = "altered instructions"
+        elif fault == "missing_mount":
+            raw["resources"] = []
+        elif fault == "duplicate_mount":
+            raw["resources"] *= 2
+        return httpx.Response(200, json=drift(raw, "get"))
+
+    router.add("POST", r"/v1/agents", native)
+    router.add(
+        "POST",
+        r"/v1/sessions/[^/]+/archive",
+        lambda request, match: httpx.Response(
+            200,
+            json={
+                **snapshots[request.url.path.split("/")[-2]],
+                "archived_at": datetime.now(UTC).isoformat(),
+            },
+        ),
+    )
+    router.add("POST", r"/v1/sessions", native)
+    router.add("GET", r"/v1/sessions/.*", native)
+    router.add("GET", r"/v1/environments/.*", native)
     transport.router = router
     guards = []
 
     async def fence():
         guards.append("fresh")
+        if (
+            fault in ("memory_cleared_before_read", "memory_rebound_before_read")
+            and len(guards) == 1
+        ):
+            from daimon.core.stores.agent_memory_stores import (
+                clear_memory_store,
+                insert_memory_store,
+            )
+
+            async with sessions.begin() as db:
+                await clear_memory_store(db, tenant_id=tenant_id, agent_id=source.agent_id)
+                if fault == "memory_rebound_before_read":
+                    await insert_memory_store(
+                        db,
+                        tenant_id=tenant_id,
+                        agent_id=source.agent_id,
+                        memory_store_id="rebound-memory",
+                    )
+        if fault == "row" and len(guards) == 2:
+            from daimon.core.stores.agent_memory_stores import clear_memory_store
+
+            async with sessions.begin() as db:
+                await clear_memory_store(db, tenant_id=tenant_id, agent_id=source.agent_id)
 
     async with transport.client() as client:
+        executing = await create_agent(
+            client, worker.spec, scope=worker.permissions.fleet.scope, key="warm-worker-agent"
+        )
+        if fault is not None:
+            from mux.errors import ScopeViolation
+
+            with pytest.raises(ScopeViolation):
+                await create_session(
+                    client,
+                    agent=executing,
+                    environment=environment,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    agent_uuid=source.agent_id,
+                    session_factory=sessions,
+                    resource_source=source,
+                    worker=worker,
+                    before_create=fence,
+                    memory_read_only=True,
+                )
+            expected_posts = (
+                0 if fault in ("memory_cleared_before_read", "memory_rebound_before_read") else 1
+            )
+            assert (
+                sum(request.path == "/v1/sessions" for request in transport.requests)
+                == expected_posts
+            )
+            assert not any("/memory_stores" in request.path for request in transport.requests)
+            assert sum(request.path.endswith("/archive") for request in transport.requests) == (
+                0
+                if fault
+                in {
+                    "session",
+                    "agent",
+                    "environment",
+                    "tenant",
+                    "account",
+                    "memory_cleared_before_read",
+                    "memory_rebound_before_read",
+                }
+                else 1
+            )
+            if expected_posts == 0:
+                async with sessions() as db:
+                    assert await get_memory_store_id(
+                        db, tenant_id=tenant_id, agent_id=source.agent_id
+                    ) == (None if fault == "memory_cleared_before_read" else "rebound-memory")
+            assert not any("/events" in request.path for request in transport.requests)
+            transport.assert_consumed()
+            return
         created = await create_session(
             client,
             agent=executing,
@@ -2944,7 +3167,7 @@ async def test_worker_executes_new_agent_with_original_source_memory_and_resourc
         request.json() for request in transport.requests if request.path == "/v1/sessions"
     )
     assert session_request["agent"] == executing.id
-    assert guards == ["fresh", "fresh"]
+    assert guards == ["fresh", "fresh", "fresh"]
     async with sessions() as db:
         source_memory = await get_memory_store_id(db, tenant_id=tenant_id, agent_id=source.agent_id)
         assert source_memory is not None
@@ -2963,7 +3186,23 @@ async def test_worker_executes_new_agent_with_original_source_memory_and_resourc
 
 
 @pytest.mark.parametrize(
-    "changed", ["source_uuid", "tenant", "account", "snapshot", "guard", "drops"]
+    "changed",
+    [
+        "source_uuid",
+        "tenant",
+        "account",
+        "snapshot",
+        "environment",
+        "environment_policy",
+        "missing_environment",
+        "environment_ref_kind",
+        "environment_ref_provider",
+        "environment_ref_tenant",
+        "environment_ref_account",
+        "environment_ref_space",
+        "guard",
+        "drops",
+    ],
 )
 async def test_worker_source_context_refuses_before_resources_or_native_io(
     db_preflight, db_nullpool_engine, changed
@@ -3003,6 +3242,27 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
         source = source.model_copy(
             update={"source": source.source.model_copy(update={"native": None})}
         )
+    elif changed == "environment":
+        environment = ma_environment(id="neighbour-environment", tenant_id=str(tenant_id))
+    elif changed == "environment_policy":
+        environment = environment.model_copy(update={"description": "changed policy revision"})
+    elif changed == "missing_environment":
+        source = source.model_copy(update={"environment": None})
+    elif changed.startswith("environment_ref_"):
+        field = {
+            "kind": "kind",
+            "provider": "provider",
+            "tenant": "tenant_id",
+            "account": "account_id",
+            "space": "account_scope_id",
+        }[changed.removeprefix("environment_ref_")]
+        source = source.model_copy(
+            update={
+                "environment": source.environment.model_copy(
+                    update={"ref": source.environment.ref.model_copy(update={field: "foreign"})}
+                )
+            }
+        )
     elif changed == "drops":
         worker = replace(
             worker, spec=worker.spec.model_copy(update={"declared_drops": ("memory",)})
@@ -3026,6 +3286,90 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
     assert trace.requests == []
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "cold",
+        "missing_grant",
+        "duplicate",
+        "tenant",
+        "account",
+        "provider",
+        "memory",
+        "access",
+        "instructions",
+        "version",
+        "schema",
+    ],
+)
+async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
+    db_preflight, db_nullpool_engine, fault
+):
+    from dataclasses import replace
+
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.errors import ScopeViolation, UnsupportedCapability
+
+    sessions, tenant, account, _, environment, worker, source = await worker_source_context(
+        db_nullpool_engine, warm=fault != "cold"
+    )
+    if fault != "cold":
+        binding = worker.resources[0]
+        if fault == "missing_grant":
+            resources = ()
+        elif fault == "duplicate":
+            resources = (binding, binding)
+        else:
+            if fault in {"tenant", "account", "provider", "memory"}:
+                key = {
+                    "tenant": "tenant_id",
+                    "account": "account_id",
+                    "provider": "provider",
+                    "memory": "id",
+                }[fault]
+                binding = binding.model_copy(
+                    update={"resource": binding.resource.model_copy(update={key: "foreign"})}
+                )
+            else:
+                value = json.loads(json.dumps(dict(binding.native.value)))
+                if fault == "access":
+                    value["resource"]["access"] = "read_write"
+                elif fault == "instructions":
+                    value["resource"]["instructions"] = "changed"
+                elif fault == "schema":
+                    value["resource"]["unknown"] = "unrepresented"
+                binding = binding.model_copy(
+                    update={
+                        "native": binding.native.model_copy(
+                            update={"value": value, "version": 2 if fault == "version" else 1}
+                        )
+                    }
+                )
+            resources = (binding,)
+        worker = replace(worker, resources=resources)
+    trace = ScriptedTransport()
+
+    async def guard():
+        pass
+
+    async with trace.client() as client:
+        with pytest.raises((ScopeViolation, UnsupportedCapability)):
+            await create_session(
+                client,
+                agent=ma_agent(id="actual-worker", tenant_id=str(tenant)),
+                environment=environment,
+                tenant_id=tenant,
+                account_id=account,
+                agent_uuid=source.agent_id,
+                session_factory=sessions,
+                worker=worker,
+                resource_source=source,
+                before_create=guard,
+                memory_read_only=True,
+            )
+    assert trace.requests == []
+
+
 async def test_worker_never_silently_loses_retained_memory_on_materialization_failure(
     db_preflight, db_nullpool_engine, monkeypatch
 ):
@@ -3040,7 +3384,7 @@ async def test_worker_never_silently_loses_retained_memory_on_materialization_fa
         environment,
         worker,
         source,
-    ) = await worker_source_context(db_nullpool_engine)
+    ) = await worker_source_context(db_nullpool_engine, warm=True)
     executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
 
     async def missing(*args, **kwargs):

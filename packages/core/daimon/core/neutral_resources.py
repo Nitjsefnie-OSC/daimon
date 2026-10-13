@@ -1286,8 +1286,30 @@ def resolve_worker_spec(
             and resource.resource.kind == "memory_store"
         )
     )
-    if any(resource.native is not None for resource in resources):
-        raise WorkerSpecRefused("files", "unsupported")
+    from mux.drivers.anthropic.sessions_lifecycle import MemoryMount, SessionResourceConfig
+
+    for resource in resources:
+        if resource.native is None:
+            continue
+        native, ref = resource.native, resource.resource
+        try:
+            mount = SessionResourceConfig.model_validate(dict(native.value)).resource
+        except ValueError:
+            raise WorkerSpecRefused("files", "unsupported") from None
+        if (
+            native.namespace != "anthropic.session_resource_create"
+            or native.version != 1
+            or resource.kind != "native"
+            or resource.target_path is not None
+            or resource.credential_ref is not None
+            or not isinstance(mount, MemoryMount)
+            or ref is None
+            or ref.kind != "memory_store"
+            or ref.id != mount.memory_store_id
+            or ref.provider != selected.backend
+            or profile.support.get("memory_stores") != "native"
+        ):
+            raise WorkerSpecRefused("files", "unsupported")
     environment = environment if environment is not None else parent.environment
     if "sandbox" in drops:
         environment = None

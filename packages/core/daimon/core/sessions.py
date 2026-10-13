@@ -8,6 +8,7 @@ BetaManagedAgentsSession is consumed by the turn driver and discarded.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
@@ -68,8 +69,18 @@ from daimon.core.mcp_vault import (
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
 )
-from daimon.core.memory_resource import ensure_memory_store_and_mount, memory_instructions
-from daimon.core.mux_compat import agent_spec, sdk_agent, source_environment_record
+from daimon.core.memory_resource import (
+    ensure_memory_store_and_mount,
+    memory_instructions,
+    memory_mount,
+)
+from daimon.core.mux_backend import managed_agents, resource_ref
+from daimon.core.mux_compat import (
+    agent_spec,
+    retrieve_environment,
+    sdk_agent,
+    source_environment_record,
+)
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_ports_compat import (
     archive_session_record,
@@ -78,6 +89,9 @@ from daimon.core.session_ports_compat import (
 )
 from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import (
+    hash_mcp_servers,
+    hash_skills,
+    hash_tools,
     session_mcp_servers,
     session_skills,
     session_tools,
@@ -95,6 +109,10 @@ from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
+from mux.drivers.anthropic.sessions_lifecycle import (
+    SessionCreateRequest,
+    SessionReads,
+)
 from mux.errors import ScopeViolation, UnsupportedCapability
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -223,6 +241,19 @@ def _check_resource_source(
         or environment.archived_at is not None
         or (environment.metadata or {}).get(MA_METADATA_KEY_TENANT, str(tenant_id))
         != str(tenant_id)
+        or (
+            source.environment is not None
+            and (
+                source.environment.ref.id != environment.id
+                or source.environment.ref.kind != "environment"
+                or source.environment.ref.provider != actual.ref.provider
+                or source.environment.ref.account_scope_id != actual.ref.account_scope_id
+                or source.environment.ref.tenant_id != resource_scope.tenant_id
+                or source.environment.ref.account_id != resource_scope.account_id
+                or source.environment.native
+                != environment.model_dump(mode="json", exclude_unset=True)
+            )
+        )
     ):
         raise ScopeViolation(
             "source-preparation", "source context differs from authorized identity"
@@ -417,7 +448,7 @@ async def project_session_resources(
         or slack_turn_context_id is not None
         or private_dm_id is not None
         or app_session_unmapped
-        or requester_is_headless
+        or (requester_is_headless and app_mode)
         or origin_seal_ids
         or agent_github_app is not None
     ):
@@ -499,6 +530,11 @@ async def create_session(
     origin_thread_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
     before_create: Callable[[], Awaitable[None]] | None = None,
+    allocation: Callable[
+        [Callable[[], Awaitable[BetaManagedAgentsSession]], SessionCreateRequest],
+        Awaitable[BetaManagedAgentsSession],
+    ]
+    | None = None,
     channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
     model_override: str | None = None,
     resource_source: BackendAgent | None = None,
@@ -618,8 +654,12 @@ async def create_session(
             or resource_source.resource_scope is None
             or resource_source.source is None
             or resource_source.source.native is None
+            or resource_source.environment is None
+            or resource_source.memory_required is not True
+            or resource_source.memory_read_only is None
             or resource_source.resource_scope != worker.permissions.fleet.scope
             or (resource_source.memory_read_only and not memory_read_only)
+            or (worker.permissions.memory_read_only and not memory_read_only)
         ):
             raise ScopeViolation(
                 "worker-resources", "captured source and owned preparation required"
@@ -633,6 +673,35 @@ async def create_session(
         )
         # Source authority is refreshed before resource effects and at the existing final fence.
         await before_create()
+        if (
+            resource_source.memory_store_id is None
+            or resource_source.resource_requirements
+            or resource_source.repository_sources
+            or extra_resources
+        ):
+            raise UnsupportedCapability(
+                ("native_worker_resource_projection",), worker.backend.profile
+            )
+        expected = memory_mount(resource_source.memory_store_id, read_only=memory_read_only)
+        if len(worker.resources) != 1:
+            raise ScopeViolation("worker-resources", "one granted warm memory mount required")
+        binding = worker.resources[0]
+        native, ref = binding.native, binding.resource
+        if (
+            native is None
+            or native.namespace != "anthropic.session_resource_create"
+            or native.version != 1
+            or binding.kind != "native"
+            or ref is None
+            or binding.target_path is not None
+            or binding.credential_ref is not None
+            or ref.kind != "memory_store"
+            or ref.id != resource_source.memory_store_id
+            or ref.provider != resource_source.source.ref.provider
+            or (ref.tenant_id, ref.account_id) != (scope.tenant_id, scope.account_id)
+            or native.value != {"resource": expected}
+        ):
+            raise ScopeViolation("worker-resources", "grant differs from source memory intent")
     app_mode = False
     if tenant_id is not None and agent_uuid is not None and session_factory is not None:
         app_mode = await _session_app_mode(
@@ -862,15 +931,18 @@ async def create_session(
             # outage must never take down chat — the session just runs without
             # persistent memory this turn.
             try:
-                memory_mount = await ensure_memory_store_and_mount(
+                memory_resource = await ensure_memory_store_and_mount(
                     anthropic,
                     session_factory,
                     tenant_id=tenant_id,
                     agent_id=agent_uuid,
                     agent_name=resource_agent.name,
                     read_only=memory_read_only,
+                    expected_memory_store_id=resource_source.memory_store_id
+                    if resource_source is not None
+                    else None,
                 )
-                resources.append(memory_mount)
+                resources.append(memory_resource)
             except (anthropic_pkg.APIError, StoreError) as exc:
                 if resource_source is not None:
                     raise
@@ -992,6 +1064,7 @@ async def create_session(
             )
 
         created: BetaManagedAgentsSession | None = None
+        owned_created = False
         try:
             if app_mode:
                 assert (
@@ -1018,7 +1091,8 @@ async def create_session(
             if before_create is not None:
                 # The caller's last access decision, after every await above.
                 await before_create()
-            created = await create_session_record(
+            create = functools.partial(
+                create_session_record,
                 anthropic,
                 scope=scope,
                 agent=agent_argument,
@@ -1033,6 +1107,120 @@ async def create_session(
                 ),
                 resources=resources if resources else None,
             )
+            created = (
+                await allocation(
+                    create,
+                    SessionCreateRequest.model_validate(
+                        {key: value for key, value in create.keywords.items() if key != "scope"}
+                    ),
+                )
+                if allocation is not None
+                else await create()
+            )
+            if resource_source is not None:
+                assert worker is not None and tenant_id is not None and account_id is not None
+                assert resource_source.memory_store_id is not None
+                assert resource_source.memory_read_only is not None
+                assert (
+                    agent_uuid is not None
+                    and session_factory is not None
+                    and before_create is not None
+                )
+                expected = memory_mount(resource_source.memory_store_id, read_only=memory_read_only)
+                backend = managed_agents(
+                    anthropic, scope=scope, resources=frozenset({("session", created.id)})
+                )
+                reader = backend.extension(
+                    SessionReads, namespace="anthropic.session_reads", version=1
+                )
+                observed = await reader.read_native(
+                    scope, resource_ref(backend, "session", created.id, scope=scope)
+                )
+                native_agent, native_metadata, native_resources = (
+                    observed.get(name) for name in ("agent", "metadata", "resources")
+                )
+                owned_created = (
+                    observed.get("id") == created.id
+                    and isinstance(native_agent, dict)
+                    and native_agent.get("id") == agent.id
+                    and observed.get("environment_id") == environment.id
+                    and isinstance(native_metadata, dict)
+                    and native_metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
+                    and native_metadata.get(MA_METADATA_KEY_ACCOUNT) == str(account_id)
+                )
+                scalars = ("id", "model", "system", "version", "multiagent")
+                fields = {*scalars, "tools", "mcp_servers", "skills"}
+                intent = agent.model_dump(mode="json")
+                if isinstance(agent_argument, dict):
+                    intent.update(
+                        {key: value for key, value in agent_argument.items() if key in fields}
+                    )
+                    if isinstance(intent["model"], str):
+                        intent["model"] = {"id": intent["model"]}
+                try:
+                    wanted = type(agent).model_validate(intent)
+                    for frozen in (
+                        created.model_dump(mode="json", exclude_unset=True).get("agent"),
+                        native_agent,
+                    ):
+                        if not isinstance(frozen, dict):
+                            raise ValueError("missing frozen agent")
+                        actual = type(agent).model_validate(
+                            {**intent, **{key: frozen[key] for key in fields}}
+                        )
+                        if (
+                            any(getattr(actual, key) != getattr(wanted, key) for key in scalars)
+                            or hash_tools(actual.tools) != hash_tools(wanted.tools)
+                            or hash_mcp_servers(actual.mcp_servers)
+                            != hash_mcp_servers(wanted.mcp_servers)
+                            or hash_skills(actual.skills) != hash_skills(wanted.skills)
+                        ):
+                            raise ValueError("frozen execution differs")
+                except (ValueError, KeyError, TypeError):
+                    raise ScopeViolation(
+                        "worker-resources", "frozen execution differs from compiled intent"
+                    ) from None
+                fresh_environment = await retrieve_environment(
+                    anthropic, environment.id, scope=scope
+                )
+                recaptured = await project_session_resources(
+                    resource_source,
+                    agent=resource_agent,
+                    environment=fresh_environment,
+                    session_factory=session_factory,
+                    tenant_id=tenant_id,
+                    agent_uuid=agent_uuid,
+                    account_id=account_id,
+                    resource_scope=scope,
+                    memory_read_only=resource_source.memory_read_only,
+                    fernet=fernet,
+                    channel_skills=channel_skills,
+                    tool_safety=tool_safety,
+                    asks_before_publishing=asks_before_publishing,
+                    mcp_settings=mcp_settings,
+                    agent_github_app=agent_github_app,
+                    hide_personal_for=hide_personal_for,
+                    is_external=is_external,
+                    requester_is_headless=requester_is_headless,
+                    app_session_unmapped=app_session_unmapped,
+                    slack_turn_context_id=slack_turn_context_id,
+                    private_dm_id=private_dm_id,
+                    origin_seal_ids=origin_seal_ids,
+                    extra_resources=extra_resources,
+                )
+                if (
+                    not owned_created
+                    or observed.get("archived_at") is not None
+                    or not isinstance(native_resources, list)
+                    or len(native_resources) != 1
+                    or not isinstance(native_resources[0], dict)
+                    or any(native_resources[0].get(key) != value for key, value in expected.items())
+                    or recaptured != resource_source
+                ):
+                    raise ScopeViolation(
+                        "worker-resources", "native source resource readback differs"
+                    )
+                await before_create()
             if app_access is not None:
                 assert (
                     session_factory is not None and tenant_id is not None and vault_id is not None
@@ -1075,6 +1263,14 @@ async def create_session(
                     )
             return created
         except BaseException:
+            if created is not None and owned_created:
+                from daimon.core.turn.run import (
+                    _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
+                )
+                from mux.drivers.anthropic.transport import single_attempt_mutation
+
+                with single_attempt_mutation():
+                    await _archive_orphaned_session(anthropic, session_id=created.id, scope=scope)
             if created is not None and app_mode:
                 await archive_session_record(
                     anthropic,

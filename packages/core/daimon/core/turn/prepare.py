@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import anthropic as anthropic_pkg
 import structlog
+from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
 )
@@ -90,7 +91,7 @@ from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import SessionSpec
-from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+from mux.drivers.anthropic.sessions_lifecycle import SessionCreateRequest, SessionReads
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -307,6 +308,7 @@ async def create_ma_session(
     tenant_id: uuid.UUID,
     extra_resources: tuple[Resource, ...] = (),
     predecessor_session_id: str | None = None,
+    preparation: ProviderPreparationRequest | None = None,
 ) -> CreatedSession:
     """Create a brand-new MA session and snapshot the configuration it froze.
 
@@ -329,6 +331,26 @@ async def create_ma_session(
     """
     if _admitted_profile(admission) != "anthropic.managed_agents":
         raise AdmissionDenied(reason="backend_unsupported")
+    persistence = None
+    if preparation is not None:
+        from daimon.core.turn.persistence import current_persistence
+
+        persistence = current_persistence.get()
+        worker, source = preparation.worker, preparation.source
+        if (
+            worker is None
+            or source is None
+            or preparation.before_native is None
+            or persistence is None
+            or preparation.deps is not deps
+            or preparation.admission != admission
+            or source.resource_scope != preparation.scope
+            or preparation.scope != worker.permissions.fleet.scope
+            or persistence.store is not deps.state_store
+            or preparation.tenant_id != tenant_id
+        ):
+            raise ScopeViolation("worker-preparation", "complete owned source required")
+        persistence.check_session(preparation.scope, None)
     admission = await reauthorize(deps, admission)
     seal: set[str] = set(admission.origin_seal_ids)
     if predecessor_session_id is not None and admission.origin_channel_id is not None:
@@ -356,6 +378,9 @@ async def create_ma_session(
     built = admission
 
     async def fence() -> None:
+        if preparation is not None:
+            assert preparation.before_native is not None
+            await preparation.before_native()
         # `create_session` awaits vault, credential, file and repository work
         # before `sessions.create`; decide once more immediately before it.
         # A pin raises `AdmissionDenied`; a seal the session was not built
@@ -381,7 +406,33 @@ async def create_ma_session(
                 retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
             )
 
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+    async def allocate(
+        call: Callable[[], Awaitable[BetaManagedAgentsSession]], wire: SessionCreateRequest
+    ) -> BetaManagedAgentsSession:
+        assert preparation is not None and preparation.worker is not None
+        assert persistence is not None
+        assert preparation.source is not None and preparation.source.source is not None
+        return await persistence.mutate(
+            None,
+            "session_create",
+            {
+                "scope": preparation.scope.model_dump(mode="json"),
+                "worker": preparation.worker.digest,
+                "source": preparation.source.source.model_dump(mode="json"),
+                "create": wire.model_dump(mode="json"),
+            },
+            lambda _key: call(),
+            BetaManagedAgentsSession,
+            lambda _: "processed",
+            guard=fence,
+            retry_failed=False,
+        )
+
+    agent_uuid = (
+        preparation.source.agent_id
+        if preparation is not None and preparation.source is not None
+        else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+    )
     async with deps.sessionmaker() as session:
         github_mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
@@ -416,6 +467,9 @@ async def create_ma_session(
         origin_seal_ids=frozenset(seal),
         before_create=fence,
         channel_skills=admission.channel_skills,
+        resource_source=preparation.source if preparation is not None else None,
+        worker=preparation.worker if preparation is not None else None,
+        allocation=allocate if preparation is not None else None,
     )
 
     has_repo = any(
