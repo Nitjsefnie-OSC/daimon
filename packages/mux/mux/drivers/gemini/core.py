@@ -45,6 +45,7 @@ from mux.drivers.gemini.mcp_auth import (
     MCPSecretResolver,
     authenticated_template,
     compile_mcp,
+    model_request,
     validate_intent,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
@@ -107,7 +108,9 @@ class Base:
         mcp_secrets: MCPSecretResolver | None = None,
         native_agent: Agent | None = None,
         max_total_tokens: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
+        self._max_output_tokens = max_output_tokens
         self._max_total_tokens = max_total_tokens
         self._native_agent = native_agent
         self._transport, self._storage, self._account = transport, storage, account_scope_id
@@ -131,7 +134,12 @@ class Base:
             agent.spec,
             authenticated_mcp=self._mcp_secrets is not None,
             max_total_tokens=self._max_total_tokens,
+            max_output_tokens=self._max_output_tokens,
         )
+        if self._max_output_tokens is not None:
+            if self._native_agent is not None or spec.environment is not None or spec.resources:
+                refuse("model_interaction_resources")
+            return request
         if self._native_agent is not None:
             if agent != self._native_agent:
                 refuse("named_agent_session_plan")
@@ -389,13 +397,29 @@ class GeminiAgents(Base):
 
 
 def compile_agent(
-    spec: AgentSpec, *, authenticated_mcp: bool = False, max_total_tokens: int | None = None
+    spec: AgentSpec,
+    *,
+    authenticated_mcp: bool = False,
+    max_total_tokens: int | None = None,
+    max_output_tokens: int | None = None,
 ) -> Object:
     if spec.model.provider != "gemini" or not spec.model.id or spec.model.options:
         refuse("model")
     if spec.extensions:
         refuse("agent_extensions")
-    result: Object = {
+    if max_output_tokens is not None:
+        if max_total_tokens is not None or spec.tools or spec.skills or spec.mcp_servers:
+            refuse("model_interaction_resources")
+        result: Object = {
+            "model": spec.model.id,
+            "generation_config": {"max_output_tokens": max_output_tokens},
+            "tools": [],
+        }
+        if spec.system is not None:
+            result["system_instruction"] = spec.system
+        model_request(result)
+        return result
+    result = {
         "agent": BASE_AGENT,
         "agent_config": {"type": "antigravity", "model": spec.model.id},
         # Omission would enable provider defaults, including billable web tools.
@@ -511,7 +535,13 @@ class GeminiEnvironments(Base):
         refuse("environment_delete")
 
 
-def compile_environment(spec: EnvironmentSpec, *, files: dict[str, str] | None = None) -> Object:
+def compile_environment(
+    spec: EnvironmentSpec, *, files: dict[str, str] | None = None, model_only: bool = False
+) -> Object:
+    if model_only:
+        if spec != EnvironmentSpec(name=spec.name, execution="none"):
+            refuse("model_interaction_resources")
+        return {}
     if spec.execution != "hosted" or spec.network or spec.packages or spec.native_config:
         refuse("environment_configuration")
     sources: list[JsonValue] = []
@@ -582,8 +612,8 @@ class GeminiSessions(Base):
                 ),
                 continuity=Continuity(
                     conversation="interaction_chain",
-                    workspace="native_reuse",
-                    processes="unknown",
+                    workspace="native_reuse" if self._max_output_tokens is None else "none",
+                    processes="unknown" if self._max_output_tokens is None else "none",
                     retention_known=True,
                 ),
                 requested_revision=spec.agent_revision,
@@ -687,6 +717,7 @@ class GeminiEvents(Base):
         mcp_secrets: MCPSecretResolver | None = None,
         native_agent: Agent | None = None,
         max_total_tokens: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
         super().__init__(
             transport,
@@ -695,6 +726,7 @@ class GeminiEvents(Base):
             mcp_secrets=mcp_secrets,
             native_agent=native_agent,
             max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
         )
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction
@@ -802,6 +834,10 @@ class GeminiEvents(Base):
                 return prior[2]
             if record.unknown_delivery:
                 refuse("unreconciled_delivery")
+            if self._max_output_tokens is not None and any(
+                not isinstance(event, UserMessage) for event in events
+            ):
+                refuse("model_interaction_resources")
             if self._max_total_tokens is not None and (
                 record.current is not None
                 or len(events) != 1
@@ -847,13 +883,14 @@ class GeminiEvents(Base):
             if record.current is not None:
                 if not authenticated:
                     await self._get(record, record.current)
-                if record.environment_id is None:
+                if self._max_output_tokens is None and record.environment_id is None:
                     raise ContinuityLost(
                         record.session.binding.id,
                         ("Gemini did not provide a reusable environment ID.",),
                     )
                 overrides["previous_interaction_id"] = record.current
-                overrides["environment"] = record.environment_id
+                if self._max_output_tokens is None:
+                    overrides["environment"] = record.environment_id
             request = await authenticated_template(
                 scope,
                 record.request,

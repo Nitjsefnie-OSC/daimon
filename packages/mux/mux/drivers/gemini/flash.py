@@ -1,6 +1,7 @@
 """Explicit host Flash policy; no client creation, retry or implicit selection."""
 
 from collections.abc import AsyncIterator, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -8,6 +9,7 @@ from pydantic import JsonValue
 
 from mux.contracts.ids import ModelRef
 from mux.contracts.resources import Agent
+from mux.drivers.gemini.mcp_auth import model_request
 from mux.drivers.gemini.transport import Object, Transport, object_value, string
 from mux.errors import ProviderError
 from mux.profiles.gemini import WORKER_MODEL
@@ -48,16 +50,25 @@ class FlashTransport:
         return self._models.get(interaction)
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
-        original = object_value(request["agent_config"])
+        request = deepcopy(dict(request))
+        capped = model_request(dict(request))
+        original = {} if capped else object_value(request["agent_config"])
         required = (
             self._native_agent.spec.model.id if self._native_agent is not None else FLASH_PRIMARY
         )
-        if required not in (FLASH_PRIMARY, WORKER_MODEL) or original.get("model") != required:
+        if (
+            required not in (FLASH_PRIMARY, WORKER_MODEL)
+            or (request.get("model") if capped else original.get("model")) != required
+        ):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
         models = FLASH_MODELS
         if self._native_agent is not None:
+            if capped:
+                raise ProviderError(
+                    "invalid_request", retryable=False, native_code="named_agent_model_required"
+                )
             if request.get(
                 "agent"
             ) != self._native_agent.ref.id or self._native_agent.spec.model != ModelRef(
@@ -72,7 +83,10 @@ class FlashTransport:
             model = ModelRef(provider="gemini", id=name)
             await self.accounting.before_attempt(model=model, attempt=index + 1)
             bounded = dict(request)
-            bounded["agent_config"] = {**original, "model": name}
+            if capped:
+                bounded["model"] = name
+            else:
+                bounded["agent_config"] = {**original, "model": name}
             try:
                 reply = await self.source.create(bounded)
             except ProviderError as error:

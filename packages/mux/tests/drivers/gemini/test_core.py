@@ -754,3 +754,92 @@ def test_worker_model_permission_preserves_default_selections_and_thread_mode() 
     assert not runnable_selection(
         resolve_default(cheap.model_copy(update={"model": "gemini-3.5-pro"}))
     )
+
+
+@pytest.mark.parametrize("ceiling", (False, 0, -1, 65_537, "4096"))
+def test_model_output_cap_is_strict_and_bounded(ceiling) -> None:
+    spec = AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
+    with pytest.raises(UnsupportedCapability, match="capped_model_request"):
+        compile_agent(spec, max_output_tokens=ceiling)
+
+
+@pytest.mark.parametrize("resource", ("tool", "skill", "mcp", "agent_budget"))
+def test_model_output_cap_cannot_discard_managed_intent(resource: str) -> None:
+    from mux.contracts.ids import SkillRef
+
+    spec = AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
+    if resource == "tool":
+        spec = spec.model_copy(update={"tools": (ToolSpec(name="code_execution", kind="builtin"),)})
+    elif resource == "skill":
+        spec = spec.model_copy(update={"skills": (SkillRef(id="skill"),)})
+    elif resource == "mcp":
+        spec = spec.model_copy(
+            update={"mcp_servers": (MCPConnection(name="server", url="https://example.test/mcp"),)}
+        )
+    with pytest.raises(UnsupportedCapability, match="model_interaction_resources"):
+        compile_agent(
+            spec,
+            max_output_tokens=4096,
+            max_total_tokens=4096 if resource == "agent_budget" else None,
+        )
+
+
+async def test_capped_model_turns_keep_conversation_and_budget_after_restart() -> None:
+    transport, storage, state = FakeTransport(), MemoryStorage(), MemoryStateStore()
+    driver = GeminiManagedAgents(
+        transport,
+        storage=storage,
+        state_store=state,
+        account_scope_id="project",
+        max_output_tokens=4096,
+    )
+    agent = await driver.agents.create(
+        SCOPE,
+        AgentSpec(
+            name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash"), system="Kept"
+        ),
+        key="agent",
+    )
+    session = await driver.sessions.create(
+        SCOPE,
+        SessionSpec(
+            agent=agent.ref,
+            agent_revision=agent.revision,
+            config_revision=1,
+            extensions={
+                "gemini.session": ExtensionConfig(
+                    namespace="gemini.session",
+                    version=1,
+                    value={"thread": THREAD.model_dump(mode="json"), "binding_id": "capped"},
+                )
+            },
+        ),
+        key="session",
+    )
+    assert session.continuity.workspace == session.continuity.processes == "none"
+    transport.responses.extend(
+        [native("one", environment_id=None), native("two", environment_id=None)]
+    )
+    receipt = await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="one")
+    restarted = GeminiManagedAgents(
+        transport,
+        storage=storage,
+        state_store=state,
+        account_scope_id="project",
+        max_output_tokens=4096,
+    )
+    assert await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="one") == receipt
+    await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="two")
+    assert len(transport.requests) == 2
+    for body in transport.requests:
+        assert body["model"] == "gemini-3.8-flash"
+        assert body["generation_config"] == {"max_output_tokens": 4096}
+        assert body["tools"] == [] and body["system_instruction"] == "Kept"
+        assert not {"agent", "agent_config", "environment"} & body.keys()
+    assert transport.requests[1]["previous_interaction_id"] == "one"
+    async with storage.transaction() as records:
+        records.sessions[session.ref.id].request["generation_config"] = {"max_output_tokens": 8192}
+    with pytest.raises(UnsupportedCapability, match="changed_mcp_request_intent"):
+        await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="tampered")
+    assert len(transport.requests) == 2
+    assert await state.get_operation(SCOPE, "tampered") is None

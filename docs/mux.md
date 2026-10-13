@@ -2722,3 +2722,19 @@ N9 must supply the owner-captured records and independently pinned operation IDs
 creation receipt provenance and current mutation authorization remain with their
 existing owners. Borrowed memory bindings remain unchanged; the helper does not
 certify DB binding preservation or deletion, which need their real owner readbacks.
+
+Ordinary tool-free Gemini channel turns can opt into a native output-token limit
+through the existing operator runtime manifest. Set `max_output_tokens` to a
+strict integer from 1 to 65,536;4096 is a small example. This requires
+`environment: {"name": "no-execution", "execution": "none"}` and `tools: []`.
+The existing driver compiles a model interaction with
+`generation_config.max_output_tokens`, retains the same scoped journal and
+conversation history, and preserves the limit on subsequent turns and 503
+fallbacks. No sandbox environment is created or reused in this configuration.
+
+Managed tools, skills, MCP, mounts, native agent definitions and worker execution
+are incompatible with this configuration and refuse before provider access.
+Omitting the field preserves existing managed-agent turns and worker option-A
+budgets. The native model response limit is distinct from the managed-agent
+`max_total_tokens` budget, which is best-effort and does not enforce an output
+ceiling. No input-token or final-cost bound is implied.
