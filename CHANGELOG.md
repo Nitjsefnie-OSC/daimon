@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 
+- Resolve canonical workers through the current backend policy and preserve their full specs through scoped, single-attempt agent creation.
+
 - Allow fleet worker specs to declare closed resource drops, narrow their grants, remove sandbox execution tools, and record the declarations in existing scoped audits.
 
 - Reuse the fenced turn mutation owner for unbound private worker slots and publish accepted worker results from their durable journal.

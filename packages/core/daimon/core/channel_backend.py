@@ -38,7 +38,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import source_agent_record
-from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.pricing import MODEL_PRICING, ProviderPrice, list_price_preview
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import agent_backends, mux_state, security_audit
@@ -625,6 +625,7 @@ async def resolve_turn_backend(
     *,
     enabled: bool,
     retained_revision: int | None = None,
+    worker: ResolvedWorkerSpec | None = None,
     validate_origin: Callable[
         [ResolvedBackend, Literal["channel", "agent"], ConfigRevision | None],
         Awaitable[None] | None,
@@ -634,7 +635,7 @@ async def resolve_turn_backend(
     """Resolve and retain through the existing immutable channel revision namespace."""
     if not enabled or retained_revision == 0:
         return None, False, "default"
-    if retained_revision is not None:
+    if retained_revision is not None and worker is None:
         retained = await mux_state.get_config_revision(session, channel, retained_revision)
         origin = await mux_state.config_origin(session, channel, retained_revision)
         if retained is None or origin not in ("channel", "channel_clear", "agent"):
@@ -648,23 +649,65 @@ async def resolve_turn_backend(
         raise AgentBackendRefused("tenant_mismatch")
     await policy_store.lock_policy_writes_shared(session, tenant_id=tenant_id)
     override, ever_shared = await current_backend_and_sharing(session, channel)
-    if (
-        override is not None
-        and await mux_state.config_origin(session, channel, override.local) != "channel_clear"
-    ):
-        return override, ever_shared, "channel"
-    setting = await agent_backends.current(session, tenant_id, agent.agent_id)
-    if setting is None or setting.backend is None:
-        return None, ever_shared, "default"
+    if worker is None:
+        if (
+            override is not None
+            and await mux_state.config_origin(session, channel, override.local) != "channel_clear"
+        ):
+            return override, ever_shared, "channel"
+        setting = await agent_backends.current(session, tenant_id, agent.agent_id)
+        if setting is None or setting.backend is None:
+            return None, ever_shared, "default"
+        selection = backend_selection(setting.backend)
+    else:
+        fleet = worker.permissions.fleet
+        if (
+            validate_origin is None
+            or fleet.root.channel != channel
+            or fleet.depth != 1
+            or not fleet.enabled
+            or not fleet.active
+            or fleet.scope.is_platform
+            or fleet.scope.is_legacy_host_authorized
+            or fleet.scope.tenant_id != channel.tenant_id
+            or fleet.scope.account_id != str(fleet.account_id)
+            or worker.permissions.spec != worker.spec
+            or worker.permissions.backend_grants != (worker.backend,)
+            or worker.spec.model.provider != worker.backend.backend
+            or worker.permissions.models != (worker.spec.model,)
+            or (worker.backend.model is not None and worker.spec.model.id != worker.backend.model)
+            or (
+                worker.permissions.agent_id is not None
+                and worker.permissions.agent_id != agent.agent_id
+            )
+        ):
+            raise AgentBackendRefused("worker_identity_required")
+        if worker.source_agent is not None and (
+            agent.source is None or worker.source_agent != (agent.source.ref, agent.source.revision)
+        ):
+            raise AgentBackendRefused("stale_revision")
+        selection = worker.backend
     policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)
-    if not backend_is_enabled(setting.backend, policy.enabled_backends):
+    if not backend_is_enabled(selection.backend, policy.enabled_backends):
         raise AgentBackendRefused("backend_not_allowed")
-    selection = backend_selection(setting.backend)
     if validate_origin is not None:
         checking = validate_origin(selection, "agent", None)
         if inspect.isawaitable(checking):
             await checking
     check_backend(ConfigRevision.create(channel, 1, selection))
+    if retained_revision is not None:
+        retained = await mux_state.get_config_revision(session, channel, retained_revision)
+        if (
+            retained is None
+            or await mux_state.config_origin(session, channel, retained_revision) != "agent"
+            or retained.content_digest() != selection.content_digest()
+        ):
+            raise AgentBackendRefused("stale_revision")
+        if validate_origin is not None:
+            checking = validate_origin(selection, "agent", retained)
+            if inspect.isawaitable(checking):
+                await checking
+        return retained, ever_shared, "agent"
     for _ in range(3):
         effective = await mux_state.effective_revision(
             session, channel, selection.content_digest(), "agent"

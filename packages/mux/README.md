@@ -944,3 +944,10 @@ that native ID, and each dispatch checks the stored definition against it. The
 Flash accounting transport uses the verified model for one named-agent attempt;
 it never substitutes the inline fallback chain. Existing inline callers omit this
 optional dependency and retain their requests and accounting policy.
+
+### Claimed worker resources
+
+Canonical worker specs can use the existing scoped Anthropic create edge without
+passing through a legacy SDK payload projection. Agent creation observes the
+existing single-attempt mutation context only for a claimed operation; ordinary
+resource callers retain their request and retry behavior.

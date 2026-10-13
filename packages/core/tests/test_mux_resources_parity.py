@@ -545,3 +545,122 @@ async def test_skill_walks_keep_sdk_terminal_page_stop_rule(path, stop_case):
     assert actual == expected
     assert_transport_equal(old, new)
     assert len(new.requests) == 1
+
+
+@pytest.mark.parametrize("clone", [False, True])
+async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
+    from dataclasses import replace
+
+    from mux.contracts.ids import ResourceRef, Revision
+    from mux.contracts.resources import Agent, AgentSpec, ToolSpec
+
+    from .test_fleet_permissions import parent, resolve
+
+    root = parent()
+    payload = {
+        "name": "worker",
+        "model": root.spec.model.id,
+        "system": root.base_system + "\n\nDo the delegated task.",
+        "description": "Full authored description",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "helper",
+                "description": "",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+        "skills": [],
+        "mcp_servers": [],
+        "metadata": {"daimon_tenant": root.fleet.scope.tenant_id},
+    }
+    requested = AgentSpec(
+        name="worker",
+        model=root.spec.model,
+        system=root.base_system + "\n\nDo the delegated task.",
+        description="Full authored description",
+        tools=(
+            ToolSpec(
+                name="helper",
+                kind="custom",
+                description="",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ),
+        skills=(),
+        mcp_servers=(),
+        metadata={"daimon_tenant": root.fleet.scope.tenant_id},
+    )
+    root = replace(root, spec=requested)
+    source = Agent(
+        ref=ResourceRef(
+            id="source",
+            kind="agent",
+            provider="anthropic",
+            account_scope_id="workspace",
+            tenant_id=root.fleet.scope.tenant_id,
+            account_id=root.fleet.scope.account_id,
+        ),
+        revision=Revision(local=7),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        spec=requested,
+    )
+    if clone:
+        root = replace(
+            root, source_agents=(source.ref,), source_revisions=((source.ref, source.revision),)
+        )
+    worker = resolve(root, source if clone else requested)
+    before, after = ScriptedTransport(), ScriptedTransport()
+    native = ma_agent(
+        id="actual-worker",
+        name="worker",
+        model=root.spec.model.id,
+        system=requested.system,
+        metadata=payload["metadata"],
+    ).model_dump(mode="json")
+    from daimon.testing.ma_transport import ScriptedReply
+
+    before.queue(ScriptedReply("POST", "/v1/agents", httpx.Response(200, json=native)))
+    after.queue(ScriptedReply("POST", "/v1/agents", httpx.Response(200, json=native)))
+    async with before.client() as old, after.client() as new:
+        await old.beta.agents.create(**payload)
+        actual = await create_agent(
+            new, worker.spec, scope=worker.permissions.fleet.scope, key="claimed-worker"
+        )
+        assert actual.id == "actual-worker"
+    before.assert_consumed()
+    after.assert_consumed()
+    assert before.requests[0].body == after.requests[0].body
+    assert before.requests[0].protocol_headers == after.requests[0].protocol_headers
+
+
+async def test_claimed_agent_create_disables_sdk_retry_without_changing_shared_client():
+    from anthropic import InternalServerError
+    from daimon.testing.ma_transport import ScriptedReply
+    from mux.drivers.anthropic.transport import single_attempt_mutation
+
+    trace = ScriptedTransport()
+    trace.queue(
+        ScriptedReply(
+            "POST",
+            "/v1/agents",
+            httpx.Response(
+                500,
+                json={
+                    "type": "error",
+                    "error": {"type": "api_error", "message": "lost acknowledgement"},
+                },
+            ),
+        )
+    )
+    async with trace.client(max_retries=8) as client:
+        with single_attempt_mutation(), pytest.raises(InternalServerError):
+            await create_agent(
+                client,
+                {"name": "worker", "model": "claude-haiku-5-5"},
+                scope=platform_scope("offline retry proof"),
+                key="claimed",
+            )
+        assert client.max_retries == 8
+    trace.assert_consumed()
+    assert len(trace.requests) == 1

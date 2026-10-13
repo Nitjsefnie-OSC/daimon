@@ -286,11 +286,21 @@ async def retrieve_agent(
 
 
 async def create_agent(
-    client: AsyncAnthropic, payload: Mapping[str, object], *, scope: Scope
+    client: AsyncAnthropic,
+    payload: Mapping[str, object] | AgentSpec,
+    *,
+    scope: Scope,
+    key: str | None = None,
 ) -> BetaManagedAgentsAgent:
     backend = managed_agents(client, scope=scope)
     return sdk_agent(
-        await legacy_call(backend.agents.create(scope, agent_spec(payload), key=str(uuid4())))
+        await legacy_call(
+            backend.agents.create(
+                scope,
+                payload if isinstance(payload, AgentSpec) else agent_spec(payload),
+                key=key if key is not None else str(uuid4()),
+            )
+        )
     )
 
 
