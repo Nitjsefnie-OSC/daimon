@@ -44,7 +44,7 @@ from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
-from daimon.core.mux_compat import legacy_call
+from daimon.core.mux_compat import legacy_call, sdk_agent
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
@@ -58,7 +58,10 @@ from daimon.core.session_snapshot import (
     session_skills,
     snapshot_from_created_session,
 )
-from daimon.core.sessions import create_session
+from daimon.core.sessions import (
+    _check_resource_source,  # pyright: ignore[reportPrivateUsage]
+    create_session,
+)
 from daimon.core.shared_threads import (
     SharedThread,
     may_have_shared_binding,
@@ -327,6 +330,27 @@ async def create_ma_session(
     turn before any session exists, and a seal added since is stamped on the
     session and mounts memory read-only.
     """
+    persistence = current_persistence.get()
+    if worker is not None:
+        if (
+            persistence is None
+            or before_native is None
+            or resource_source is None
+            or resource_source.source is None
+            or resource_source.source.native is None
+            or persistence.scope != worker.permissions.fleet.scope
+            or resource_source.resource_scope != worker.permissions.fleet.scope
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        _check_resource_source(
+            resource_source,
+            sdk_agent(resource_source.source),
+            admission.environment,
+            tenant_id,
+            resource_source.agent_id,
+            admission.account_id,
+            persistence.scope,
+        )
     if _admitted_profile(admission) != "anthropic.managed_agents":
         raise AdmissionDenied(reason="backend_unsupported")
     admission = await reauthorize(deps, admission)
@@ -432,7 +456,6 @@ async def create_ma_session(
             channel_skills=admission.channel_skills,
         )
 
-    persistence = current_persistence.get()
     if worker is None:
         ma_session = await create()
     elif persistence is None or before_native is None or resource_source is None:

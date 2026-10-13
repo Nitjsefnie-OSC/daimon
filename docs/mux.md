@@ -2515,3 +2515,8 @@ refuses and invokes bounded cleanup. Allocation still requires the caller's fres
 source-preservation and financial authority; preparation alone is not an
 execution certificate. Anthropic worker execution remains refused until its
 complete source-preservation and independent native readback proof is installed.
+
+Worker allocation requires the complete captured source, fresh callback and active
+persistence context to share the same canonical worker scope, including principal
+and authorization. The existing source identity validator runs before source or
+credential reads; a foreign context cannot own another worker's acknowledgement.

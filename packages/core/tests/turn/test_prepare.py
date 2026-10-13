@@ -1381,6 +1381,118 @@ def test_no_replacement_notice_without_a_replacement_or_a_transfer() -> None:
     assert not ContinuityOutcome(state="replaced", applied=("model",)).announces_replacement()
 
 
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "tenant_id",
+        "account_id",
+        "principal_id",
+        "authorization_id",
+        "source_scope",
+        "source_native_identity",
+        "source_tenant",
+        "missing_source",
+        "missing_callback",
+        "missing_context",
+    ],
+)
+async def test_worker_session_preparation_refuses_foreign_context_before_reads_or_effects(
+    db_preflight, db_nullpool_engine, monkeypatch, mismatch
+):
+    from daimon.core.fleet import spawn_operation_key
+    from daimon.core.turn.persistence import TurnPersistence
+    from mux.contracts.ids import ThreadRef
+    from mux.errors import ScopeViolation
+    from mux.state.lease import Slot
+    from mux.state.memory import MemoryStateStore
+
+    from ..test_sessions import worker_source_context
+
+    sessions, tenant, account, original, environment, worker, source = await worker_source_context(
+        db_nullpool_engine
+    )
+    scope = worker.permissions.fleet.scope
+    if mismatch in {"tenant_id", "account_id", "principal_id", "authorization_id"}:
+        scope = scope.model_copy(update={mismatch: str(uuid.uuid4())})
+    elif mismatch == "source_scope":
+        source = source.model_copy(
+            update={"resource_scope": scope.model_copy(update={"principal_id": "foreign"})}
+        )
+    elif mismatch == "source_native_identity":
+        source = source.model_copy(
+            update={
+                "source": source.source.model_copy(
+                    update={"native": {**source.source.native, "id": "foreign-source"}}
+                )
+            }
+        )
+    elif mismatch == "source_tenant":
+        source = source.model_copy(update={"tenant_id": uuid.uuid4()})
+    elif mismatch == "missing_source":
+        source = None
+    store = MemoryStateStore()
+    slot = Slot(
+        thread=ThreadRef(
+            channel=worker.permissions.fleet.root.channel.model_copy(
+                update={"tenant_id": scope.tenant_id}
+            ),
+            thread_id="foreign-allocation",
+        ),
+        account_id=scope.account_id,
+    )
+    key = spawn_operation_key(worker.permissions.fleet.run_id, 0)
+    persistence = TurnPersistence(store, None, scope, slot=slot, operation_key=key)
+    reads = []
+
+    async def forbidden(*args, **kwargs):
+        reads.append(True)
+        raise AssertionError("a scope refusal must precede source/secret/native reads")
+
+    for name in ("reauthorize", "get_agent_mode", "_env_bytes_sha256", "create_session"):
+        monkeypatch.setattr(prepare_mod, name, forbidden)
+    native_calls = []
+
+    def no_native(request, match):
+        native_calls.append(request)
+        raise AssertionError("a scope refusal must precede native requests")
+
+    router = MARouter()
+    for method in ("GET", "POST", "DELETE"):
+        router.add(method, r"/v1/.*", no_native)
+    deps = _deps(sessionmaker=sessions, router=router)
+    admitted = _admission(account_id=account, agent=original, env=environment)
+
+    async def guard():
+        raise AssertionError("the local scope guard must precede the fresh callback")
+
+    async def attempt():
+        expected = (
+            ScopeViolation
+            if mismatch in {"source_native_identity", "source_tenant"}
+            else prepare_mod.AdmissionDenied
+        )
+        with pytest.raises(expected) as refused:
+            await prepare_mod.create_ma_session(
+                deps,
+                admitted,
+                tenant_id=tenant,
+                resource_source=source,
+                worker=worker,
+                before_native=None if mismatch == "missing_callback" else guard,
+            )
+        if expected is prepare_mod.AdmissionDenied:
+            assert refused.value.reason == "backend_unsupported"
+
+    async with deps.anthropic:
+        if mismatch == "missing_context":
+            await attempt()
+        else:
+            with persistence.activate():
+                await persistence.run(attempt)
+    assert reads == [] and native_calls == []
+    assert not store.data.operations and not store.data.bindings
+
+
 @pytest.mark.parametrize("outcome", ["ack", "lost_ack", "refused", "model_drift"])
 async def test_worker_session_preparation_uses_one_owned_claim_and_original_source(
     db_preflight, db_nullpool_engine, outcome
