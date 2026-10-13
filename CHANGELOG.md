@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin the minimum completion-wake rollback reader and verify the downgrade lock against a concurrent writer.
 - Keep fleet outcome exports free of private worker specs and opaque native data while preserving result bindings and known failures.
 - Keep fleet outcome exports free of private worker specs and opaque native data while preserving result bindings and independently validated failure facts.
+- Retain finite, revocable per-agent fleet grants through the existing backend preference CAS and audit owner; backend changes preserve the current grant without restoring historical authority.
+- Retain finite, revocable per-agent fleet grants through one existing backend preference CAS and audit mutation owner; backend changes preserve the current grant without restoring historical authority.
 
 - Refuse retained fleet-root authority after its original run completes, fails or is cancelled, including completion-turn and authenticated tool readers.
 

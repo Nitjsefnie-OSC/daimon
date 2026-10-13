@@ -2798,3 +2798,27 @@ and refuses while any such row remains; refusal rolls back the restore step.
 After retirement, its reason-only deletion and legacy-check restoration can
 succeed. Removing queue rows is not cancellation of native work or a refund of
 usage; those confirmations remain independent requirements.
+
+Per-agent fleet grants are finite admin settings in the existing immutable
+`agent_backend_revision` lineage. The nullable grant retains exact paired
+backend/profile and model references, worker count, per-run worker authority budget,
+expiry and explicit run/worker/input ceilings. The current admin must confirm a
+fresh preview and setting revision; backend and grant edits share one policy-
+fenced revision insert and security audit transaction. An epoch is the local revision that granted or amended authority.
+Backend set, clear and revert carry the current grant unchanged; grant-only
+appends preserve the backend undo pointer. Revoke appends no grant, and re-grant
+uses a new epoch. A backend revert never restores a historical grant.
+
+Grant reads do not infer funding, prices, source fidelity or a native final-bill
+cap. Missing or expired grants supply no fleet authority; malformed grant data
+is logged without its body and refused by the fleet reader while ordinary
+backend reads remain usable. A backend edit after an invalid grant appends no
+grant, retiring that authority without rewriting the malformed history. Old
+rows have no grant. During a mixed-image
+rollout, an old neutral writer appends no grant and therefore revokes rather
+than broadens authority; re-granting cannot reuse its former epoch. Dropping the
+grant column removes all grants. Runtime construction and admin surfaces are
+separate installation steps; this persistence API alone enables no fleet task.
+The financial grant ceiling covers workers only. The ordinary orchestrator root
+retains its normal billing and input path; whole-root financial and input
+controls must be installed separately before a fleet live retry.

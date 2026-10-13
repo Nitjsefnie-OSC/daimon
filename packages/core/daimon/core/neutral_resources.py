@@ -928,6 +928,53 @@ class WorkerLimits(Contract):
             raise WorkerSpecRefused("deadline", "not_subset")
 
 
+class AgentFleetGrant(Contract):
+    """Finite admin ceilings; an owner assigns the persisted setting epoch."""
+
+    epoch: int = Field(default=0, ge=0, strict=True)
+    max_workers: int = Field(gt=0, strict=True)
+    choices: tuple[tuple[ResolvedBackend, ModelRef], ...] = Field(min_length=1)
+    limits: WorkerLimits
+    max_run_seconds: int = Field(gt=0, strict=True)
+    max_worker_seconds: int = Field(gt=0, strict=True)
+    max_root_turns: int = Field(gt=0, strict=True)
+
+    @property
+    def expires_at(self) -> datetime:
+        return self.limits.deadline
+
+    @property
+    def backends(self) -> tuple[ResolvedBackend, ...]:
+        retained: list[ResolvedBackend] = []
+        for backend, _model in self.choices:
+            if backend not in retained:
+                retained.append(backend)
+        return tuple(retained)
+
+    @property
+    def models(self) -> tuple[ModelRef, ...]:
+        return tuple(model for _backend, model in self.choices)
+
+    @model_validator(mode="after")
+    def _finite_choices(self) -> AgentFleetGrant:
+        models = tuple((model.provider, model.id) for _backend, model in self.choices)
+        if (
+            self.limits.budget_usd <= 0
+            or len(set(models)) != len(models)
+            or self.max_worker_seconds > self.max_run_seconds
+            or any(
+                backend.backend != model.provider
+                or backend.thread_mode != "per_caller"
+                or (backend.model is not None and backend.model != model.id)
+                or bool(model.options)
+                or "*" in model.id
+                for backend, model in self.choices
+            )
+        ):
+            raise ValueError("fleet ceilings require finite unique profile/model choices")
+        return self
+
+
 @dataclass(frozen=True)
 class WorkerPermissions:
     """Actual root facts supplied by the host; never parsed from worker JSON."""
