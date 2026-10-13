@@ -2368,3 +2368,50 @@ collection still require their independently authorized host integrations.
 Migration `0094_worker_finished_wakes`, after `0093_fleet_runs`, widens only
 the existing reason check. Its downgrade removes worker-completion rows that
 older applications cannot interpret before restoring the previous reasons.
+
+
+## Fleet orchestration tools
+
+The opt-in fleet registration exposes `fleet_spawn`, `fleet_status`, `fleet_kill`,
+`fleet_resume`, `fleet_cross_review` and `fleet_collect`. Registration requires
+fleet enablement plus the mux turn path and channel-backend configuration. It is
+disabled by default. An authenticated live-root loader and the host fleet owner
+ports must be installed; absent bindings refuse before worker effects. A chat
+agent ID, run handle, role or matching agent name does not supply those grants.
+Every root and session decision reuses the host-loaded complete `Place`, including
+category and unresolved-category facts, against current tenant policy.
+Kill, resume and collect additionally require the original orchestrator principal
+or a trusted tenant admin; an agent key cannot supply the admin exemption. The
+loader retains the run's original scope principal independently of the current
+interaction's subject. The shared service owns this check for every adapter;
+open channel policy alone does not grant control of another person's run.
+Role refusals use the existing request audit as `authz:controller_required`
+denials, rather than tool errors; outside an audit capture the recorder is a no-op.
+
+Workers reuse `AgentSpec`, `BackendConfig` and a pinned `Agent` revision with
+sparse `AgentPatch` overrides. The single worker resolver derives their tools,
+models, resources, safety prompt and limits from the root. Arbitrary caller
+`SessionSpec` resources are currently refused until scoped worker preparation is
+bound. Resume rechecks current permissions and keeps the original budget, turn
+and deadline ceilings; it cannot reopen a terminal worker or reset a hold.
+
+Cross-review attaches the target's verified journal event through the same spawn
+path. The host pins a closed review contract: JSON containing `verdict`
+(`approved` or `refused`) and the exact `reviewed_digest`. A primary's stored
+result contract declares a required review with `review_required: true`; omitted
+or false does not require one, and any non-boolean value refuses. Reviewers use
+the same admission path, capacity slots, budgets and deadlines as primaries and
+count within the run's worker limit. Three primaries and one required review
+therefore use four workers. Collection waits for unfinished workers and blocks on failed
+workers, refused reviews, stale digests or invalid output contracts. A wake or
+quorum is scheduling evidence, never output approval. `ready` returns validated
+primary outputs for the orchestrator's summary; card excerpts and review prose
+are not used as results.
+
+The shared `FleetOrchestrator` serves both MCP and authenticated platform
+controls. Store, budget, driver and wake bindings own atomic admission, audit,
+reservation, operation replay, scoped binding reads and frozen wait generations.
+The tool service adds no database tables, native client or permission resolver.
+Missing bindings stay unavailable; offline dependency stubs do not certify
+native worker execution. Existing self-only agent-chat tools continue to refuse
+inside chat turns.
