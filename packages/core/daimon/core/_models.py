@@ -2684,6 +2684,9 @@ class TenantGitHubRepo(Base):
     authorized_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
     )
+    # The confirming person's GitHub permission on the repo: admin, maintain,
+    # write, triage or read. Null on rows authorized before it was recorded.
+    authorized_permission: Mapped[str | None] = mapped_column(Text)
     authorized_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

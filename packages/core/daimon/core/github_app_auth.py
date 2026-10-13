@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, cast
 
@@ -66,6 +66,16 @@ class AppInstallationDetails:
     account_type: str
     repository_selection: Literal["all", "selected"]
     suspended_at: datetime | None
+    permissions: Mapping[str, str] = field(default_factory=dict[str, str])
+
+
+def installation_supports_write(permissions: Mapping[str, str]) -> bool:
+    """True when `permissions` covers the write profile (contents, issues, pull requests)."""
+    rank = {"read": 1, "write": 2, "admin": 3}
+    return all(
+        rank.get(permissions.get(name, ""), 0) >= rank[level]
+        for name, level in WRITE_PERMISSIONS.items()
+    )
 
 
 class _InstallationAccount(BaseModel):
@@ -79,6 +89,7 @@ class _InstallationDetailsResponse(BaseModel):
     account: _InstallationAccount
     repository_selection: Literal["all", "selected"]
     suspended_at: datetime | None = None
+    permissions: dict[str, str] = Field(default_factory=dict)
 
 
 async def get_app_installation_details(
@@ -104,6 +115,7 @@ async def get_app_installation_details(
         account_type=body.account.type,
         repository_selection=body.repository_selection,
         suspended_at=body.suspended_at,
+        permissions=body.permissions,
     )
 
 
