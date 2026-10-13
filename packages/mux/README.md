@@ -1024,3 +1024,8 @@ reported as a successful archive.
 Default-off worker echo admission is omitted from serialized controls so
 existing ordinary host plan and creation identities remain unchanged. Enabled
 echo admission is serialized and distinguishes the worker policy.
+Anthropic builtin tool configs accept the explicit `type` field returned by
+native agent retrieval. Session overrides preserve its original presence and
+request bytes; the legacy shape without that field remains valid. Unknown
+properties, invalid tool names, permission policies and non-string type values
+remain rejected by the existing strict configuration schema.

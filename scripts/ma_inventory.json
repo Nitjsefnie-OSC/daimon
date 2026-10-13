@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2653,
+  "files_scanned": 2654,
   "parse_errors": [],
   "calls": [
     {
@@ -7618,6 +7618,30 @@
       "category": "test",
       "resource": "sessions.create",
       "call": "original.beta.sessions.create(agent=cast(Agent, agent), environment_id='env_1')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_tool_config_roundtrip.py",
+      "line": 75,
+      "end": 75,
+      "scope": "test_sdk_retrieval_and_session_override_preserve_exact_request_bytes",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "sdk.beta.agents.retrieve('ag_1')",
+      "request_keys": [],
+      "response_access": [
+        "agent.id"
+      ]
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_tool_config_roundtrip.py",
+      "line": 99,
+      "end": 99,
+      "scope": "test_sdk_retrieval_and_session_override_preserve_exact_request_bytes",
+      "category": "test",
+      "resource": "sessions.create",
+      "call": "sdk.beta.sessions.create(agent=cast(Agent, override), environment_id='env_1')",
       "request_keys": [],
       "response_access": []
     },
@@ -19134,6 +19158,15 @@
     {
       "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
       "line": 182,
+      "module": "anthropic.types.beta.session_create_params",
+      "names": [
+        "Agent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_tool_config_roundtrip.py",
+      "line": 11,
       "module": "anthropic.types.beta.session_create_params",
       "names": [
         "Agent"

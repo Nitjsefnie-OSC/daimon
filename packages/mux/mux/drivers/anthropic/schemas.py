@@ -4,9 +4,9 @@ Optional properties serialize with exclude_unset=True: omission, explicit
 null, and explicit empty lists preserve the provider's distinct meanings.
 """
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.resources import NetworkPolicy, ToolSpec
@@ -36,8 +36,20 @@ class ToolConfig(ToolDefaults):
     name: str
 
 
+type _BuiltinToolName = Literal[
+    "bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"
+]
+
+
 class BuiltinToolConfig(ToolDefaults):
-    name: Literal["bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"]
+    name: _BuiltinToolName
+    type: _BuiltinToolName | None = None
+
+    @model_validator(mode="after")
+    def matching_type(self) -> Self:
+        if "type" in self.model_fields_set and self.type != self.name:
+            raise ValueError("builtin tool config type must match its name")
+        return self
 
 
 class AgentToolset(NativeConfig):
