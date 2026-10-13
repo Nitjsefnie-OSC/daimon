@@ -2472,7 +2472,10 @@ only its explicitly declared attachment, memory and sandbox losses; protected
 instructions, publication policy, credentials and opaque private resources are
 still obligations. The proof checks root scope, source identity/version, derived
 permissions and deadline, reads the complete native counterpart, then re-reads
-resource intent to reject drift before handing that exact plan to preparation.
+resource intent to reject drift before handing that exact verified snapshot to
+preparation. Gemini preparation consumes that snapshot without another native
+read. OpenAI and Gemini allocation share the held-owner validation and guarded
+catalog publication; provider environment and deployment checks remain scoped.
 Existing agent switches without a resolved worker remain refused. Configured
 caller MCP credentials also remain obligations, so these workers refuse in a
 host configuration requiring them until a credential materializer exists.

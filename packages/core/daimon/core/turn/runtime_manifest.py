@@ -25,9 +25,10 @@ from pydantic import (
 )
 
 if TYPE_CHECKING:
-    from daimon.core.neutral_resources import NeutralResourceHost
+    from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
     from daimon.core.stores.domain import BackendAgent
     from daimon.core.stores.neutral_catalog import AgentRevision
+    from daimon.core.turn.persistence import TurnPersistence
     from daimon.core.turn.prepare import ProviderPreparationRequest
 
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
@@ -426,7 +427,7 @@ async def read_preparation_counterpart(
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
-        return replace(selected, counterpart=counterpart)
+        return replace(selected, counterpart=counterpart, verified_counterpart=counterpart)
     except (UnsupportedCapability, TimeoutError, TurnError) as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception:
@@ -438,6 +439,8 @@ class CounterpartPlan(Protocol):
 
     @property
     def profile(self) -> str: ...
+    @property
+    def worker_materialization(self) -> bool: ...
     @property
     def tenant_id(self) -> str: ...
     @property
@@ -571,6 +574,49 @@ def validate_counterpart_request(
     if select_runtime_manifest(request, type(plan)) != plan:
         raise AdmissionDenied(reason="backend_unsupported")
     return revision
+
+
+async def materialize_counterpart(
+    plan: CounterpartPlan,
+    request: ProviderPreparationRequest,
+    original: ProviderPreparationRequest,
+    *,
+    resources: Callable[[TurnPersistence, ResolvedWorkerSpec], Awaitable[NeutralResourceHost]],
+) -> AgentRevision:
+    """Publish through the held preparation owner after validating its original grant."""
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.persistence import current_persistence
+
+    validate_counterpart_request(plan, request, worker_materialization=True)
+    worker, source, guard = request.worker, request.source, request.before_native
+    active = current_persistence.get()
+    if (
+        not plan.worker_materialization
+        or (request.scope, request.admission.backend_revision, worker)
+        != (original.scope, original.admission.backend_revision, original.worker)
+        or worker is None
+        or source is None
+        or source.source is None
+        or guard is None
+        or active is None
+        or active.scope != request.scope
+        or active.store is not request.deps.state_store
+        or request.deps.state_store is not original.deps.state_store
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
+    active.check_session(request.scope, None)
+    host = await resources(active, worker)
+    catalog_id = active.operation_key + ":agent"
+    return await host.publish(
+        catalog_id,
+        worker.spec,
+        expected_revision=0,
+        key=catalog_id,
+        persistence=active,
+        guard=guard,
+        worker=worker,
+        source=source.source,
+    )
 
 
 async def read_counterpart(
