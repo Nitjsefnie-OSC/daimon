@@ -207,7 +207,7 @@ async def test_remove_and_delete_leave_members_contained(
         "the Space's agent drops the channel, keeping the Space as its home"
     )
     assert channel_rule(policy, "c3") == OWN, "the channel that left stays contained"
-    assert agent_permissions(policy, ("x",)).home is not None, "x still has a home"
+    assert agent_permissions(policy, ("x",)).home == space_key(removed.space.id), "still the Space"
 
     deleted = await delete_space(db_session_factory, tenant_id=tenant.id, name="s", subject=ADMIN)
     policy = await load_access_policy(db_session, tenant_id=tenant.id)

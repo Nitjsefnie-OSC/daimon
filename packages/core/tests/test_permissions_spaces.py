@@ -142,6 +142,34 @@ def test_inside_space_members_read_each_other_and_keep_no_agents() -> None:
     assert _decide(policy, Action.RUN_AGENT, "a", agent=AgentRef.of("y")) is None, "any agent runs"
 
 
+def test_an_inside_space_answers_no_external_people() -> None:
+    """An inside Space is no home, so externals are refused there as anywhere else."""
+    for place in "ab":
+        assert not channel_permissions(_policy(INSIDE), channel_id=place).answers_external
+
+
+@pytest.mark.parametrize(("parent", "allowed"), [("a", True), ("c", False)])
+def test_a_thread_under_a_member_is_in_the_space(parent: str, allowed: bool) -> None:
+    policy = _policy()
+    thread = Place(channel_id="t", parent_channel_id=parent)
+
+    def decide(action: Action, place: Place) -> bool:
+        return bool(
+            authorize(
+                policy,
+                subject=MEMBER,
+                action=action,
+                agent=X,
+                place=place,
+                origin=thread,
+                origin_channel_ids=frozenset({"t", parent}),
+            )
+        )
+
+    assert decide(Action.RUN_AGENT, thread) is allowed, "x runs in threads of members only"
+    assert decide(Action.READ_CHANNEL, Place(channel_id="b")) is allowed, "and reads across"
+
+
 def test_set_space_is_for_server_admins_only() -> None:
     policy = _policy()
     admin = Subject(is_admin=True, platform_user_id="u1")
