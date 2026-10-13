@@ -1713,12 +1713,20 @@ class BudgetGuard:
             reason = "settled"
         elif status != "completed":
             reason = "probe_error"
-        elif estimate is None or actual is not None or original.container_allowance is not None:
+        elif (
+            estimate is None
+            or actual is not None
+            or original.container_allowance is not None
+            or original.h6 is not None
+        ):
             terminal, reason = "uncertain", "unknown_usage"
         charged = measured if measured is not None else original.reserved_usd
         # Backward-compatible undated estimates are explicitly unverified holds.
+        # Staging cash bounds also cover setup, admin and cleanup exposure;
+        # token counts alone cannot establish their actual spend or release room.
         if (
             actual is None
+            and original.h6 is None
             and original.container_allowance is None
             and status == "completed"
             and estimate is not None

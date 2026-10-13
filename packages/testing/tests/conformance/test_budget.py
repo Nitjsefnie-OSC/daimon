@@ -660,3 +660,63 @@ def test_staging_no_duplicate_or_followup_after_unresolved_leg(
     with pytest.raises(BudgetRefused, match="active, failed or unresolved"):
         guard.reserve(second)
     assert len(receipts(guard)) == (1 if terminal == "active" else 2)
+
+
+@pytest.mark.parametrize("provider", tuple(TEST_MODELS))
+@pytest.mark.parametrize("tokens", [0, 1_000])
+def test_staging_token_estimate_cannot_release_cash_hold(
+    tmp_path: Path, provider: str, tokens: int
+) -> None:
+    guard = setup_guard(tmp_path, "2", providers=tuple(TEST_MODELS))
+    admitted = staging_plan(guard, provider=provider, fixture_id=f"H6-{provider.upper()}")
+    held = guard.reserve(admitted)
+    receipt = guard.settle(
+        held,
+        status="completed",
+        limits=admitted.limits,
+        usage=TokenUsage(
+            input_tokens=tokens, output_tokens=0, input_cached_tokens=0, input_cache_write_tokens=0
+        ),
+    )
+    assert receipt.status == "uncertain" and receipt.reason == "unknown_usage"
+    assert receipt.actual_usd is None and receipt.actual_evidence is None
+    assert receipt.accounting_status == "estimated_unverified"
+    assert receipt.held_usd == receipt.cost_estimate_usd == held.receipt.reserved_usd == 1
+    assert BudgetGuard(guard.config_path, guard.spend_path).report()[-1] == receipt
+    with pytest.raises(BudgetRefused):
+        guard.reserve(plan(provider=provider))
+
+
+def test_staging_token_overrun_retains_larger_proven_hold(tmp_path: Path) -> None:
+    guard = setup_guard(tmp_path)
+    admitted = staging_plan(guard)
+    held = guard.reserve(admitted)
+    usage = TokenUsage(
+        input_tokens=2_000_000, output_tokens=0, input_cached_tokens=0, input_cache_write_tokens=0
+    )
+    receipt = guard.settle(held, status="completed", limits=admitted.limits, usage=usage)
+    assert receipt.status == "overrun" and receipt.admission_blocked
+    assert receipt.actual_usd is None and receipt.accounting_status == "estimated_unverified"
+    assert (
+        receipt.held_usd
+        == receipt.cost_estimate_usd
+        == held.price.reserve(admitted.limits, usage=usage)
+    )
+    assert receipt.held_usd > held.receipt.reserved_usd
+
+
+def test_ordinary_zero_token_estimate_keeps_legacy_settlement(tmp_path: Path) -> None:
+    guard = setup_guard(tmp_path)
+    admitted = plan()
+    held = guard.reserve(admitted)
+    receipt = guard.settle(
+        held,
+        status="completed",
+        limits=admitted.limits,
+        usage=TokenUsage(
+            input_tokens=0, output_tokens=0, input_cached_tokens=0, input_cache_write_tokens=0
+        ),
+    )
+    assert receipt.status == "completed" and receipt.reason == "settled"
+    assert receipt.actual_usd is None and receipt.accounting_status == "estimated_unverified"
+    assert receipt.held_usd == receipt.cost_estimate_usd == 0

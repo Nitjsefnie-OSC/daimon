@@ -500,3 +500,57 @@ async def test_staging_complete_schema_needs_bound_artifact_reader_and_actual_sp
                 and result.receipt.held_usd == admitted.h6.maximum_hold_usd
             )
     assert len(receipts(guard)) == 2
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+@pytest.mark.parametrize("tokens", [0, 1_000])
+@pytest.mark.parametrize("spend", ["absent", "partial", "complete"])
+async def test_staging_runner_releases_cash_only_on_complete_actual(
+    tmp_path: Path, provider: str, tokens: int, spend: str
+) -> None:
+    guard = setup_guard(tmp_path, "2", providers=("anthropic", "openai", "gemini"))
+    admitted = staging_plan(guard, provider=provider, fixture_id=f"H6-{provider.upper()}")
+    proof = cell_proof(admitted.fixture_id)
+
+    def verifier(value: H6Receipt) -> None:
+        assert value == H6Receipt.model_validate_json(proof.model_dump_json())
+
+    async def invoke(recorder: Recorder) -> ProbeOutcome:
+        async with httpx.AsyncClient(transport=recorder, trust_env=False) as client:
+            await client.post("https://offline.invalid/v1/messages")
+        actual = None if spend == "absent" else known_staging_spend(admitted)
+        if spend == "partial":
+            actual = actual.model_copy(update={"usage_complete": False})
+        return ProbeOutcome(
+            usage=TokenUsage(
+                input_tokens=tokens,
+                output_tokens=0,
+                input_cached_tokens=0,
+                input_cache_write_tokens=0,
+            ),
+            actual=actual,
+            result=Result(admitted.fixture_id, "pass", ("offline contract",)),
+            h6=proof,
+        )
+
+    result = await run_probe(
+        guard,
+        admitted,
+        tmp_path / "settlement.json",
+        invoke,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200)),
+        verify_h6=verifier,
+    )
+    receipt = result.receipt
+    if spend == "complete":
+        assert result.result.status == "pass"
+        assert receipt.accounting_status == "actual" and receipt.status == "completed"
+        assert receipt.actual_usd == Decimal("0.000011") and receipt.held_usd == 0
+        guard.reserve(plan(provider=provider))
+    else:
+        assert result.result.status == "pending"
+        assert receipt.status == "uncertain" and receipt.reason == "unknown_usage"
+        assert receipt.actual_usd is None and receipt.accounting_status == "estimated_unverified"
+        assert receipt.held_usd == receipt.cost_estimate_usd == receipt.reserved_usd == 1
+        with pytest.raises(BudgetRefused):
+            guard.reserve(plan(provider=provider))

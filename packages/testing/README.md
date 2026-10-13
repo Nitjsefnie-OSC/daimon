@@ -918,6 +918,8 @@ artifact reader must independently validate the real preview/admin/CAS/audit,
 setting/revert, native/delivery, usage and cleanup artifacts and signed manifest.
 It raises on missing or foreign proof and returns `None`, never a boolean approval.
 Absent proof, reader or known actual accounting produces typed PENDING.
+For these staging legs, token estimates alone retain the full reserved cash
+bound (or a larger proven overrun); only complete measured spend releases savings.
 
 These offline contracts grant no authority and earn no staging points. The live
 entry still needs the exact lead SIGN/PIN, fresh N8 quote/native bounds, all
