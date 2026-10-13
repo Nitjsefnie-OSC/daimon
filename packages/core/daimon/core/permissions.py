@@ -93,6 +93,13 @@ def space_reach(policy: TenantAccessPolicy, origin_ids: Collection[str]) -> froz
     return frozenset(reach)
 
 
+def home_channel_ids(policy: TenantAccessPolicy, home: str) -> frozenset[str]:
+    """The channels a home spans: an own Space's members, else the channel itself.
+    A Space key the policy doesn't hold spans only itself, which no one administers."""
+    space = policy.spaces.get(home)
+    return space.channel_ids if space is not None else frozenset({home})
+
+
 def describe_home(policy: TenantAccessPolicy, home: str) -> str:
     """A home as a person reads it: `Space <name>` for a Space, else the channel id."""
     space = policy.spaces.get(home)
@@ -679,6 +686,7 @@ __all__ = [
     "thread_rule_key",
     "crosses_home",
     "describe_home",
+    "home_channel_ids",
     "home_key",
     "is_space_key",
     "space_of",

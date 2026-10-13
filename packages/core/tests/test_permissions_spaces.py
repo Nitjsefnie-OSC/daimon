@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import pytest
 from daimon.core.access_policy import SpaceRule, TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, SessionFacts, Subject, authorize
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    AgentStanding,
+    Place,
+    SessionFacts,
+    Subject,
+    authorize,
+    channel_admin_holds,
+)
 from daimon.core.permissions import (
     AgentRule,
     ChannelRule,
@@ -140,3 +149,25 @@ def test_set_space_is_for_server_admins_only() -> None:
     assert authorize(policy, subject=admin, action=Action.SET_SPACE), "an admin sets Spaces"
     assert not authorize(policy, subject=MEMBER, action=Action.SET_SPACE), "a member doesn't"
     assert not authorize(policy, subject=key, action=Action.SET_SPACE), "nor an agent key"
+
+
+def test_a_channel_admin_of_one_member_does_not_hold_a_space_agent() -> None:
+    """x names only a, but its home is the Space, so it reads b: holding it takes both."""
+    policy = _policy(runs_in=("a",))
+    assert agent_permissions(policy, ("x",)).home == KEY, "x is the Space's own agent"
+    one = Subject(platform_user_id="u1", administered_channel_ids=frozenset({"a"}))
+    both = Subject(platform_user_id="u1", administered_channel_ids=frozenset({"a", "b"}))
+    for subject, allowed in ((one, False), (both, True)):
+        mint = authorize(
+            policy,
+            subject=subject,
+            action=Action.MINT_CODING_TOKEN,
+            agent=X,
+            place=Place(channel_id="a"),
+        )
+        configure = authorize(policy, subject=subject, action=Action.CONFIGURE, agent=X)
+        assert bool(mint) is allowed, f"a key minted in a reads b; allowed={allowed}"
+        assert bool(configure) is allowed, f"its setup reaches b; allowed={allowed}"
+        for standing in (AgentStanding(), AgentStanding(created_for_channel_id="a")):
+            holds = channel_admin_holds(policy, subject=subject, agent=X, standing=standing)
+            assert holds is allowed, f"held only with every member; {standing}"
