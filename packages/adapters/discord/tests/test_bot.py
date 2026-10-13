@@ -845,6 +845,7 @@ def _make_sweep_guild(guild_id: int) -> MagicMock:
     guild = MagicMock(spec=discord.Guild)
     guild.id = guild_id
     guild.name = "Sweep Guild"
+    guild.unavailable = False
     me = MagicMock(spec=discord.Member)
     me.guild_permissions = MagicMock()
     me.guild_permissions.manage_guild = False
@@ -925,6 +926,7 @@ class TestOnReadySweepProvisioning:
         mock_guild = MagicMock(spec=discord.Guild)
         mock_guild.id = guild_id
         mock_guild.name = "Sweep Guild"
+        mock_guild.unavailable = False
         me = MagicMock(spec=discord.Member)
         perms = MagicMock()
         perms.send_messages = True
@@ -1266,6 +1268,149 @@ class TestOnReadySweepWidenedReconcile:
 
                 await _asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
         mock_reconcile.assert_not_awaited()
+
+    async def test_a_repeated_on_ready_redoes_only_what_has_not_succeeded(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """on_ready re-fires after a failed RESUME. A tenant whose reconcile succeeded
+        and every synced scope are done once per process; a tenant whose reconcile
+        failed, though still ready, is reconciled again."""
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
+        from daimon.core.ma_identity import derive_tenant_uuid
+
+        ok_id, flaky_id = 900000020, 900000021
+        for guild_id in (ok_id, flaky_id):
+            await provision_tenant(
+                db_session_factory,
+                platform="discord",
+                workspace_id=str(guild_id),
+                signup_credit=Decimal("0"),
+            )
+        flaky_tenant = derive_tenant_uuid(platform="discord", workspace_id=str(flaky_id))
+        reconciled: list[uuid.UUID] = []
+
+        async def reconcile(*_args: object, tenant_id: uuid.UUID, **_kwargs: object) -> ApplyReport:
+            report = ApplyReport()
+            if tenant_id == flaky_tenant and tenant_id not in reconciled:
+                report.add(ResourceOutcome(kind="agent", name="a", action=Action.FAILED))
+            reconciled.append(tenant_id)
+            return report
+
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot._connection._guilds = {  # pyright: ignore[reportPrivateUsage]
+            gid: _make_sweep_guild(gid) for gid in (ok_id, flaky_id)
+        }
+        with (
+            patch("daimon.adapters.discord.bot.reconcile_tenant_defaults", side_effect=reconcile),
+            patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync,
+            patch.object(bot.tree, "clear_commands", new_callable=MagicMock),
+        ):
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+            first_reconciles, first_syncs = len(reconciled), sync.await_count
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+        assert (first_reconciles, first_syncs) == (2, 3), (
+            "the first on_ready reconciles both tenants and syncs both guilds plus global"
+        )
+        assert reconciled[first_reconciles:] == [flaky_tenant], (
+            "only the tenant whose reconcile failed is reconciled again"
+        )
+        assert sync.await_count == first_syncs, "no command scope is synced twice"
+
+    async def test_a_guild_back_at_a_later_on_ready_still_gets_its_joined_reconcile(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A ready tenant whose guild was not joined at the first on_ready took the
+        unjoined reconcile; once the guild is back it still gets the joined one."""
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.defaults.report import ApplyReport
+        from daimon.core.ma_identity import derive_tenant_uuid
+
+        guild_id = 900000022
+        await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=str(guild_id),
+            signup_credit=Decimal("0"),
+        )
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+
+        bot = make_bot(_make_runtime(db_session_factory))
+        with (
+            patch(
+                "daimon.adapters.discord.bot.reconcile_tenant_defaults",
+                new_callable=AsyncMock,
+                return_value=ApplyReport(),
+            ),
+            patch.object(
+                bot,
+                "_seed_tenant_defaults",
+                wraps=bot._seed_tenant_defaults,  # pyright: ignore[reportPrivateUsage]
+            ) as seed,
+            patch.object(bot.tree, "sync", new_callable=AsyncMock),
+            patch.object(bot.tree, "clear_commands", new_callable=MagicMock),
+        ):
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+            bot._connection._guilds = {guild_id: _make_sweep_guild(guild_id)}  # pyright: ignore[reportPrivateUsage]
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+        seeded = [c.kwargs["tenant_id"] for c in seed.await_args_list]
+        assert seeded == [tenant_id], "the guild back at the second on_ready is seeded"
+
+    async def test_an_unavailable_guild_is_skipped_not_fatal(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """discord.py keeps READY's unavailable guilds cached with no `me`; the sweep
+        skips one rather than raising before the global sync and later tenants."""
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.defaults.report import ApplyReport
+
+        guild_id = 900000030
+        await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=str(guild_id),
+            signup_credit=Decimal("0"),
+        )
+        later_id = guild_id + 1  # swept after the stub: tenants go in external_id order
+        await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=str(later_id),
+            signup_credit=Decimal("0"),
+        )
+        bot = make_bot(_make_runtime(db_session_factory))
+        # The call parse_ready makes for each guild stub in the READY payload.
+        bot._connection._add_guild_from_data({"id": str(guild_id), "unavailable": True})  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+        bot._connection._guilds[later_id] = _make_sweep_guild(later_id)  # pyright: ignore[reportPrivateUsage]
+        with (
+            patch(
+                "daimon.adapters.discord.bot.reconcile_tenant_defaults",
+                new_callable=AsyncMock,
+                return_value=ApplyReport(),
+            ),
+            # Two seeds at once would share the test's one connection; only syncs matter here.
+            patch.object(bot, "_seed_tenant_defaults", new_callable=AsyncMock),
+            patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync,
+            patch.object(bot.tree, "clear_commands", new_callable=MagicMock),
+        ):
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+        synced = [c.kwargs.get("guild") for c in sync.await_args_list]
+        assert [g.id for g in synced if g is not None] == [later_id], (
+            "the guild after the stub is still synced; the stub waits for a later ready"
+        )
+        assert synced[-1] is None, "the global tree is synced"
+        assert guild_id not in bot._ready_synced_guild_ids  # pyright: ignore[reportPrivateUsage]
 
 
 class TestReadyEmbedSuppression:

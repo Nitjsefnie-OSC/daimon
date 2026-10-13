@@ -13,9 +13,12 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
 from daimon.adapters.slack.runtime import SlackRuntime, build_runtime
 from daimon.core.channel_budget_notice import BudgetNotice, spawn_budget_notice
 from daimon.core.config import Settings
+from daimon.core.github_credentials import decrypt_token, encrypt_token
+from pydantic import SecretStr
 
 
 def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,9 +45,11 @@ class TestSlackRuntime:
             "deployment_default",
             "mcp_token_probe",
             "group_members",
+            "slack_http",
         }, (
             "expected exactly settings/anthropic/sessionmaker/billing_config/http_client/"
-            f"resolver_cache/turn_deps/deployment_default/mcp_token_probe/group_members fields, "
+            "resolver_cache/turn_deps/deployment_default/mcp_token_probe/group_members/"
+            f"slack_http fields, "
             f"got {fields}"
         )
 
@@ -63,6 +68,46 @@ class TestSlackRuntime:
             rt.settings = MagicMock()  # type: ignore[misc]  # intentionally testing frozen
 
 
+def test_fernet_is_built_once_per_runtime() -> None:
+    """Events reuse one cipher; the keys never change in-process."""
+    key = Fernet.generate_key().decode()
+    settings = MagicMock()
+    settings.crypto.keys = (SecretStr(key),)
+    rt = SlackRuntime(
+        settings=settings,
+        anthropic=MagicMock(),  # pyright: ignore[reportArgumentType]
+        sessionmaker=MagicMock(),  # pyright: ignore[reportArgumentType]
+        billing_config=None,
+        http_client=MagicMock(),  # pyright: ignore[reportArgumentType]
+        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]
+    )
+
+    assert rt.fernet is rt.fernet, "a second event must reuse the first event's cipher"
+    assert decrypt_token(rt.fernet, encrypt_token(Fernet(key.encode()), "xoxb-t")) == "xoxb-t", (
+        "the cipher decrypts tokens sealed with the configured key"
+    )
+
+
+def test_fernet_without_keys_raises_on_every_access() -> None:
+    """A missing key set stays a per-event failure, not a cached one."""
+    settings = MagicMock()
+    settings.crypto.keys = ()
+    rt = SlackRuntime(
+        settings=settings,
+        anthropic=MagicMock(),  # pyright: ignore[reportArgumentType]
+        sessionmaker=MagicMock(),  # pyright: ignore[reportArgumentType]
+        billing_config=None,
+        http_client=MagicMock(),  # pyright: ignore[reportArgumentType]
+        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]
+    )
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="crypto.keys is empty"):
+            _ = rt.fernet
+
+
 async def test_build_runtime_yields_wired_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -76,6 +121,22 @@ async def test_build_runtime_yields_wired_runtime(
         assert runtime.sessionmaker is not None, "build_runtime must wire a non-None sessionmaker"
         assert runtime.anthropic is not None, "build_runtime must wire a non-None anthropic client"
         assert runtime.http_client is not None, "build_runtime wires an http_client"
+
+
+async def test_build_runtime_opens_one_slack_session_and_closes_it_on_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every per-event Slack client reuses one pool, released when the process stops."""
+    _isolate_settings_env(monkeypatch)
+    monkeypatch.setenv("DAIMON_SLACK__SIGNING_SECRET", "test-signing-secret")
+    monkeypatch.setenv("DAIMON_SLACK__APP_TOKEN", "xapp-test-token")
+    settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+
+    async with build_runtime(settings) as runtime:
+        session = runtime.slack_http
+        assert session is not None, "build_runtime wires the shared Slack session"
+        assert not session.closed, "the session is open while the runtime is live"
+    assert session.closed, "leaving build_runtime closes the shared Slack session"
 
 
 async def test_main_guard_exits_cleanly_when_slack_unconfigured(
