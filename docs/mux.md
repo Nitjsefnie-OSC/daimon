@@ -2856,3 +2856,9 @@ policy or audit writes; snapshot dry-run also creates no file. Current authority
 is required again for rollback. These commands grant no fleet permissions and
 do not make provider calls, allocate native resources or change default chat
 behavior.
+The continuation store exposes a read-only tenant/run-scoped completion audit
+reader. It requires an actual owned run, returns all statuses in creation/ID
+order, and matches the literal canonical run prefix before decoding. Malformed
+owned bodies and mismatched roots remain visible for exporter refusal;
+canonical cohort/key/address validation and snapshot coherence remain exporter
+checks. Reading this audit never claims or runs a wake.
