@@ -2288,6 +2288,8 @@ journal entry of its own, with an id and source key derived from the worker
 journaled and a lease successor appending it again is a duplicate.
 ### Worker permission derivation
 
+Backend loaders and worker derivation use the same skill and MCP requirement mapping. Worker skills retain their root provider restriction; catalog previews retain their portable skill capability check. SDK MCP sources keep their conservative vault requirement because their records do not expose credential intent.
+
 The core resource owner exposes one worker spec resolver over existing
 `AgentSpec` and sparse `AgentPatch` shapes. Host-supplied current root facts bind
 the real tenant, account, channel, thread and origin, and retain the existing

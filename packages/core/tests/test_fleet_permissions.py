@@ -946,3 +946,83 @@ async def test_fleet_audit_uses_real_root_identity_and_existing_tenant_store(db_
             reason="authorized",
         )
     assert len(await list_events(db_session, tenant_id=tenant.id)) == 1
+
+
+@pytest.mark.parametrize("support", ("unsupported", "unknown"))
+def test_anonymous_mcp_compatibility_keeps_sdk_vault_requirement(monkeypatch, support):
+    from daimon.core.channel_backend import compatibility_preview, spec_compatibility_items
+    from daimon.core.stores.domain import BackendAgent, TenantBackendPolicy
+    from daimon.testing.ma_models import ma_agent
+    from mux import profiles
+
+    root = parent("openai")
+    connection = MCPConnection(
+        name="public-server",
+        url="https://public.invalid/mcp",
+        tool_policy={"allowed_tools": ["read"], "required": True},
+    )
+    root = replace(root, spec=root.spec.model_copy(update={"mcp_servers": (connection,)}))
+    profile = get_profile(root.backend_grants[0].profile)
+    limited = profile.model_copy(
+        update={"core": False, "support": {**profile.support, "vaults": support}}
+    )
+    monkeypatch.setattr(profiles, "PROFILES", {**profiles.PROFILES, profile.profile_id: limited})
+    policy = TenantBackendPolicy(
+        tenant_id=UUID(root.fleet.scope.tenant_id), revision="policy", enabled_backends=("openai",)
+    )
+
+    def preview(source):
+        skills, mcps = (tuple(items) for items in spec_compatibility_items(source))
+        return compatibility_preview(
+            BackendAgent(
+                tenant_id=policy.tenant_id,
+                agent_id=uuid4(),
+                name="source",
+                configuration_digest="scoped",
+                skills=skills,
+                mcps=mcps,
+            ),
+            "openai",
+            policy,
+        )
+
+    # A canonical anonymous connection has no credential mount to preserve.
+    assert not preview(root.spec).unsupported_mcps
+    # Compatibility alone does not waive the worker's native credential-binding gate.
+    with pytest.raises(WorkerSpecRefused, match="mcp: unsupported"):
+        resolve(root)
+    authenticated = connection.model_copy(update={"credential_ref": "owned-ref"})
+    assert preview(
+        root.spec.model_copy(update={"mcp_servers": (authenticated,)})
+    ).unsupported_mcps == ("public-server",)
+    with pytest.raises(WorkerSpecRefused, match="mcp: unsupported"):
+        resolve(replace(root, spec=root.spec.model_copy(update={"mcp_servers": (authenticated,)})))
+
+    # Actual SDK metadata cannot prove credential absence, even at the same public URL.
+    sdk = ma_agent(mcp_servers=[{"name": connection.name, "type": "url", "url": connection.url}])
+    assert preview(sdk).unsupported_mcps == ("public-server",)
+
+
+@pytest.mark.parametrize("support", ("unsupported", "unknown"))
+def test_unsupported_skill_refuses_before_invalid_mcp_projection(monkeypatch, support):
+    from mux import profiles
+
+    root = parent("openai")
+    profile = get_profile(root.backend_grants[0].profile)
+    limited = profile.model_copy(
+        update={"core": False, "support": {**profile.support, "skills_bundle": support}}
+    )
+    monkeypatch.setattr(profiles, "PROFILES", {**profiles.PROFILES, profile.profile_id: limited})
+    root = replace(
+        root,
+        spec=root.spec.model_copy(
+            update={
+                "skills": (SkillRef(id="attached", source="custom", version="1"),),
+                "mcp_servers": (MCPConnection(name="", url="https://invalid.example/mcp"),),
+            }
+        ),
+    )
+    # The source spec accepts this MCP name, but compatibility-item validation does not.
+    # Preserve the existing skill refusal before inspecting the irrelevant MCP entry.
+    with pytest.raises(WorkerSpecRefused, match="skills: unsupported"):
+        resolve(root)

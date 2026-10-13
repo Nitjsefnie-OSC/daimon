@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 - Cover refusal of a foreign model provider before pinned counterpart native readback.
+
+- Share skill and MCP compatibility requirements across backend previews and worker derivation while preserving native SDK vault requirements.
 - Preserve native required-action termination when the backend cannot accept tool-confirmation events.
 - Refuse malformed chat approval requests without failing sibling decisions, and derive confirmation gates for registered tools from the shared safety table.
 - Add opt-in admin confirmation cards for chat-requested agent backend changes, with current compatibility and cost previews, permission rechecks and stale-preview refusal.
