@@ -121,3 +121,60 @@ async def test_named_cheap_worker_preserves_budget_and_never_falls_back(overload
     assert source.requests == [selected]
     assert accounting.held == [agent.spec.model]
     assert len(accounting.receipts) == 1
+
+
+async def test_model_output_cap_survives_the_existing_503_fallback_chain() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend(
+        [
+            ProviderError("overloaded", retryable=True, native_code="503"),
+            ProviderError("overloaded", retryable=True, native_code="503"),
+            {"id": "bounded", "status": "completed"},
+        ]
+    )
+    body: Mapping[str, JsonValue] = {
+        "model": FLASH_MODELS[0],
+        "generation_config": {"max_output_tokens": 4096},
+        "tools": [],
+    }
+    await FlashTransport(source, accounting).create(body)
+    assert [call["model"] for call in source.requests] == list(FLASH_MODELS)
+    assert all(call["generation_config"] == {"max_output_tokens": 4096} for call in source.requests)
+    assert all(
+        not {"agent", "agent_config", "environment"} & call.keys() for call in source.requests
+    )
+    assert len(accounting.held) == 3 and body["model"] == FLASH_MODELS[0]
+
+
+@pytest.mark.parametrize("budget", (None, False, 0, 65_537))
+async def test_model_without_a_valid_output_cap_refuses_before_a_hold(budget) -> None:
+    from mux.errors import UnsupportedCapability
+
+    source, accounting = FakeTransport(), Accounting()
+    with pytest.raises(UnsupportedCapability):
+        await FlashTransport(source, accounting).create(
+            {
+                "model": FLASH_MODELS[0],
+                "generation_config": {"max_output_tokens": budget},
+                "tools": [],
+            }
+        )
+    assert source.requests == [] and accounting.held == []
+
+
+async def test_output_cap_is_snapshotted_before_the_accounting_await() -> None:
+    body: dict[str, JsonValue] = {
+        "model": FLASH_MODELS[0],
+        "generation_config": {"max_output_tokens": 4096},
+        "tools": [],
+    }
+
+    class MutatingAccounting(Accounting):
+        async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
+            await super().before_attempt(model=model, attempt=attempt)
+            body["generation_config"] = {"max_output_tokens": 8192}
+
+    source, accounting = FakeTransport(), MutatingAccounting()
+    source.responses.append({"id": "capped", "status": "completed"})
+    await FlashTransport(source, accounting).create(body)
+    assert source.requests[0]["generation_config"] == {"max_output_tokens": 4096}

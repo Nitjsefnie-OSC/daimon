@@ -56,6 +56,7 @@ from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
+from mux.drivers.gemini.core import compile_agent, compile_environment
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAccounting, FlashTransport
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
@@ -79,6 +80,7 @@ class GeminiDeployment:
     environment: EnvironmentSpec
     native_agent: Agent | None = None
     max_total_tokens: int | None = None
+    max_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +171,11 @@ def gemini_backend(
         or deployment.agent.model != ModelRef(provider="gemini", id=required_model)
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
+    if deployment.max_output_tokens is not None:
+        if deployment.native_agent is not None or deployment.max_total_tokens is not None:
+            raise UnsupportedCapability(("model_interaction_resources",), PROFILE)
+        compile_agent(deployment.agent, max_output_tokens=deployment.max_output_tokens)
+        compile_environment(deployment.environment, model_only=True)
     supplied = runtime.transport_factory(config, scope)
     if not isinstance(supplied, GeminiTransportRuntime):
         raise UnsupportedCapability(("gemini_private_transport",), PROFILE)
@@ -185,6 +192,7 @@ def gemini_backend(
         resource_catalog_transport=supplied.catalog_transport,
         native_agent=deployment.native_agent,
         max_total_tokens=deployment.max_total_tokens,
+        max_output_tokens=deployment.max_output_tokens,
     )
 
 

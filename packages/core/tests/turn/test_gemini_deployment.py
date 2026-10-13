@@ -1079,17 +1079,24 @@ async def test_policy_refusal_precedes_selected_key_and_transport(
     assert not (tmp_path / "records.sqlite").exists()
 
 
+@pytest.mark.parametrize("output_cap", (None, 4096))
 async def test_application_constructs_gemini_and_reuses_persisted_native_binding(
     selected: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     db_clean: None,
+    output_cap: int | None,
 ) -> None:
     import httpx
 
     from .test_gemini_codec import interaction
 
-    manifest(monkeypatch, tmp_path / "manifest.json", [entry(selected, tmp_path)])
+    plan = entry(selected, tmp_path)
+    if output_cap is not None:
+        plan.update(
+            max_output_tokens=output_cap, environment={"name": "no-execution", "execution": "none"}
+        )
+    manifest(monkeypatch, tmp_path / "manifest.json", [plan])
     monkeypatch.setenv("N4_OFFLINE_GEMINI_KEY", "offline-selected-key")
     calls: list[httpx.Request] = []
     posts: list[dict[str, JsonValue]] = []
@@ -1100,17 +1107,26 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
         assert request.headers["x-goog-api-key"] == "offline-selected-key"
         if request.method == "POST":
             body = json.loads(request.content)
-            assert body["tools"] == [] and body["agent_config"]["model"] == FLASH_PRIMARY
+            assert body["tools"] == []
+            if output_cap is None:
+                assert body["agent_config"]["model"] == FLASH_PRIMARY
+                assert "generation_config" not in body
+            else:
+                assert body["model"] == FLASH_PRIMARY
+                assert body["generation_config"] == {"max_output_tokens": 4096}
+                assert not {"agent", "agent_config", "environment"} & body.keys()
             assert "spend_control" not in body
             posts.append(body)
             if len(posts) > 1:
-                assert (
-                    body["previous_interaction_id"] == "one" and body["environment"] == "workspace"
-                )
-            return httpx.Response(200, json=interaction("one" if len(posts) == 1 else "two"))
-        return httpx.Response(
-            200, json=interaction("two" if request.url.path.endswith("two") else "one")
-        )
+                assert body["previous_interaction_id"] == "one"
+                if output_cap is None:
+                    assert body["environment"] == "workspace"
+            response = interaction("one" if len(posts) == 1 else "two")
+        else:
+            response = interaction("two" if request.url.path.endswith("two") else "one")
+        if output_cap is not None:
+            response.pop("environment_id")
+        return httpx.Response(200, json=response)
 
     # Replace owned HTTP transports only; exercise the real product SDK and host.
     from .test_gemini_runtime_transport import clients_for
@@ -1160,6 +1176,9 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
             operation_key=f"offline-gemini:{index}",
         )
         assert outcome.state.error is None and not outcome.recovered
+        from daimon.core.turn.state import extract_final_response
+
+        assert extract_final_response(outcome.state.content) == "answer"
         assert outcome.state.usage_totals.output_tokens == 11
     assert len(posts) == 2 and calls and len(clients) == 2 * len(calls)
     assert all(client.is_closed for client in clients)
@@ -1602,3 +1621,92 @@ async def test_cheap_model_does_not_enable_an_ordinary_channel_runtime(
     with pytest.raises(AdmissionDenied) as refused:
         build_gemini_runtime(selected)
     assert refused.value.reason == "backend_unsupported"
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ("bool", "zero", "above_max", "string", "sandbox", "sources", "network", "packages", "tools"),
+)
+async def test_capped_turn_refuses_invalid_controls_and_execution_before_key_access(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    defect: str,
+) -> None:
+    values = entry(selected, tmp_path)
+    values.update(max_output_tokens=4096, environment={"name": "no-execution", "execution": "none"})
+    if defect in ("bool", "zero", "above_max", "string"):
+        values["max_output_tokens"] = {
+            "bool": True,
+            "zero": 0,
+            "above_max": 65_537,
+            "string": "4096",
+        }[defect]
+    elif defect == "tools":
+        values["tools"] = [{"name": "code_execution", "kind": "builtin"}]
+    else:
+        env = dict(cast(dict[str, JsonValue], values["environment"]))
+        if defect == "sandbox":
+            env["execution"] = "hosted"
+        elif defect == "sources":
+            env["sources"] = [
+                {
+                    "kind": "repository",
+                    "repository_url": "https://example.test/repo",
+                    "target_path": "/workspace/repo",
+                }
+            ]
+        elif defect == "network":
+            env["network"] = {"mode": "disabled"}
+        elif defect == "packages":
+            env["packages"] = {"pip": ["package==1"]}
+        values["environment"] = env
+    manifest(monkeypatch, tmp_path / "manifest.json", [values])
+    get = os.environ.get
+
+    def key(name: str, default: str | None = None) -> str | None:
+        if name == "N4_OFFLINE_GEMINI_KEY":
+            pytest.fail("incompatible capped turn discovered its credential")
+        return get(name, default)
+
+    monkeypatch.setattr(os.environ, "get", key)
+    with pytest.raises(AdmissionDenied) as refused:
+        build_channel_runtime(selected)
+    assert refused.value.reason == "backend_unsupported"
+    assert not (tmp_path / "records.sqlite").exists()
+    assert not (tmp_path / "holds.sqlite").exists()
+
+
+async def test_output_cap_never_activates_a_named_option_a_worker(
+    materialization_worker_request: tuple[_ClaimedWorker, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (selected, _, _, _, owned, calls), _ = materialization_worker_request
+    values = json.loads(owned.manifest_path.read_text())[0]
+    values["max_output_tokens"] = 4096
+    owned.manifest_path.write_text(json.dumps([values]))
+    plan = GeminiPlan.model_validate(values)
+    get = os.environ.get
+
+    def key(name: str, default: str | None = None) -> str | None:
+        if name == plan.api_key_env:
+            pytest.fail("capped worker discovered its credential")
+        return get(name, default)
+
+    monkeypatch.setattr(os.environ, "get", key)
+    with pytest.raises(AdmissionDenied) as refused:
+        build_gemini_runtime(selected)
+    assert refused.value.reason == "backend_unsupported"
+    assert owned.wire.requests == [] and calls == []
+
+
+def test_output_cap_omission_preserves_existing_plan_serialization(
+    selected: ProviderPreparationRequest,
+    tmp_path: Path,
+) -> None:
+    values = entry(selected, tmp_path)
+    default = GeminiPlan.model_validate(values)
+    omitted = GeminiPlan.model_validate({**values, "max_output_tokens": None})
+    assert default.max_output_tokens is None
+    assert default.model_dump_json() == omitted.model_dump_json()
+    assert "max_output_tokens" not in json.loads(default.model_dump_json())

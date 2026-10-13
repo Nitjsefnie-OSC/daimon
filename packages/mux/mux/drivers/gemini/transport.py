@@ -12,7 +12,7 @@ from google.genai._interactions import APIConnectionError, APIError, APIStatusEr
 from pydantic import JsonValue
 
 from mux.contracts.errors import ProviderErrorCategory
-from mux.drivers.gemini.mcp_auth import refresh_bound_request
+from mux.drivers.gemini.mcp_auth import model_request, refresh_bound_request
 from mux.errors import ProviderError
 
 API_REVISION = "2026-05-20"
@@ -135,16 +135,28 @@ class SDKTransport:
                 "invalid_request", retryable=False, native_code="explicit_tools_required"
             )
         bounded = await refresh_bound_request(bounded)
-        response = await provider_call(
-            self._interactions.create(
-                agent=string(request["agent"]),
-                input=[],
-                background=True,
-                store=True,
-                extra_body=bounded,
-                extra_headers={"Api-Revision": API_REVISION},
+        if model_request(bounded):
+            response = await provider_call(
+                self._interactions.create(
+                    model=string(bounded["model"]),
+                    input=[],
+                    background=True,
+                    store=True,
+                    extra_body=bounded,
+                    extra_headers={"Api-Revision": API_REVISION},
+                )
             )
-        )
+        else:
+            response = await provider_call(
+                self._interactions.create(
+                    agent=string(bounded["agent"]),
+                    input=[],
+                    background=True,
+                    store=True,
+                    extra_body=bounded,
+                    extra_headers={"Api-Revision": API_REVISION},
+                )
+            )
         return object_value(cast(JsonValue, response.model_dump(mode="json", exclude_none=True)))
 
     async def get(self, interaction_id: str) -> Object:

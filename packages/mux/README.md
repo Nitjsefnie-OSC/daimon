@@ -1029,3 +1029,14 @@ native agent retrieval. Session overrides preserve its original presence and
 request bytes; the legacy shape without that field remains valid. Unknown
 properties, invalid tool names, permission policies and non-string type values
 remain rejected by the existing strict configuration schema.
+
+An ordinary tool-free Gemini channel can explicitly configure `max_output_tokens`
+on its existing runtime plan (a strict integer from 1 to 65,536, for example 4096).
+This uses the same driver and journal with a model interaction's native
+`generation_config.max_output_tokens`; it requires an explicit no-execution
+environment and carries no managed tools, skills, MCP, mounts or named agent.
+Conversation history reuses `previous_interaction_id`, and the limit survives
+continuation and the existing 503 fallback policy. An unsupported or rejected
+limit never retries without it. Omission retains managed-agent requests and
+option-A worker defaults. This is an output limit per interaction, not an input
+or final-spend limit.

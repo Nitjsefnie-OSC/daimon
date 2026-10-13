@@ -136,17 +136,19 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             agent = await backend.agents.create(
                 request.scope, deployment.agent, key=f"{binding_id}:agent"
             )
-        environment = await backend.environments.create(
-            request.scope,
-            deployment.environment,
-            key=f"{binding_id}:environment",
+        environment = (
+            await backend.environments.create(
+                request.scope, deployment.environment, key=f"{binding_id}:environment"
+            )
+            if deployment.max_output_tokens is None
+            else None
         )
         session = await backend.sessions.create(
             request.scope,
             SessionSpec(
                 agent=agent.ref,
                 agent_revision=agent.revision,
-                environment=environment.ref,
+                environment=environment.ref if environment is not None else None,
                 config_revision=config.local,
                 extensions={
                     "gemini.session": ExtensionConfig(

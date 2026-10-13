@@ -216,12 +216,43 @@ def stable_request(request: Object) -> Object:
     return stable
 
 
+def model_request(request: Object) -> bool:
+    """A capped model request cannot carry managed execution or authentication."""
+    if not {"model", "generation_config"} & request.keys():
+        return False
+    config = request.get("generation_config")
+    if (
+        set(request)
+        - {
+            "model",
+            "generation_config",
+            "tools",
+            "system_instruction",
+            "input",
+            "background",
+            "store",
+            "previous_interaction_id",
+        }
+        or not isinstance(request.get("model"), str)
+        or not request["model"]
+        or request.get("tools") != []
+        or not isinstance(config, dict)
+        or set(config) != {"max_output_tokens"}
+        or type(config.get("max_output_tokens")) is not int
+        or not 0 < cast(int, config["max_output_tokens"]) <= 65_536
+    ):
+        refuse("capped_model_request")
+    return True
+
+
 async def refresh_bound_request(request: Object) -> Object:
     """Refresh driver-minted intent at each SDK dispatch, including Flash fallback.
 
     The marker lives only in request memory. Credential-free requests retain
     their native shape. Bare headers are never an authenticated binding.
     """
+    if model_request(request):
+        return request
     if set(request) - {
         "agent",
         "agent_config",

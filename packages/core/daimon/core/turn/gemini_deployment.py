@@ -95,6 +95,9 @@ class GeminiPlan(BaseModel):
     worker_materialization: bool = Field(
         default=False, strict=True, exclude_if=lambda value: not value
     )
+    max_output_tokens: Annotated[int, Field(gt=0, le=65_536, strict=True)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> GeminiPlan:
@@ -120,6 +123,7 @@ class GeminiPlan(BaseModel):
         scope = worker.permissions.fleet.scope
         if (
             "memory" not in drops
+            or self.max_output_tokens is not None
             or worker.resources
             or (self.worker_materialization and worker.permissions.seal_ids)
             or revision.profile != self.profile
@@ -264,6 +268,14 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     plan = load_gemini_deployment(request)
+    if plan.max_output_tokens is not None and (
+        request.worker is not None
+        or request.admission.backend_revision_origin == "agent"
+        or plan.agent_id is not None
+        or plan.skill_ids
+        or plan.worker_materialization
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
     agent = AgentSpec(
         name=plan.agent_name,
         model=ModelRef(provider="gemini", id=FLASH_PRIMARY),
@@ -275,10 +287,20 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     if request.worker is not None:
         deployment = plan.worker_deployment(request.worker, revision)
     else:
-        compile_agent(agent)
-        compile_environment(plan.environment)
+        try:
+            compile_agent(agent, max_output_tokens=plan.max_output_tokens)
+            compile_environment(plan.environment, model_only=plan.max_output_tokens is not None)
+        except UnsupportedCapability as error:
+            if plan.max_output_tokens is None:
+                raise
+            raise AdmissionDenied(reason="backend_unsupported") from error
         deployment = GeminiDeployment(
-            revision.digest, revision.local, plan.project, agent, plan.environment
+            revision.digest,
+            revision.local,
+            plan.project,
+            agent,
+            plan.environment,
+            max_output_tokens=plan.max_output_tokens,
         )
     namespace = json.dumps([scope.tenant_id, scope.account_id, plan.project], separators=(",", ":"))
 
