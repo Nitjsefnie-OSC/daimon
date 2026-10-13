@@ -22,8 +22,9 @@ Daimon calls this store yet.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -99,6 +100,10 @@ def _where_slot(
 def _json(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
+
+type BeforeClaim = Callable[[AsyncSession, Scope, str, Lease | None], Awaitable[bool]]
+"""Runs in a send claim's transaction just before the claim. True claims (and a
+lost claim rolls back what it wrote); False commits what it wrote and refuses."""
 
 type Clock = Callable[[AsyncSession], Awaitable[datetime]]
 """Reads the time a lease decision is made at. Call it after taking the locks."""
@@ -770,9 +775,28 @@ class PostgresStateStore:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         trust_caller_clock: bool = False,
+        before_claim: BeforeClaim | None = None,
     ) -> None:
         self._factory = session_factory
         self._trust_caller_clock = trust_caller_clock
+        self._before_claim = before_claim
+        self._active_check: ContextVar[BeforeClaim | None] = ContextVar(
+            f"before_claim_{id(self)}", default=None
+        )
+
+    @contextmanager
+    def checking_claims(self, check: BeforeClaim) -> Iterator[None]:
+        """Run `check` before this store's send claims, in this task only.
+
+        For the block's duration, claims made in the current task (and in tasks
+        it starts) run `check` instead of the constructor's. Other tasks sharing
+        this same store keep theirs, so concurrent workers never see each other's.
+        """
+        token = self._active_check.set(check)
+        try:
+            yield
+        finally:
+            self._active_check.reset(token)
 
     def _clock(self, now: datetime) -> Clock:
         return fixed_clock(now) if self._trust_caller_clock else database_clock
@@ -832,10 +856,14 @@ class PostgresStateStore:
     async def claim_send(
         self, scope: Scope, key: str, *, now: datetime, fence: Lease | None
     ) -> OperationRecord:
+        check = self._active_check.get() or self._before_claim
         async with self._tx() as session:
-            return await claim_send(
-                session, scope, key, now=now, clock=self._clock(now), fence=fence
-            )
+            if check is None or await check(session, scope, key, fence):
+                return await claim_send(
+                    session, scope, key, now=now, clock=self._clock(now), fence=fence
+                )
+        # Refused: what the check wrote (its evidence) is committed, nothing is claimed.
+        raise ScopeViolation(key, "the send was refused before its claim")
 
     async def advance_operation(
         self,
