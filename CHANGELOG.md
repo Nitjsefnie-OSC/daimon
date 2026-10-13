@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make preparation lock and redaction work budgets independent of host scheduling.
 - Refuse a worker allocation under a foreign persistence scope before source or credential reads.
 - Execute claimed fleet workers through canonical source normalization, atomic funded input claims and authoritative journal results, without retrying unknown deliveries.
+- Preserve fleet worker terminal diagnostics under their own origin alongside legacy turn outcomes.
 - Validate prepared scope through one admitted-session identity rule; defer worker allocation until its complete proof and caller land.
 - Keep the accepted first worker input financially monitored after its once-only turn count is recorded.
 - Recheck funded fleet workers against their current persisted binding and financial limits before model input.
