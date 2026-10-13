@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Preserve a tenant-wide clone source identity only under its exact root source/revision grant and authorized account capture.
+- Refuse worker resource preparation if the captured source environment is missing or differs from the requested native environment.
 - Project fully explicit cloud source policies into the existing neutral worker environment while refusing implicit or unrepresented native permissions.
 - Make preparation lock and redaction work budgets independent of host scheduling.
 - Refuse a worker allocation under a foreign persistence scope before source or credential reads.

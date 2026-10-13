@@ -44,6 +44,7 @@ from daimon.core.defaults.metadata import (
     tenant_scoped_display_title,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.mux_backend import resource_scope
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_upload
 from daimon.core.skills.service import AddedSkill, StoredSkillUpload, UploadedSkill, add_skill
 from daimon.core.stores import security_audit
@@ -1091,9 +1092,14 @@ def resolve_worker_spec(
             or spec.archived_at is not None
         ):
             raise WorkerSpecRefused("scope", "unbound")
-        if (
-            spec.ref.tenant_id != fleet.scope.tenant_id
-            or spec.ref.account_id != fleet.scope.account_id
+        if spec.ref.tenant_id != fleet.scope.tenant_id or (
+            spec.ref.account_id != fleet.scope.account_id
+            and not (
+                spec.ref.account_id == resource_scope(tenant_id=fleet.scope.tenant_id).account_id
+                and captured_source is not None
+                and captured_source.resource_scope == fleet.scope
+                and captured_source.source == spec
+            )
         ):
             raise WorkerSpecRefused("scope", "not_subset")
         if (spec.ref, spec.revision) not in parent.source_revisions:

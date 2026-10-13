@@ -3305,3 +3305,83 @@ async def test_source_environment_projection_retains_unrepresented_native_policy
     assert projected.native == environment.model_dump(mode="json", exclude_unset=True)
     transport.assert_consumed()
     assert [request.method for request in transport.requests] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        "missing_capture",
+        "missing_grant",
+        "foreign_account",
+        "unbound_account",
+        "foreign_tenant",
+        "capture_scope",
+        "stale_revision",
+    ],
+)
+async def test_actual_tenant_scoped_source_clone_requires_the_root_account_capture_and_pin(
+    db_preflight, db_nullpool_engine, failure
+):
+    from dataclasses import replace
+
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+    from mux.contracts.resources import AgentPatch
+
+    from .test_fleet_permissions import NOW, POLICY
+
+    _, _, _, original, _, worker, captured = await worker_source_context(db_nullpool_engine)
+    actual = captured.source
+    assert actual.ref.account_id == resource_scope(tenant_id=actual.ref.tenant_id).account_id
+    assert actual.native == original.model_dump(mode="json", exclude_unset=True)
+    root = replace(
+        worker.permissions,
+        fleet=replace(worker.permissions.fleet, depth=0),
+        agent_id=captured.agent_id,
+        spec=worker.spec.model_copy(update={"metadata": actual.spec.metadata}),
+        source_agents=(actual.ref,),
+        source_revisions=((actual.ref, actual.revision),),
+    )
+    desired = root.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
+    if failure == "missing_capture":
+        captured = None
+    elif failure == "missing_grant":
+        root = replace(root, source_agents=())
+    elif failure in {"foreign_account", "unbound_account", "foreign_tenant"}:
+        ref = actual.ref.model_copy(
+            update={
+                "tenant_id" if failure == "foreign_tenant" else "account_id": None
+                if failure == "unbound_account"
+                else str(uuid.uuid4())
+            }
+        )
+        actual = actual.model_copy(update={"ref": ref})
+        captured = captured.model_copy(update={"source": actual})
+        root = replace(root, source_agents=(ref,), source_revisions=((ref, actual.revision),))
+    elif failure == "capture_scope":
+        captured = captured.model_copy(
+            update={
+                "resource_scope": captured.resource_scope.model_copy(
+                    update={"account_id": str(uuid.uuid4())}
+                )
+            }
+        )
+    elif failure == "stale_revision":
+        root = replace(root, source_revisions=())
+    kwargs = {
+        "policy": POLICY,
+        "now": NOW,
+        "captured_source": captured,
+        "overrides": AgentPatch.model_validate(desired.model_dump(mode="json")),
+    }
+    if failure is not None:
+        with pytest.raises(WorkerSpecRefused):
+            resolve_worker_spec(root, actual, **kwargs)
+        return
+    result = resolve_worker_spec(root, actual, **kwargs)
+    assert result.source_agent == (actual.ref, actual.revision)
+    assert result.source_agent[0] == actual.ref
+    assert result.permissions.fleet.scope.account_id == root.fleet.scope.account_id
+    assert result.spec.metadata == root.spec.metadata
+    assert result.digest == resolve_worker_spec(root, actual, **kwargs).digest

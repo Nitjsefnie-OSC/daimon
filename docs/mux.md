@@ -2582,3 +2582,9 @@ refuses before allocation; stored worker intent and digests are never rewritten.
 Worker cleanup uses the verified prepared resource ports through the existing
 bounded archive owner. Unsupported archive remains a logged limitation and
 preserves the original dispatch failure, input count and reconciliation hold.
+
+A clone retains the native source reference's tenant-wide service identity. The
+root must explicitly grant that exact source and revision, and the owner capture
+must bind the complete source snapshot to the root's authorized account scope.
+An arbitrary foreign or unbound account reference cannot use this path; the
+source identity is never relabeled as the worker's account.
