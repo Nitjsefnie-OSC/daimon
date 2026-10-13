@@ -26,6 +26,7 @@ from typing import Literal, get_args
 from daimon.core._models import Account, CredentialRequest, TaskContinuation, ThreadSession
 from daimon.core._models import FleetRun as FleetRunModel
 from daimon.core.fleet import RUN_TRANSITIONS, FleetRun
+from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import (
     ContinuationReason,
     Role,
@@ -170,8 +171,9 @@ async def list_worker_finished_for_run(
     for the consumer to refuse; never cast untrusted text or mutate scheduling.
     Root/cohort/key validation and capture completeness remain consumer checks.
     """
-    rows = await session.scalars(
-        select(TaskContinuation)
+    rows = await read_persisted_columns(
+        session,
+        select(*TaskContinuation.__table__.c)
         .where(
             exists(
                 select(FleetRunModel.id).where(
@@ -183,9 +185,9 @@ async def list_worker_finished_for_run(
             TaskContinuation.reason == "worker_finished",
             TaskContinuation.requested_work.startswith(f'{{"run_id":"{run_id}",', autoescape=True),
         )
-        .order_by(TaskContinuation.created_at, TaskContinuation.id)
+        .order_by(TaskContinuation.created_at, TaskContinuation.id),
     )
-    return tuple(TaskContinuationRow.model_validate(row) for row in rows)
+    return tuple(TaskContinuationRow.model_validate(dict(row)) for row in rows.mappings())
 
 
 async def list_pending_continuations(

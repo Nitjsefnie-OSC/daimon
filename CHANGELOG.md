@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read original accounting revisions and debits for an exact fleet run through its private worker bindings without funding or settlement writes.
 - Refuse cached unflushed persistent state in financial reads while preserving pending new objects without writes.
 
-- Add a tenant/run-scoped completion-wake audit reader that retains every status and settled dispatcher identity.
+- Add a tenant/run-scoped completion-wake audit reader that retains every status and settled dispatcher identity, reading persisted columns without flushing or overwriting caller state.
 - Refuse retained fleet-root authority after its original run completes, fails or is cancelled, including completion-turn and authenticated tool readers.
 
 - Resume opted-in fleet completion turns through their exact original frozen run, preserving grants and finite origin/card lifetimes across idle frames.

@@ -2861,4 +2861,6 @@ reader. It requires an actual owned run, returns all statuses in creation/ID
 order, and matches the literal canonical run prefix before decoding. Malformed
 owned bodies and mismatched roots remain visible for exporter refusal;
 canonical cohort/key/address validation and snapshot coherence remain exporter
-checks. Reading this audit never claims or runs a wake.
+checks. Reads project persisted columns without flushing or overwriting caller
+objects; effective dirty or deleted state for its source tables is refused by
+the shared store reader. Reading this audit never claims or runs a wake.
