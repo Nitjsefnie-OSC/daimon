@@ -2500,7 +2500,8 @@ class TurnOutcome(Base):
     __tablename__ = "turn_outcomes"
     __table_args__ = (
         CheckConstraint(
-            "origin IN ('chat', 'routine', 'relay', 'handoff')", name="ck_turn_outcomes_origin"
+            "origin IN ('chat', 'routine', 'relay', 'handoff', 'worker')",
+            name="ck_turn_outcomes_origin",
         ),
         CheckConstraint(
             "reason IN ('completed', 'interrupted', 'interrupt_timeout', "
