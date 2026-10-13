@@ -2669,3 +2669,8 @@ foreign, stale or unsupported facts refuse. The caller must first verify the
 exact active origin, native binding and card intent association. This projection
 does not derive authority from balance, pricing, mutable agent names or tool
 requests, and does not reserve funds or activate a run.
+
+
+Fleet roots are projected only when fleet orchestration is enabled and the host installs an explicit `TurnDeps.fleet_root_grants` loader. The loader supplies finite operator grants through the existing `WorkerPermissions` contract; tool bodies, cards, tenant balances and current model prices cannot supply them. Session preparation retains its scoped source capture privately. Before native input, the real turn joins its genuine card intent, active origin, original requester and accepted private binding under the existing lease, then uses `freeze_root_permissions` and the existing fleet/operation owners to retain one immutable root. Missing prerequisites refuse; unconfigured turns perform no new capture or persistence.
+
+`read_frozen_root` in `daimon.core.turn.runtime_manifest` takes the original scope and exactly one selector: the genuine card `intent_id` or verified native `origin_id`. A captured `run_id`, when provided, must match. Cards and authenticated tools consume the same record and fresh policy; recovered controls must provide their captured run. The lookup preserves the original scope principal and finite bounds, checks the current origin, intent, requester, binding and run, and refuses stale or foreign associations. Fresh read authorization cannot enlarge or replace the frozen authority. This seam does not install an operator grant policy or certify a live deployment.

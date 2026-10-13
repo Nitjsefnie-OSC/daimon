@@ -499,6 +499,36 @@ async def get_operation(session: AsyncSession, scope: Scope, key: str) -> Operat
     return record
 
 
+async def get_fleet_root_operation(
+    session: AsyncSession,
+    scope: Scope,
+    *,
+    intent_id: uuid.UUID | None = None,
+    origin_id: uuid.UUID | None = None,
+) -> OperationRecord | None:
+    """Read one exact host-retained root association, never a latest thread."""
+    if (intent_id is None) == (origin_id is None):
+        raise ValueError("exactly one root selector required")
+    tenant_id, account_id = operations.operation_scope(scope)
+    field, value = ("intent_id", intent_id) if intent_id is not None else ("origin_id", origin_id)
+    body = (
+        await session.execute(
+            select(MuxOperation.record).where(
+                MuxOperation.tenant_id == _tenant(tenant_id),
+                MuxOperation.account_id == account_id,
+                MuxOperation.key.startswith("fleet_root:"),
+                MuxOperation.status == "processed",
+                MuxOperation.record["result"][field].astext == str(value),
+            )
+        )
+    ).scalar_one_or_none()
+    if body is None:
+        return None
+    record = OperationRecord.model_validate(body)
+    operations.check_owner(record, scope)
+    return record
+
+
 async def _owned(session: AsyncSession, scope: Scope, key: str) -> OperationRecord:
     record = await _operation(session, scope, key, lock=True)
     if record is None:

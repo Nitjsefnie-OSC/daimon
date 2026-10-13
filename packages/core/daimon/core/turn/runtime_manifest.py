@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast
 from uuid import UUID
 
 from daimon.core.errors import TurnError
+from daimon.core.neutral_resources import (
+    WorkerPermissions,
+    WorkerSpecRefused,
+    freeze_root_permissions,
+)
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
+from mux.contracts.ids import Scope
 from mux.contracts.profile import Capability
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
 from mux.errors import UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
+from mux.state.store import binding_slot
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -26,18 +35,235 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     ValidationError,
+    field_validator,
 )
 
 if TYPE_CHECKING:
+    from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
     from daimon.core.stores.domain import BackendAgent
     from daimon.core.stores.neutral_catalog import AgentRevision
+    from daimon.core.turn.deps import TurnDeps
     from daimon.core.turn.persistence import TurnPersistence
-    from daimon.core.turn.prepare import ProviderPreparationRequest
+    from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
+
+
+class _FrozenRoot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    intent_id: UUID
+    origin_id: UUID
+    binding: ProviderBinding
+    permissions: WorkerPermissions
+
+    @field_validator("permissions", mode="before")
+    @classmethod
+    def _permissions_from_receipt(cls, value: object) -> WorkerPermissions:
+        if isinstance(value, WorkerPermissions):
+            return value
+        return TypeAdapter(WorkerPermissions).validate_json(json.dumps(value))
+
+
+async def _root_context(deps: TurnDeps, root: _FrozenRoot, *, now: datetime) -> TenantAccessPolicy:
+    from daimon.core.stores import turn_card_intents, turn_origins
+    from daimon.core.stores.access_policy import load_access_policy
+    from daimon.core.stores.accounts import get_account_with_tenant
+
+    parent, binding = root.permissions, root.binding
+    facts, scope = parent.fleet, parent.fleet.scope
+    async with deps.sessionmaker() as db:
+        origin = await turn_origins.get_active_origin(
+            db,
+            origin_id=root.origin_id,
+            tenant_id=UUID(scope.tenant_id),
+            account_id=facts.account_id,
+            platform=binding.thread.channel.platform,
+            now=now,
+        )
+        intent = await turn_card_intents.get_turn_card_intent(db, id=root.intent_id)
+        account = await get_account_with_tenant(db, account_id=facts.account_id)
+        policy = await load_access_policy(db, tenant_id=UUID(scope.tenant_id))
+    if not (origin and intent and account and deps.state_store):
+        raise WorkerSpecRefused("origin", "stale")
+    if (
+        facts.depth != 0
+        or len(parent.source_agents) != 1
+        or not facts.enabled
+        or not facts.active
+        or facts.origin_id != root.origin_id
+        or str(facts.account_id) != scope.account_id
+        or facts.root != binding.thread
+        or binding.legacy_account_id != scope.account_id
+        or origin.responder_ma_agent_id != parent.source_agents[0].id
+        or origin.parent_channel_id != facts.root.channel.channel_id
+        or origin.thread_id != facts.root.thread_id
+        or origin.is_external
+        or account.tenant_id != origin.tenant_id
+        or account.platform != origin.platform
+        or account.platform_user_id != parent.subject.platform_user_id
+        or account.is_external
+        or intent.tenant_id != origin.tenant_id
+        or intent.platform != origin.platform
+        or intent.channel_id != origin.parent_channel_id
+        or intent.thread_id != origin.thread_id
+        or intent.status not in ("prepared", "posted")
+        or parent.limits.deadline <= now
+        or await deps.state_store.get_binding(binding_slot(binding)) != binding
+    ):
+        raise WorkerSpecRefused("origin", "stale")
+    return policy
+
+
+async def freeze_prepared_root(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    intent_id: UUID,
+    now: Callable[[], datetime],
+) -> None:
+    """Retain the exact host-owned root under its input's existing mutation fence."""
+    from daimon.core.stores import fleet, mux_state
+    from daimon.core.stores.access_policy import load_access_policy
+    from daimon.core.turn.persistence import current_persistence
+    from daimon.core.turn_origin import current_origin_id
+
+    persistence, origin_id = current_persistence.get(), current_origin_id.get()
+    grant, source = prepared.admission.grant, prepared._source  # pyright: ignore[reportPrivateUsage]
+    loader = deps.fleet_root_grants
+    if not (persistence and origin_id and grant and source and loader):
+        raise WorkerSpecRefused("origin", "unbound")
+    scope, binding = persistence.scope, persistence.binding
+    if (
+        not deps.fleet_enabled
+        or prepared.admission.shared_owner is not None
+        or binding.native_refs.get("session") != prepared.ma_session_id
+        or prepared.admission.account_id != UUID(scope.account_id)
+        or not source.source
+        or source.source.ref.id != prepared.admission.agent.id
+        or binding.config_revision
+        != (prepared.admission.backend_revision.local if prepared.admission.backend_revision else 0)
+    ):
+        raise WorkerSpecRefused("origin", "unbound")
+    async with deps.sessionmaker() as db:
+        existing = await mux_state.get_fleet_root_operation(db, scope, origin_id=origin_id)
+        if existing is not None and existing.result.get("intent_id") != str(intent_id):
+            raise WorkerSpecRefused("origin", "unbound")
+        policy = await load_access_policy(db, tenant_id=grant.tenant_id)
+    permissions = freeze_root_permissions(
+        await loader(grant, source),
+        source,
+        admission=grant,
+        policy=policy,
+        now=now(),
+    )
+    root = _FrozenRoot(
+        intent_id=intent_id, origin_id=origin_id, binding=binding, permissions=permissions
+    )
+
+    async def validate() -> None:
+        if (
+            root.permissions.fleet.scope != scope
+            or root.origin_id != root.permissions.fleet.origin_id
+        ):
+            raise WorkerSpecRefused("origin", "unbound")
+        await _root_context(deps, root, now=now())
+
+    async def retain(_key: str) -> _FrozenRoot:
+        await validate()
+        run = await fleet.create_run(
+            deps.sessionmaker,
+            tenant_id=grant.tenant_id,
+            orchestrator_account_id=prepared.admission.account_id,
+            orchestrator_session_id=prepared.ma_session_id,
+            orchestrator_binding_id=binding.id,
+            platform=binding.thread.channel.platform,
+            channel_id=grant.channel_id,
+            thread_id=binding.thread.thread_id,
+            operation_key=f"fleet_root:{intent_id}",
+            total_budget_usd=permissions.limits.budget_usd,
+            deadline_at=permissions.limits.deadline,
+            max_workers=deps.fleet_max_workers,
+            created_by="host",
+        )
+        await validate()
+        return _FrozenRoot(
+            intent_id=intent_id,
+            origin_id=origin_id,
+            binding=binding,
+            permissions=replace(permissions, fleet=replace(permissions.fleet, run_id=run.id)),
+        )
+
+    await validate()
+    await persistence.mutate(
+        prepared.session_ref,
+        "root",
+        root.model_dump(mode="json", exclude={"permissions"}),
+        retain,
+        _FrozenRoot,
+        lambda _: "processed",
+        guard=validate,
+        retry_failed=False,
+        operation_key=f"fleet_root:{intent_id}",
+    )
+
+
+async def read_frozen_root(
+    deps: TurnDeps,
+    scope: Scope,
+    *,
+    intent_id: UUID | None = None,
+    origin_id: UUID | None = None,
+    run_id: UUID | None = None,
+    now: datetime,
+) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+    """Load one exact retained root, with its original finite authority and current policy."""
+    from daimon.core.stores import fleet, mux_state
+
+    if not deps.fleet_enabled or deps.state_store is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    async with deps.sessionmaker() as db:
+        record = await mux_state.get_fleet_root_operation(
+            db,
+            scope,
+            intent_id=intent_id,
+            origin_id=origin_id,
+        )
+    if record is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    try:
+        root = _FrozenRoot.model_validate(dict(record.result))
+    except ValidationError:
+        raise WorkerSpecRefused("origin", "unbound") from None
+    parent, binding = root.permissions, root.binding
+    original = parent.fleet.scope
+    if (original.tenant_id, original.account_id, original.principal_id) != (
+        scope.tenant_id,
+        scope.account_id,
+        scope.principal_id,
+    ) or record.slot != binding_slot(binding):
+        raise WorkerSpecRefused("origin", "unbound")
+    policy = await _root_context(deps, root, now=now)
+    selected = parent.fleet.run_id
+    if run_id is not None and selected != run_id:
+        raise WorkerSpecRefused("origin", "unbound")
+    run, _ = await fleet.run_status(
+        deps.sessionmaker, tenant_id=UUID(scope.tenant_id), run_id=selected
+    )
+    if (
+        run.orchestrator_session_id != binding.native_refs.get("session")
+        or run.orchestrator_binding_id != binding.id
+        or run.orchestrator_account_id != parent.fleet.account_id
+        or run.platform != binding.thread.channel.platform
+        or run.channel_id != binding.thread.channel.channel_id
+        or run.thread_id != binding.thread.thread_id
+        or run.total_budget_usd != parent.limits.budget_usd
+        or run.deadline_at != parent.limits.deadline
+    ):
+        raise WorkerSpecRefused("origin", "stale")
+    return parent, policy
 
 
 class ProviderRuntimeConfigurationError(RuntimeError):

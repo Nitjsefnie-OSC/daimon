@@ -182,6 +182,7 @@ class TurnPersistence:
         *,
         guard: Callable[[], Awaitable[None]] | None = None,
         retry_failed: bool = True,
+        operation_key: str | None = None,
     ) -> M:
         """Intent then send CAS, or restore an acknowledged receipt.
 
@@ -200,7 +201,7 @@ class TurnPersistence:
         )
         attempt = 0
         while True:
-            key = f"{self.operation_key}:{kind}:{attempt}"
+            key = f"{operation_key or self.operation_key}:{kind}:{attempt}"
             begun = await self.store.begin_operation(
                 self.scope,
                 key=key,
