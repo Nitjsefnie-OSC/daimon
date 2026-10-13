@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The scheduler no longer keeps a database transaction open for its whole lifetime after taking its singleton lock. That open transaction made concurrent index builds, such as migration `0093_spend_gate_indexes`, wait forever, so deploys stalled at the migrate step.
 - On Discord, a server that is unavailable when the bot connects (during a Discord outage) no longer stops the startup sweep. Before, the sweep raised on it and skipped the command sync and the setup of every server after it until the next reconnect; now that server is skipped and synced the next time the bot starts or fully reconnects.
 - Confirming a chat skill add (or a GitHub repo grant) with a polite yes now works. The reply still has to be the whole message, but it may now be `yes please`, `yes pls`, `yep`, `yeah`, `ok`, `okay`, `sure`, `go ahead` or `do it` as well as `yes`, `y`, `confirm` or `approve`, with commas and extra spaces ignored. Before, "yes please" cancelled the preview. A reply that adds anything ("yes but not now", "sure, after lunch") or asks ("ok?") still cancels it.
 - A file the agent writes in its working directory now survives a workspace move (adding a skill, changing the model and the like). The sandbox shell starts in /, so a file written there with a relative path landed outside everything the move archives, and the next workspace could not find it. The loose files directly in / now travel with the rest, and the new workspace is told to put them back there.

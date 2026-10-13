@@ -168,6 +168,10 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
     try:
         result = await conn.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
         got = result.scalar_one()
+        # The lock is session-scoped and survives the commit. Leaving the
+        # autobegun transaction open would hold a snapshot for the process
+        # lifetime and block every CREATE INDEX CONCURRENTLY in migrations.
+        await conn.commit()
     except Exception:
         await conn.close()
         raise
