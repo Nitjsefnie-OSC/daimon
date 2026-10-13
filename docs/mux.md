@@ -2704,3 +2704,21 @@ session/account and the runner's input; that input hook disables replacement
 recovery. Other wake reasons and fleet-disabled calls keep their existing path.
 Original-run tool authority, collection certification, run-end cleanup and the
 deployed compatible-reader/rollback floor require their separate owner proofs.
+
+QA cleanup evidence uses `daimon.testing.admin_resources.ResourceManifestEntry`
+and `freeze_resource_manifest` to retain exact scope/run/binding/native references
+and owner creation receipts. `ownership` and `eligible_actions` are derived;
+borrowed resources have no destructive eligibility, and unknown creations retain
+no guessed native identity. The signed action list is only a ceiling, never a
+production authorization. Original admitted input receipts bind cancellation.
+
+`verify_cancel_readback` performs the existing driver's independent stop readback
+and retains its actual observation. `verify_archive_readback` performs the scoped
+session-admin GET, verifies identity/account/agent/environment and an aware archive
+timestamp, and never sets a native-stop result. Unknown, missing or unsupported
+readbacks remain pending/retained. These read-only QA functions do not cancel,
+archive, delete, release holds, authorize live work or award a scenario point.
+N9 must supply the owner-captured records and independently pinned operation IDs;
+creation receipt provenance and current mutation authorization remain with their
+existing owners. Borrowed memory bindings remain unchanged; the helper does not
+certify DB binding preservation or deletion, which need their real owner readbacks.
