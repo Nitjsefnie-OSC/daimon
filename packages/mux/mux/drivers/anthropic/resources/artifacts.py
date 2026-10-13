@@ -26,6 +26,7 @@ from mux.drivers.anthropic.resources._secrets import (
     credential_request,
     unavailable_secret,
 )
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import UnsupportedCapability
 
 
@@ -97,7 +98,7 @@ class AnthropicArtifacts:
         authorize(self._authorization, scope, "file")
         content = b"".join([chunk async for chunk in body])
         return await provider_call(
-            self._client.beta.files.upload(file=(filename, content, media_type))
+            mutation_client(self._client).beta.files.upload(file=(filename, content, media_type))
         )
 
     async def upload_native(
@@ -106,7 +107,7 @@ class AnthropicArtifacts:
         authorize(self._authorization, scope, "file")
         # Keep the caller's bounded spool as the SDK multipart stream.
         item = await provider_call(
-            self._client.beta.files.upload(file=(filename, body, media_type))
+            mutation_client(self._client).beta.files.upload(file=(filename, body, media_type))
         )
         return native_snapshot(item)
 
@@ -129,7 +130,7 @@ class AnthropicArtifacts:
         authorize(self._authorization, scope, "file")
 
         async def send(kwargs: dict[str, object]) -> FileMetadata:
-            return await self._client.beta.files.upload(
+            return await mutation_client(self._client).beta.files.upload(
                 file=(
                     cast(str, kwargs["filename"]),
                     io.BytesIO(cast(bytes, kwargs["content"])),

@@ -18,7 +18,7 @@ from dataclasses import field as dataclass_field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import PurePosixPath
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 import structlog
@@ -71,8 +71,14 @@ from mux.contracts.resources import (
 )
 from mux.errors import InvalidConfig, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile, native_agent_tools, neutral_catalog_profile_for
-from pydantic import Field, model_validator
+from mux.state.lease import Slot
+from mux.state.operations import request_digest
+from mux.state.store import StateStore
+from pydantic import Field, JsonValue, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.turn.persistence import TurnPersistence
 
 AgentGate = Callable[[Agent], Awaitable[None]]
 PinResolver = Callable[[Scope, SkillRef], Awaitable[SkillRef]]
@@ -223,8 +229,39 @@ class NeutralResourceHost:
         self.check(row.agent)
         return row
 
-    async def read(self, catalog_id: str) -> AgentRevision:
+    async def read(
+        self,
+        catalog_id: str,
+        *,
+        store: StateStore | None = None,
+        key: str | None = None,
+        worker: ResolvedWorkerSpec | None = None,
+        source: Agent | None = None,
+    ) -> AgentRevision:
         row = await self.entry(catalog_id)
+        if any(value is not None for value in (store, key, worker, source)):
+            from daimon.core.turn.persistence import UncertainSend
+
+            if store is None or key is None or worker is None or source is None:
+                raise ScopeViolation(catalog_id, "worker readback needs the owned operation")
+            record = await store.get_operation(self.scope, key)
+            if record is None or record.slot is None or record.operation.status != "processed":
+                raise UncertainSend("worker publication has no committed acknowledgement")
+            payload = self._publication_request(
+                catalog_id, worker.spec, 0, worker, source, record.slot
+            )
+            acknowledged = Agent.model_validate(dict(record.result))
+            if (
+                key != catalog_id.removesuffix(":agent") + ":agent_create:0"
+                or record.operation.request_digest
+                != request_digest({"session": None, "kind": "agent_create", "request": payload})
+                or record.operation.resource is not None
+                or acknowledged.ref != row.agent.ref
+                or acknowledged.revision != row.agent.revision
+                or row.local_revision != 1
+                or row.agent.spec != worker.spec
+            ):
+                raise CatalogConflict("worker differs from its owned publication acknowledgement")
         if self._catalog_adapter is not None:
             fresh = await self._catalog_adapter.verify(self.scope, row.agent)
             self.check(fresh)
@@ -247,6 +284,17 @@ class NeutralResourceHost:
             or fresh.spec.skills != row.agent.spec.skills
             or tuple(fresh.spec.tools or ()) != tools
             or tuple(fresh.spec.mcp_servers or ()) != tuple(row.agent.spec.mcp_servers or ())
+            or (
+                worker is not None
+                and (
+                    fresh.revision != row.agent.revision
+                    or fresh.spec.description != row.agent.spec.description
+                    or any(
+                        (fresh.spec.metadata or {}).get(name) != value
+                        for name, value in (row.agent.spec.metadata or {}).items()
+                    )
+                )
+            )
             or any(
                 (fresh.spec.metadata or {}).get(key) != (row.agent.spec.metadata or {}).get(key)
                 for key in (
@@ -259,6 +307,79 @@ class NeutralResourceHost:
         ):
             raise CatalogConflict("native agent differs from the retained catalog revision")
         return row
+
+    def _publication_request(
+        self,
+        catalog_id: str,
+        spec: AgentSpec,
+        expected_revision: int,
+        worker: ResolvedWorkerSpec,
+        source: Agent,
+        slot: Slot,
+    ) -> dict[str, JsonValue]:
+        fleet = worker.permissions.fleet
+        prefix = f"fleet/{fleet.run_id}/"
+        ordinal = slot.thread.thread_id.removeprefix(prefix)
+        if (
+            not slot.thread.thread_id.startswith(prefix)
+            or not ordinal.isdecimal()
+            or str(int(ordinal)) != ordinal
+            or catalog_id != f"fleet:{fleet.run_id}:spawn:{ordinal}:agent"
+            or expected_revision != 0
+            or slot.thread.channel != fleet.root.channel
+            or slot.account_id != self.scope.account_id
+            or fleet.scope != self.scope
+            or fleet.depth != 1
+            or not fleet.enabled
+            or not fleet.active
+            or worker.spec != spec
+            or worker.permissions.spec != spec
+            or worker.backend.profile != self.profile.profile_id
+            or spec.model.provider != self.profile.provider
+            or source.ref.kind != "agent"
+            or source.ref.provider != source.spec.model.provider
+            or source.ref.tenant_id != self.scope.tenant_id
+            or source.lifecycle != "active"
+            or source.archived_at is not None
+            or (
+                worker.source_agent is not None
+                and worker.source_agent != (source.ref, source.revision)
+            )
+        ):
+            raise ScopeViolation(catalog_id, "publication differs from the canonical worker claim")
+        return cast(
+            dict[str, JsonValue],
+            {
+                "catalog": catalog_id,
+                "workspace": self.workspace,
+                "slot": slot.model_dump(mode="json"),
+                "scope": self.scope.model_dump(mode="json"),
+                "origin": str(fleet.origin_id),
+                "root": fleet.root.model_dump(mode="json"),
+                "place": asdict(fleet.place),
+                "run": str(fleet.run_id),
+                "agent": str(worker.permissions.agent_id),
+                "backend": worker.backend.model_dump(mode="json"),
+                "spec": spec.model_dump(mode="json", exclude_unset=True),
+                "source": (
+                    [part.model_dump(mode="json") for part in worker.source_agent]
+                    if worker.source_agent is not None
+                    else None
+                ),
+                "captured_source": request_digest(
+                    cast(JsonValue, source.model_dump(mode="json", exclude_unset=True))
+                ),
+                "resources": [item.model_dump(mode="json") for item in worker.resources],
+                "environment": (
+                    worker.environment.model_dump(mode="json")
+                    if worker.environment is not None
+                    else None
+                ),
+                "limits": worker.limits.model_dump(mode="json"),
+                "seals": sorted(worker.permissions.seal_ids),
+                "memory_read_only": worker.permissions.memory_read_only,
+            },
+        )
 
     async def agents(self) -> tuple[AgentRevision, ...]:
         rows = await self.catalog.list_agents(self.scope)
@@ -278,15 +399,66 @@ class NeutralResourceHost:
         return None if not matches else HostAgentView(matches[0])
 
     async def publish(
-        self, catalog_id: str, spec: AgentSpec, *, expected_revision: int, key: str
+        self,
+        catalog_id: str,
+        spec: AgentSpec,
+        *,
+        expected_revision: int,
+        key: str,
+        persistence: TurnPersistence | None = None,
+        guard: Callable[[], Awaitable[None]] | None = None,
+        worker: ResolvedWorkerSpec | None = None,
+        source: Agent | None = None,
     ) -> AgentRevision:
-        current = await self.catalog.get_agent(self.scope, catalog_id)
-        if (current.local_revision if current is not None else 0) != expected_revision:
-            raise CatalogConflict("agent changed before native creation")
-        created = await self.backend.agents.create(self.scope, spec, key=key)
+        """Publish authored intent through the worker's existing native mutation owner."""
+        owned = any(value is not None for value in (persistence, guard, worker, source))
+        if owned:
+            if persistence is None or guard is None or worker is None or source is None:
+                raise ScopeViolation(catalog_id, "publication needs complete owned authority")
+            if persistence.scope != self.scope or persistence.operation_key + ":agent" != key:
+                raise ScopeViolation(catalog_id, "publication differs from the owned invocation")
+            payload = self._publication_request(
+                catalog_id, spec, expected_revision, worker, source, persistence.slot
+            )
+            await guard()
+
+            async def preallocate() -> None:
+                await guard()
+                if await self.catalog.get_agent(self.scope, catalog_id) is not None:
+                    raise CatalogConflict("agent changed before native creation")
+
+            async def create(native_key: str) -> Agent:
+                actual = await self.backend.agents.create(self.scope, spec, key=native_key)
+                self.check(actual)
+                return actual
+
+            created = await persistence.mutate(
+                None,
+                "agent_create",
+                payload,
+                create,
+                Agent,
+                lambda _: "processed",
+                guard=preallocate,
+                retry_failed=False,
+            )
+            current = await self.catalog.get_agent(self.scope, catalog_id)
+            if current is not None:
+                if (
+                    current.local_revision != 1
+                    or current.agent.ref != created.ref
+                    or current.agent.revision != created.revision
+                    or current.agent.spec != spec
+                ):
+                    raise CatalogConflict("catalog differs from the acknowledged publication")
+                return current
+        else:
+            current = await self.catalog.get_agent(self.scope, catalog_id)
+            if (current.local_revision if current is not None else 0) != expected_revision:
+                raise CatalogConflict("agent changed before native creation")
+            created = await self.backend.agents.create(self.scope, spec, key=key)
         self.check(created)
-        # Keep authored intent, rather than reusing driver's compiled metadata
-        # chunks or losing hosted Bash/MCP toolset declarations on the next edit.
+        # Keep authored intent, rather than losing compiled tool declarations on edits.
         authored = created.model_copy(update={"spec": spec})
         published = False
         try:
@@ -296,10 +468,7 @@ class NeutralResourceHost:
             published = True
             return row
         finally:
-            # An idempotent replay can return a ref already published by the
-            # winning operation, including a historical catalog revision. A
-            # lost CAS or commit acknowledgement never proves it unpublished.
-            # Without a fenced identity/history proof, retain it for reconciliation.
+            # A lost CAS or commit ACK never proves the native identity unpublished.
             if not published:
                 _log.warning(
                     "neutral_resources.agent_publication_failed_native_retained",

@@ -944,3 +944,29 @@ that native ID, and each dispatch checks the stored definition against it. The
 Flash accounting transport uses the verified model for one named-agent attempt;
 it never substitutes the inline fallback chain. Existing inline callers omit this
 optional dependency and retain their requests and accounting policy.
+
+### Claimed worker resources
+
+Canonical worker specs can use the existing scoped Anthropic create edge without
+passing through a legacy SDK payload projection. Agent creation observes the
+existing single-attempt mutation context only for a claimed operation; ordinary
+resource callers retain their request and retry behavior.
+
+Alternate-backend worker publication uses the existing catalog publisher with
+an owned private-slot lease, the canonical worker, and a fresh authorization and
+financial guard. Its operation binds the run, ordinal, root, source revision,
+resource context and authored spec. It invokes the existing unbound turn persistence owner, which records the
+native acknowledgment before catalog publication. A catalog retry restores that
+identity rather than creating another agent. A sent or unknown operation requires reconciliation.
+The existing read edge can verify the processed operation against the scoped
+catalog before native readback. Runtime installation, source classification and
+session preparation remain required; this resource edge does not grant execution.
+
+The Anthropic session composer accepts a captured resource source together with
+the canonical worker. The original source UUID selects memory, repository,
+files and credentials while the actual worker ID selects execution. The existing
+source projection guard is reused, and the existing preparation fence runs before
+resource effects and again before session creation. Worker memory or Copilot
+failures propagate; ordinary degradation remains unchanged. Native worker resource
+drops are refused until this composer can prove them. Claimed memory/vault/file
+creation and credential mirroring use the same single-attempt SDK selector.

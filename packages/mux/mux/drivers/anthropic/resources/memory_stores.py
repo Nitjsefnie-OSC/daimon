@@ -30,6 +30,7 @@ from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.resources._native import NativeSnapshot, native_snapshot
 from mux.drivers.anthropic.resources.vaults import operation
 from mux.drivers.anthropic.schemas import NativeConfig
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import UnsupportedCapability
 
 
@@ -147,7 +148,7 @@ class AnthropicMemoryStores:
         authorize(self._authorization, scope, "memory_store")
         check_record(scope, "new-memory-store", config.metadata)
         item = await provider_call(
-            self._client.beta.memory_stores.create(
+            mutation_client(self._client).beta.memory_stores.create(
                 **cast(MemoryStoreCreateParams, config.model_dump(exclude_unset=True))
             )
         )

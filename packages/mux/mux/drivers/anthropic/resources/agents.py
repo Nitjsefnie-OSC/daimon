@@ -31,6 +31,7 @@ from mux.drivers.anthropic.schemas import (
     agent_tools,
     multiagent,
 )
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import ScopeViolation, UnsupportedCapability
 
 
@@ -215,7 +216,9 @@ class AnthropicAgents:
         authorize(self._authorization, scope, "agent")
         check_record(scope, "new-agent", spec.metadata)
         item = await provider_call(
-            self._client.beta.agents.create(**cast(AgentCreateParams, agent_payload(spec)))
+            mutation_client(self._client).beta.agents.create(
+                **cast(AgentCreateParams, agent_payload(spec))
+            )
         )
         check_record(scope, item.id, item.metadata)
         return agent_record(item, self._account_scope_id, scope)
