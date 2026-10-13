@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Synchronize Discord gateway-lease tests with completed PostgreSQL backend shutdown before a successor attempts the released advisory lock.
 - Prepare worker-completion decoding and dispatch on the existing leased continuation ladder, while refusing new completion writes until a compatible-reader release protects legacy timer scans. Missing host decisions defer without a provider fallback.
+- Verify explicitly restricted worker source intent and native counterparts through the existing preparation seam; retain refusal for undeclared, private or unrepresentable obligations.
+
 - Verify declared OpenAI worker restrictions against native agent and hosted-environment readback; refuse missing memory declarations, residual mounts and unproven no-sandbox execution before allocation.
 - Verify explicitly restricted Gemini worker targets against native catalog readback and consume their checked identity, preserving admission restrictions and refusing unsupported retained resources.
 

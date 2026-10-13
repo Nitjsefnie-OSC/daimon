@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast
 from uuid import UUID
@@ -176,6 +177,7 @@ async def read_preparation_counterpart(
             ),
             resource_scope=request.scope,
             memory_read_only=request.admission.memory_read_only,
+            fernet=request.deps.fernet,
             channel_skills=request.admission.channel_skills,
             tool_safety=request.deps.tool_safety,
             asks_before_publishing=request.admission.asks_before_publishing,
@@ -211,40 +213,123 @@ async def read_preparation_counterpart(
         spec = source.effective_spec
         if spec is None:
             raise UnsupportedCapability(("source_definition",), revision.profile)
+        worker = request.worker
+        if worker is not None:
+            fleet = worker.permissions.fleet
+            if (
+                fleet.scope != request.scope
+                or not fleet.enabled
+                or not fleet.active
+                or fleet.depth != 1
+                or fleet.account_id != request.admission.account_id
+                or fleet.root.channel != revision.channel
+                or (worker.source_agent is None and worker.permissions.agent_id != source.agent_id)
+                or worker.backend.profile != revision.profile
+                or worker.backend.backend != revision.backend
+                or worker.backend.model != revision.model
+                or dict(worker.backend.requires) != dict(revision.requires)
+                or worker.backend.thread_mode != revision.thread_mode
+                or worker.permissions.spec != worker.spec
+                or worker.permissions.resources != worker.resources
+                or worker.permissions.environment != worker.environment
+                or worker.permissions.limits != worker.limits
+                or worker.limits.deadline > request.deadline
+                or worker.limits.deadline <= request.now()
+                or worker.permissions.subject.is_admin
+                or (request.admission.memory_read_only and not worker.permissions.memory_read_only)
+                or not request.admission.origin_seal_ids <= worker.permissions.seal_ids
+                or (
+                    worker.source_agent is not None
+                    and worker.source_agent != (source.source.ref, source.source.revision)
+                )
+            ):
+                raise UnsupportedCapability(("worker_context",), revision.profile)
+        drops = worker.declared_drops if worker is not None else ()
+        target = worker.spec if worker is not None else None
         missing: set[str] = set()
-        if spec.system is not None:
+        if spec.system is not None and (
+            target is None
+            or target.system is None
+            or not (target.system == spec.system or target.system.startswith(spec.system + "\n\n"))
+        ):
             missing.add("instructions")
-        if (
-            spec.tools
-            or any(extension.value.get("tools") for extension in spec.extensions or ())
-            or request.admission.asks_before_publishing
+        if request.admission.asks_before_publishing or (
+            (spec.tools or any(extension.value.get("tools") for extension in spec.extensions or ()))
+            and "tools" not in drops
+            and (target is None or target.tools != spec.tools or spec.extensions)
         ):
             missing.add("tools")
-        if spec.skills or request.admission.channel_skills:
+        if (
+            spec.skills
+            and "skills" not in drops
+            and (target is None or target.skills != spec.skills)
+        ):
             missing.add("skills")
-        if spec.mcp_servers:
+        if (
+            spec.mcp_servers
+            and "mcp" not in drops
+            and "tools" not in drops
+            and (target is None or target.mcp_servers != spec.mcp_servers)
+        ):
             missing.add("mcp")
-        if source.repository_sources:
+        if source.repository_sources and "repository" not in drops:
             missing.add("repository")
         for resource in source.resource_requirements:
-            if resource.target_path is not None:
+            if resource.target_path is not None and "files" not in drops:
                 missing.add("files")
-            missing.add(
-                "credentials"
-                if resource.kind == "credential"
-                else "repository"
-                if resource.kind == "repository"
-                else "files"
-                if resource.kind == "artifact"
-                else "memory"
-                if resource.resource is not None and resource.resource.kind == "memory_store"
-                else "source_definition"
-            )
-        if source.memory_required is not False or source.memory_store_id is not None:
+            # No installed materializer proves credentials or opaque private resources.
+            missing.add("credentials" if resource.kind == "credential" else "source_definition")
+        if (source.memory_required is not False or source.memory_store_id is not None) and (
+            "memory" not in drops
+        ):
             missing.add("memory")
-        # No installed target plan proves the source environment or complete materialization.
-        missing.add("environment")
-        raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
+        # Removing execution is explicit; retaining a source environment requires
+        # its complete canonical policy, which native readback must also verify.
+        if worker is None or not (
+            ("sandbox" in drops and worker.environment is None and not worker.resources)
+            or (
+                source.environment is not None
+                and worker.environment is not None
+                and worker.environment == source.environment.spec
+                and worker.environment.native_config is None
+            )
+        ):
+            missing.add("environment")
+        if worker is not None:
+            for extension in spec.extensions or ():
+                model = extension.value.get("model")
+                if (
+                    (
+                        extension.namespace == "anthropic.agent_tools"
+                        and (not extension.value.get("tools") or "tools" in drops)
+                    )
+                    or (
+                        extension.namespace == "anthropic.model_config"
+                        and isinstance(model, dict)
+                        and set(model) <= {"id", "speed"}
+                        and model.get("speed") is None
+                    )
+                    or (
+                        extension.namespace == "anthropic.multiagent"
+                        and extension.value == {"clear": True}
+                    )
+                    or extension.namespace == "anthropic.agent_create_nulls"
+                ):
+                    continue
+                missing.add("source_definition")
+        if missing:
+            raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
+        selected = replace(request, source=source)
+        runtime = selected.deps.turn_runtimes.get(revision.profile)
+        if runtime is None or runtime.read_agent_counterpart is None:
+            raise UnsupportedCapability(("native_counterpart",), revision.profile)
+        counterpart = await asyncio.wait_for(
+            runtime.read_agent_counterpart(selected),
+            timeout=remaining_s(request.deadline, now=request.now()),
+        )
+        if target is None or counterpart.agent.spec != target or await capture() != source:
+            raise UnsupportedCapability(("source_drift",), revision.profile)
+        return replace(selected, counterpart=counterpart)
     except UnsupportedCapability as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception:

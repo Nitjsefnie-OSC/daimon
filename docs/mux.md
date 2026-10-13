@@ -2467,3 +2467,22 @@ remain admission constraints; dropping memory leaves the admission's readonly
 ceiling intact. Ordinary agent switches without a resolved worker remain
 refused. These provider checks complement the shared source and resource proof,
 whose completion is required before fleet execution is available.
+
+
+The shared worker preparation proof captures the authorized source through the
+existing session resource composer. A canonical resolved worker can discharge
+only its explicitly declared attachment, memory and sandbox losses; protected
+instructions, publication policy, credentials and opaque private resources are
+still obligations. The proof checks root scope, source identity/version, derived
+permissions and deadline, reads the complete native counterpart, then re-reads
+resource intent to reject drift before handing that exact plan to preparation.
+Existing agent switches without a resolved worker remain refused.
+
+A restricted Gemini worker with declared losses can use the checked native
+agent, remote empty environment and no execution tools. Readonly remains on the
+admission even when its memory mount is explicitly removed. OpenAI hosted
+readback is component coverage; ordinary legacy-source environment preservation
+and no-sandbox first-input consumption remain refused. Neither readback nor a
+resolved worker digest substitutes for fresh fleet/budget admission, which the
+headless worker driver must obtain before native execution. All switches remain
+default off; the legacy and channel paths keep their existing behavior.

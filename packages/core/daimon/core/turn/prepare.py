@@ -916,6 +916,7 @@ async def bind_session_impl(
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     _on_prepared: Callable[[PreparedTurn], Awaitable[None]] | None = None,
+    worker: ResolvedWorkerSpec | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
 
@@ -992,6 +993,14 @@ async def bind_session_impl(
         if prepare is None:
             raise AdmissionDenied(reason="backend_unsupported")
         scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
+        if worker is not None:
+            worker_scope = worker.permissions.fleet.scope
+            if (worker_scope.tenant_id, worker_scope.account_id) != (
+                scope.tenant_id,
+                scope.account_id,
+            ):
+                raise AdmissionDenied(reason="backend_unsupported")
+            scope = worker_scope
         request = ProviderPreparationRequest(
             deps,
             admission,
@@ -1006,6 +1015,7 @@ async def bind_session_impl(
             transfer,
             effective_deadline,
             now,
+            worker=worker,
         )
         request, runtimes = scope_channel_runtimes(request)
 
