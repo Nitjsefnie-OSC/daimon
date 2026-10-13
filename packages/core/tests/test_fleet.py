@@ -1401,6 +1401,47 @@ async def test_a_model_input_counts_once_with_its_winning_send(
     _, (after,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
     assert after.turns_used == 1 and after.version == counted.version
 
+    # The next input from a stale copy of the worker is refused, not counted.
+    with pytest.raises(FleetConflict, match="at version"):
+        await _count_input(sm, store, run, worker, lease, f"{key}:next")
+    _, (after,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert after.turns_used == 1 and after.version == counted.version
+
+
+async def test_concurrent_sends_of_one_input_count_it_once(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    store = PostgresStateStore(pooled, trust_caller_clock=True)
+    run, worker, lease = await _running_worker(pooled, store)
+    key = f"fleet:{run.id}:input:{worker.ordinal}:1"
+    outcomes = await asyncio.gather(
+        *(_count_input(pooled, store, run, worker, lease, key) for _ in range(2)),
+        return_exceptions=True,
+    )
+    # The loser meets either the row's version compare-and-swap or the lost claim;
+    # either way it rolls back and the input counts once.
+    (won,) = [o for o in outcomes if isinstance(o, FleetWorker)]
+    (lost,) = [o for o in outcomes if not isinstance(o, FleetWorker)]
+    assert isinstance(lost, FleetConflict | SendClaimed)
+    _, (after,) = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
+    assert after.turns_used == 1 and after.version == won.version
+
+
+async def test_only_a_running_worker_counts_a_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    run = await _run(sm)
+    await _worker(sm, run, 0)
+    starting = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+    assert starting is not None and starting.status == "starting"
+    _, _, lease, _ = await _bind(store, run, starting)
+    with pytest.raises(FleetConflict, match="at version"):
+        await _count_input(sm, store, run, starting, lease, "in:1")
+    _, (after,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert after.turns_used == 0 and after.version == starting.version
+
 
 async def test_a_worker_cannot_use_more_than_its_max_turns(
     db_session_factory: async_sessionmaker[AsyncSession],
