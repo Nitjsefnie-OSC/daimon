@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 
+- Preserve authorized source resource identity while executing canonical Anthropic workers, refusing unavailable retained resources and unsupported native drops.
+
+- Verify worker resource publication against its existing native mutation receipt, captured source and scoped catalog before native readback.
+
 - Resolve canonical workers through the current backend policy and preserve their full specs through scoped, single-attempt agent creation.
 
 - Allow fleet worker specs to declare closed resource drops, narrow their grants, remove sandbox execution tools, and record the declarations in existing scoped audits.
