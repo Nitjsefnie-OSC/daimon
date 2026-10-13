@@ -1060,6 +1060,10 @@ def resolve_worker_spec(
         spec_compatibility_items,
     )
     from daimon.core.turn.ceiling import TURN_CEILING_S
+    from daimon.core.turn.runtime_manifest import (
+        classify_source_obligations,
+        compose_source_instructions,
+    )
 
     fleet = parent.fleet
     place = fleet.place
@@ -1147,36 +1151,8 @@ def resolve_worker_spec(
             or captured_source.environment is None
         ):
             raise WorkerSpecRefused("scope", "stale")
-        if effective.extensions or effective.model.options:
-            raise WorkerSpecRefused("extensions", "unsupported")
-        for field, required, requested in (
-            ("tools", effective.tools, resolved.tools),
-            ("skills", effective.skills, resolved.skills),
-            ("mcp", effective.mcp_servers, resolved.mcp_servers),
-        ):
-            if field not in resolved.declared_drops:
-                _worker_subset(
-                    cast(WorkerField, field), tuple(required or ()), tuple(requested or ())
-                )
-        if captured_source.memory_required and "memory" not in resolved.declared_drops:
-            raise WorkerSpecRefused("memory", "unsupported")
-        if "sandbox" not in resolved.declared_drops:
-            environment = environment if environment is not None else parent.environment
-            if environment is None or environment != captured_source.environment.spec:
-                raise WorkerSpecRefused("sandbox", "not_subset")
-            if "repository" not in resolved.declared_drops:
-                _worker_subset(
-                    "files", captured_source.repository_sources, tuple(environment.sources or ())
-                )
-        if {item.kind for item in captured_source.resource_requirements} & {"native", "credential"}:
-            raise WorkerSpecRefused("files", "unsupported")
-        _worker_subset("files", captured_source.resource_requirements, resources)
-        system = effective.system or ""
         parent = replace(
-            parent,
-            base_system=parent.base_system
-            + ("\n\n" + system if system and system != parent.base_system else ""),
-            memory_read_only=parent.memory_read_only or captured_source.memory_read_only,
+            parent, memory_read_only=parent.memory_read_only or captured_source.memory_read_only
         )
     drops = resolved.declared_drops
     inherited = (parent.spec, source, captured_source.effective_spec if captured_source else None)
@@ -1337,9 +1313,11 @@ def resolve_worker_spec(
         raise WorkerSpecRefused("deadline", "not_subset")
     if cap.max_turns > parent.limits.max_turns:
         raise WorkerSpecRefused("max_turns", "not_subset")
-    system = resolved.system or ""
-    if not (system == parent.base_system or system.startswith(parent.base_system + "\n\n")):
-        system = parent.base_system + ("\n\n" + system if system else "")
+    system = compose_source_instructions(parent.base_system, resolved.system)
+    if captured_source is not None:
+        system = compose_source_instructions(
+            cast(AgentSpec, captured_source.effective_spec).system, system, deduplicate_prefix=True
+        )
     resolved = resolved.model_copy(update={"system": system})
     if drops:
         guidance = "Worker restrictions: " + "; ".join(
@@ -1352,6 +1330,19 @@ def resolve_worker_spec(
         )
         if guidance not in system.split("\n\n"):
             resolved = resolved.model_copy(update={"system": system + "\n\n" + guidance})
+    if captured_source is not None:
+        missing = classify_source_obligations(
+            captured_source, resolved, environment=environment, resources=resources
+        )
+        if missing:
+            field = {
+                "instructions": "system",
+                "environment": "sandbox",
+                "repository": "files",
+                "credentials": "files",
+                "source_definition": "extensions",
+            }.get(sorted(missing)[0], sorted(missing)[0])
+            raise WorkerSpecRefused(cast(WorkerField, field), "unsupported")
     body = {
         "spec": resolved.model_dump(mode="json"),
         "backend": selected.model_dump(mode="json"),

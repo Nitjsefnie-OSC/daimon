@@ -194,3 +194,37 @@ def test_new_resource_declarations_default_closed_for_old_profile_rows() -> None
     assert restored.skill_digest is None
     assert restored.tool_readback == "authored"
     assert restored.catalog_readback == "retrieve"
+
+
+def test_native_agent_tool_projection_uses_the_closed_anthropic_compiler():
+    from mux.drivers.anthropic.schemas import agent_tools
+
+    extension = ExtensionConfig(
+        namespace="anthropic.agent_tools",
+        version=1,
+        value={
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "helper",
+                    "description": "Helper",
+                    "input_schema": {"type": "object"},
+                }
+            ]
+        },
+    )
+    spec = AgentSpec(
+        name="source",
+        model=ModelRef(provider="anthropic", id="claude-haiku-5-5"),
+        tools=agent_tools(extension).intent(),
+    )
+    assert native_agent_tools(MANAGED_AGENTS, spec) == (
+        ToolSpec(
+            name="helper", kind="custom", description="Helper", input_schema={"type": "object"}
+        ),
+    )
+    assert agent_tools(extension.model_copy(update={"value": {"tools": []}})).intent() == ()
+    with pytest.raises(ValueError):
+        agent_tools(
+            extension.model_copy(update={"value": {"tools": [{"type": "agent_toolset_20260401"}]}})
+        ).intent()

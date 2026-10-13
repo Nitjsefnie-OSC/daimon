@@ -1358,3 +1358,59 @@ async def test_worker_expiry_attempts_cleanup_of_the_actual_prepared_session_onc
     assert session.state == "idle"
     assert "session_archive" in capsys.readouterr().out
     assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_normalized_source_prefix_is_consumed_by_actual_preparation(
+    explicit_worker_request, monkeypatch
+):
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    from ..test_fleet_permissions import POLICY
+
+    request, _, owned, transport = explicit_worker_request
+    captured = await capture_preparation_source(request)
+    root = replace(
+        request.worker.permissions,
+        fleet=replace(request.worker.permissions.fleet, depth=0),
+        base_system="Protected root instruction",
+    )
+    worker = resolve_worker_spec(
+        root,
+        root.spec.model_copy(update={"system": root.base_system}),
+        policy=POLICY,
+        now=request.now(),
+        captured_source=captured,
+    )
+    assert worker.spec.system.startswith("Retained instructions\n\nProtected root instruction\n\n")
+    assert worker.spec.system.count(root.base_system) == 1
+    scope = worker.permissions.fleet.scope
+    actual = await owned.resources.backend.agents.create(
+        scope, worker.spec, key="normalized-prefix"
+    )
+    previous = await owned.resources.catalog.get_agent(scope, owned.retained.catalog_id)
+    assert previous is not None
+    row = await owned.resources.catalog.put_agent(
+        scope,
+        owned.retained.catalog_id,
+        actual,
+        expected_revision=previous.local_revision,
+    )
+    plan = owned.plan.model_copy(
+        update={
+            "agent_id": actual.ref.id,
+            "agent_name": worker.spec.name,
+            "tools": tuple(worker.spec.tools or ()),
+            "skill_ids": tuple(pin.id for pin in worker.spec.skills or ()),
+            "system": worker.spec.system,
+            "counterpart_catalog_revision": row.local_revision,
+        }
+    )
+    owned.manifest_path.write_text(json.dumps([plan.model_dump(mode="json")]))
+    request, _ = install_runtime(
+        replace(request, scope=scope, worker=worker), owned, monkeypatch, transport
+    )
+    selected = await read_preparation_counterpart(request)
+    assert selected.counterpart.agent.spec == worker.spec
+    assert selected.source.effective_spec.system == "Retained instructions"

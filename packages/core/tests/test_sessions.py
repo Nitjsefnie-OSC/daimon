@@ -2805,7 +2805,7 @@ async def test_projection_uses_composer_vault_copilot_and_app_filters(
         assert "private-" not in output and "owned-repo-credential" not in output
 
 
-async def worker_source_context(db_nullpool_engine):
+async def worker_source_context(db_nullpool_engine, *, original_tools=(), granted_tools=()):
     from dataclasses import replace
 
     from daimon.core.channel_backend import load_backend_agent
@@ -2829,6 +2829,7 @@ async def worker_source_context(db_nullpool_engine):
         tenant_id=str(tenant.id),
         name="source",
         system="Protected root instruction",
+        tools=original_tools,
     )
     environment = ma_environment(tenant_id=str(tenant.id))
     root = parent()
@@ -2839,6 +2840,7 @@ async def worker_source_context(db_nullpool_engine):
             model=root.spec.model,
             system=root.base_system,
             metadata={"daimon_tenant": str(tenant.id)},
+            tools=granted_tools or None,
         ),
         fleet=replace(
             root.fleet,
@@ -3063,23 +3065,122 @@ async def test_worker_never_silently_loses_retained_memory_on_materialization_fa
     assert trace.requests == []
 
 
-async def test_actual_sdk_projected_worker_source_refuses_opaque_intent_before_allocation(
-    db_preflight, db_nullpool_engine
+@pytest.mark.parametrize("custom", [False, True])
+async def test_actual_sdk_projected_worker_source_normalizes_represented_native_intent(
+    db_preflight, db_nullpool_engine, custom
 ):
     from dataclasses import replace
 
-    from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+    from mux.contracts.resources import ToolSpec
+    from mux.drivers.anthropic.resources.agents import tool_payload
 
     from .test_fleet_permissions import NOW, POLICY
 
-    _, _, _, original, _, worker, captured = await worker_source_context(db_nullpool_engine)
+    tool = ToolSpec(
+        name="owned-helper",
+        kind="custom",
+        description="Owned helper",
+        input_schema={"type": "object"},
+    )
+    _, _, _, original, _, worker, captured = await worker_source_context(
+        db_nullpool_engine,
+        original_tools=(tool_payload(tool),) if custom else (),
+        granted_tools=(tool,) if custom else (),
+    )
     root = replace(
         worker.permissions,
         fleet=replace(worker.permissions.fleet, depth=0),
         agent_id=captured.agent_id,
     )
+    namespaces = {item.namespace for item in captured.effective_spec.extensions}
+    assert namespaces == {
+        "anthropic.agent_tools",
+        "anthropic.model_config",
+        "anthropic.multiagent",
+        "anthropic.agent_create_nulls",
+    }
     assert captured.source.native == original.model_dump(mode="json", exclude_unset=True)
-    assert captured.effective_spec.extensions
-    with pytest.raises(WorkerSpecRefused) as refusal:
-        resolve_worker_spec(root, worker.spec, policy=POLICY, now=NOW, captured_source=captured)
-    assert (refusal.value.field, refusal.value.reason) == ("extensions", "unsupported")
+    requested = worker.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
+    result = resolve_worker_spec(root, requested, policy=POLICY, now=NOW, captured_source=captured)
+    assert result.spec.tools == ((tool,) if custom else ())
+    assert result.spec.system.count("Protected root instruction") == 1
+    assert not result.spec.extensions
+    assert result.environment is None
+    assert (
+        classify_source_obligations(
+            captured, result.spec, environment=result.environment, resources=result.resources
+        )
+        == frozenset()
+    )
+    assert (
+        result.digest
+        == resolve_worker_spec(
+            root, requested, policy=POLICY, now=NOW, captured_source=captured
+        ).digest
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", ["namespace", "model_option", "version", "tools", "memory", "sandbox"]
+)
+async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
+    db_preflight, db_nullpool_engine, failure
+):
+    from dataclasses import replace
+
+    from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.resources import ToolSpec
+    from mux.drivers.anthropic.resources.agents import tool_payload
+
+    from .test_fleet_permissions import NOW, POLICY
+
+    tool = ToolSpec(
+        name="owned-helper",
+        kind="custom",
+        description="Owned helper",
+        input_schema={"type": "object"},
+    )
+    _, _, _, _, _, worker, captured = await worker_source_context(
+        db_nullpool_engine, original_tools=(tool_payload(tool),), granted_tools=(tool,)
+    )
+    root = replace(
+        worker.permissions,
+        fleet=replace(worker.permissions.fleet, depth=0),
+        agent_id=captured.agent_id,
+    )
+    requested = worker.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
+    if failure in ("namespace", "model_option", "version"):
+        extensions = captured.effective_spec.extensions
+        if failure == "namespace":
+            extensions += (ExtensionConfig(namespace="anthropic.opaque", version=1, value={}),)
+        elif failure == "model_option":
+            extensions = tuple(
+                item.model_copy(update={"value": {"model": {"id": "other", "speed": "fast"}}})
+                if item.namespace == "anthropic.model_config"
+                else item
+                for item in extensions
+            )
+        else:
+            extensions = tuple(item.model_copy(update={"version": 2}) for item in extensions)
+        captured = captured.model_copy(
+            update={
+                "effective_spec": captured.effective_spec.model_copy(
+                    update={"extensions": extensions}
+                )
+            }
+        )
+    elif failure == "tools":
+        requested = requested.model_copy(update={"tools": ()})
+    else:
+        requested = requested.model_copy(
+            update={
+                "declared_drops": tuple(
+                    item for item in requested.declared_drops if item != failure
+                )
+            }
+        )
+    with pytest.raises(WorkerSpecRefused):
+        resolve_worker_spec(root, requested, policy=POLICY, now=NOW, captured_source=captured)

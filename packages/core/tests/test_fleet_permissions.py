@@ -1294,7 +1294,7 @@ def test_captured_intent_keeps_root_and_source_instructions_with_role_selected_m
     result = resolve(
         root, root.spec.model_copy(update={"system": "Role rule"}), captured_source=captured
     )
-    assert result.spec.system == "Protected root instruction\n\nSource rule\n\nRole rule"
+    assert result.spec.system == "Source rule\n\nProtected root instruction\n\nRole rule"
     assert result.spec.model == root.spec.model
     assert result.permissions.seal_ids == root.seal_ids
     assert result.permissions.memory_read_only is True
@@ -1325,7 +1325,7 @@ def test_source_obligations_cannot_be_silently_omitted(field):
     key = "mcp_servers" if field == "mcp" else field
     with pytest.raises(WorkerSpecRefused) as refusal:
         resolve(root, root.spec.model_copy(update={key: ()}), captured_source=captured)
-    assert (refusal.value.field, refusal.value.reason) == (field, "not_subset")
+    assert (refusal.value.field, refusal.value.reason) == (field, "unsupported")
     result = resolve(
         root,
         root.spec.model_copy(update={key: (), "declared_drops": (field,)}),
@@ -1454,7 +1454,7 @@ def test_clone_capture_must_match_retained_source_revision_and_native_snapshot()
 def test_captured_sandbox_and_resources_cannot_replace_root_grants():
     root, captured = captured_worker_source(parent("openai"))
     binding = ResourceBinding(id="file", kind="artifact")
-    with pytest.raises(WorkerSpecRefused, match="files: not_subset"):
+    with pytest.raises(WorkerSpecRefused, match="extensions: unsupported"):
         resolve(
             root, captured_source=captured.model_copy(update={"resource_requirements": (binding,)})
         )
@@ -1484,3 +1484,52 @@ def test_capture_inherited_drops_remain_restrictions():
         root, root.spec.model_copy(update={"declared_drops": ("memory",)}), captured_source=captured
     )
     assert result.declared_drops == ("memory",)
+
+
+def test_existing_memory_store_cannot_disappear_from_capture_obligations():
+    root, captured = captured_worker_source(parent("openai"))
+    captured = captured.model_copy(
+        update={"memory_required": False, "memory_store_id": "memstore-existing"}
+    )
+    with pytest.raises(WorkerSpecRefused, match="memory: unsupported"):
+        resolve(root, captured_source=captured)
+    result = resolve(
+        root, root.spec.model_copy(update={"declared_drops": ("memory",)}), captured_source=captured
+    )
+    assert result.declared_drops == ("memory",)
+
+
+@pytest.mark.parametrize(
+    "source,role,expected",
+    [
+        ("Source rule", "Protected root instruction", "Source rule\n\nProtected root instruction"),
+        (
+            "Protected root instruction\n\nSource rule",
+            "Protected root instruction\n\nRole rule",
+            "Protected root instruction\n\nSource rule\n\nRole rule",
+        ),
+    ],
+)
+def test_instruction_normalization_matches_preparation_without_duplicate_root(
+    source, role, expected
+):
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    root, captured = captured_worker_source(parent("openai"))
+    captured = captured.model_copy(
+        update={"effective_spec": captured.effective_spec.model_copy(update={"system": source})}
+    )
+    result = resolve(root, root.spec.model_copy(update={"system": role}), captured_source=captured)
+    assert result.spec.system == expected
+    assert result.spec.system.count(root.base_system) == 1
+    assert (
+        classify_source_obligations(captured, result.spec, environment=result.environment)
+        == frozenset()
+    )
+
+
+def test_without_capture_instruction_composition_retains_existing_bytes():
+    root = parent("openai")
+    root = replace(root, base_system="Root\n\nProtected rule")
+    result = resolve(root, root.spec.model_copy(update={"system": "Root\n\nRole rule"}))
+    assert result.spec.system == "Root\n\nProtected rule\n\nRoot\n\nRole rule"
