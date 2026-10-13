@@ -26,6 +26,7 @@ from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
 from mux.errors import UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
+from mux.state.operations import OperationRecord
 from mux.state.store import binding_slot
 from pydantic import (
     AfterValidator,
@@ -35,7 +36,6 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     ValidationError,
-    field_validator,
 )
 
 if TYPE_CHECKING:
@@ -58,13 +58,6 @@ class _FrozenRoot(BaseModel):
     origin_id: UUID
     binding: ProviderBinding
     permissions: WorkerPermissions
-
-    @field_validator("permissions", mode="before")
-    @classmethod
-    def _permissions_from_receipt(cls, value: object) -> WorkerPermissions:
-        if isinstance(value, WorkerPermissions):
-            return value
-        return TypeAdapter(WorkerPermissions).validate_json(json.dumps(value))
 
 
 async def _root_context(deps: TurnDeps, root: _FrozenRoot, *, now: datetime) -> TenantAccessPolicy:
@@ -101,8 +94,7 @@ async def _root_context(deps: TurnDeps, root: _FrozenRoot, *, now: datetime) -> 
         or origin.parent_channel_id != facts.root.channel.channel_id
         or origin.thread_id != facts.root.thread_id
         or origin.is_external
-        or account.tenant_id != origin.tenant_id
-        or account.platform != origin.platform
+        or (account.tenant_id, account.platform) != (origin.tenant_id, origin.platform)
         or account.platform_user_id != parent.subject.platform_user_id
         or account.is_external
         or intent.tenant_id != origin.tenant_id
@@ -141,6 +133,7 @@ async def freeze_prepared_root(
         or prepared.admission.shared_owner is not None
         or binding.native_refs.get("session") != prepared.ma_session_id
         or prepared.admission.account_id != UUID(scope.account_id)
+        or source.resource_scope != scope
         or not source.source
         or source.source.ref.id != prepared.admission.agent.id
         or binding.config_revision
@@ -148,9 +141,6 @@ async def freeze_prepared_root(
     ):
         raise WorkerSpecRefused("origin", "unbound")
     async with deps.sessionmaker() as db:
-        existing = await mux_state.get_fleet_root_operation(db, scope, origin_id=origin_id)
-        if existing is not None and existing.result.get("intent_id") != str(intent_id):
-            raise WorkerSpecRefused("origin", "unbound")
         policy = await load_access_policy(db, tenant_id=grant.tenant_id)
     permissions = freeze_root_permissions(
         await loader(grant, source),
@@ -164,11 +154,6 @@ async def freeze_prepared_root(
     )
 
     async def validate() -> None:
-        if (
-            root.permissions.fleet.scope != scope
-            or root.origin_id != root.permissions.fleet.origin_id
-        ):
-            raise WorkerSpecRefused("origin", "unbound")
         await _root_context(deps, root, now=now())
 
     async def retain(_key: str) -> _FrozenRoot:
@@ -182,19 +167,32 @@ async def freeze_prepared_root(
             platform=binding.thread.channel.platform,
             channel_id=grant.channel_id,
             thread_id=binding.thread.thread_id,
-            operation_key=f"fleet_root:{intent_id}",
+            operation_key=f"fleet_root:{origin_id}",
             total_budget_usd=permissions.limits.budget_usd,
             deadline_at=permissions.limits.deadline,
             max_workers=deps.fleet_max_workers,
             created_by="host",
         )
         await validate()
-        return _FrozenRoot(
-            intent_id=intent_id,
-            origin_id=origin_id,
-            binding=binding,
-            permissions=replace(permissions, fleet=replace(permissions.fleet, run_id=run.id)),
+        return root.model_copy(
+            update={
+                "permissions": replace(permissions, fleet=replace(permissions.fleet, run_id=run.id))
+            }
         )
+
+    async def begin(_key: str, digest: str) -> OperationRecord:
+        async with deps.sessionmaker.begin() as db:
+            record = await mux_state.get_fleet_root_operation(
+                db,
+                scope,
+                intent_id=intent_id,
+                origin_id=origin_id,
+                slot=persistence.slot,
+                request_digest=digest,
+            )
+        if record is None:
+            raise WorkerSpecRefused("origin", "unbound")
+        return record
 
     await validate()
     await persistence.mutate(
@@ -206,7 +204,8 @@ async def freeze_prepared_root(
         lambda _: "processed",
         guard=validate,
         retry_failed=False,
-        operation_key=f"fleet_root:{intent_id}",
+        operation_key=f"fleet_root:{origin_id}",
+        begin=begin,
     )
 
 
@@ -231,10 +230,10 @@ async def read_frozen_root(
             intent_id=intent_id,
             origin_id=origin_id,
         )
-    if record is None:
+    if record is None or record.operation.status != "processed":
         raise WorkerSpecRefused("origin", "unbound")
     try:
-        root = _FrozenRoot.model_validate(dict(record.result))
+        root = _FrozenRoot.model_validate_json(json.dumps(dict(record.result)))
     except ValidationError:
         raise WorkerSpecRefused("origin", "unbound") from None
     parent, binding = root.permissions, root.binding

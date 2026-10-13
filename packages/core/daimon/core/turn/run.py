@@ -987,15 +987,18 @@ async def run_prepared_turn_impl(
         with persistence.activate():
             yield
 
+    root_intent = (
+        turn_card_intent_id
+        if deps.fleet_enabled and deps.fleet_root_grants is not None and origin != "worker"
+        else None
+    )
+
     async def checked_send() -> None:
         await decide_before_send(deps, prepared.admission)()
-        if deps.fleet_enabled and deps.fleet_root_grants is not None and origin != "worker":
-            from daimon.core.neutral_resources import WorkerSpecRefused
+        if root_intent is not None:
             from daimon.core.turn.runtime_manifest import freeze_prepared_root
 
-            if turn_card_intent_id is None:
-                raise WorkerSpecRefused("origin", "unbound")
-            await freeze_prepared_root(deps, prepared, intent_id=turn_card_intent_id, now=now)
+            await freeze_prepared_root(deps, prepared, intent_id=root_intent, now=now)
         if before_send is not None:
             await before_send()
 
@@ -1043,10 +1046,7 @@ async def run_prepared_turn_impl(
                 image_blocks=image_blocks,
                 system_blocks=prepared.continuity.system_blocks,
                 before_send=checked_send
-                if before_send is not None
-                or (
-                    deps.fleet_enabled and deps.fleet_root_grants is not None and origin != "worker"
-                )
+                if before_send is not None or root_intent is not None
                 else decide_before_send(deps, prepared.admission),
                 send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
             )

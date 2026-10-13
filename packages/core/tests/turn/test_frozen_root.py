@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from daimon.core._models import FleetRun
 from daimon.core.authz import Subject, Surface, build_agent_ref
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
@@ -18,10 +19,10 @@ from daimon.core.neutral_resources import WorkerSpecRefused
 from daimon.core.scope import ResolvedConfig
 from daimon.core.session_ports_compat import create_session_record
 from daimon.core.sessions import project_session_resources
-from daimon.core.stores import access_policy, mux_state, turn_card_intents, turn_origins
+from daimon.core.stores import access_policy, fleet, mux_state, turn_card_intents, turn_origins
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import Admission, AdmissionGrant
-from daimon.core.turn.persistence import TurnPersistence
+from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtime_manifest import freeze_prepared_root, read_frozen_root
@@ -33,7 +34,9 @@ from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
 from mux.contracts.resources import ProviderBinding
-from mux.errors import ScopeViolation
+from mux.errors import OperationConflict, ScopeViolation
+from mux.state.store import binding_slot
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..test_fleet_permissions import POLICY, parent
@@ -409,7 +412,9 @@ async def test_fresh_read_authorization_preserves_original_root_scope(root_turn)
     assert retained.fleet.scope == scope and retained.fleet.scope != fresh
 
 
-@pytest.mark.parametrize("fault", ("intent", "origin", "scope", "binding", "requester"))
+@pytest.mark.parametrize(
+    "fault", ("intent", "origin", "scope", "binding", "requester", "source_scope")
+)
 async def test_invalid_capture_cannot_commit_a_root_or_dispatch_input(root_turn, fault):
     deps, prepared, grants, intent, origin, scope, binding, transport = root_turn
     if fault == "intent":
@@ -421,6 +426,13 @@ async def test_invalid_capture_cannot_commit_a_root_or_dispatch_input(root_turn,
             grants[0],
             fleet=replace(
                 grants[0].fleet, scope=scope.model_copy(update={"principal_id": "other"})
+            ),
+        )
+    elif fault == "source_scope":
+        prepared = replace(
+            prepared,
+            _source=prepared._source.model_copy(
+                update={"resource_scope": scope.model_copy(update={"authorization_id": "other"})}
             ),
         )
     elif fault == "binding":
@@ -474,13 +486,14 @@ async def test_one_native_origin_cannot_create_a_second_root_budget(root_turn):
             thread_id=intent.thread_id,
             turn_token=uuid4(),
         )
-    with pytest.raises(WorkerSpecRefused):
+    with pytest.raises(OperationConflict):
         await freeze((deps, prepared, grants, other, origin, scope, binding, transport))
     retained, _ = await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
     assert retained.fleet.run_id == original.fleet.run_id and len(transport.requests) == 2
 
 
-async def test_worker_turn_never_recaptures_or_allocates_an_orchestrator_root(root_turn):
+@pytest.mark.parametrize("origin_kind", ("worker", "chat"))
+async def test_installed_loader_does_not_capture_worker_or_ordinary_turn(root_turn, origin_kind):
     deps, prepared, _, intent, origin, scope, _, transport = root_turn
     prepared = replace(prepared, _source=None)
 
@@ -505,8 +518,127 @@ async def test_worker_turn_never_recaptures_or_allocates_an_orchestrator_root(ro
         cancel=asyncio.Event(),
         reseed_user_message=reseed,
         recovery_lifecycle=lambda cancel: lifecycle,
-        origin="worker",
+        origin=origin_kind,
     )
     async with deps.sessionmaker() as db:
         assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
     assert any(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
+
+
+async def new_intent(value):
+    deps, _, _, intent, _, _, _, _ = value
+    async with deps.sessionmaker.begin() as db:
+        return await turn_card_intents.create_turn_card_intent(
+            db,
+            tenant_id=intent.tenant_id,
+            platform=intent.platform,
+            channel_id=intent.channel_id,
+            thread_id=intent.thread_id,
+            turn_token=uuid4(),
+        )
+
+
+async def assert_one_run(value):
+    deps, _, _, intent, _, _, _, transport = value
+    async with deps.sessionmaker() as db:
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == intent.tenant_id)
+            )
+            == 1
+        )
+    assert len(transport.requests) == 2
+
+
+async def test_pending_origin_reservation_refuses_a_second_intent(root_turn):
+    deps, prepared, grants, intent, origin, scope, binding, transport = root_turn
+    async with deps.sessionmaker.begin() as db:
+        reserved = await mux_state.get_fleet_root_operation(
+            db,
+            scope,
+            intent_id=intent.id,
+            origin_id=origin.id,
+            request_digest="reserved",
+            slot=binding_slot(binding),
+        )
+    assert reserved.operation.status == "pending"
+    other = await new_intent(root_turn)
+    with pytest.raises(OperationConflict):
+        await freeze((deps, prepared, grants, other, origin, scope, binding, transport))
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
+    assert len(transport.requests) == 2
+
+
+async def test_committed_run_without_receipt_cannot_allocate_again(root_turn, monkeypatch):
+    deps, prepared, grants, intent, origin, scope, binding, transport = root_turn
+    original = fleet.create_run
+
+    async def lost_receipt(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(fleet, "create_run", lost_receipt)
+    with pytest.raises(asyncio.CancelledError):
+        await freeze(root_turn)
+    async with deps.sessionmaker() as db:
+        reserved = await mux_state.get_fleet_root_operation(db, scope, origin_id=origin.id)
+    assert reserved.operation.status == "outcome_unknown"
+    assert reserved.result["intent_id"] == str(intent.id)
+    other = await new_intent(root_turn)
+    with pytest.raises(OperationConflict):
+        await freeze((deps, prepared, grants, other, origin, scope, binding, transport))
+    with pytest.raises(UncertainSend):
+        await freeze(root_turn)
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    await assert_one_run(root_turn)
+
+
+async def test_interleaved_intents_reserve_one_origin_before_run_receipt(root_turn, monkeypatch):
+    deps, prepared, _, intent, origin, scope, binding, _ = root_turn
+    other = await new_intent(root_turn)
+    committed, release = asyncio.Event(), asyncio.Event()
+    original = fleet.create_run
+
+    async def delayed_receipt(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        committed.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(fleet, "create_run", delayed_receipt)
+    persistence = TurnPersistence(deps.state_store, binding, scope, operation_key="interleaved")
+
+    async def write():
+        with persistence.activate():
+            first = asyncio.create_task(
+                freeze_prepared_root(
+                    deps, prepared, intent_id=intent.id, now=lambda: datetime.now(UTC)
+                )
+            )
+            try:
+                await asyncio.wait_for(committed.wait(), timeout=10)
+                async with deps.sessionmaker() as db:
+                    reserved = await mux_state.get_fleet_root_operation(
+                        db, scope, origin_id=origin.id
+                    )
+                assert reserved.operation.status == "sent"
+                with pytest.raises(OperationConflict):
+                    await freeze_prepared_root(
+                        deps, prepared, intent_id=other.id, now=lambda: datetime.now(UTC)
+                    )
+            finally:
+                release.set()
+                await first
+
+    await persistence.run(write)
+    await assert_one_run(root_turn)
+    retained, _ = await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=other.id) is None
+    assert retained.fleet.origin_id == origin.id
