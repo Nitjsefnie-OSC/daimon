@@ -427,7 +427,7 @@ class ResourceManifestEntry(Contract):
             and (
                 not self.creation_key
                 or self.creation.key != self.creation_key
-                or self.creation.resource != self.resource
+                or self.creation.resource not in (None, self.resource)
                 or self.creation_ack != self.resource
                 or self.resource is None
                 or self.resource.account_id != self.scope.account_id

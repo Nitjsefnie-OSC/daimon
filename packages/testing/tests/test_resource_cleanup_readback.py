@@ -363,3 +363,34 @@ async def test_naive_creation_time_is_refused_before_archive_read():
         with pytest.raises(ValueError):
             await verify_archive_readback(backend, row, archive(entry), operation_id="archive")
         assert len(transport.requests) == 1
+
+
+async def test_creation_journal_without_resource_uses_its_separate_actual_sdk_ack():
+    from mux.state.memory import MemoryStateStore
+
+    async with case() as (backend, entry, raw, transport):
+        store = MemoryStateStore()
+        await store.begin_operation(
+            SCOPE,
+            key="actual-create",
+            operation_id="actual-create",
+            request_digest=entry.creation.request_digest,
+            now=NOW,
+        )
+        await store.claim_send(SCOPE, "actual-create", now=NOW, fence=None)
+        record = await store.advance_operation(
+            SCOPE, "actual-create", "processed", now=NOW, fence=None, result=raw
+        )
+        assert record.operation.resource is None
+        observed = entry.model_copy(
+            update={"creation": record.operation, "creation_key": "actual-create"}
+        )
+        manifest = freeze_resource_manifest((observed,))
+        assert manifest[0].ownership == "created" and manifest[0].creation_ack == entry.resource
+        raw["archived_at"] = datetime.now(UTC).isoformat()
+        transport.queue(ScriptedReply("GET", "/v1/sessions/session", httpx.Response(200, json=raw)))
+        assert (
+            await verify_archive_readback(
+                backend, manifest[0], archive(entry), operation_id="archive"
+            )
+        ).archived
