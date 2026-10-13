@@ -25,6 +25,7 @@ from daimon.core.continuity.continuation import (
 )
 from daimon.core.continuity.wakes import (
     WAKE_RETRY_DELAY,
+    WAKE_UNAVAILABLE_DELAY,
     WakeClaim,
     busy_retry_at,
     claim_wake,
@@ -188,7 +189,8 @@ async def dispatch_pending_continuations(
         try:
             if row.reason == "worker_finished":
                 if worker_finished_decision is None:
-                    raise ContinuationContextUnavailable("worker_finished_unavailable")
+                    await release_wake(sessionmaker, claim, retry_at=now() + WAKE_UNAVAILABLE_DELAY)
+                    continue
                 decision = await worker_finished_decision(row, now())
                 if decision is None:
                     raise ContinuationContextUnavailable("worker_finished_not_ready")
