@@ -18,7 +18,7 @@ from dataclasses import field as dataclass_field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 import structlog
@@ -55,11 +55,11 @@ from daimon.core.stores.neutral_catalog import (
     PostgresNeutralCatalog,
     SkillVersion,
 )
-from mux.contracts._base import Contract
+from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
-from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
+from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.ports import Agents, ManagedAgents
-from mux.contracts.profile import SUPPORTED, Profile
+from mux.contracts.profile import SUPPORTED, Capability, Profile
 from mux.contracts.resources import (
     Agent,
     AgentPatch,
@@ -837,6 +837,10 @@ WorkerField = Literal[
     "budget",
     "deadline",
     "max_turns",
+    "max_model_requests",
+    "max_input_tokens",
+    "max_output_tokens",
+    "provider_limits_usd",
     "declared_drops",
 ]
 WorkerReason = DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale"]
@@ -855,12 +859,47 @@ class WorkerLimits(Contract):
     budget_usd: Decimal = Field(ge=0, allow_inf_nan=False, strict=True)
     deadline: datetime
     max_turns: int = Field(gt=0, strict=True)
+    max_model_requests: int | None = Field(
+        default=None, gt=0, strict=True, exclude_if=lambda value: value is None
+    )
+    max_input_tokens: int | None = Field(
+        default=None, gt=0, strict=True, exclude_if=lambda value: value is None
+    )
+    max_output_tokens: int | None = Field(
+        default=None, gt=0, strict=True, exclude_if=lambda value: value is None
+    )
+    provider_limits_usd: (
+        FrozenMap[
+            Provider,
+            Annotated[
+                Decimal,
+                Field(ge=0, strict=True, allow_inf_nan=False, max_digits=12, decimal_places=6),
+            ],
+        ]
+        | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _aware_deadline(self) -> WorkerLimits:
         if self.deadline.utcoffset() is None:
             raise ValueError("worker deadline must be aware")
         return self
+
+    def require_profile(self, profile: Profile) -> None:
+        """Refuse requested ceilings before a driver can allocate native work."""
+        if self.provider_limits_usd is not None and (
+            self.provider_limits_usd.get(profile.provider, Decimal(0)) <= 0
+        ):
+            raise WorkerSpecRefused("provider_limits_usd", "not_subset")
+        capabilities: tuple[tuple[int | None, Capability], ...] = (
+            (self.max_model_requests, "model_request_limit"),
+            (self.max_input_tokens, "input_token_limit"),
+            (self.max_output_tokens, "output_token_limit"),
+        )
+        for value, capability in capabilities:
+            allowed = ("native",) if capability == "output_token_limit" else SUPPORTED
+            if value is not None and profile.support_for(capability) not in allowed:
+                raise WorkerSpecRefused("budget", "unsupported")
 
 
 @dataclass(frozen=True)
@@ -1428,6 +1467,28 @@ def resolve_worker_spec(
         raise WorkerSpecRefused("deadline", "not_subset")
     if cap.max_turns > parent.limits.max_turns:
         raise WorkerSpecRefused("max_turns", "not_subset")
+    request_fields: tuple[WorkerField, ...] = (
+        "max_model_requests",
+        "max_input_tokens",
+        "max_output_tokens",
+    )
+    for field in request_fields:
+        retained, narrowed = getattr(parent.limits, field), getattr(cap, field)
+        if retained is not None and (narrowed is None or narrowed > retained):
+            raise WorkerSpecRefused(field, "not_subset")
+    if parent.limits.provider_limits_usd is not None:
+        lines = cap.provider_limits_usd
+        if lines is None or any(
+            provider not in parent.limits.provider_limits_usd
+            or amount > parent.limits.provider_limits_usd[provider]
+            for provider, amount in lines.items()
+        ):
+            raise WorkerSpecRefused("provider_limits_usd", "not_subset")
+    if cap.provider_limits_usd is not None and (
+        cap.budget_usd > cap.provider_limits_usd.get(selected.backend, Decimal(0))
+    ):
+        raise WorkerSpecRefused("provider_limits_usd", "not_subset")
+    cap.require_profile(profile)
     system = compose_source_instructions(parent.base_system, resolved.system)
     if captured_source is not None:
         system = compose_source_instructions(

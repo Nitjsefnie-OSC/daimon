@@ -43,6 +43,7 @@ from daimon.core.stores.turn_usage import read_accounting_revisions
 from daimon.core.usage_delegation import HostUsageBinding, read_delegated_usage
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ProviderBinding
+from mux.profiles import get_profile
 from mux.state.lease import Slot
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -441,6 +442,19 @@ async def _produce_fleet_budget(
         raise FleetConflict("financial admission requires the current root binding")
     if run.total_budget_usd > parent.limits.budget_usd:
         raise FleetConflict("fleet cap exceeds the authenticated parent budget")
+    parent.limits.require_profile(get_profile(root_binding.profile))
+    provider_limits = (
+        None
+        if parent.limits.provider_limits_usd is None
+        else {
+            str(provider): amount for provider, amount in parent.limits.provider_limits_usd.items()
+        }
+    )
+    if provider_limits is not None:
+        with localcontext() as arithmetic:
+            arithmetic.prec = 80
+            if sum(provider_limits.values(), Decimal(0)) > run.total_budget_usd:
+                raise FleetConflict("provider limits exceed the retained run budget")
 
     # The shared tariff gate covers each selected worker before reservation,
     # dispatch or passive refresh, even without a native binding yet.
@@ -537,6 +551,11 @@ async def _produce_fleet_budget(
         result: dict[uuid.UUID, FleetBudgetUsage] = {}
         selected = workers if worker_id is None else tuple(w for w in workers if w.id == worker_id)
         worker_overrun = any(w.reserved_usd > w.budget_usd for w in workers)
+        provider_exposures: dict[str, Decimal] = {}
+        for member in workers:
+            provider_exposures[member.backend] = (
+                provider_exposures.get(member.backend, Decimal(0)) + member.reserved_usd
+            )
         for worker in selected:
             reason = None
             if run.status != "running" or worker.status not in ("pending", "starting", "running"):
@@ -554,6 +573,11 @@ async def _produce_fleet_budget(
                 reason = "channel_budget_exceeded"
             elif run.reserved_usd > run.total_budget_usd:
                 reason = "run_budget_exceeded"
+            elif provider_limits is not None and any(
+                amount > provider_limits.get(provider, Decimal(0))
+                for provider, amount in provider_exposures.items()
+            ):
+                reason = "provider_budget_exceeded"
             elif worker_overrun or floors[worker.id] >= worker.budget_usd:
                 reason = "worker_budget_exceeded"
             elif pricing_unavailable[worker.id] or unpriced_usage:
@@ -576,6 +600,11 @@ async def _produce_fleet_budget(
                     reason = "worker_budget_exceeded"
                 elif run.reserved_usd + delta > run.total_budget_usd:
                     reason = "run_budget_exceeded"
+                elif provider_limits is not None and (
+                    provider_exposures.get(worker.backend, Decimal(0)) + delta
+                    > provider_limits.get(worker.backend, Decimal(0))
+                ):
+                    reason = "provider_budget_exceeded"
                 elif available is None or delta > available:
                     reason = "tenant_budget_exceeded"
                 elif channel_available is not None and delta > channel_available:

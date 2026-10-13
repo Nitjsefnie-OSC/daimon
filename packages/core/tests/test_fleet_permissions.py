@@ -232,6 +232,102 @@ def test_expired_deadline_and_missing_timezone_refuse_before_remaining_floor():
         WorkerLimits(budget_usd=Decimal("1"), deadline=NOW.replace(tzinfo=None), max_turns=1)
 
 
+@pytest.mark.parametrize("field", ("max_model_requests", "max_input_tokens", "max_output_tokens"))
+@pytest.mark.parametrize("value", (True, False, 0, -1, 1.5, "2"))
+def test_request_limits_refuse_nonpositive_or_inexact_values(field, value):
+    with pytest.raises(ValidationError):
+        WorkerLimits.model_validate(parent().limits.model_dump() | {field: value})
+
+
+@pytest.mark.parametrize("field", ("max_model_requests", "max_input_tokens", "max_output_tokens"))
+@pytest.mark.parametrize("replacement", (None, 3))
+def test_a_worker_cannot_drop_or_raise_a_retained_request_ceiling(field, replacement):
+    root = parent()
+    retained = WorkerLimits.model_validate(root.limits.model_dump() | {field: 2})
+    root = replace(root, limits=retained)
+    narrowed = WorkerLimits.model_validate(retained.model_dump() | {field: replacement})
+    with pytest.raises(WorkerSpecRefused, match=field):
+        resolve(root, limits=narrowed)
+
+
+@pytest.mark.parametrize("provider", ("anthropic", "openai", "gemini"))
+@pytest.mark.parametrize("field", ("max_model_requests", "max_input_tokens", "max_output_tokens"))
+def test_unknown_native_request_enforcement_refuses_before_worker_compilation(provider, field):
+    root = parent(provider)
+    limits = WorkerLimits.model_validate(root.limits.model_dump() | {field: 2})
+    with pytest.raises(WorkerSpecRefused, match="budget: unsupported"):
+        resolve(root, limits=limits)
+    with pytest.raises(WorkerSpecRefused, match="budget: unsupported"):
+        limits.require_profile(get_profile(root.backend_grants[0].profile))
+
+
+def test_an_emulated_output_ceiling_cannot_claim_native_enforcement():
+    root = parent()
+    limits = WorkerLimits.model_validate(root.limits.model_dump() | {"max_output_tokens": 2})
+    profile = get_profile(root.backend_grants[0].profile)
+    profile = profile.model_copy(
+        update={"support": dict(profile.support) | {"output_token_limit": "emulated"}}
+    )
+    with pytest.raises(WorkerSpecRefused, match="budget: unsupported"):
+        limits.require_profile(profile)
+
+
+@pytest.mark.parametrize("value", (Decimal("NaN"), Decimal("Infinity"), Decimal("-1"), True, 0.1))
+def test_provider_sublimits_require_exact_finite_money(value):
+    with pytest.raises(ValidationError):
+        WorkerLimits.model_validate(
+            parent().limits.model_dump() | {"provider_limits_usd": {"anthropic": value}}
+        )
+
+
+def test_worker_provider_lines_cannot_expand_or_disappear():
+    root = parent()
+    retained = WorkerLimits.model_validate(
+        root.limits.model_dump() | {"provider_limits_usd": {"anthropic": Decimal("0.5")}}
+    )
+    root = replace(root, limits=retained)
+    for lines in (None, {"anthropic": Decimal("0.6")}, {"openai": Decimal("0.1")}):
+        limits = WorkerLimits.model_validate(retained.model_dump() | {"provider_limits_usd": lines})
+        with pytest.raises(WorkerSpecRefused, match="provider_limits_usd: not_subset"):
+            resolve(root, limits=limits)
+    for lines in ({}, {"anthropic": Decimal(0)}):
+        limits = WorkerLimits.model_validate(retained.model_dump() | {"provider_limits_usd": lines})
+        with pytest.raises(WorkerSpecRefused, match="provider_limits_usd: not_subset"):
+            resolve(root, limits=limits)
+
+
+def test_narrower_provider_limits_are_in_the_existing_intent_digest():
+    root = parent()
+    broad = resolve(root)
+    limits = WorkerLimits.model_validate(
+        root.limits.model_dump()
+        | {"budget_usd": Decimal("0.5"), "provider_limits_usd": {"anthropic": Decimal("0.5")}}
+    )
+    narrowed = resolve(root, limits=limits)
+    assert narrowed.digest != broad.digest
+    assert narrowed.permissions.limits == limits
+
+
+def test_a_worker_budget_cannot_exceed_its_narrowed_provider_line():
+    root = parent()
+    limits = WorkerLimits.model_validate(
+        root.limits.model_dump() | {"provider_limits_usd": {"anthropic": Decimal("0.5")}}
+    )
+    with pytest.raises(WorkerSpecRefused, match="provider_limits_usd: not_subset"):
+        resolve(root, limits=limits)
+
+
+def test_unrequested_request_limits_preserve_existing_serialized_intent():
+    limits = parent().limits
+    expected = {
+        "budget_usd": Decimal("1"),
+        "deadline": NOW + timedelta(minutes=10),
+        "max_turns": 4,
+    }
+    assert limits.model_dump() == expected
+    assert WorkerLimits.model_validate(limits.model_dump()).model_dump() == expected
+
+
 def test_backend_allowlist_and_model_grants_are_independent():
     root = parent("openai")
     with pytest.raises(WorkerSpecRefused, match="backend"):

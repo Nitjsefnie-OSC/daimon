@@ -990,3 +990,10 @@ the existing agent compiler and durable request template. The budget is native
 best-effort behavior, excluding cached tokens. A budgeted worker permits one
 interaction and retains its exact named-agent model, without fallback; ordinary
 Gemini sessions retain their existing behavior.
+
+Profiles declare `model_request_limit`, `input_token_limit` and
+`output_token_limit` through the existing capability map. Unknown support
+refuses a requested worker ceiling. Output ceilings require native enforcement;
+host request admission can be emulated only where the host controls each actual
+model request. Observing a managed agent's inference events does not establish
+that admission control. Unrequested limits preserve existing serialized intent.

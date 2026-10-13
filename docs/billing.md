@@ -1110,3 +1110,19 @@ checks and monitoring; the count is not proof of zero spend or final usage.
 Recovery attempts, extra turns and a used turn on an unallocated row stay
 refused in the single-input executor slice. The store's max-turn admission and
 input claim still precede dispatch; financial facts do not authorize replay.
+
+Optional worker request limits are part of the existing canonical intent and
+must narrow the parent's limits. Missing profile support refuses a requested
+limit before resource compilation; an output-token ceiling requires native
+enforcement. Host turn counts and observed model usage do not substitute for
+an enforced limit on internal model requests. Omitted limits preserve the
+existing serialized intent.
+
+An authenticated parent's optional `provider_limits_usd` fences each provider's
+sibling worker exposure within the run. A missing or zero line refuses that
+provider; a funded reservation cannot borrow unused capacity from another line.
+The same financial producer sums whole unknown reservations and measured
+overruns before admission, under its existing lock and exact decimal context.
+These worker sublimits do not reserve root inference or install credential-line
+guards. The caller must separately bind root admission and native request
+controls; a financial snapshot alone never certifies a provider spending cap.
