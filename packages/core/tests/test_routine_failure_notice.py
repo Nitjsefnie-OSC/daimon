@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import anthropic
 import httpx
 import pytest
+from daimon.core._models import TurnOutcome
 from daimon.core.errors import TurnError
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -20,12 +21,15 @@ from daimon.core.routine_delivery import (
 from daimon.core.scheduler import run_one_tick
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
+    FAILURE_NOTICE,
     create_routine,
     get_routine,
     record_result,
 )
-from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.outcomes import drain_outcomes
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.testing.factories import make_tenant
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _PDF_ERROR = "TurnError: upstream: The PDF specified was not valid"
@@ -170,7 +174,10 @@ def test_notice_says_what_failed_in_plain_words(
     ("error", "expected"),
     [
         (TurnError(kind="upstream", message="The PDF specified was not valid"), _MODEL_NOTICE),
-        (anthropic.APIConnectionError(request=httpx.Request("POST", "https://x")), _MODEL_NOTICE),
+        (
+            anthropic.APIConnectionError(request=httpx.Request("POST", "https://x")),
+            "Something went wrong while it was running.",
+        ),
         (KeyError("x"), "Something went wrong while it was running."),
     ],
 )
@@ -187,17 +194,22 @@ async def test_a_fire_that_raises_is_classified_where_it_is_caught(
         raise error
 
     await _tick(db_session_factory, now, failing_fire)
+    await drain_outcomes()
 
     after = await _get(db_session_factory, row)
-    assert after.delivery_kind == "failure_notice"
+    assert (after.delivery_kind, after.delivery_note) == ("failure_notice", FAILURE_NOTICE)
     assert after.delivery_payload is not None and after.delivery_payload.startswith(expected)
     assert "PDF" not in after.delivery_payload, "no raw error text"
+    async with db_session_factory() as s:
+        outcomes = (await s.execute(select(TurnOutcome.reason))).scalars().all()
+    reason = termination_reason(error)
+    assert outcomes == [reason.value], "the outcome and the notice share one reason"
 
 
 async def test_failure_notice_reads_as_a_failure_not_a_result(db_session: AsyncSession) -> None:
     saved = await _routine(db_session)
     row = saved.model_copy(
-        update={"delivery_kind": "failure_notice", "delivery_payload": _MODEL_NOTICE}
+        update={"delivery_note": FAILURE_NOTICE, "delivery_payload": _MODEL_NOTICE}
     )
     assert render_fallback_post(row) == (
         "team-020-analyst's daily routine at 09:00 UTC failed, so there's no result this time."

@@ -408,7 +408,7 @@ It will try again at its next scheduled time.
 
 The middle line says what failed in plain words, never the raw error, by
 the `TerminationReason` the scheduler records where it catches the failure: a
-model request that failed for good (`UPSTREAM`, or an SDK error), a run that
+model request that failed for good (`UPSTREAM`), a run that
 took too long (`CEILING`), a used-up monthly cap, or otherwise "Something
 went wrong while it was running." A depleted balance or used-up channel
 budget says it in the turn refusal's words (`daimon.core.turn.notices`,
@@ -417,7 +417,8 @@ notice is queued only while `last_error` is still null, so a routine that
 keeps failing posts once and stays quiet until a run succeeds; the panels
 still show every failure. It never replaces a post that is pending or
 claimed, so an undelivered result wins. The outbox row carries
-`delivery_kind = failure_notice`. Nothing is posted for `scheduler_shutdown`,
+`delivery_kind` and `delivery_note` = `failure_notice` until it settles; the
+poster reads the note, which every release writes. Nothing is posted for `scheduler_shutdown`,
 a routine with no tenant or creator, any access-policy refusal
 (`invoker_not_allowed`, `access_policy_unreadable`, `runs_elsewhere`,
 `own_agents_only`), or a routine without a destination.

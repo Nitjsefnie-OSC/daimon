@@ -8,7 +8,6 @@ from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-import anthropic
 import structlog
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
@@ -201,14 +200,9 @@ async def run_one_tick(
                     timeout = f"timeout: exceeded {dispatch_timeout_s}s"
                     await _record_fire_error(sm, row.id, timeout, TerminationReason.CEILING)
                 except Exception as err:
-                    observation.finish(error=err)
+                    reason = termination_reason(err)
+                    observation.finish(error=err, reason=reason)
                     capture_exception_with_scope(err)
-                    # An SDK error raised directly is a model request that failed for good.
-                    reason = (
-                        TerminationReason.UPSTREAM
-                        if isinstance(err, anthropic.APIError)
-                        else termination_reason(err)
-                    )
                     await _record_fire_error(
                         sm, row.id, f"{type(err).__name__}: {err}"[:500], reason
                     )

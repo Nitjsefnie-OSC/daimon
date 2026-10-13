@@ -2,11 +2,12 @@
 
 `delivery_note` said both why a post was skipped and, as `failure_notice`,
 that the pending post is a failed run's notice rather than a result. The kind
-moves to its own nullable column: `result` or `failure_notice`. Existing rows
-are backfilled where the kind can be told: a `failure_notice` note, a pending
-or claimed result, and a result skipped because the agent posted it itself.
-Expand-only: `delivery_note` stays and keeps its values, so the previous
-release still reads the rows it wrote.
+gets its own nullable column: `result` or `failure_notice`. Existing rows are
+backfilled where the kind can be told: a `failure_notice` note, a pending or
+claimed result, and a result skipped because the agent posted it itself.
+Expand-only: `delivery_note` stays, and every release keeps writing
+`failure_notice` there, so the poster reads the note until the previous
+release can no longer write a row without the kind.
 
 downgrade: safe
 """
@@ -33,9 +34,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # The previous release reads a waiting failure notice from the note.
-    op.execute(
-        "UPDATE routines SET delivery_note = 'failure_notice' "
-        "WHERE delivery_kind = 'failure_notice' AND delivery_status IN ('pending', 'claimed')"
-    )
     op.drop_column("routines", "delivery_kind")

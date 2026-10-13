@@ -35,6 +35,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 
+FAILURE_NOTICE = "failure_notice"
+"""`delivery_note` of a pending failure notice, written with `delivery_kind`.
+
+The poster reads the note: the previous release writes the note and not the
+kind, so only the note is right for every row while it can still run."""
+
 LAST_RESULT_TAIL_MAX = 1000
 """Maximum length of the stored preview; delivery keeps the complete reply."""
 
@@ -503,7 +509,7 @@ async def queue_failure_notice(
             .values(
                 delivery_status="pending",
                 delivery_kind="failure_notice",
-                delivery_note=None,
+                delivery_note=FAILURE_NOTICE,
                 delivery_payload=notice,
                 delivery_lease_owner=None,
                 delivery_lease_expires_at=None,

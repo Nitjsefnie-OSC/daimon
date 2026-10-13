@@ -53,6 +53,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
+    FAILURE_NOTICE,
     claim_routine_deliveries,
     queue_failure_notice,
     record_result,
@@ -352,7 +353,7 @@ def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
     """
     payload = (row.delivery_payload or "").strip()
     phrase = routine_phrase(row.cron_expr, row.timezone)
-    if row.delivery_kind == "failure_notice":
+    if row.delivery_note == FAILURE_NOTICE:
         owner = "The" if as_agent else f"{row.agent_name}'s"
         return f"{owner} {phrase} failed, so there's no result this time.\n\n{payload}"
     owner = "the" if as_agent else f"{row.agent_name}'s"
@@ -429,7 +430,7 @@ def render_fallback_dm(row: RoutineRow, reason: str) -> str:
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
     payload = (row.delivery_payload or "").strip()
-    if row.delivery_kind == "failure_notice":
+    if row.delivery_note == FAILURE_NOTICE:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:
         why = _DM_REASONS.get(reason, _DM_REASONS["destination_unavailable"])
