@@ -40,8 +40,26 @@ async def upsert_mirror(
 ) -> MirrorRow:
     """Create the tenant's mirror `name`, or replace it and make it active again.
 
-    A consent note records attested consent by `account_id` at `now`.
+    A consent note records attested consent by `account_id` at `now`. A
+    replacement with another agent or destination settles the posts queued
+    under the old one (`replaced`): they were matched and checked for it.
     """
+    old = await session.scalar(
+        select(Mirror).where(Mirror.tenant_id == tenant_id, Mirror.name == name).with_for_update()
+    )
+    target = (source_agent_id, dest_platform, dest_kind, dest_id)
+    if (
+        old is not None
+        and (old.source_agent_id, old.dest_platform, old.dest_kind, old.dest_id) != target
+    ):
+        await session.execute(
+            update(MirrorDelivery)
+            .where(
+                MirrorDelivery.mirror_id == old.id,
+                MirrorDelivery.status.in_(("pending", "claimed")),
+            )
+            .values(_settled("replaced", now))
+        )
     values: dict[str, Any] = {
         "source_agent_id": source_agent_id,
         "source_agent_name": source_agent_name,

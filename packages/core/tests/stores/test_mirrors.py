@@ -27,7 +27,9 @@ _LEASE = timedelta(minutes=2)
 _MAX_AGE = timedelta(minutes=30)
 
 
-async def _mirror(session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> MirrorRow:
+async def _mirror(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID, *, dest_id: str = "300"
+) -> MirrorRow:
     return await store.upsert_mirror(
         session,
         tenant_id=tenant_id,
@@ -37,7 +39,7 @@ async def _mirror(session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UU
         source_agent_names=("helper",),
         dest_platform="discord",
         dest_kind="channel",
-        dest_id="300",
+        dest_id=dest_id,
         consent_note="askers agreed in the kickoff call",
         max_answer_chars=None,
         account_id=None,
@@ -187,6 +189,59 @@ async def test_a_poster_pause_pauses_the_mirror(
     paused = await store.get_mirror(db_session, mirror.id)
     assert paused is not None and paused.status == "paused", "the mirror is paused"
     assert paused.paused_reason == "writers_none", paused
+
+
+async def test_replacing_a_mirrors_agent_or_destination_drops_what_it_queued(
+    db_session: AsyncSession,
+) -> None:
+    agent = uuid.uuid4()
+    tenant = await make_tenant(db_session)
+    mirror = await _mirror(db_session, tenant.id, agent)
+    for session_key in ("s1", "s2"):
+        await store.insert_deliveries(
+            db_session,
+            event=_event(tenant.id, agent, session_key=session_key),
+            mirror_ids=[mirror.id],
+            now=_NOW,
+        )
+    await _mirror(db_session, tenant.id, agent)
+    assert len(await _claim(db_session, owner="w0")) == 2, "an unchanged mirror keeps its queue"
+    await store.insert_deliveries(
+        db_session, event=_event(tenant.id, agent), mirror_ids=[mirror.id], now=_NOW
+    )
+
+    await _mirror(db_session, tenant.id, uuid.uuid4(), dest_id="301")
+
+    assert await _claim(db_session, now=_NOW + timedelta(seconds=1)) == [], (
+        "posts queued for the old agent and destination never go to the new ones"
+    )
+    rows = (await db_session.scalars(select(MirrorDelivery))).all()
+    assert {(row.status, row.note) for row in rows} == {("skipped", "replaced")}, rows
+    assert all(row.payload is None for row in rows), "a dropped post keeps no question or answer"
+
+
+async def test_a_post_of_another_agent_is_never_handed_to_the_poster(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    mirror = await _mirror(db_session, tenant.id, uuid.uuid4())
+    await store.insert_deliveries(
+        db_session, event=_event(tenant.id, uuid.uuid4()), mirror_ids=[mirror.id], now=_NOW
+    )
+    await db_session.commit()
+    jobs: list[MirrorJob] = []
+
+    async def post(job: MirrorJob) -> MirrorOutcome:
+        jobs.append(job)
+        return MirrorOutcome(status="delivered")
+
+    await poll_mirror_deliveries_once(
+        db_session_factory, platform="discord", post=post, settings=MirrorsSettings(), now=_NOW
+    )
+
+    assert jobs == [], "a post queued for one agent is never posted under another"
+    note = await db_session.scalar(select(MirrorDelivery.note))
+    assert note == "replaced", note
 
 
 async def test_purge_deletes_the_persons_queued_questions(

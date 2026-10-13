@@ -84,6 +84,9 @@ async def _prepare(
         event = delivery.payload
         if event is None:
             return MirrorOutcome(status="skipped", note="no_payload")
+        if event.agent_id != mirror.source_agent_id:
+            # The mirror was replaced with another agent after this was queued.
+            return MirrorOutcome(status="skipped", note="replaced")
         if event.person_scoped and mirror.consent_basis is None:
             # The mirror was replaced without consent after this was queued.
             return MirrorOutcome(status="skipped", note="needs_consent")
