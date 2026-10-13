@@ -13,6 +13,8 @@ from typing import Literal, cast
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
+import httpx
+from daimon.testing.conformance.budget import FIXTURE_ID_PATTERN
 from daimon.testing.conformance.runner import Adapter, Result, run_fixture
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.events import PAYLOAD_MODELS, Event, RequiredAction, ToolUsePayload
@@ -114,11 +116,14 @@ class EventBatch(Contract):
 
 class Tape(Contract):
     version: Literal[2] = 2
-    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1)$")
+    fixture_id: str = Field(pattern=rf"^{FIXTURE_ID_PATTERN}$")
     provider: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}$")
     model: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}$")
     complete: bool = False
     batches: tuple[EventBatch, ...]
+    request_edges: tuple[RequestMetadata, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
 
 def decode_base64(blob: str) -> bytes | None:
@@ -404,15 +409,43 @@ def audit_tape(tape: Tape, secrets: tuple[str, ...]) -> None:
     )
 
 
-class Recorder:
-    """Observe explicitly supplied mux events; never intercept a native callback."""
+class Recorder(httpx.AsyncBaseTransport):
+    """Capture supplied events and gate an explicitly bound native HTTP transport."""
 
-    def __init__(self, *, secrets: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        secrets: tuple[str, ...] = (),
+        transport: httpx.AsyncBaseTransport | None = None,
+        request_guard: Callable[[httpx.Request], None] | None = None,
+    ) -> None:
         if any(not secret for secret in secrets):
             raise RecordingError("redaction secrets must be nonempty")
         self.secrets = secrets
         self._batches: list[EventBatch] = []
         self._unsafe = False
+        self._transport, self._request_guard = transport, request_guard
+        self._request_edges: list[RequestMetadata] = []
+
+    @property
+    def request_edges(self) -> tuple[RequestMetadata, ...]:
+        return tuple(self._request_edges)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """Explicitly bound transport only; gate before any underlying I/O."""
+        if self._transport is None or self._request_guard is None:
+            raise RecordingError("native request transport is unbound")
+        self._request_guard(request)
+        metadata = RequestMetadata.from_request(
+            request.method, str(request.url), headers=request.headers
+        )
+        Audit(self.secrets).audit(metadata.model_dump(mode="json"))
+        self._request_edges.append(metadata)
+        return await self._transport.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        if self._transport is not None:
+            await self._transport.aclose()
 
     def record(self, request: RequestMetadata, events: Iterable[Event]) -> None:
         try:
@@ -441,6 +474,7 @@ class Recorder:
                 model=model,
                 complete=complete,
                 batches=tuple(self._batches),
+                request_edges=self.request_edges,
             )
             audit_tape(tape, self.secrets)
         except (ValidationError, ValueError, TypeError, RecursionError):

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import multiprocessing
 import os
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -20,6 +22,7 @@ from daimon.testing.conformance.budget import (
     BudgetGuard,
     BudgetLedgerError,
     BudgetRefused,
+    H6Binding,
     ModelPrice,
     ProbePlan,
     SpendReceipt,
@@ -28,7 +31,11 @@ from daimon.testing.conformance.budget import (
 )
 from pydantic import ValidationError
 
-TEST_MODELS = {"openai": "gpt-6-luna", "anthropic": "claude-haiku-5-5"}
+TEST_MODELS = {
+    "openai": "gpt-6-luna",
+    "anthropic": "claude-haiku-5-5",
+    "gemini": "gemini-3.8-flash",
+}
 
 
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
@@ -218,7 +225,9 @@ else:
     )
 
 
-def setup_guard(tmp_path: Path, cap: str = "10") -> BudgetGuard:
+def setup_guard(
+    tmp_path: Path, cap: str = "10", *, providers: tuple[str, ...] = ("openai", "anthropic")
+) -> BudgetGuard:
     config = tmp_path / "budget.json"
     config.write_text(
         json.dumps(
@@ -236,7 +245,7 @@ def setup_guard(tmp_path: Path, cap: str = "10") -> BudgetGuard:
                             }
                         },
                     }
-                    for provider in ("openai", "anthropic")
+                    for provider in providers
                 },
             }
         )
@@ -248,7 +257,7 @@ def setup_guard(tmp_path: Path, cap: str = "10") -> BudgetGuard:
 def plan(tokens: int = 1_000_000, provider: str = "openai") -> ProbePlan:
     return ProbePlan(
         provider=provider,
-        model="gpt-6-luna" if provider == "openai" else "claude-haiku-5-5",
+        model=TEST_MODELS[provider],
         fixture_id="C16",
         limits=TokenLimits(input_tokens=tokens, output_tokens=0),
     )
@@ -260,6 +269,25 @@ def receipts(guard: BudgetGuard) -> list[SpendReceipt]:
         for line in guard.spend_path.read_text().splitlines()
         if line.startswith("<!-- mux-probe ")
     ]
+
+
+@pytest.mark.parametrize("fixture_id", ["H6-ANTHROPIC", "H6-OPENAI", "H6-GEMINI"])
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+def test_h6_identity_preserves_the_actual_provider_budget_line(
+    tmp_path: Path, fixture_id: str, provider: str
+) -> None:
+    guard = setup_guard(tmp_path, providers=tuple(TEST_MODELS))
+    admitted = staging_plan(guard, provider=provider, fixture_id=fixture_id)
+    reservation = guard.reserve(admitted)
+    assert reservation.receipt.fixture_id == fixture_id
+    assert reservation.receipt.provider == provider
+    assert reservation.receipt.model == TEST_MODELS[provider]
+    assert reservation.receipt.reserved_usd == 1
+    settled = guard.settle(reservation, status="completed", limits=admitted.limits)
+    assert settled.fixture_id == fixture_id and settled.provider == provider
+    assert settled.status == "uncertain" and settled.actual_usd is None
+    assert settled.held_usd == reservation.receipt.reserved_usd
+    assert BudgetGuard(guard.config_path, guard.spend_path).report()[-1] == settled
 
 
 def test_80_percent_boundary_persists_before_io_and_survives_restarts(tmp_path: Path) -> None:
@@ -498,3 +526,197 @@ def test_anchor_sequence_advances_without_preventing_known_settlement_savings(
     assert guard.lock_path.stat().st_ino == inode
     assert json.loads(guard.lock_path.read_text())["sequence"] == 3
     assert json.loads(guard.checkpoint_path.read_text())["sequence"] == 3
+
+
+def staging_plan(
+    guard: BudgetGuard,
+    *,
+    provider: str = "openai",
+    fixture_id: str = "H6-OPENAI",
+    **changes: object,
+) -> ProbePlan:
+    data = json.loads(guard.config_path.read_text())
+    now = datetime.now(UTC)
+    for budget in data["providers"].values():
+        for price in budget["models"].values():
+            price.update(
+                effective_from=(now - timedelta(days=1)).date().isoformat(),
+                effective_until=(now + timedelta(days=1)).date().isoformat(),
+                source="https://developers.openai.com/api/docs/pricing",
+            )
+    guard.config_path.write_text(json.dumps(data))
+    binding = H6Binding(
+        attempt_id="offline-attempt",
+        leg_id="baseline",
+        phase="baseline",
+        source_sha256="a" * 64,
+        deployment_sha256="b" * 64,
+        go_sha256="c" * 64,
+        envelope_sha256="d" * 64,
+        quote_sha256="e" * 64,
+        scope_sha256="f" * 64,
+        config_sha256=hashlib.sha256(guard.config_path.read_bytes()).hexdigest(),
+        ledger_id=json.loads(guard.checkpoint_path.read_text())["binding"]["ledger_id"],
+        deadline=now + timedelta(minutes=5),
+        maximum_hold_usd=Decimal(1),
+        origin="https://offline.invalid",
+        requests=(("POST", "/v1/messages"),),
+        request_limit=1,
+    )
+    return ProbePlan.model_validate(
+        {
+            **plan(provider=provider).model_dump(),
+            "fixture_id": fixture_id,
+            "limits": {"input_tokens": 20_000, "output_tokens": 2_000},
+            "h6": {**binding.model_dump(), **changes},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_id",
+    ["H6", "H6-UNKNOWN", "H6-openai", "H6-OPENAI-extra", "H6-OPENAI\n", "C00", "C19", "F2"],
+)
+def test_staging_fixture_identity_is_exact(fixture_id: str) -> None:
+    with pytest.raises(ValidationError):
+        ProbePlan(provider="openai", model=TEST_MODELS["openai"], fixture_id=fixture_id)
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing", "deadline", "ledger", "config", "routes", "origin", "scope", "limit"]
+)
+def test_unbound_staging_admission_refuses(tmp_path: Path, damage: str) -> None:
+    guard = setup_guard(tmp_path)
+    updates: dict[str, object] = {
+        "deadline": datetime.now(UTC) - timedelta(seconds=1),
+        "ledger_id": "0" * 32,
+        "config_sha256": "0" * 64,
+        "requests": (),
+        "origin": "https://user:secret@offline.invalid",
+        "scope_sha256": "unbound",
+        "request_limit": 0,
+    }
+    with pytest.raises((ValidationError, BudgetRefused)):
+        if damage == "missing":
+            ProbePlan(provider="openai", model=TEST_MODELS["openai"], fixture_id="H6-OPENAI")
+        else:
+            field = {
+                "ledger": "ledger_id",
+                "config": "config_sha256",
+                "routes": "requests",
+                "scope": "scope_sha256",
+                "limit": "request_limit",
+            }.get(damage, damage)
+            guard.reserve(staging_plan(guard, **{field: updates[field]}))
+    assert not receipts(guard)
+
+
+@pytest.mark.parametrize("damage", ["undated", "expired", "fallback", "room"])
+def test_staging_dated_model_and_room_admission(tmp_path: Path, damage: str) -> None:
+    guard = setup_guard(tmp_path, providers=tuple(TEST_MODELS))
+    admitted = staging_plan(guard, provider="gemini")
+    data = json.loads(guard.config_path.read_text())
+    price = data["providers"]["gemini"]["models"][TEST_MODELS["gemini"]]
+    if damage == "undated":
+        price.pop("effective_until")
+    elif damage == "expired":
+        price["effective_until"] = datetime.now(UTC).date().isoformat()
+    elif damage == "room":
+        data["providers"]["gemini"]["cap_usd"] = ".5"
+    else:
+        data["providers"]["gemini"]["models"]["gemini-flash-latest"] = price
+    guard.config_path.write_text(json.dumps(data))
+    raw = admitted.model_dump()
+    raw["h6"]["config_sha256"] = hashlib.sha256(guard.config_path.read_bytes()).hexdigest()
+    if damage == "fallback":
+        raw["model"] = "gemini-flash-latest"
+    admitted = ProbePlan.model_validate(raw)
+    with pytest.raises(BudgetRefused):
+        guard.reserve(admitted)
+    assert receipts(guard)[-1].status == "blocked"
+
+
+@pytest.mark.parametrize("terminal", ["active", "unknown", "failed", "cancelled"])
+def test_staging_no_duplicate_or_followup_after_unresolved_leg(
+    tmp_path: Path, terminal: str
+) -> None:
+    guard = setup_guard(tmp_path)
+    first = staging_plan(guard)
+    reservation = guard.reserve(first)
+    if terminal != "active":
+        guard.settle(
+            reservation,
+            status="completed" if terminal == "unknown" else terminal,
+            limits=first.limits,
+        )
+    with pytest.raises(BudgetRefused, match="already consumed"):
+        guard.reserve(first)
+    second = ProbePlan.model_validate(
+        {
+            **first.model_dump(),
+            "h6": {**first.h6.model_dump(), "leg_id": "target", "phase": "switched_new"},
+        }
+    )
+    with pytest.raises(BudgetRefused, match="active, failed or unresolved"):
+        guard.reserve(second)
+    assert len(receipts(guard)) == (1 if terminal == "active" else 2)
+
+
+@pytest.mark.parametrize("provider", tuple(TEST_MODELS))
+@pytest.mark.parametrize("tokens", [0, 1_000])
+def test_staging_token_estimate_cannot_release_cash_hold(
+    tmp_path: Path, provider: str, tokens: int
+) -> None:
+    guard = setup_guard(tmp_path, "2", providers=tuple(TEST_MODELS))
+    admitted = staging_plan(guard, provider=provider, fixture_id=f"H6-{provider.upper()}")
+    held = guard.reserve(admitted)
+    receipt = guard.settle(
+        held,
+        status="completed",
+        limits=admitted.limits,
+        usage=TokenUsage(
+            input_tokens=tokens, output_tokens=0, input_cached_tokens=0, input_cache_write_tokens=0
+        ),
+    )
+    assert receipt.status == "uncertain" and receipt.reason == "unknown_usage"
+    assert receipt.actual_usd is None and receipt.actual_evidence is None
+    assert receipt.accounting_status == "estimated_unverified"
+    assert receipt.held_usd == receipt.cost_estimate_usd == held.receipt.reserved_usd == 1
+    assert BudgetGuard(guard.config_path, guard.spend_path).report()[-1] == receipt
+    with pytest.raises(BudgetRefused):
+        guard.reserve(plan(provider=provider))
+
+
+def test_staging_token_overrun_retains_larger_proven_hold(tmp_path: Path) -> None:
+    guard = setup_guard(tmp_path)
+    admitted = staging_plan(guard)
+    held = guard.reserve(admitted)
+    usage = TokenUsage(
+        input_tokens=2_000_000, output_tokens=0, input_cached_tokens=0, input_cache_write_tokens=0
+    )
+    receipt = guard.settle(held, status="completed", limits=admitted.limits, usage=usage)
+    assert receipt.status == "overrun" and receipt.admission_blocked
+    assert receipt.actual_usd is None and receipt.accounting_status == "estimated_unverified"
+    assert (
+        receipt.held_usd
+        == receipt.cost_estimate_usd
+        == held.price.reserve(admitted.limits, usage=usage)
+    )
+    assert receipt.held_usd > held.receipt.reserved_usd
+
+
+def test_ordinary_zero_token_estimate_keeps_legacy_settlement(tmp_path: Path) -> None:
+    guard = setup_guard(tmp_path)
+    admitted = plan()
+    held = guard.reserve(admitted)
+    receipt = guard.settle(
+        held,
+        status="completed",
+        limits=admitted.limits,
+        usage=TokenUsage(
+            input_tokens=0, output_tokens=0, input_cached_tokens=0, input_cache_write_tokens=0
+        ),
+    )
+    assert receipt.status == "completed" and receipt.reason == "settled"
+    assert receipt.actual_usd is None and receipt.accounting_status == "estimated_unverified"
+    assert receipt.held_usd == receipt.cost_estimate_usd == 0

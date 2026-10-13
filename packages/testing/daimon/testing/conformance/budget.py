@@ -22,7 +22,12 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 Money = Annotated[Decimal, Field(ge=0, max_digits=32, decimal_places=18)]
 Rate = Annotated[Decimal, Field(ge=0, max_digits=16, decimal_places=8)]
 Identifier = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}$")]
+FIXTURE_ID_PATTERN = r"(?:C(?:0[1-9]|1[0-8])|F1|H6-(?:ANTHROPIC|OPENAI|GEMINI))"
+H6_MODELS = {"anthropic": "claude-haiku-5-5", "openai": "gpt-6-luna", "gemini": "gemini-3.8-flash"}
 Count = Annotated[int, Field(strict=True, ge=0, le=1_000_000_000)]
+Sha256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+RequestPath = Annotated[str, Field(pattern=r"^/[a-zA-Z0-9_./:-]*$")]
+RequestRoute = tuple[Literal["GET", "POST", "PUT", "PATCH", "DELETE"], RequestPath]
 SourceURL = Annotated[
     str,
     Field(
@@ -458,12 +463,62 @@ class BudgetConfig(ProbeModel):
             raise BudgetRefused("invalid budget configuration") from None
 
 
+def omit_none(value: object) -> bool:
+    return value is None
+
+
+class H6Binding(ProbeModel):
+    """Caller-verified deployment/GO/quote pins; hashes are not authorization."""
+
+    attempt_id: Identifier
+    leg_id: Identifier
+    phase: (
+        Literal[
+            "baseline", "switched_new", "switched_existing", "reverted_new", "reverted_existing"
+        ]
+        | Literal["setup", "admin", "smoke", "cleanup"]
+    )
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    deployment_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    go_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    envelope_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    quote_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    scope_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    config_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    ledger_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    deadline: datetime
+    maximum_hold_usd: Money = Field(gt=0)
+    origin: str = Field(pattern=r"^https://[a-zA-Z0-9.-]+(?::[0-9]+)?$")
+    requests: tuple[RequestRoute, ...]
+    request_limit: Count = Field(gt=0)
+
+    @model_validator(mode="after")
+    def bound(self) -> H6Binding:
+        if (
+            self.deadline.tzinfo is None
+            or not self.requests
+            or len(set(self.requests)) != len(self.requests)
+        ):
+            raise ValueError("staging request binding needs an aware deadline and exact routes")
+        names = (self.attempt_id, self.leg_id, self.origin)
+        if any(map(sensitive_identifier, names + tuple(path for _, path in self.requests))):
+            raise ValueError("staging binding must not contain credentials")
+        return self
+
+
 class ProbePlan(ProbeModel):
     provider: Identifier
     model: Identifier
-    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1|A7)$")
+    fixture_id: str = Field(pattern=rf"^(?:{FIXTURE_ID_PATTERN}|A7)$")
     limits: TokenLimits = TokenLimits(input_tokens=20_000, output_tokens=2_000)
     container_allowance: ContainerAllowance | None = None
+    h6: H6Binding | None = Field(default=None, exclude_if=omit_none)
+
+    @model_validator(mode="after")
+    def staging_binding(self) -> ProbePlan:
+        if self.fixture_id.startswith("H6-") != (self.h6 is not None):
+            raise ValueError("staging fixture identity requires its own binding")
+        return self
 
     @classmethod
     def create_only(
@@ -630,17 +685,12 @@ class ColumnState(ProbeModel):
     cells: tuple[ColumnCellReceipt, ...]
 
 
-def _absent_column(value: object) -> bool:
-    # Keep ordinary receipts and old signatures byte-identical.
-    return value is None
-
-
 class SpendReceipt(ProbeModel):
     version: Literal[1, 2] = 1
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     provider: Identifier
     model: Identifier
-    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1|A7)$")
+    fixture_id: str = Field(pattern=rf"^(?:{FIXTURE_ID_PATTERN}|A7)$")
     timestamp: datetime
     status: Literal[
         "reserved",
@@ -670,7 +720,8 @@ class SpendReceipt(ProbeModel):
     container_usd: Money | None = None
     reconcile: Reconciliation | None = None
     latch_recovery: LatchRecovery | None = None
-    column: ColumnState | None = Field(default=None, exclude_if=_absent_column)
+    column: ColumnState | None = Field(default=None, exclude_if=omit_none)
+    h6: H6Binding | None = Field(default=None, exclude_if=omit_none)
     reason: Literal[
         "admitted",
         "settled",
@@ -686,6 +737,8 @@ class SpendReceipt(ProbeModel):
 
     @model_validator(mode="after")
     def accounting(self) -> SpendReceipt:
+        if self.fixture_id.startswith("H6-") != (self.h6 is not None):
+            raise ValueError("staging receipt identity requires its own binding")
         if self.column is not None:
             BudgetGuard.validate_column_receipt(self)
             return self
@@ -974,6 +1027,8 @@ class BudgetGuard:
                 if receipt.status == "blocked":
                     continue
                 previous = runs.get(receipt.run_id)
+                if previous is not None and previous.h6 != receipt.h6:
+                    raise BudgetLedgerError("staging receipt binding changed")
                 if (
                     receipt.column is not None
                     and receipt.column.approval.ledger_id != binding.ledger_id
@@ -1149,7 +1204,39 @@ class BudgetGuard:
             raise BudgetRefused("invalid reservation installation pins")
         if any(sensitive_identifier(name) for name in (plan.provider, plan.model)):
             raise BudgetRefused("probe metadata must not contain credentials")
+        if plan.h6 is not None:
+            binding = plan.h6
+            if datetime.now(UTC) >= binding.deadline:
+                raise BudgetRefused("staging deadline expired")
+            if expected_config_sha256 not in (
+                None,
+                binding.config_sha256,
+            ) or expected_ledger_id not in (None, binding.ledger_id):
+                raise BudgetRefused("staging financial pins changed")
+            expected_config_sha256, expected_ledger_id = binding.config_sha256, binding.ledger_id
+            minimum_hold_usd = max(minimum_hold_usd, binding.maximum_hold_usd)
+            maximum_hold_usd = (
+                binding.maximum_hold_usd
+                if maximum_hold_usd is None
+                else min(maximum_hold_usd, binding.maximum_hold_usd)
+            )
         with self._locked() as (file, lock, checkpoint, runs, config):
+            if plan.h6 is not None:
+                for previous in runs.values():
+                    if previous.h6 is not None and previous.h6.attempt_id == plan.h6.attempt_id:
+                        if (previous.fixture_id, previous.h6.leg_id) == (
+                            plan.fixture_id,
+                            plan.h6.leg_id,
+                        ):
+                            raise BudgetRefused("staging leg already consumed")
+                        if (
+                            previous.status != "completed"
+                            or previous.accounting_status != "actual"
+                            or previous.admission_blocked
+                        ):
+                            raise BudgetRefused(
+                                "staging attempt has active, failed or unresolved spend"
+                            )
             if (
                 expected_ledger_id is not None
                 and checkpoint.binding.ledger_id != expected_ledger_id
@@ -1170,6 +1257,16 @@ class BudgetGuard:
             allowed = plan.model in LIVE_MODEL_ALLOWLIST.get(plan.provider, frozenset())
             price = budget.models.get(plan.model) if budget is not None and allowed else None
             today = datetime.now(UTC).date()
+            if (
+                plan.h6 is not None
+                and price is not None
+                and (
+                    plan.model != H6_MODELS.get(plan.provider)
+                    or price.effective_from is None
+                    or price.effective_until is None
+                )
+            ):
+                price = None
             if price is not None and (
                 (price.effective_from is not None and today < price.effective_from)
                 or (price.effective_until is not None and today >= price.effective_until)
@@ -1206,6 +1303,7 @@ class BudgetGuard:
                 provider=plan.provider,
                 model=plan.model,
                 fixture_id=plan.fixture_id,
+                h6=plan.h6,
                 timestamp=datetime.now(UTC),
                 status="reserved",
                 reserved_usd=estimate,
@@ -1269,10 +1367,49 @@ class BudgetGuard:
             raise BudgetRefused("model pricing is required")
         return Reservation(receipt=receipt, price=price)
 
+    def require_reservation(self, reservation: Reservation, plan: ProbePlan) -> None:
+        """Recheck an admitted staging leg immediately before transport I/O."""
+        binding = plan.h6
+        if binding is None or datetime.now(UTC) >= binding.deadline:
+            raise BudgetRefused("staging request binding absent or expired")
+        with self._locked() as (_, _, checkpoint, runs, config):
+            current = runs.get(reservation.receipt.run_id)
+            if (
+                current != reservation.receipt
+                or current is None
+                or current.status != "reserved"
+                or (current.fixture_id, current.provider, current.model, current.limits, current.h6)
+                != (plan.fixture_id, plan.provider, plan.model, plan.limits, binding)
+                or checkpoint.binding.ledger_id != binding.ledger_id
+                or hashlib.sha256(self.config_path.read_bytes()).hexdigest()
+                != binding.config_sha256
+            ):
+                raise BudgetRefused("staging reservation changed or was released")
+            price = config.providers[plan.provider].models[plan.model]
+            if price.effective_until is None or not self._price_current(price, datetime.now(UTC)):
+                raise BudgetRefused("staging prices expired")
+            if any(
+                row.admission_blocked and row.provider == plan.provider for row in runs.values()
+            ):
+                raise BudgetRefused("staging provider admission is latched")
+            if any(
+                row.h6 is not None
+                and row.h6.attempt_id == binding.attempt_id
+                and row.run_id != reservation.receipt.run_id
+                and (
+                    row.status != "completed"
+                    or row.accounting_status != "actual"
+                    or row.admission_blocked
+                )
+                for row in runs.values()
+            ):
+                raise BudgetRefused("staging attempt has unresolved spend")
+
     @staticmethod
-    def _price_current(price: SessionPrice, at: datetime) -> bool:
+    def _price_current(price: SessionPrice | ModelPrice, at: datetime) -> bool:
         return (
             at.tzinfo is not None
+            and price.effective_from is not None
             and at.astimezone(UTC).date() >= price.effective_from
             and (price.effective_until is None or at.astimezone(UTC).date() < price.effective_until)
         )
@@ -1576,12 +1713,20 @@ class BudgetGuard:
             reason = "settled"
         elif status != "completed":
             reason = "probe_error"
-        elif estimate is None or actual is not None or original.container_allowance is not None:
+        elif (
+            estimate is None
+            or actual is not None
+            or original.container_allowance is not None
+            or original.h6 is not None
+        ):
             terminal, reason = "uncertain", "unknown_usage"
         charged = measured if measured is not None else original.reserved_usd
         # Backward-compatible undated estimates are explicitly unverified holds.
+        # Staging cash bounds also cover setup, admin and cleanup exposure;
+        # token counts alone cannot establish their actual spend or release room.
         if (
             actual is None
+            and original.h6 is None
             and original.container_allowance is None
             and status == "completed"
             and estimate is not None
@@ -2199,6 +2344,8 @@ class BudgetGuard:
         expected = {
             name: field.get_default(call_default_factory=True)
             for name, field in SpendReceipt.model_fields.items()
+            if field.exclude_if is None
+            or not field.exclude_if(field.get_default(call_default_factory=True))
         }
         expected.update(BudgetGuard._column_receipt_fields(state, receipt.timestamp))
         expected["column"] = state.model_dump()
