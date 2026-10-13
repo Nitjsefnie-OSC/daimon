@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from secrets import randbits
@@ -44,7 +44,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, a
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.lifecycle import EditFn, SendFn
-    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
+    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard, ParentResolver
+    from daimon.core.fleet_orchestration import FleetOrchestrator
+    from daimon.core.stores.agent_posts import AgentPostRow
 
     import discord
 
@@ -58,6 +60,9 @@ class FleetCardFactory(Protocol):
         edit: EditFn,
         *,
         run_id: UUID | None = None,
+        turn_card_intent_id: UUID | None = None,
+        recorded_post: AgentPostRow | None = None,
+        on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
     ) -> DiscordFleetCard | None: ...
 
 
@@ -263,7 +268,20 @@ class DiscordRuntime:
 
 
 @asynccontextmanager
-async def build_runtime(settings: Settings) -> AsyncIterator[DiscordRuntime]:
+async def build_runtime(
+    settings: Settings,
+    *,
+    fleet_service: FleetOrchestrator | None = None,
+    fleet_parent_loader: ParentResolver | None = None,
+) -> AsyncIterator[DiscordRuntime]:
+    fleet_factory: FleetCardFactory | None = None
+    if settings.fleet.enabled:
+        from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCardFactory
+        from daimon.core.fleet_orchestration import FleetRefused
+
+        if fleet_service is None or fleet_parent_loader is None:
+            raise FleetRefused("prerequisites_unavailable")
+        fleet_factory = DiscordFleetCardFactory(fleet_service, fleet_parent_loader)
     engine = build_engine(
         str(settings.database.url),
         pool_size=settings.database.pool_size,
@@ -320,6 +338,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[DiscordRuntime]:
                     turn_deps=turn_deps,
                     mcp_token_probe=probe_bearer_token,
                     gateway_lease=gateway_lease,
+                    fleet_card_factory=fleet_factory,
                 )
         finally:
             await drain_outcomes()

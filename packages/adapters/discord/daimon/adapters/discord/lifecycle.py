@@ -1442,8 +1442,7 @@ class DiscordTurnLifecycle:
         # answer never trails behind an embed that already moved past it.
         if self._terminal or self._thread_stopped():
             return
-        if self._fleet_card is not None:
-            await self._fleet_card.refresh()
+        if self._fleet_card is not None and await self._fleet_card.refresh():
             return
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)

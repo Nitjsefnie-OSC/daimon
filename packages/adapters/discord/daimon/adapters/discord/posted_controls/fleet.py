@@ -21,6 +21,7 @@ from daimon.core.fleet_orchestration import Control, FleetOrchestrator, FleetRef
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerPermissions, WorkerSpecRefused
 from daimon.core.posted_controls import CardButton, CardState, PostedCard
+from daimon.core.stores.agent_posts import AgentPostRow
 
 import discord
 
@@ -28,7 +29,11 @@ if TYPE_CHECKING:
     from daimon.adapters.discord.bot import DaimonBot
 
 type ParentLoader = Callable[
-    [discord.Interaction | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy]]
+    [discord.Interaction | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None]
+]
+type ParentResolver = Callable[
+    [discord.Thread, int, uuid.UUID | None, uuid.UUID | None, discord.Interaction | None],
+    Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None],
 ]
 type Send = Callable[..., Awaitable[discord.Message]]
 type Edit = Callable[..., Awaitable[discord.Message | None]]
@@ -213,21 +218,7 @@ class FleetControl(
             )
             return
 
-        async def edit(
-            message: discord.Message,
-            *,
-            view: discord.ui.LayoutView,
-            allowed_mentions: discord.AllowedMentions,
-        ) -> discord.Message:
-            return await message.edit(view=view, allowed_mentions=allowed_mentions)
-
-        card = bot.fleet_card_for(
-            thread=channel,
-            requester_id=interaction.user.id,
-            send=lambda: channel.send,
-            edit=edit,
-            run_id=self.run_id,
-        )
+        card = await bot.recover_fleet_card(interaction, run_id=self.run_id)
         if card is None or card.run_id != self.run_id:
             await interaction.response.send_message(
                 "This fleet control is unavailable.", ephemeral=True
@@ -241,17 +232,85 @@ class FleetControl(
         )
 
 
+class DiscordFleetCardFactory:
+    """Bind the installed shared owner to an actual Discord root and post path.
+
+    The resolver proves the exact turn intent/origin and fresh current Subject.
+    Only proven absence may return None; missing or foreign authority raises.
+    No database, provider or permission projection is invented by this factory.
+    """
+
+    def __init__(self, service: FleetOrchestrator, load_parent: ParentResolver) -> None:
+        self._service = service
+        self._resolve = load_parent
+
+    def __call__(
+        self,
+        thread: discord.abc.Messageable,
+        requester_id: int,
+        send: Send,
+        edit: Edit,
+        *,
+        run_id: uuid.UUID | None = None,
+        turn_card_intent_id: uuid.UUID | None = None,
+        recorded_post: AgentPostRow | None = None,
+        on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
+    ) -> DiscordFleetCard | None:
+        if not isinstance(thread, discord.Thread):
+            return None
+        card: DiscordFleetCard
+
+        async def current(interaction: discord.Interaction | None):
+            actor_id = interaction.user.id if interaction is not None else requester_id
+            result = await self._resolve(
+                thread, actor_id, turn_card_intent_id, card.run_id, interaction
+            )
+            if result is None:
+                if card.run_id is not None:
+                    raise FleetRefused("foreign_run")
+                return None
+            parent, policy = result
+            root = parent.fleet.root
+            if (
+                root.channel.platform != "discord"
+                or root.thread_id != str(thread.id)
+                or root.channel.channel_id != str(thread.parent_id)
+                or parent.fleet.scope.tenant_id
+                != str(derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id)))
+                or parent.subject.platform_user_id != str(actor_id)
+            ):
+                raise FleetRefused("foreign_run")
+            if recorded_post is not None and (
+                parent.agent_id != recorded_post.agent_id
+                or parent.fleet.scope.principal_id != recorded_post.requester_platform_user_id
+                or recorded_post.tenant_id != uuid.UUID(parent.fleet.scope.tenant_id)
+            ):
+                raise FleetRefused("foreign_run")
+            return parent, policy
+
+        card = DiscordFleetCard(
+            run_id=run_id,
+            service=self._service,
+            load_parent=current,
+            send=send,
+            edit=edit,
+            on_replacement=on_replacement,
+        )
+        return card
+
+
 class DiscordFleetCard:
     """One orchestrator card; all reads and controls use the same core owner."""
 
     def __init__(
         self,
         *,
-        run_id: uuid.UUID,
+        run_id: uuid.UUID | None,
         service: FleetOrchestrator,
         load_parent: ParentLoader,
         send: Send,
         edit: Edit,
+        on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._run_id = run_id
@@ -259,20 +318,26 @@ class DiscordFleetCard:
         self._load_parent = load_parent
         self._send = send
         self._edit = edit
+        self._on_replacement = on_replacement
         self._clock = clock
         self._message: discord.Message | None = None
         self._view: discord.ui.LayoutView | None = None
         self._lock = asyncio.Lock()
 
     @property
-    def run_id(self) -> uuid.UUID:
+    def run_id(self) -> uuid.UUID | None:
         """A lookup identity; the shared owner still proves root/run authority."""
         return self._run_id
 
     async def _snapshot(
         self, interaction: discord.Interaction | None
-    ) -> tuple[WorkerPermissions, TenantAccessPolicy, FleetRun, tuple[FleetWorker, ...]]:
-        parent, policy = await self._load_parent(interaction)
+    ) -> tuple[WorkerPermissions, TenantAccessPolicy, FleetRun, tuple[FleetWorker, ...]] | None:
+        result = await self._load_parent(interaction)
+        if result is None:
+            if self._run_id is not None:
+                raise FleetRefused("foreign_run")
+            return None
+        parent, policy = result
         if interaction is not None and (
             parent.subject.platform_user_id != str(interaction.user.id)
             or interaction.guild_id is None
@@ -282,7 +347,9 @@ class DiscordFleetCard:
             or parent.fleet.root.thread_id != str(interaction.channel_id)
         ):
             raise FleetRefused("foreign_run")
-        run, workers = await self._service.read_snapshot(parent, policy, self._run_id)
+        run_id = self._run_id or parent.fleet.run_id
+        run, workers = await self._service.read_snapshot(parent, policy, run_id)
+        self._run_id = run.id
         return parent, policy, run, workers
 
     def _render(
@@ -294,22 +361,34 @@ class DiscordFleetCard:
             collected=collected,
         )
 
-    async def refresh(self) -> None:
+    async def refresh(self) -> bool:
         """Called from the existing render loop, never from a native event tap."""
         async with self._lock:
-            _, _, run, workers = await self._snapshot(None)
+            snapshot = await self._snapshot(None)
+            if snapshot is None:
+                return False
+            _, _, run, workers = snapshot
             view = self._render(run, workers)
-            if self._message is None:
-                self._message = await self._send(
-                    view=view, allowed_mentions=discord.AllowedMentions.none()
-                )
-            else:
-                await self._edit(
-                    self._message, view=view, allowed_mentions=discord.AllowedMentions.none()
-                )
-            if self._view is not None:
-                self._view.stop()
-            self._view = view
+            await self._display(view)
+            return True
+
+    async def _display(self, view: discord.ui.LayoutView) -> None:
+        if self._message is None:
+            self._message = await self._send(
+                view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+        else:
+            previous = self._message
+            updated = await self._edit(
+                previous, view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+            if updated is not None:
+                self._message = updated
+                if updated.id != previous.id and self._on_replacement is not None:
+                    await self._on_replacement(updated)
+        if self._view is not None:
+            self._view.stop()
+        self._view = view
 
     async def control(
         self,
@@ -321,11 +400,14 @@ class DiscordFleetCard:
     ) -> bool:
         async with self._lock:
             try:
-                parent, policy, _, _ = await self._snapshot(interaction)
+                snapshot = await self._snapshot(interaction)
+                if snapshot is None:
+                    raise FleetRefused("foreign_run")
+                parent, policy, run, _ = snapshot
                 reply = await self._service.control(
                     parent,
                     policy,
-                    run_id=self._run_id,
+                    run_id=run.id,
                     worker_id=worker_id,
                     action=action,
                     expected_version=expected_version,
@@ -340,12 +422,25 @@ class DiscordFleetCard:
                         "This action is waiting for its dependencies.", ephemeral=True
                     )
                     return False
-                run, workers = await self._service.read_snapshot(parent, policy, self._run_id)
+                run, workers = await self._service.read_snapshot(parent, policy, run.id)
                 view = self._render(run, workers)
+
+                async def edit_current(
+                    message: discord.Message,
+                    *,
+                    view: discord.ui.LayoutView,
+                    allowed_mentions: discord.AllowedMentions | None = None,
+                ) -> discord.Message | None:
+                    self._message = message
+                    await self._display(view)
+                    return self._message
+
                 await finish_control(
-                    interaction, view=view, allowed_mentions=discord.AllowedMentions.none()
+                    interaction,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    edit=edit_current,
                 )
-                self._view = view
                 return True
             except (FleetRefused, WorkerSpecRefused):
                 await interaction.response.send_message(
@@ -358,17 +453,15 @@ class DiscordFleetCard:
         """Gate the existing orchestrator answer on authoritative collect/review."""
         async with self._lock:
             try:
-                parent, policy, run, workers = await self._snapshot(None)
-                reply = await self._service.collect(parent, policy, run_id=self._run_id)
+                snapshot = await self._snapshot(None)
+                if snapshot is None:
+                    return True
+                parent, policy, run, workers = snapshot
+                reply = await self._service.collect(parent, policy, run_id=run.id)
             except (FleetRefused, WorkerSpecRefused):
                 return False
             ready = reply.get("status") == "ready"
             if ready and self._message is not None:
                 view = self._render(run, workers, collected=True)
-                await self._edit(
-                    self._message, view=view, allowed_mentions=discord.AllowedMentions.none()
-                )
-                if self._view is not None:
-                    self._view.stop()
-                self._view = view
+                await self._display(view)
             return ready

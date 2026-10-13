@@ -77,3 +77,22 @@ turn preparation, so a run spawned mid-turn needs the owner's subsequent wake
 turn to render it. Waiting collection ends that root delivery without an answer;
 the same wake owner must arrange its later reviewed summary. The card does not
 claim that those currently absent owner bindings execute.
+
+`build_runtime` installs the concrete Discord factory when fleet is enabled
+and the host supplies the shared `FleetOrchestrator` and authenticated root
+resolver. Enabled construction without either dependency refuses before SDK
+or database construction. Disabled construction never calls or installs them.
+The resolver receives the genuine turn-card intent, destination, current actor
+and optional captured run ID. It runs during rendering, after preparation;
+only a proven absence can return no active fleet. Unknown, missing or foreign
+authority refuses. The consumer does not construct root grants or select a
+latest session; the shared preparation/origin owner must supply that binding.
+
+Recovered controls look up the real post in the actual tenant/thread and use
+its recorded intent and original attribution. The factory verifies that
+attribution against the loaded root before shared control authorization.
+Edits use `DiscordPostTransport`, including webhook recovery, and acknowledged
+replacement message IDs carry the original post attribution in the existing
+post store. Live refresh and collected-card edits adopt the returned message,
+so subsequent edits target the actual replacement. Capture is metadata only;
+there is no production QA recorder or new card table.

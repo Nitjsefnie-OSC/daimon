@@ -14,6 +14,7 @@ import pytest
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.posted_controls.fleet import (
     DiscordFleetCard,
+    DiscordFleetCardFactory,
     FleetControl,
     build_fleet_view,
 )
@@ -24,10 +25,13 @@ from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
+from discord.webhook.async_ import AsyncWebhookAdapter, async_context
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, NetworkPolicy, ToolSpec
 from mux.profiles import backend_selection, get_profile
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 NOW = datetime(2026, 10, 12, 19, tzinfo=UTC)
 TENANT = derive_tenant_uuid(platform="discord", workspace_id="60")
@@ -133,7 +137,11 @@ def interaction(user_id=123, guild=60, thread=70, card=None):
     value.channel = MagicMock(spec=discord.Thread)
     value.channel.send = AsyncMock()
     value.client.fleet_card_for = MagicMock(return_value=card)
+    value.client.recover_fleet_card = AsyncMock(return_value=card)
     value.response.send_message = AsyncMock()
+    value.response.defer = AsyncMock()
+    value.message = MagicMock(spec=discord.Message)
+    value.message.id = 900
     value.response.edit_message = AsyncMock()
     value.response.is_done.return_value = False
 
@@ -197,7 +205,7 @@ async def test_sdk_button_uses_real_shared_control_and_current_host_loader(provi
     assert owner.control.call_args.kwargs["expected_version"] == 3
     assert owner.control.call_args.args[0] is loader.return_value[0]
     assert loader.await_args_list[-1].args == (click,)
-    click.response.edit_message.assert_awaited_once()
+    click.response.defer.assert_awaited_once()
     assert str(RUN.hex) in buttons(view)[0].item.custom_id
 
 
@@ -251,6 +259,21 @@ async def test_waiting_owner_ack_keeps_controls_active():
     click.response.edit_message.assert_not_awaited()
 
 
+async def test_fleet_edits_follow_the_transport_replacement_message():
+    card, _, _, send, edit = setup()
+    first = MagicMock(spec=discord.Message)
+    first.id = 900
+    replacement = MagicMock(spec=discord.Message)
+    replacement.id = 901
+    send.return_value = first
+    edit.return_value = replacement
+    await card.refresh()
+    await card.refresh()
+    await card.refresh()
+    assert edit.await_args_list[0].args[0] is first
+    assert edit.await_args_list[1].args[0] is replacement
+
+
 @pytest.mark.parametrize("admin", [False, True])
 async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(admin):
     card, owner, loader, send, _ = setup()
@@ -277,17 +300,39 @@ async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_ite
     components = view.to_components()
     del original, view
 
-    def factory(thread, requester_id, _send, _edit, *, run_id=None):
-        assert run_id == RUN
-        return DiscordFleetCard(
-            run_id=run_id,
-            service=FleetOrchestrator(owner),
-            load_parent=loader,
-            send=send,
-            edit=edit,
-            clock=lambda: NOW,
-        )
+    async def resolve_root(thread, actor_id, intent_id, run_id, current):
+        assert thread.id == 70 and actor_id == 123
+        assert intent_id == intent.id and run_id == RUN
+        return await loader(current)
 
+    factory = DiscordFleetCardFactory(FleetOrchestrator(owner), resolve_root)
+
+    from daimon.core.stores.agent_posts import record_post
+    from daimon.core.stores.turn_card_intents import create_turn_card_intent
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, id=TENANT, platform="discord", workspace_id="60")
+        intent = await create_turn_card_intent(
+            session,
+            tenant_id=TENANT,
+            platform="discord",
+            thread_id="70",
+            channel_id="50",
+            turn_token=UUID(int=74),
+        )
+        await record_post(
+            session,
+            tenant_id=TENANT,
+            platform="discord",
+            channel_id="70",
+            message_id="900",
+            agent_id=UUID(int=44),
+            parent_channel_id="50",
+            source="turn",
+            requester_platform_user_id="123",
+            turn_card_intent_id=intent.id,
+        )
     runtime = _make_runtime(db_session_factory)
     runtime.settings.fleet.enabled = True
     bot = make_bot(replace(runtime, fleet_card_factory=factory))
@@ -296,6 +341,8 @@ async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_ite
     click = interaction()
     click.client = bot
     click.channel.id = 70
+    click.channel.parent_id = 50
+    click.channel.guild.id = 60
     click.message = discord.Message(
         state=bot._connection,
         channel=click.channel,
@@ -317,6 +364,30 @@ async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_ite
             "components": components,
         },
     )
+
+    async def edit_gateway(channel_id, message_id, *, params):
+        assert channel_id == 70 and message_id == 900
+        assert params.payload["components"]
+        return {
+            "id": "900",
+            "channel_id": "70",
+            "type": 0,
+            "content": "",
+            "author": {"id": "999", "username": "fixture", "discriminator": "0", "avatar": None},
+            "flags": 32768,
+            "timestamp": NOW.isoformat(),
+            "edited_timestamp": NOW.isoformat(),
+            "pinned": False,
+            "mention_everyone": False,
+            "tts": False,
+            "attachments": [],
+            "embeds": [],
+            "mentions": [],
+            "mention_roles": [],
+            "components": params.payload["components"],
+        }
+
+    bot.http.edit_message = AsyncMock(side_effect=edit_gateway)
     click.data = {"custom_id": custom_id, "component_type": 2}
     store = bot._connection._view_store
     tasks = []
@@ -337,7 +408,8 @@ async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_ite
         owner.control.call_args.kwargs["operation_key"]
         == f"discord:fleet:{RUN}:{worker().id}:3:kill"
     )
-    click.response.edit_message.assert_awaited_once()
+    click.response.defer.assert_awaited_once()
+    bot.http.edit_message.assert_awaited_once()
     assert loader.await_args_list[-1].args == (click,)
 
 
@@ -614,3 +686,335 @@ def test_real_bot_flag_off_does_not_construct_a_sender_or_fleet_service():
     )
     sender.assert_not_called()
     bot.runtime.fleet_card_factory.assert_not_called()
+
+
+async def test_real_webhook_replacement_records_both_accepted_card_messages(
+    db_nullpool_engine, db_clean, monkeypatch
+):
+    from daimon.adapters.discord import post_transport
+    from daimon.adapters.discord.post_transport import DiscordPostTransport
+    from daimon.adapters.discord.turn_posts import TurnPostRecorder
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.agent_posts import get_post
+    from daimon.core.stores.fleet import add_worker, create_run, run_status
+    from daimon.core.stores.turn_card_intents import create_turn_card_intent
+    from daimon.testing.factories import make_account, make_tenant
+
+    from .harness import make_bot
+    from .test_bot import _make_runtime
+
+    sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, id=TENANT, platform="discord", workspace_id="60")
+        await make_account(session, id=ACCOUNT, tenant=tenant)
+        intent = await create_turn_card_intent(
+            session,
+            tenant_id=TENANT,
+            platform="discord",
+            thread_id="70",
+            channel_id="50",
+            turn_token=UUID(int=71),
+        )
+    deadline = datetime.now(UTC) + timedelta(minutes=10)
+    fleet = await create_run(
+        sessionmaker,
+        tenant_id=TENANT,
+        orchestrator_account_id=ACCOUNT,
+        orchestrator_session_id="root-session",
+        orchestrator_binding_id="root-binding",
+        platform="discord",
+        channel_id="50",
+        thread_id="70",
+        operation_key="card-transport",
+        total_budget_usd=Decimal("1"),
+        deadline_at=deadline,
+        max_workers=3,
+        created_by="123",
+    )
+    for ordinal, provider in enumerate(("anthropic", "openai", "gemini")):
+        row = worker(provider, ordinal)
+        await add_worker(
+            sessionmaker,
+            tenant_id=TENANT,
+            run_id=fleet.id,
+            ordinal=ordinal,
+            role=row.role,
+            spec=row.spec,
+            spec_digest=row.spec_digest,
+            backend=row.backend,
+            profile=row.profile,
+            model=row.model,
+            budget_usd=row.budget_usd,
+            deadline_at=deadline,
+            max_turns=row.max_turns,
+        )
+
+    bot = make_bot(_make_runtime(sessionmaker))
+    bot._connection.application_id = 999
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id, thread.locked = 70, 50, False
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 50
+    thread.parent = channel
+    thread.guild.id = channel.guild.id = 60
+    channel.guild.me = MagicMock(spec=discord.Member)
+    channel.permissions_for.return_value.manage_webhooks = True
+    bot.http.channel_webhooks = AsyncMock(return_value=[])
+    hooks = [
+        discord.Webhook.from_state(
+            {
+                "id": str(webhook_id),
+                "type": 1,
+                "token": "offline-webhook-token",
+                "channel_id": "50",
+                "guild_id": "60",
+                "name": "Root",
+            },
+            bot._connection,
+        )
+        for webhook_id in (500, 600)
+    ]
+    channel.create_webhook = AsyncMock(side_effect=hooks)
+    monkeypatch.setattr(post_transport, "_webhooks", {})
+    monkeypatch.setattr(post_transport, "_creation_tasks", {})
+    monkeypatch.setattr(post_transport, "_locks", {})
+    monkeypatch.setattr(post_transport, "_unavailable_until", {})
+    monkeypatch.setattr(post_transport, "_send_unavailable_until", {})
+
+    class Gateway(AsyncWebhookAdapter):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+            self.accepted = {}
+
+        def reply(self, webhook_id, message_id, payload):
+            return {
+                "id": str(message_id),
+                "type": 0,
+                "channel_id": "70",
+                "webhook_id": str(webhook_id),
+                "content": "",
+                "author": {
+                    "id": str(webhook_id),
+                    "username": "Root",
+                    "discriminator": "0",
+                    "avatar": None,
+                },
+                "flags": payload.get("flags", 32768),
+                "timestamp": NOW.isoformat(),
+                "edited_timestamp": None,
+                "pinned": False,
+                "mention_everyone": False,
+                "tts": False,
+                "attachments": [],
+                "embeds": [],
+                "mentions": [],
+                "mention_roles": [],
+                "components": payload["components"],
+            }
+
+        async def execute_webhook(self, webhook_id, token, **kwargs):
+            assert kwargs["wait"] is True and kwargs["thread_id"] == 70
+            payload = json.loads(json.dumps(kwargs["payload"]))
+            message_id = 900 + len(self.accepted)
+            self.calls.append(("send", webhook_id, message_id))
+            self.accepted[message_id] = self.reply(webhook_id, message_id, payload)
+            return self.accepted[message_id]
+
+        async def edit_webhook_message(self, webhook_id, token, message_id, **kwargs):
+            self.calls.append(("edit", webhook_id, message_id))
+            if webhook_id == 500:
+                raise discord.NotFound(
+                    MagicMock(status=404, reason="Not Found"),
+                    {"code": 10015, "message": "Unknown Webhook"},
+                )
+            assert message_id == 901 and kwargs["thread_id"] == 70
+            return self.reply(webhook_id, message_id, kwargs["payload"])
+
+    owner = create_autospec(FleetPorts, instance=True)
+
+    async def read_run(scope, run_id):
+        return await run_status(sessionmaker, tenant_id=UUID(scope.tenant_id), run_id=run_id)
+
+    owner.read_run.side_effect = read_run
+    authority = parent()
+    authority = replace(authority, fleet=replace(authority.fleet, run_id=fleet.id))
+    recorder = TurnPostRecorder(sessionmaker, TENANT, "root-agent", 123)
+    transport = DiscordPostTransport(
+        bot, thread, name="Root", avatar_url=None, builtin=False, identity_enabled=True
+    )
+
+    async def record_replacement(message):
+        await recorder.message(thread, message, turn_card_intent_id=intent.id)
+
+    async def resolve_root(destination, actor_id, intent_id, run_id, interaction):
+        assert destination is thread and actor_id == 123
+        assert intent_id == intent.id and run_id in (None, fleet.id) and interaction is None
+        return authority, POLICY
+
+    factory = DiscordFleetCardFactory(FleetOrchestrator(owner), resolve_root)
+    card = factory(
+        thread,
+        123,
+        recorder.sender(thread, turn_card_intent_id=intent.id, transport=transport),
+        transport.edit,
+        turn_card_intent_id=intent.id,
+        on_replacement=record_replacement,
+    )
+    assert card is not None
+    gateway = Gateway()
+    token = async_context.set(gateway)
+    try:
+        await card.refresh()
+        await card.refresh()
+        await card.refresh()
+    finally:
+        async_context.reset(token)
+    assert gateway.calls == [
+        ("send", 500, 900),
+        ("edit", 500, 900),
+        ("send", 600, 901),
+        ("edit", 600, 901),
+    ]
+    async with sessionmaker() as session:
+        posts = [
+            await get_post(
+                session,
+                tenant_id=TENANT,
+                platform="discord",
+                channel_id="70",
+                message_id=str(message_id),
+            )
+            for message_id in (900, 901)
+        ]
+    assert all(post is not None for post in posts)
+    assert all(
+        post.turn_card_intent_id == intent.id
+        and post.requester_platform_user_id == "123"
+        and post.agent_id == derive_agent_uuid(tenant_id=TENANT, ma_agent_id="root-agent")
+        for post in posts
+    )
+    for payload in gateway.accepted.values():
+        text = json.dumps(payload["components"], ensure_ascii=False)
+        assert all(provider in text for provider in ("anthropic", "openai", "gemini"))
+        assert "pending" in text
+        assert payload["flags"] & 32768
+
+
+async def test_factory_defers_then_binds_the_exact_authoritative_run():
+    _, owner, _, send, edit = setup()
+    resolver = AsyncMock(side_effect=[None, (parent(), POLICY), (parent(), POLICY)])
+    factory = DiscordFleetCardFactory(FleetOrchestrator(owner), resolver)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = 70, 50
+    thread.guild.id = 60
+    intent = UUID(int=72)
+    card = factory(thread, 123, send, edit, turn_card_intent_id=intent)
+    assert card is not None and card.run_id is None
+    resolver.assert_not_awaited()
+    assert await card.refresh() is False
+    send.assert_not_awaited()
+    owner.read_run.assert_not_awaited()
+    assert await card.refresh() is True
+    assert card.run_id == RUN
+    assert await card.refresh() is True
+    assert resolver.await_args_list[-1].args == (thread, 123, intent, RUN, None)
+    send.assert_awaited_once()
+    edit.assert_awaited_once()
+
+
+@pytest.mark.parametrize("mutation", ["user", "tenant", "thread", "channel", "missing"])
+async def test_recovered_factory_refuses_foreign_or_missing_projection_before_posts(mutation):
+    from daimon.core.fleet_orchestration import FleetRefused
+
+    _, owner, _, send, edit = setup()
+    authority = parent()
+    if mutation == "user":
+        authority = replace(authority, subject=Subject(platform_user_id="456"))
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 71 if mutation == "thread" else 70
+    thread.parent_id = 51 if mutation == "channel" else 50
+    thread.guild.id = 61 if mutation == "tenant" else 60
+    resolver = AsyncMock(return_value=None if mutation == "missing" else (authority, POLICY))
+    card = DiscordFleetCardFactory(FleetOrchestrator(owner), resolver)(
+        thread, 123, send, edit, run_id=RUN
+    )
+    assert card is not None
+    with pytest.raises(FleetRefused, match="foreign_run"):
+        await card.refresh()
+    owner.read_run.assert_not_awaited()
+    send.assert_not_awaited()
+    edit.assert_not_awaited()
+
+
+async def test_unbound_factory_absence_allows_only_an_ordinary_final_answer():
+    _, owner, _, send, edit = setup()
+    resolver = AsyncMock(return_value=None)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = 70, 50
+    thread.guild.id = 60
+    card = DiscordFleetCardFactory(FleetOrchestrator(owner), resolver)(thread, 123, send, edit)
+    assert card is not None and await card.allow_summary()
+    owner.read_run.assert_not_awaited()
+    owner.read_result.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_runtime_installs_factory_only_with_opted_in_owner_bindings(
+    db_nullpool_engine, monkeypatch, enabled
+):
+    from pathlib import Path
+
+    from daimon.adapters.discord import runtime as runtime_module
+    from daimon.core.config import Settings
+    from daimon.testing.ma import build_stub_anthropic
+
+    settings = Settings.model_validate(
+        {
+            "database": {
+                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "pool_size": 1,
+                "max_overflow": 3,
+            },
+            "anthropic": {"api_key": "offline-test-key"},
+            "crypto": {"allow_plaintext": True},
+            "defaults_root": Path("defaults"),
+            "fleet": {"enabled": enabled},
+        }
+    )
+    # Exercise the real runtime bootstrap and PG owner; only external SDK
+    # construction uses the shared isolated client, with no ambient credentials.
+    monkeypatch.setattr(runtime_module, "AsyncAnthropic", lambda **kwargs: build_stub_anthropic())
+    owner = create_autospec(FleetPorts, instance=True)
+    resolver = AsyncMock()
+    async with runtime_module.build_runtime(
+        settings, fleet_service=FleetOrchestrator(owner), fleet_parent_loader=resolver
+    ) as runtime:
+        assert isinstance(runtime.fleet_card_factory, DiscordFleetCardFactory) is enabled
+        resolver.assert_not_awaited()
+
+
+async def test_runtime_refuses_missing_fleet_binding_before_sdk_or_db_construction(monkeypatch):
+    from daimon.adapters.discord import runtime as runtime_module
+    from daimon.core.config import Settings
+    from daimon.core.fleet_orchestration import FleetRefused
+
+    settings = Settings.model_validate(
+        {
+            "fleet": {"enabled": True},
+            "database": {
+                "url": "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test_nc_N7_fleet"
+            },
+            "anthropic": {"api_key": "offline-test-key"},
+        }
+    )
+    database = MagicMock(side_effect=AssertionError("no database construction permitted"))
+    sdk = MagicMock(side_effect=AssertionError("no SDK construction permitted"))
+    monkeypatch.setattr(runtime_module, "build_engine", database)
+    monkeypatch.setattr(runtime_module, "AsyncAnthropic", sdk)
+    with pytest.raises(FleetRefused, match="prerequisites_unavailable"):
+        async with runtime_module.build_runtime(settings):
+            raise AssertionError("unbound runtime must refuse")
+    database.assert_not_called()
+    sdk.assert_not_called()
