@@ -12,12 +12,14 @@ from daimon.core.mirror_delivery import (
     MirrorOutcome,
     poll_mirror_deliveries_once,
     record_conversation_event,
+    sweep_mirror_deliveries,
 )
 from daimon.core.mirror_events import ActorRef, ConversationEventV1, SourceRef
 from daimon.core.privacy import collect_purge_preview
 from daimon.core.purge import purge_account
 from daimon.core.stores import mirrors as store
 from daimon.core.stores.domain import MirrorDeliveryRow, MirrorRow
+from daimon.core.stores.tenants import set_provision_status
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -242,6 +244,37 @@ async def test_a_post_of_another_agent_is_never_handed_to_the_poster(
     assert jobs == [], "a post queued for one agent is never posted under another"
     note = await db_session.scalar(select(MirrorDelivery.note))
     assert note == "replaced", note
+
+
+async def test_the_sweep_drops_stale_posts_of_archived_tenants_without_a_poller(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The scheduler's sweep runs with mirrors off and no poller, for every tenant."""
+    agent = uuid.uuid4()
+    tenant = await make_tenant(db_session)
+    mirror = await _mirror(db_session, tenant.id, agent)
+    for session_key, age in (("old", _MAX_AGE + timedelta(seconds=1)), ("new", timedelta(0))):
+        await store.insert_deliveries(
+            db_session,
+            event=_event(tenant.id, agent, session_key=session_key),
+            mirror_ids=[mirror.id],
+            now=_NOW - age,
+        )
+    await db_session.commit()
+    await set_provision_status(db_session_factory, tenant_id=tenant.id, archive=True)
+
+    settled = await sweep_mirror_deliveries(
+        db_session_factory, settings=MirrorsSettings(enabled=False), now=_NOW
+    )
+
+    assert settled == 1, "only the post past the pending limit is dropped"
+    rows = (
+        await db_session.scalars(select(MirrorDelivery).order_by(MirrorDelivery.created_at))
+    ).all()
+    assert [(row.status, row.note, row.payload is None) for row in rows] == [
+        ("skipped", "stale", True),
+        ("pending", None, False),
+    ], rows
 
 
 async def test_purge_deletes_the_persons_queued_questions(

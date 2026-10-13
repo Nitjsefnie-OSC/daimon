@@ -169,6 +169,34 @@ def _settled(note: str, now: datetime) -> dict[str, Any]:
     }
 
 
+async def settle_unpostable_deliveries(
+    session: AsyncSession, *, now: datetime, max_pending_age: timedelta
+) -> int:
+    """Settle what must not post, in every tenant (archived ones too) and for
+    every platform: claims whose lease ran out (`interrupted`, the owner may
+    have posted), posts older than `max_pending_age` (`stale`), and posts of a
+    paused mirror (`paused`). Returns how many."""
+    paused = select(Mirror.id).where(Mirror.status == "paused")
+    pending = MirrorDelivery.status == "pending"
+    settled = 0
+    for condition, note in (
+        (
+            (MirrorDelivery.status == "claimed", MirrorDelivery.lease_expires_at < now),
+            "interrupted",
+        ),
+        ((pending, MirrorDelivery.created_at < now - max_pending_age), "stale"),
+        ((pending, MirrorDelivery.mirror_id.in_(paused)), "paused"),
+    ):
+        result = cast(
+            "CursorResult[Any]",
+            await session.execute(
+                update(MirrorDelivery).where(*condition).values(_settled(note, now))
+            ),
+        )
+        settled += result.rowcount
+    return settled
+
+
 async def claim_mirror_deliveries(
     session: AsyncSession,
     *,
@@ -181,30 +209,15 @@ async def claim_mirror_deliveries(
 ) -> list[MirrorDeliveryRow]:
     """Claim due posts for mirrors into `platform`, oldest first.
 
-    First settles what must not post: claims whose lease ran out
-    (`interrupted`, the owner may have posted), posts older than
-    `max_pending_age` (`stale`), and posts of a paused mirror (`paused`).
-    Then claims at most one post per (mirror, session), and none for a pair
-    that already has one claimed, so a session's posts keep their order and
-    its thread is opened once. Archived tenants' posts wait.
+    First settles what must not post (`settle_unpostable_deliveries`). Then
+    claims at most one post per (mirror, session), and none for a pair that
+    already has one claimed, so a session's posts keep their order and its
+    thread is opened once. Archived tenants' posts wait until they are stale.
     """
+    await settle_unpostable_deliveries(session, now=now, max_pending_age=max_pending_age)
     live = select(Tenant.id).where(Tenant.platform == platform, Tenant.archived_at.is_(None))
     here = select(Mirror.id).where(Mirror.dest_platform == platform, Mirror.tenant_id.in_(live))
-    paused = select(Mirror.id).where(Mirror.status == "paused")
     pending = (MirrorDelivery.status == "pending", MirrorDelivery.mirror_id.in_(here))
-    for condition, note in (
-        (
-            (
-                MirrorDelivery.status == "claimed",
-                MirrorDelivery.lease_expires_at < now,
-                MirrorDelivery.mirror_id.in_(here),
-            ),
-            "interrupted",
-        ),
-        ((*pending, MirrorDelivery.created_at < now - max_pending_age), "stale"),
-        ((*pending, MirrorDelivery.mirror_id.in_(paused)), "paused"),
-    ):
-        await session.execute(update(MirrorDelivery).where(*condition).values(_settled(note, now)))
     claimed = aliased(MirrorDelivery)
     busy = exists().where(
         claimed.mirror_id == MirrorDelivery.mirror_id,

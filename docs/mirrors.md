@@ -64,7 +64,9 @@ order. Delivery is at most once: a post whose lease ran out, or one older than
 `max_pending_age_s`, is skipped rather than retried, since it may already have
 landed. A missing destination, a refusal or a bot that may not post pauses the
 mirror; `list_mirrors` shows why, and calling `create_mirror` again with the
-same name resumes it. A settled row keeps no question or answer.
+same name resumes it. A settled row keeps no question or answer. The
+scheduler settles stale, interrupted and paused rows on every tick, whether
+or not mirrors or the bot's poller are on, archived workspaces included.
 
 Deleting a person's data (`/privacy`) deletes their queued and settled rows;
 messages already posted stay. Slack and Teams destinations are not built yet:

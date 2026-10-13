@@ -171,6 +171,24 @@ async def poll_mirror_deliveries_once(
     return len(claimed)
 
 
+async def sweep_mirror_deliveries(
+    sessionmaker: async_sessionmaker[AsyncSession], *, settings: MirrorsSettings, now: datetime
+) -> int:
+    """Settle queued posts that must not post, and drop their payload.
+
+    Run by the scheduler whether or not mirrors or any poller are on, so a
+    question queued before the feature was switched off, for a platform
+    whose poller is off, or for an archived tenant is not kept.
+    """
+    async with sessionmaker() as session, session.begin():
+        settled = await mirrors_store.settle_unpostable_deliveries(
+            session, now=now, max_pending_age=timedelta(seconds=settings.max_pending_age_s)
+        )
+    if settled:
+        log.info("mirror.deliveries_swept", settled=settled)
+    return settled
+
+
 async def run_mirror_poller(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -205,4 +223,5 @@ __all__ = [
     "poll_mirror_deliveries_once",
     "record_conversation_event",
     "run_mirror_poller",
+    "sweep_mirror_deliveries",
 ]
