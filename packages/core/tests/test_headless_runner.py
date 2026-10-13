@@ -1543,3 +1543,20 @@ async def test_memory_access_per_headless_origin(
     )
     memory = next(r for r in bodies[0]["resources"] if r["type"] == "memory_store")
     assert memory["access"] == ("read_only" if origin == "routine" else "read_write")
+
+
+@pytest.mark.parametrize("reason", ["completed", "interrupted", "upstream", "ceiling"])
+async def test_headless_result_callback_only_receives_completed_turns(reason):
+    from daimon.core.headless_runner import _NoOpLifecycle
+    from daimon.core.turn.state import TurnState
+    from daimon.core.turn.termination import TerminationReason
+
+    seen = []
+
+    async def result(state):
+        seen.append(state)
+
+    lifecycle = _NoOpLifecycle(on_result=result)
+    state = TurnState(termination=TerminationReason(reason))
+    await lifecycle.on_terminal_success(state)
+    assert seen == ([state] if reason == "completed" else [])

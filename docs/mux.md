@@ -2534,3 +2534,23 @@ source prefix is retained ahead of the root and role text; a shared leading root
 paragraph appears once. The default path without a capture retains its earlier
 composition bytes. A successful normalization proves representability and root
 authorization; native execution still requires independent preparation readback.
+
+
+The headless `run_worker` entry accepts an already-claimed pool worker and its
+original root authority. It reloads current policy and captures the actual source
+before resolving and comparing stored intent. Supported pre-provisioned targets
+use the registered preparer and their real journal store; unsupported allocation
+paths refuse. The caller owns pool release and the existing run-level budget watch.
+
+The first primary input joins the current bound budget guard, worker turn-count
+CAS and journal send claim in one transaction. A lost acknowledgment consumes at
+most that one claimed input and retains the hold for reconciliation; recovery
+cannot create another session. Successful results come from accepted authoritative
+journal messages through the existing fleet result writer. Ordinary headless and
+legacy turns keep their existing behavior.
+
+A worker dispatch exception does not mark its input rejected, refund its reserve
+or release the caller's pool slot. The caller releases its slot in `finally` and
+uses the existing journal operation readback before classifying a possibly-sent
+input. A count returned inside the claim transaction is never adopted as durable
+worker state; terminal updates reread the worker through the budget lock owner.
