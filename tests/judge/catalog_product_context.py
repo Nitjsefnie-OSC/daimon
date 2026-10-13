@@ -19,8 +19,6 @@ from daimon.core.session_preparation import (
     PreparationBusy,
     PreparationDeferred,
     PreparationFailure,
-    SessionOps,
-    prepare_session_for_turn,
 )
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -29,8 +27,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import (
     PreparedTurn,
     admitted_session_scope,
-    bind_recorder,
-    create_fresh_session,
+    bind_session,
 )
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.state import extract_final_response
@@ -189,14 +186,9 @@ class ProductContext:
             )
             if admission.backend_revision != revision or admission.grant is None:
                 raise ValueError("admission did not use the real configured revision/policy")
-            prepared = await prepare_session_for_turn(
+            prepared = await bind_session(
                 deps,
                 admission,
-                ops=SessionOps(
-                    read_live_row=get_live_thread_session,
-                    create_fresh=create_fresh_session,
-                    bind_record=bind_recorder,
-                ),
                 tenant_id=tenant,
                 platform=self.admin.platform,
                 external_user_id=self.external_user_id,

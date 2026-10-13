@@ -20118,7 +20118,7 @@
     },
     {
       "file": "tests/judge/catalog_product_context.py",
-      "line": 49,
+      "line": 46,
       "module": "anthropic_catalog_replay",
       "names": [
         "AnthropicTurnSource"
@@ -20127,7 +20127,7 @@
     },
     {
       "file": "tests/judge/catalog_product_context.py",
-      "line": 55,
+      "line": 52,
       "module": "anthropic_catalog_replay",
       "names": [
         "AnthropicTurnSource"

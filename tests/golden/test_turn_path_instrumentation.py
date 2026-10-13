@@ -1,11 +1,13 @@
 """Child-only probe for the real oracle's mocked run-turn recorder."""
 
+import asyncio
 import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
 from daimon.testing.effect_recorder import database_metadata
+from runner import SCENARIOS, replay
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,8 +35,15 @@ async def test_controls_are_forwarded_without_erasing_semantic_kwargs() -> None:
 
 @pytest.mark.parametrize("lease_count", (0, 1, 3))
 async def test_lease_inserts_preserve_host_uuid_sequence(
-    db_session: AsyncSession, lease_count: int
+    db_session: AsyncSession,
+    lease_count: int,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    if not request.config.pluginmanager.hasplugin("oracle_plugin"):
+        monkeypatch.setitem(SCENARIOS, "uuid_sequence_probe", request.node.nodeid)
+        await asyncio.to_thread(replay, "uuid_sequence_probe")
+        return
     metadata = database_metadata()
     tenants = metadata.tables["tenants"]
     leases = metadata.tables["thread_lease"]
