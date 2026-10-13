@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 
 from mux.contracts.events import Event
 from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
@@ -139,7 +139,26 @@ def check_run_move(current: RunStatus, target: RunStatus) -> None:
         raise FleetConflict(f"a {current} run cannot become {target}")
 
 
-def worker_slot(run: FleetRun, worker: FleetWorker) -> Slot:
+class ResultWorker(Protocol):
+    """The immutable worker identity used to validate a journal result."""
+
+    @property
+    def id(self) -> uuid.UUID: ...
+
+    @property
+    def run_id(self) -> uuid.UUID: ...
+
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+    @property
+    def ordinal(self) -> int: ...
+
+    @property
+    def binding_id(self) -> str | None: ...
+
+
+def worker_slot(run: FleetRun, worker: ResultWorker) -> Slot:
     """The worker's private binding slot: its own thread under the orchestrator's
     channel, owned by the orchestrator's account. Never the shared slot."""
     channel = ChannelRef(
@@ -190,14 +209,14 @@ def _excerpt(payload: Mapping[str, JsonValue]) -> str:
     return body[:EXCERPT_LIMIT]
 
 
-def _check_member(run: FleetRun, worker: FleetWorker) -> None:
+def _check_member(run: FleetRun, worker: ResultWorker) -> None:
     if worker.run_id != run.id or worker.tenant_id != run.tenant_id:
         raise FleetConflict(f"worker {worker.id} is not in run {run.id}")
 
 
 def check_result(
     run: FleetRun,
-    worker: FleetWorker,
+    worker: ResultWorker,
     binding: ProviderBinding | None,
     stored: Event | None,
     pointer: ResultPointer,

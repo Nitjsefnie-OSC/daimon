@@ -24,6 +24,7 @@ from daimon.testing.outcome_oracle import (
     CardUpdate,
     FleetCollectCapture,
     FleetEvidence,
+    FleetReviewFacts,
     FleetWakeCapture,
     FleetWorkerCapture,
     LogObservation,
@@ -1528,6 +1529,6 @@ def test_fleet_completed_native_does_not_rescue_invalid_result_or_input(damage):
 def test_fleet_disabled_required_review_fails_even_if_reviewer_is_missing():
     source, assertion = fleet_recording()
     worker = source.fleet.workers[0].worker
-    source = replace_capture(source, worker=replace(worker, result_contract={"format": "text"}))
+    source = replace_capture(source, worker=replace(worker, review=FleetReviewFacts(format="text")))
     source = replace_fleet(source, workers=source.fleet.workers[:3], workers_capture_complete=False)
     assert evaluate(source, [assertion], finding_judge=fixture_finding_judge).status == "FAIL"
