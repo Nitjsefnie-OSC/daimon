@@ -29,6 +29,7 @@ from daimon.core.turn.gemini import (
 from daimon.core.turn.gemini_prepare import prepare_gemini_turn
 from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiStorage
 from daimon.core.turn.io import register_turn_codec
+from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_preparation
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
@@ -84,12 +85,15 @@ class GeminiPlan(BaseModel):
     source_agent_version: Annotated[int, Field(gt=0, strict=True)] | None = None
     counterpart_catalog_id: Nonblank | None = None
     counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
+    worker_materialization: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> GeminiPlan:
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
-        validate_counterpart_pins(self)
+        validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
         if (
             not self.records_path.is_absolute()
             or not self.holds_path.is_absolute()
@@ -110,6 +114,7 @@ class GeminiPlan(BaseModel):
         if (
             "memory" not in drops
             or worker.resources
+            or (self.worker_materialization and worker.permissions.seal_ids)
             or revision.profile != self.profile
             or revision.model != FLASH_PRIMARY
             or spec.model != ModelRef(provider="gemini", id=FLASH_PRIMARY)
@@ -122,10 +127,22 @@ class GeminiPlan(BaseModel):
             or scope.is_legacy_host_authorized
             or (scope.tenant_id, scope.account_id) != (self.tenant_id, self.account_id)
             or worker.permissions.fleet.root.channel != revision.channel
-            or spec.name != self.agent_name
-            or spec.system != self.system
-            or tuple(spec.tools or ()) != self.tools
-            or tuple(pin.id for pin in spec.skills or ()) != self.skill_ids
+            or (
+                not self.worker_materialization
+                and (
+                    spec.name != self.agent_name
+                    or spec.system != self.system
+                    or tuple(spec.tools or ()) != self.tools
+                    or tuple(pin.id for pin in spec.skills or ()) != self.skill_ids
+                )
+            )
+            or (
+                self.worker_materialization
+                and (
+                    any(tool not in self.tools for tool in spec.tools or ())
+                    or any(pin.id not in self.skill_ids for pin in spec.skills or ())
+                )
+            )
             or ("skills" in drops and spec.skills)
             or ("mcp" in drops and spec.mcp_servers)
             or ("tools" in drops and (spec.tools or spec.mcp_servers))
@@ -182,13 +199,23 @@ class GeminiPlan(BaseModel):
                 or not adapter.enabled
                 or adapter.account_scope_id != self.project
                 or compile_environment(self.environment) != {"type": "remote", "sources": []}
-                or checked.agent.spec.system != self.system
-                or checked.agent.spec.tools != self.tools
+                or (
+                    (not self.worker_materialization or expected is None)
+                    and (
+                        checked.agent.spec.system != self.system
+                        or checked.agent.spec.tools != self.tools
+                    )
+                )
             ):
                 raise AdmissionDenied(reason="backend_unsupported")
 
         return await read_counterpart(
-            self, request, source=source, resources=resources, verify_native=verify_native
+            self,
+            request,
+            source=source,
+            resources=resources,
+            verify_native=verify_native,
+            worker_materialization=self.worker_materialization,
         )
 
 
@@ -203,7 +230,9 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
         raise AdmissionDenied(reason="backend_unsupported")
     plan = select_runtime_manifest(request, GeminiPlan)
     if origin == "agent":
-        validate_counterpart_request(plan, request)
+        validate_counterpart_request(
+            plan, request, worker_materialization=plan.worker_materialization
+        )
     return plan
 
 
@@ -246,7 +275,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         )
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
-        validate_counterpart_request(plan, preparation)
+        validate_counterpart_request(
+            plan, preparation, worker_materialization=plan.worker_materialization
+        )
         if preparation.worker != request.worker:
             raise AdmissionDenied(reason="backend_unsupported")
         source = preparation.source
@@ -264,8 +295,18 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 or "",
                 actual_agent=preparation.admission.agent,
             )
+        return await plan.read_counterpart(
+            preparation, source=source, resources=resources(preparation)
+        )
+
+    def resources(preparation: ProviderPreparationRequest) -> NeutralResourceHost:
+        if plan.worker_materialization:
+            persistence = current_persistence.get()
+            if persistence is None:
+                raise AdmissionDenied(reason="backend_unsupported")
+            persistence.check_session(preparation.scope, None)
         backend = gemini_backend(revision, preparation.scope, runtime, plan.project)
-        resources = NeutralResourceHost(
+        return NeutralResourceHost(
             backend,
             preparation.deps.sessionmaker,
             scope=preparation.scope,
@@ -274,11 +315,41 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             resource_catalog_enabled=True,
             catalog_adapter=backend.catalog_adapter,
         )
-        return await plan.read_counterpart(preparation, source=source, resources=resources)
+
+    async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
+        validate_counterpart_request(plan, preparation, worker_materialization=True)
+        persistence = current_persistence.get()
+        worker, source, guard = preparation.worker, preparation.source, preparation.before_native
+        if (
+            not plan.worker_materialization
+            or worker is None
+            or worker != request.worker
+            or source is None
+            or source.source is None
+            or guard is None
+            or persistence is None
+            or persistence.scope != preparation.scope
+            or persistence.store is not preparation.deps.state_store
+            or preparation.deps.state_store is not request.deps.state_store
+            or plan.worker_deployment(worker, revision) != deployment
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        catalog_id = persistence.operation_key + ":agent"
+        return await resources(preparation).publish(
+            catalog_id,
+            worker.spec,
+            expected_revision=0,
+            key=catalog_id,
+            persistence=persistence,
+            guard=guard,
+            worker=worker,
+            source=source.source,
+        )
 
     runtime = TurnRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
+        materialize_worker=materialize if plan.worker_materialization else None,
         journal=GeminiJournal(
             SQLiteGeminiStorage(plan.records_path, namespace=namespace),
             request.deps.state_store,
