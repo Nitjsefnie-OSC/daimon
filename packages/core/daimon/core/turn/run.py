@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, TypedDict, cast
@@ -471,6 +471,7 @@ async def _archive_orphaned_session(
     session_id: str,
     io: TurnIO | None = None,
     scope: Scope | None = None,
+    archive: Callable[[], Coroutine[object, object, object]] | None = None,
 ) -> None:
     """Best-effort archive of an upstream session no mapping row names.
 
@@ -480,7 +481,9 @@ async def _archive_orphaned_session(
     swallowed: the error being unwound is the one the caller must see.
     """
     archive_task = asyncio.create_task(
-        (io or LegacyTurnIO(anthropic, session_id, scope=scope)).archive(),
+        archive()
+        if archive is not None
+        else (io or LegacyTurnIO(anthropic, session_id, scope=scope)).archive(),
         name="turn.orphan_session_archive",
     )
     deadline = asyncio.get_running_loop().time() + _ORPHAN_ARCHIVE_TIMEOUT_S

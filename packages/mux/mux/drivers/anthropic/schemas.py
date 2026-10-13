@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.resources import ToolSpec
+from mux.contracts.resources import NetworkPolicy, ToolSpec
 
 
 class NativeConfig(BaseModel):
@@ -152,6 +152,37 @@ class EnvironmentConfig(NativeConfig):
 
     config: Annotated[CloudConfig | SelfHostedConfig, Field(discriminator="type")] | None = None
     create_nulls: list[Literal["description"]] = []
+
+    def intent(self) -> tuple[NetworkPolicy, dict[str, tuple[str, ...]]]:
+        """Project explicit cloud policy; implicit defaults retain native obligations."""
+        config = self.config
+        if not isinstance(config, CloudConfig) or self.create_nulls:
+            raise ValueError("environment execution policy is not represented")
+        network, packages = config.networking, config.packages
+        if network is None or packages is None:
+            raise ValueError("environment policy has implicit defaults")
+        if isinstance(network, LimitedNetwork) and (
+            network.allowed_hosts is None
+            or network.allow_mcp_servers is not False
+            or network.allow_package_managers is not False
+        ):
+            raise ValueError("network permissions are not represented")
+        if any(getattr(packages, name) is None for name in ("apt", "pip", "npm")) or any(
+            getattr(packages, name) != [] for name in ("cargo", "gem", "go")
+        ):
+            raise ValueError("package policy is not represented")
+        return (
+            NetworkPolicy(
+                mode=network.type,
+                allowed_hosts=tuple(network.allowed_hosts or ())
+                if isinstance(network, LimitedNetwork)
+                else (),
+            ),
+            {
+                name: tuple(getattr(packages, native))
+                for name, native in (("system", "apt"), ("python", "pip"), ("npm", "npm"))
+            },
+        )
 
 
 class ModelConfig(NativeConfig):

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Preserve a tenant-wide clone source identity only under its exact root source/revision grant and authorized account capture.
+- Refuse worker resource preparation if the captured source environment is missing or differs from the requested native environment.
+- Project fully explicit cloud source policies into the existing neutral worker environment while refusing implicit or unrepresented native permissions.
 - Make preparation lock and redaction work budgets independent of host scheduling.
 - Refuse a worker allocation under a foreign persistence scope before source or credential reads.
 - Execute claimed fleet workers through canonical source normalization, atomic funded input claims and authoritative journal results, without retrying unknown deliveries.
@@ -49,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Synchronize Discord gateway-lease tests with completed PostgreSQL backend shutdown before a successor attempts the released advisory lock.
 - Prepare worker-completion decoding and dispatch on the existing leased continuation ladder, while refusing new completion writes until a compatible-reader release protects legacy timer scans. Missing host decisions defer without a provider fallback.
+- Preserve worker dispatch failures when provider cleanup cannot archive; reuse the verified preparation ports and existing bounded cleanup.
+- Retain authorized source lineage when normalizing a fleet worker clone; refuse stale or ungranted sources before allocation.
+- Opt-in OpenAI worker materialization uses the existing fenced publisher and session mutation owner; retain real native provenance and authoritative result identity.
+- Carry the headless worker’s fresh financial guard through registered materialization and verify its acknowledged catalog component before preparation; read-only proofs keep their existing behavior.
+
 - Cap restricted worker preparation at the earlier of caller and canonical worker deadlines; refuse expired readback or preparation before a successful handoff.
 - Verify explicitly restricted worker source intent and native counterparts through the existing preparation seam; retain refusal for undeclared, private or unrepresentable obligations.
 - Verify declared OpenAI worker restrictions against native agent and hosted-environment readback; refuse missing memory declarations, residual mounts and unproven no-sandbox execution before allocation.

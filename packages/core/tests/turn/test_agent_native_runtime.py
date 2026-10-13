@@ -1426,8 +1426,13 @@ async def test_normalized_source_prefix_is_consumed_by_actual_preparation(
     assert selected.source.effective_spec.system == "Retained instructions"
 
 
+@pytest.fixture(params=[False])
+def clone_source(request):
+    return request.param
+
+
 @pytest.fixture
-async def claimed_worker_request(explicit_worker_request, monkeypatch):
+async def claimed_worker_request(explicit_worker_request, monkeypatch, clone_source):
     from decimal import Decimal
 
     from daimon.core.authz import Surface
@@ -1493,9 +1498,21 @@ async def claimed_worker_request(explicit_worker_request, monkeypatch):
     source = await capture_preparation_source(
         replace(request, scope=root.fleet.scope, source=None, worker=None)
     )
+    if clone_source:
+        assert source.source is not None
+        root = replace(
+            root,
+            source_agents=(source.source.ref,),
+            source_revisions=((source.source.ref, source.source.revision),),
+        )
+    from mux.contracts.resources import AgentPatch
+
     resolved = resolve_worker_spec(
         root,
-        request.worker.spec,
+        source.source if clone_source else request.worker.spec,
+        overrides=AgentPatch.model_validate(request.worker.spec.model_dump())
+        if clone_source
+        else None,
         policy=POLICY,
         now=request.now(),
         backend=BackendConfig.model_validate(
@@ -1662,6 +1679,7 @@ async def test_claimed_worker_opaque_source_is_refused_before_funding_or_native_
 
 
 @pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("clone_source", [False, True], indirect=True)
 async def test_claimed_worker_runs_through_budget_binding_and_journal_result(
     claimed_worker_request,
 ):
@@ -1671,6 +1689,9 @@ async def test_claimed_worker_runs_through_budget_binding_and_journal_result(
     from daimon.core.stores import mux_state
 
     request, root, worker, prices, owned, native_requests = claimed_worker_request
+    if request.worker.source_agent is not None:
+        assert request.worker.source_agent[0] in root.source_agents
+        assert request.worker.source_agent in root.source_revisions
     result = await run_worker(
         request,
         parent=root,
@@ -1934,3 +1955,333 @@ async def test_worker_lost_native_ack_never_reposts_or_counts_a_second_input(
         persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
     assert persisted.turns_used == 1 and persisted.result is None
     assert persisted.status == "running" and persisted.reserved_usd > 0
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_readonly_worker_proof_never_invokes_optional_materialization(
+    explicit_worker_request,
+):
+    request, runtime, owned, transport = explicit_worker_request
+    assert runtime.materialize_worker is None
+
+    async def forbidden(selected):
+        raise AssertionError("read-only proof attempted native materialization")
+
+    request = replace(
+        request,
+        deps=replace(
+            request.deps,
+            turn_runtimes={
+                request.admission.backend_revision.profile: replace(
+                    runtime, materialize_worker=forbidden
+                )
+            },
+        ),
+    )
+    selected = await read_preparation_counterpart(request)
+    assert selected.counterpart is not None
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_claimed_worker_supplies_its_fresh_guard_to_registered_materialization(
+    claimed_worker_request,
+):
+    import asyncio
+
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn.persistence import current_persistence
+    from mux.errors import UnsupportedCapability
+
+    request, root, worker, prices, owned, calls = claimed_worker_request
+    profile = request.admission.backend_revision.profile
+    runtime = request.deps.turn_runtimes[profile]
+    reached = []
+
+    async def materialize(selected):
+        persistence = current_persistence.get()
+        assert persistence is not None
+        assert persistence.scope == selected.scope == selected.worker.permissions.fleet.scope
+        assert persistence.store is selected.deps.state_store
+        assert persistence.slot.thread.thread_id == selected.thread_id
+        assert selected.source.source.ref.id == selected.admission.agent.id
+        assert selected.before_native is not None
+        await selected.before_native()
+        reached.append(selected)
+        raise UnsupportedCapability(("unsupported_worker_source",), profile)
+
+    request = replace(
+        request,
+        deps=replace(
+            request.deps, turn_runtimes={profile: replace(runtime, materialize_worker=materialize)}
+        ),
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert refused.value.reason == "backend_unsupported"
+    assert len(reached) == 1
+    assert calls == [] and owned.wire.requests == []
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize(
+    "fault", ["missing_context", "unleased", "scope", "store", "thread", "account"]
+)
+async def test_materialization_requires_the_exact_active_preparation_owner(
+    explicit_worker_request,
+    fault,
+):
+    from contextlib import nullcontext
+
+    from daimon.core.turn.persistence import TurnPersistence
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+    from mux.state.memory import MemoryStateStore
+
+    request, runtime, owned, transport = explicit_worker_request
+    profile = request.admission.backend_revision.profile
+    calls = []
+
+    async def forbidden(selected):
+        calls.append(selected)
+        raise AssertionError("unauthorized materialization")
+
+    async def guard():
+        calls.append("guard")
+
+    store = request.deps.state_store
+    scope = request.scope
+    thread = ThreadRef(
+        channel=request.admission.backend_revision.channel, thread_id=request.thread_id
+    )
+    if fault == "scope":
+        scope = scope.model_copy(update={"authorization_id": "another-authority"})
+    if fault == "store":
+        store = MemoryStateStore()
+    if fault == "thread":
+        thread = thread.model_copy(update={"thread_id": "another-thread"})
+    slot = Slot(thread=thread, account_id=None)
+    if fault != "account":
+        slot = slot.model_copy(update={"account_id": scope.account_id})
+    persistence = TurnPersistence(store, None, scope, slot=slot, operation_key="proof-spawn")
+    request = replace(
+        request,
+        before_native=guard,
+        deps=replace(
+            request.deps, turn_runtimes={profile: replace(runtime, materialize_worker=forbidden)}
+        ),
+    )
+    with (
+        persistence.activate() if fault != "missing_context" else nullcontext(),
+        pytest.raises(AdmissionDenied),
+    ):
+        await read_preparation_counterpart(request)
+    assert calls == [] and owned.wire.requests == [] and not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("fault", ["none", "ack_drift", "expired", "cancelled"])
+async def test_materialization_handoff_retains_verified_ack_and_deadline(
+    explicit_worker_request,
+    fault,
+):
+    import asyncio
+    from datetime import timedelta
+
+    from daimon.core.turn.persistence import TurnPersistence
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    request, runtime, owned, transport = explicit_worker_request
+    profile = request.admission.backend_revision.profile
+    # This proves callback handoff of an already-published real catalog component;
+    # fresh provider allocation is exercised by each provider's actual caller test.
+    read = runtime.read_agent_counterpart
+    clock = [request.now()]
+    stages = []
+
+    async def guard():
+        stages.append("guard")
+        if fault == "cancelled":
+            raise asyncio.CancelledError
+
+    async def materialize(selected):
+        stages.append("materialize")
+        assert selected.source.resource_scope == request.scope
+        assert selected.before_native is guard
+        component = await read(selected)
+        if fault == "expired":
+            clock[0] = selected.deadline + timedelta(seconds=1)
+        if fault == "ack_drift":
+            component = component.model_copy(
+                update={"local_revision": component.local_revision + 1}
+            )
+        return component
+
+    request = replace(
+        request,
+        now=lambda: clock[0],
+        before_native=guard,
+        deps=replace(
+            request.deps, turn_runtimes={profile: replace(runtime, materialize_worker=materialize)}
+        ),
+    )
+    slot = Slot(
+        thread=ThreadRef(
+            channel=request.admission.backend_revision.channel, thread_id=request.thread_id
+        ),
+        account_id=request.scope.account_id,
+    )
+    persistence = TurnPersistence(
+        request.deps.state_store,
+        None,
+        request.scope,
+        slot=slot,
+        operation_key="proof-spawn",
+        now=request.now,
+    )
+
+    async def prove():
+        return await read_preparation_counterpart(request)
+
+    with persistence.activate():
+        if fault == "none":
+            selected = await persistence.run(prove)
+            assert selected.counterpart.agent.spec == request.worker.spec
+        else:
+            with pytest.raises(asyncio.CancelledError if fault == "cancelled" else AdmissionDenied):
+                await persistence.run(prove)
+    assert stages == (["guard"] if fault == "cancelled" else ["guard", "materialize"])
+    assert all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize(
+    "fault", [None, "source_id", "source_revision", "catalog", "revision", "native"]
+)
+async def test_dynamic_worker_pins_require_source_authority_without_a_fixed_target(
+    explicit_worker_request,
+    fault,
+):
+    from daimon.core.turn.runtime_manifest import validate_counterpart_pins
+
+    _, _, owned, _ = explicit_worker_request
+    values = {
+        "agent_id": None,
+        "counterpart_catalog_id": None,
+        "counterpart_catalog_revision": None,
+    }
+    if fault == "source_id":
+        values["source_agent_id"] = None
+    elif fault == "source_revision":
+        values["source_agent_version"] = None
+    elif fault == "catalog":
+        values["counterpart_catalog_id"] = "fixed-target"
+    elif fault == "revision":
+        values["counterpart_catalog_revision"] = 1
+    elif fault == "native":
+        values["agent_id"] = "fixed-agent"
+    # Exercise the existing pin owner directly; provider plan validators call it
+    # before manifest selection or native work.
+    plan = owned.plan.model_copy(update=values)
+    if fault is None:
+        validate_counterpart_pins(plan, worker_materialization=True)
+        with pytest.raises(ValueError, match="complete source and catalog revision pins"):
+            validate_counterpart_pins(plan)
+    else:
+        with pytest.raises(ValueError, match="source pins without fixed target pins"):
+            validate_counterpart_pins(plan, worker_materialization=True)
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("fault", ["identity", "revision", "missing_source_grant"])
+async def test_clone_dispatch_cannot_invent_or_reuse_source_lineage(
+    claimed_worker_request,
+    fault,
+):
+    import asyncio
+
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, root, worker, prices, owned, calls = claimed_worker_request
+    source = await capture_preparation_source(
+        replace(request, scope=root.fleet.scope, source=None, worker=None)
+    )
+    ref, revision = source.source.ref, source.source.revision
+    if fault == "identity":
+        ref = ref.model_copy(update={"id": "another-source"})
+    elif fault == "revision":
+        revision = revision.model_copy(update={"local": revision.local + 1})
+    request = replace(request, worker=replace(request.worker, source_agent=(ref, revision)))
+    with pytest.raises((FleetConflict, WorkerSpecRefused)):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert calls == [] and owned.wire.requests == []
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_worker_cleanup_uses_prepared_ports_and_preserves_the_original_failure(
+    claimed_worker_request,
+    monkeypatch,
+    capsys,
+):
+    import asyncio
+
+    from daimon.core import headless_runner
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.turn.persistence import TurnPersistence
+
+    request, root, worker, prices, _, calls = claimed_worker_request
+    entered = []
+
+    async def refused(self, *args, **kwargs):
+        entered.append(self.binding.native_refs["session"])
+        raise FleetConflict("offline final message refusal")
+
+    def forbidden_codec(*args, **kwargs):
+        raise AssertionError("cleanup rebuilt a codec outside its turn context")
+
+    # Result publication fails after the real SDK input and terminal frame.
+    monkeypatch.setattr(TurnPersistence, "publish_worker_result", refused)
+    monkeypatch.setattr(headless_runner, "turn_io", forbidden_codec)
+    with pytest.raises(FleetConflict, match="offline final message refusal"):
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert len(entered) == 1
+    assert len([call for call in calls if call.method == "POST"]) == 1
+    output = capsys.readouterr().out
+    assert output.count("turn.recovery_orphan_archive_failed") == 1
+    assert "session_archive" in output
+    from daimon.core.stores import fleet
+
+    async with request.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet.lock_budget(
+            db, tenant_id=request.tenant_id, actor_id=root.fleet.account_id, run_id=worker.run_id
+        )
+        retained = next(row for _, rows in graph for row in rows if row.id == worker.id)
+    assert retained.turns_used == 1 and retained.result is None
+    assert retained.reserved_usd > 0 and retained.status == "running"

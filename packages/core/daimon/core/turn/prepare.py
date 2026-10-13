@@ -202,6 +202,9 @@ class ProviderPreparationRequest:
     counterpart: AgentRevision | None = field(default=None, kw_only=True)
     source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
     worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
+    before_native: Callable[[], Awaitable[None]] | None = field(
+        default=None, kw_only=True, compare=False, repr=False
+    )
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
@@ -930,6 +933,7 @@ async def bind_session_impl(
     _on_prepared: Callable[[PreparedTurn], Awaitable[None]] | None = None,
     _on_orphan: Callable[[PreparedTurn], Awaitable[None]] | None = None,
     worker: ResolvedWorkerSpec | None = None,
+    before_native: Callable[[], Awaitable[None]] | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
 
@@ -1043,6 +1047,7 @@ async def bind_session_impl(
             effective_deadline,
             now,
             worker=worker,
+            before_native=before_native,
         )
         request, runtimes = scope_channel_runtimes(request)
 

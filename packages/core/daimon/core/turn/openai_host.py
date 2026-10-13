@@ -189,6 +189,35 @@ async def _create(
     spec: SessionSpec,
     runtime: OpenAIHostRuntime,
 ) -> Session:
+    if request.worker is not None:
+        active = current_persistence.get()
+        if (
+            active is None
+            or active.store is not store
+            or active.scope != request.scope
+            or active.slot != slot
+            or request.before_native is None
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        active.check_session(request.scope, None)
+        await request.before_native()
+
+        async def create(native_key: str) -> Session:
+            return await backend.sessions.create(request.scope, spec, key=native_key)
+
+        return await active.mutate(
+            None,
+            "session_create",
+            {
+                "spec": spec.model_dump(mode="json"),
+                "controls": runtime.controls.model_dump(mode="json"),
+            },
+            create,
+            Session,
+            lambda _: "processed",
+            guard=request.before_native,
+            retry_failed=False,
+        )
     # Stable per empty slot, including after a crash. Changed config/plan gets a
     # digest conflict, not a fresh operation which might create a second session.
     key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json()))

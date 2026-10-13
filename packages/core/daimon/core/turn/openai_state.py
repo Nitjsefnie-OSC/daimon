@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from daimon.core.turn.persistence import TurnPersistence, current_persistence
-from mux.contracts.events import Event, NativeProvenance
+from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance
 from mux.contracts.ids import ResourceRef
 from mux.drivers.openai.transport import object_json
 from mux.drivers.openai.turn import merge_history
@@ -62,6 +62,10 @@ def checkpoint(
 
 def journal_source(event: Event) -> str:
     """One provider item can yield two records with unchanged native provenance."""
+    if event.type == "agent.message":
+        message = AgentMessagePayload.model_validate(event.payload)
+        if message.complete:
+            return "openai:item:" + message.item_id
     if event.type in ("agent.tool_use", "agent.tool_result"):
         return event.id
     return event.native.event_id or event.id
@@ -79,7 +83,12 @@ class OpenAIRecoveryJournal:
             raise ScopeViolation(session.id, "foreign OpenAI recovery snapshot")
         # Publish all completed pages, projection and cursor in ONE commit.
         cursor = events[-1].id if events else ""
-        await active.record_many(session, events, cursor=cursor, source_key=journal_source)
+        await active.record_many(
+            session,
+            tuple(event.model_copy(update={"id": journal_source(event)}) for event in events),
+            cursor=cursor,
+            source_key=journal_source,
+        )
 
 
 async def invocation_baseline(

@@ -103,7 +103,7 @@ from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import Scope
-from mux.contracts.resources import AgentSpec, ProviderBinding
+from mux.contracts.resources import Agent, AgentPatch, AgentSpec, ProviderBinding
 from mux.errors import ScopeViolation
 from mux.state.lease import Lease
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -535,10 +535,23 @@ async def run_worker(
                 policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
             source_request = replace(request, scope=parent.fleet.scope, source=None, worker=None)
             source = await capture_preparation_source(source_request)
+            definition: Agent | AgentSpec = AgentSpec.model_validate(worker.spec)
+            overrides = None
+            if request.worker.source_agent is not None:
+                if source.source is None or request.worker.source_agent != (
+                    source.source.ref,
+                    source.source.revision,
+                ):
+                    raise FleetConflict(
+                        "worker clone source no longer matches its admitted lineage"
+                    )
+                definition = source.source
+                overrides = AgentPatch.model_validate(worker.spec)
             normalize = functools.partial(
                 resolve_worker_spec,
                 parent,
-                AgentSpec.model_validate(worker.spec),
+                definition,
+                overrides=overrides,
                 backend=BackendConfig.model_validate(
                     revision.model_dump(include=set(BackendConfig.model_fields))
                 ),
@@ -613,22 +626,37 @@ async def run_worker(
                 if result.ma_session_id in archived:
                     return
                 archived.add(result.ma_session_id)
-                io = turn_io(
-                    deps.anthropic,
-                    result.ma_session_id,
-                    **_turn_port_kwargs(
-                        deps,
-                        result.admission,
+                backend, ref, scope = result.backend, result.session_ref, result._scope  # pyright: ignore[reportPrivateUsage]
+                archive = (
+                    functools.partial(
+                        backend.sessions.archive,
+                        scope,
+                        ref,
+                        key=f"{operation}:orphan:{result.ma_session_id}",
+                    )
+                    if backend is not None and ref is not None and scope is not None
+                    else None
+                )
+                io = (
+                    None
+                    if archive is not None
+                    else turn_io(
+                        deps.anthropic,
                         result.ma_session_id,
-                        tenant_id=request.tenant_id,
-                        provider_backend=result.backend,
-                        provider_session=result.session_ref,
-                        provider_runtime=result.runtime,
-                        provider_scope=result._scope,  # pyright: ignore[reportPrivateUsage]
-                    ),
+                        **_turn_port_kwargs(
+                            deps,
+                            result.admission,
+                            result.ma_session_id,
+                            tenant_id=request.tenant_id,
+                            provider_backend=result.backend,
+                            provider_session=result.session_ref,
+                            provider_runtime=result.runtime,
+                            provider_scope=result._scope,  # pyright: ignore[reportPrivateUsage]
+                        ),
+                    )
                 )
                 await _archive_orphaned_session(
-                    deps.anthropic, session_id=result.ma_session_id, io=io
+                    deps.anthropic, session_id=result.ma_session_id, io=io, archive=archive
                 )
 
             async def commit_transition(
@@ -766,6 +794,7 @@ async def run_worker(
                                 deadline=bound,
                                 now=request.now,
                                 worker=resolved,
+                                before_native=guard,
                                 _on_prepared=bound_session,
                                 _on_orphan=orphan,
                             )

@@ -2554,3 +2554,47 @@ or release the caller's pool slot. The caller releases its slot in `finally` and
 uses the existing journal operation readback before classifying a possibly-sent
 input. A count returned inside the claim transaction is never adopted as durable
 worker state; terminal updates reread the worker through the budget lock owner.
+
+The existing `TurnRuntime` can expose an optional `materialize_worker(request)`
+callback returning the existing `AgentRevision` acknowledgement. It is absent by
+default. Read-only counterpart proof does not invoke it. The headless worker
+passes its existing fresh financial guard as `before_native`; preparation checks
+the full scope, shared store and private slot before invoking materialization.
+The existing publisher owns the lease, single-attempt mutation and acknowledgment.
+Counterpart readback verifies that actual publication through the catalog owner,
+then preparation recaptures the source and checks the worker deadline before
+handoff. Missing authority, unknown outcomes and mismatched readback refuse.
+
+Source environment capture projects a closed cloud policy only when networking
+and every package-manager list are explicit. Limited networking must explicitly
+disable implicit MCP-server and package-manager access. Apt, pip and npm map to
+the neutral system, Python and npm lists; other managers must be explicitly
+empty. Unknown fields, missing defaults and self-hosted policy retain their
+native obligation and refuse when unrepresented. The source's native snapshot,
+identity metadata and visibility remain intact. Ordinary Anthropic environment
+requests retain their native configuration bytes. A projected environment is
+still subject to the root's sandbox grant and independent native readback.
+
+Worker clone normalization retains the actual authorized source reference and
+revision through the existing resolver. A changed source or missing source grant
+refuses before allocation; stored worker intent and digests are never rewritten.
+
+Worker cleanup uses the verified prepared resource ports through the existing
+bounded archive owner. Unsupported archive remains a logged limitation and
+preserves the original dispatch failure, input count and reconciliation hold.
+
+A clone retains the native source reference's tenant-wide service identity. The
+root must explicitly grant that exact source and revision, and the owner capture
+must bind the complete source snapshot to the root's authorized account scope.
+An arbitrary foreign or unbound account reference cannot use this path; the
+source identity is never relabeled as the worker's account.
+
+An OpenAI deployment can explicitly enable `worker_materialization` (default
+`false`) with exact source identity/revision pins and finite configuration bounds.
+Dynamic plans omit fixed native agent and catalog target pins. The actual worker
+uses the existing scoped publisher and session mutation owner with one attempt;
+unknown acknowledgments retain their operation for reconciliation. The verified
+native target is consumed directly without changing the deployment manifest.
+Complete message journal identities match the stable accepted provider item ID;
+the true native stream event ID remains in provenance. Unconfigured and fixed
+deployments retain their existing behavior.

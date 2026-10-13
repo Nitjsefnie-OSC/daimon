@@ -104,7 +104,12 @@ class TurnPersistence:
         finally:
             current_persistence.reset(token)
 
-    def check_session(self, scope: Scope, session: ResourceRef) -> None:
+    def check_session(self, scope: Scope, session: ResourceRef | None) -> None:
+        if session is None:
+            if scope != self.scope or self._binding is not None:
+                raise ScopeViolation(self.operation_key, "turn context does not own preparation")
+            self._fence()
+            return
         if (
             scope != self.scope
             or session.kind != "session"

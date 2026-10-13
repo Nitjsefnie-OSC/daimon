@@ -44,6 +44,9 @@ class TurnRuntime:
     read_agent_counterpart: (
         Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None
     ) = field(default=None, kw_only=True)
+    materialize_worker: Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None = (
+        field(default=None, kw_only=True)
+    )
 
 
 @dataclass(frozen=True)

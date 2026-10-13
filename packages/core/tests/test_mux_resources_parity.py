@@ -217,6 +217,26 @@ async def test_agent_create_has_no_extra_or_missing_fields(payload):
                 "networking": {"type": "limited", "allowed_hosts": [], "allow_mcp_servers": False},
             },
         },
+        {
+            "name": "example",
+            "config": {
+                "type": "cloud",
+                "networking": {
+                    "type": "limited",
+                    "allowed_hosts": ["pypi.org"],
+                    "allow_mcp_servers": False,
+                    "allow_package_managers": False,
+                },
+                "packages": {
+                    "apt": ["git"],
+                    "pip": ["pandas"],
+                    "npm": [],
+                    "cargo": [],
+                    "gem": [],
+                    "go": [],
+                },
+            },
+        },
     ],
 )
 async def test_environment_create_preserves_configuration(payload):
@@ -228,6 +248,9 @@ async def test_environment_create_preserves_configuration(payload):
             after, payload, scope=platform_scope("test request fidelity")
         )
     assert_transport_equal(old, new)
+    assert [request.body for request in old.scripted.requests] == [
+        request.body for request in new.scripted.requests
+    ]
     assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
 
 
