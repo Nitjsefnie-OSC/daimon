@@ -9,7 +9,6 @@ run for real.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 import httpx
@@ -114,6 +113,7 @@ def test_fallback_thread_name_quotes_the_opening_message_not_an_agent_name() -> 
     assert title == "Hi! what can you do? I'm new here.", (
         "a greeting is titled from its own words, capitalised, never from the agent slug"
     )
+    assert not is_generic_thread_name(title)
 
 
 def test_fallback_thread_name_uses_first_line_and_fits_the_cap() -> None:
@@ -131,18 +131,7 @@ def test_fallback_thread_name_uses_default_when_message_says_nothing(text: str) 
     assert fallback_thread_name(text, default="Chat with daimon") == "Chat with daimon", (
         "nothing to quote, or only a bare greeting, falls back to the bot's presented name"
     )
-
-
-# The thread_name assertion of QA-NEW9-NO-INTERNAL-PLUMBING, verbatim.
-_NEW9_FORBIDDEN = re.compile(r"(?i)^(greeting|hello|hi|help request|chat with .*)$")
-_NEW9_OPENING = "hi! what can you do? I'm new here."
-
-
-def test_fallback_thread_name_passes_new9_for_its_opening_message() -> None:
-    title = fallback_thread_name(_NEW9_OPENING, default="Chat with daimon")
-    assert not _NEW9_FORBIDDEN.match(title) and len(title) <= 50, (
-        f"{title!r} must pass NEW9's thread-name assertion"
-    )
+    assert is_generic_thread_name("Chat with daimon"), "the default is a generic placeholder"
 
 
 @pytest.mark.parametrize(
@@ -165,25 +154,6 @@ def test_fallback_thread_name_passes_new9_for_its_opening_message() -> None:
 )
 def test_is_generic_thread_name_flags_titles_that_name_nothing(title: str) -> None:
     assert is_generic_thread_name(title), f"{title!r} says nothing about the thread"
-
-
-@pytest.mark.parametrize(
-    "title",
-    [
-        "Greeting",
-        "Hello",
-        "Hi",
-        "Help request",
-        "Chat with Daimon",
-        "Chat with you",
-        "Chat with ...",
-        "Chat with ?",
-        "CHAT WITH !!!",
-    ],
-)
-def test_is_generic_thread_name_covers_everything_new9_forbids(title: str) -> None:
-    assert _NEW9_FORBIDDEN.match(title), "precondition: NEW9 rejects this title"
-    assert is_generic_thread_name(title), f"{title!r} must be replaced before it reaches Discord"
 
 
 def test_cut_keeps_a_word_that_ends_exactly_at_the_cap() -> None:

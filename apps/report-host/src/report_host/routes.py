@@ -6,7 +6,7 @@ built inside ``build_reader_router``, and every read and write below it is
 scoped to that recipient (and, for threads, to the report's own slug) — the
 store-level three-way scope ``threads_store.load_thread`` enforces. Unknown,
 revoked and expired tokens are indistinguishable to a caller: one 403, one
-message, so a guess learns nothing (T-21-15-A).
+message, so a guess learns nothing.
 
 Admin, upload-token-consuming and publish routes are NOT here — they land in
 later plans. This module owns only what a report's reader can reach.
@@ -36,7 +36,7 @@ _VIEWER_DIR = Path(__file__).parent / "viewer"
 
 # A single literal for every reason a recipient dependency can fail: unknown
 # token, revoked token, expired token. A reader whose link expired and a
-# stranger guessing tokens get the same answer (T-21-15-A).
+# stranger guessing tokens get the same answer.
 _RECIPIENT_INVALID_MESSAGE = "this link is not valid for this report"
 _LINK_UNAVAILABLE_HTML = (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -183,7 +183,7 @@ def build_reader_router(
             return await resolve_recipient(slug, request)
         except HTTPException as exc:
             if (
-                (settings.html_link_errors or _browser_navigation(request.headers.get("accept")))
+                _browser_navigation(request.headers.get("accept"))
                 and exc.status_code == status.HTTP_403_FORBIDDEN
                 and exc.detail == _RECIPIENT_INVALID_MESSAGE
             ):

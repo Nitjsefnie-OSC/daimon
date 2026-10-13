@@ -391,7 +391,7 @@ async def _process_one(
                 raise DefaultsError(
                     f"duplicate-title collision resolved to a skill outside this tenant's "
                     f"namespace (tenant={str(tenant_id)[:8]}, recovered.display_title="
-                    f"{recovered.display_title!r}); push refused (#138)"
+                    f"{recovered.display_title!r}); push refused"
                 ) from err
             resp = await anthropic_client.beta.skills.versions.create(
                 skill_id=recovered.id,

@@ -34,7 +34,7 @@ class RunningTurns:
     def track(self) -> Iterator[None]:
         """Count the current task as in progress until the block exits."""
         task = asyncio.current_task()
-        if task is None:  # pragma: no cover - only reachable outside an event loop
+        if task is None:  # a loop callback, not a task: nothing to count
             yield
             return
         self._entries[task] = self._entries.get(task, 0) + 1

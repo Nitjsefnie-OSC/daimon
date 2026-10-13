@@ -1707,9 +1707,7 @@ signed upload token.
 A browser (`Accept: text/html`) opening an unavailable document link gets a
 static “Link unavailable” HTML page instead of a JSON error: unresolved
 `GET /n/{slug}/` requests (404) and refused `GET /r/{slug}` requests (403).
-Other clients keep the JSON error unless `DAIMON_NOTEBOOK__HTML_LINK_ERRORS`
-or `DAIMON_REPORT__HTML_LINK_ERRORS` is `true`, which gives every client the
-page. Token and expiry checks, successful pages, and API/file/admin
+Other clients keep the JSON error. Token and expiry checks, successful pages, and API/file/admin
 responses retain their existing behavior.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach Daimon over HTTP with capability tokens, and the

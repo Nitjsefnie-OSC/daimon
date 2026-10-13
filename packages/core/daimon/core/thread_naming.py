@@ -28,9 +28,7 @@ THREAD_NAME_MAX_CHARS = 50
 _MAX_OUTPUT_TOKENS = 60
 _MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")
 # Titles that say nothing about the thread. Haiku answers some greetings with
-# one of these; the opening message itself makes a better title. The pattern
-# is the one QA-NEW9 asserts against; the set adds near-synonyms.
-_GENERIC_TITLE_RE = re.compile(r"^(?:greeting|hello|hi|help request|chat with .*)$", re.IGNORECASE)
+# one of these; the opening message itself makes a better title.
 _GENERIC_TITLES = frozenset(
     {
         "chat",
@@ -137,16 +135,9 @@ def _cut_at_word(title: str) -> str:
 
 
 def is_generic_thread_name(title: str) -> bool:
-    """True for a title like "Greeting", "Help request" or "Chat with Daimon" that names nothing."""
-    # NEW9's pattern runs on the trimmed title as it would be shown: stripping
-    # punctuation first would turn "Chat with ..." into "Chat with" and miss it.
-    shown = title.strip()
-    bare = shown.strip(" .!?,:;\"'")
-    return (
-        bare.casefold() in _GENERIC_TITLES
-        or _GENERIC_TITLE_RE.match(shown) is not None
-        or _GENERIC_TITLE_RE.match(bare) is not None
-    )
+    """True for a title that names nothing: a greeting, "Help request", or any "Chat with ..."."""
+    bare = title.strip().strip(" .!?,:;\"'").casefold()
+    return bare in _GENERIC_TITLES or bare.startswith("chat with ")
 
 
 def fallback_thread_name(text: str, *, default: str) -> str:

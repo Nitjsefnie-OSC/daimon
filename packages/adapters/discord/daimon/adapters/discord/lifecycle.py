@@ -343,7 +343,7 @@ class DiscordTurnLifecycle:
         alert_webhook_url: SecretStr | None = None,
         thread_stopped: Callable[[], bool] | None = None,
     ) -> None:
-        # Once the turn's thread is gone or closed (#809) nothing more is written:
+        # Once the turn's thread is gone or closed, nothing more is written:
         # no progress edit, no terminal card, no replacement for a missing card.
         self._thread_stopped = thread_stopped or (lambda: False)
         self._requester_id = requester_id
@@ -940,7 +940,7 @@ class DiscordTurnLifecycle:
         ``summary_on_card=False`` is for an answer posted as a fresh message:
         that message carries the summary, so the card shows "Done." without it.
         The card is deleted only after the answer is up, best effort, so a card
-        with the summary would show it twice until then, or for good (#787).
+        with the summary would show it twice until then, or for good if the delete fails.
         """
         if self._sessionmaker is not None and self._tenant_id is not None:
             try:
@@ -1088,7 +1088,7 @@ class DiscordTurnLifecycle:
                 )
                 # The "Done." card carries the summary, so the turn's files go on it.
                 self._summary_ref = self._message_ref
-                # #79: a tool-only turn has no reply to hang the notice under,
+                # A tool-only turn has no reply to hang the notice under,
                 # so a dropped server is named on its own line.
                 tool_only_notice = render_degraded_notice(state.mcp_failures)
                 if tool_only_notice is not None:
@@ -1110,7 +1110,7 @@ class DiscordTurnLifecycle:
         if self.answer_prefix is not None:
             response_text = f"{self.answer_prefix}\n\n{response_text}"
             self.answer_prefix_applied = True
-        # #79: a server MA dropped this turn is named under the reply, so a
+        # A server MA dropped this turn is named under the reply, so a
         # degraded answer never reads as a complete one.
         degraded_notice = render_degraded_notice(state.mcp_failures)
         if degraded_notice is not None:
