@@ -1091,3 +1091,14 @@ deadline: `run_prepared_turn` owns it. Complete native execution, operator-funde
 admission, replacement inventory and exact final settlement remain unavailable
 here. These interfaces create no ledger charge or provider-native hard cap;
 other runs' undebited native floors are discovered by their own refresh.
+
+
+At the bound worker's before-input edge, hosts call the same
+`require_fleet_worker_admission` with the actual prepared `binding`. It requires
+an already funded running row and the exact current binding in that worker's
+private slot, including generation, configuration revision and native IDs.
+The call rechecks authorization, resolved worker tariff, priced floors and
+funds under the existing financial fence; it never reserves an unfunded worker.
+Callers commit refusals as well as successes before dispatch, and keep the
+existing lease, single-attempt input claim and canonical model/resource proof.
+Omitting `binding` keeps the unallocated starting-claim check.

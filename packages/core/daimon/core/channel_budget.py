@@ -42,6 +42,7 @@ from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_bala
 from daimon.core.stores.turn_usage import read_accounting_revisions
 from daimon.core.usage_delegation import HostUsageBinding, read_delegated_usage
 from mux.contracts.ids import Scope
+from mux.contracts.resources import ProviderBinding
 from mux.state.lease import Slot
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -765,12 +766,16 @@ async def require_fleet_worker_admission(
     worker_id: uuid.UUID,
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
+    binding: ProviderBinding | None = None,
 ) -> FleetBudgetUsage:
-    """Pre-allocation readback; a pool claim or a cached snapshot is insufficient.
+    """Fresh financial readback before allocation or a bound worker's input.
 
     Never implicitly funds a claimed worker. Return refusal rather than raise
     after producing money, so callers commit overrun evidence, then stop before
-    native allocation. The resolver/driver still proves fresh spec/resources.
+    native allocation/input. With no binding, require an unallocated starting
+    claim. With the actual prepared binding, require the running row and an
+    exact current private-slot identity; stale snapshots convey no permission.
+    The resolver/driver still proves fresh canonical spec/model/resources.
     """
     decision = authorize(
         policy,
@@ -794,8 +799,16 @@ async def require_fleet_worker_admission(
             financial=True,
         )
     )[worker_id]
-    if usage.worker.status != "starting" or usage.worker.binding_id is not None:
-        return replace(usage, admitted=False, reason="not_an_unallocated_pool_claim")
+    if binding is None:
+        if usage.worker.status != "starting" or usage.worker.binding_id is not None:
+            return replace(usage, admitted=False, reason="not_an_unallocated_pool_claim")
+    elif (
+        usage.worker.status != "running"
+        or usage.worker.binding_id != binding.id
+        or not binding.native_refs.get("session")
+        or binding != await mux_state.get_binding(session, worker_slot(usage.run, usage.worker))
+    ):
+        return replace(usage, admitted=False, reason="not_current_worker_binding")
     return usage
 
 

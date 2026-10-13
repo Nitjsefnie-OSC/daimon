@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reuse the fenced turn mutation owner for unbound private worker slots and publish accepted worker results from their durable journal.
 - Resolve canonical workers through the current backend policy and preserve their full specs through scoped, single-attempt agent creation.
+- Recheck funded fleet workers against their current persisted binding and financial limits before model input.
+- Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 
 - Allow fleet worker specs to declare closed resource drops, narrow their grants, remove sandbox execution tools, and record the declarations in existing scoped audits.
 
