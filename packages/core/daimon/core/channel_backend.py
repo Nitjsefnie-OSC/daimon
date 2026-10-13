@@ -24,6 +24,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, cast
 
 import structlog
@@ -38,7 +39,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import source_agent_record
-from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
+from daimon.core.neutral_resources import AgentFleetGrant, NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.pricing import MODEL_PRICING, ProviderPrice, list_price_preview
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import agent_backends, mux_state, security_audit
@@ -70,6 +71,8 @@ from mux.profiles import (
     shared_threads_available,
 )
 from mux.state.store import ConfigRevisionConflict
+from pydantic import JsonValue
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -201,6 +204,19 @@ def _digest(facts: object) -> str:
     return hashlib.sha256(
         json.dumps(facts, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
+
+
+def _revision_digest(
+    agent: BackendAgent, backend: Provider | None, fleet_grant: JsonValue | None
+) -> str:
+    facts: dict[str, object] = {
+        "tenant_id": agent.tenant_id,
+        "agent_id": agent.agent_id,
+        "backend": backend,
+    }
+    if fleet_grant is not None:
+        facts["fleet_grant"] = fleet_grant
+    return _digest(facts)
 
 
 def spec_compatibility_items(
@@ -474,10 +490,9 @@ class AgentBackendService:
                 local=local + 1,
                 backend=backend,
                 previous_local=local or None,
-                digest=_digest(
-                    {"tenant_id": agent.tenant_id, "agent_id": agent.agent_id, "backend": backend}
-                ),
+                digest=_revision_digest(agent, backend, current.fleet_grant if current else None),
                 preview_digest=preview.digest,
+                fleet_grant=current.fleet_grant if current else None,
             )
             await security_audit.append_event(
                 session,
@@ -493,6 +508,175 @@ class AgentBackendService:
                 scope=f"agent_backend:{agent.agent_id}:{revision.local}",
             )
             return revision
+
+    async def read_fleet_grant(
+        self, tenant_id: uuid.UUID, agent_id: uuid.UUID, *, now: datetime
+    ) -> AgentFleetGrant | None:
+        if not self.enabled:
+            return None
+        if not isinstance(cast(object, tenant_id), uuid.UUID) or not isinstance(
+            cast(object, agent_id), uuid.UUID
+        ):
+            raise AgentBackendRefused("agent_identity_required")
+        async with self._sessions() as session:
+            current = await agent_backends.current(session, tenant_id, agent_id)
+        if current is None:
+            return None
+        if current.fleet_grant_invalid:
+            raise AgentBackendRefused("invalid_fleet_grant")
+        if current.fleet_grant is None:
+            return None
+        value = AgentFleetGrant.model_validate_json(json.dumps(current.fleet_grant))
+        return value if value.expires_at > now else None
+
+    async def _fleet_preview(
+        self,
+        session: AsyncSession,
+        agent: BackendAgent,
+        value: AgentFleetGrant | None,
+        *,
+        now: datetime,
+    ) -> CompatibilityPreview:
+        current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+        local = current.local if current else 0
+        policy = await self._policy(session, agent.tenant_id)
+        normalized: JsonValue | None = None
+        if value is not None:
+            try:
+                value = AgentFleetGrant.model_validate_json(value.model_dump_json())
+                if value.expires_at <= now:
+                    raise ValueError("expired grant")
+                for choice in value.backends:
+                    check_backend(
+                        ConfigRevision.create(
+                            ChannelRef(
+                                tenant_id=str(agent.tenant_id),
+                                platform="cli",
+                                channel_id=agent.name,
+                            ),
+                            1,
+                            choice,
+                        ),
+                        enabled_backends=policy.enabled_backends,
+                    )
+                    value.limits.require_profile(get_profile(choice.profile))
+            except (ValueError, DaimonError, UnsupportedCapability):
+                raise AgentBackendRefused("invalid_fleet_grant") from None
+            normalized = value.model_copy(update={"epoch": local + 1}).model_dump(mode="json")
+        preview = compatibility_preview(
+            agent,
+            (current.backend if current else None) or DEFAULT_BACKEND,
+            policy,
+            setting_revision=local,
+            cost_line="Fleet grant is an authority ceiling; funding is checked separately.",
+        ).model_copy(update={"fleet_grant": normalized})
+        return preview.model_copy(
+            update={
+                "digest": _digest(
+                    {
+                        **preview.model_dump(mode="json"),
+                        "configuration_digest": agent.configuration_digest,
+                    }
+                )
+            }
+        )
+
+    async def preview_fleet_grant(
+        self, agent: BackendAgent, value: AgentFleetGrant | None, *, now: datetime
+    ) -> CompatibilityPreview:
+        self._require_enabled()
+        async with self._sessions() as session:
+            return await self._fleet_preview(session, agent, value, now=now)
+
+    async def _write_fleet_grant(
+        self,
+        agent: BackendAgent,
+        value: AgentFleetGrant | None,
+        expected_revision: int,
+        actor: BackendActor,
+        *,
+        expected_preview_digest: str,
+        now: datetime,
+    ) -> AgentBackendRevision:
+        self._check_actor(agent.tenant_id, actor)
+        async with policy_store.policy_write_transaction(
+            self._sessions, tenant_id=agent.tenant_id
+        ) as session:
+            await self._actor(session, agent.tenant_id, actor)
+            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+            local = current.local if current else 0
+            if local != expected_revision:
+                raise AgentBackendRefused("stale_revision")
+            preview = await self._fleet_preview(session, agent, value, now=now)
+            if preview.digest != expected_preview_digest:
+                raise AgentBackendRefused("stale_preview")
+            backend = current.backend if current else None
+            try:
+                revision = await agent_backends.put_revision(
+                    session,
+                    tenant_id=agent.tenant_id,
+                    agent_id=agent.agent_id,
+                    agent_name=agent.name,
+                    local=local + 1,
+                    backend=backend,
+                    previous_local=current.previous_local if current else None,
+                    digest=_revision_digest(agent, backend, preview.fleet_grant),
+                    preview_digest=preview.digest,
+                    fleet_grant=preview.fleet_grant,
+                )
+            except IntegrityError:
+                raise AgentBackendRefused("stale_revision") from None
+            await security_audit.append_event(
+                session,
+                tenant_id=agent.tenant_id,
+                account_id=actor.account_id,
+                agent_id=agent.agent_id,
+                platform=None,
+                platform_user_id=None,
+                tool_name="agent_backend",
+                operation="fleet_grant_set" if value is not None else "fleet_grant_revoke",
+                outcome="allowed",
+                reason="completed",
+                scope=f"agent_backend:{agent.agent_id}:{revision.local}",
+            )
+            return revision
+
+    async def set_fleet_grant(
+        self,
+        agent: BackendAgent,
+        value: AgentFleetGrant,
+        expected_revision: int,
+        actor: BackendActor,
+        *,
+        expected_preview_digest: str,
+        now: datetime,
+    ) -> AgentBackendRevision:
+        return await self._write_fleet_grant(
+            agent,
+            value,
+            expected_revision,
+            actor,
+            expected_preview_digest=expected_preview_digest,
+            now=now,
+        )
+
+    async def revoke_fleet_grant(
+        self,
+        agent: BackendAgent,
+        expected_revision: int,
+        actor: BackendActor,
+        *,
+        expected_preview_digest: str,
+        now: datetime,
+    ) -> AgentBackendRevision:
+        return await self._write_fleet_grant(
+            agent,
+            None,
+            expected_revision,
+            actor,
+            expected_preview_digest=expected_preview_digest,
+            now=now,
+        )
 
     async def set_backend(
         self,
