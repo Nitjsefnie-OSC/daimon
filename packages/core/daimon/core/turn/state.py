@@ -28,6 +28,7 @@ from daimon.core.pricing import uncached_input_tokens
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.usage import UsageObservation
+from mux.profiles import accounting_mode_for
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +104,7 @@ class UsageTotals:
 
     def add_observation(self, usage: UsageObservation) -> UsageTotals:
         """Sum reported request stages; unknown buckets add no measurement."""
-        if usage.session.provider != "anthropic":
+        if accounting_mode_for(usage.session.provider).settles_natively:
             from daimon.core.usage_totals import ProviderUsageTotals
 
             if any(

@@ -8,6 +8,7 @@ capability. Anything it does not declare is `unknown`, and admission treats
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import model_validator
@@ -70,6 +71,26 @@ CORE_CAPABILITIES: frozenset[Capability] = frozenset(
 )
 
 
+class AccountingMode(StrEnum):
+    """The host settlement protocol for a profile's measured observations.
+
+    Native root totals describe already decoded disjoint child usage, not
+    permission to provision delegation or a claim that a roster port exists.
+    """
+
+    REQUEST_SPANS = "request_spans"
+    NATIVE_TOTALS = "native_totals"
+    NATIVE_ROOT_TOTALS = "native_root_totals"
+
+    @property
+    def settles_natively(self) -> bool:
+        return self is not AccountingMode.REQUEST_SPANS
+
+    @property
+    def supports_root_usage(self) -> bool:
+        return self is AccountingMode.NATIVE_ROOT_TOTALS
+
+
 class Profile(Contract):
     """One provider profile and what it supports.
 
@@ -84,6 +105,7 @@ class Profile(Contract):
     sdk_pin: str
     core: bool
     support: FrozenMap[Capability, Support]
+    accounting_mode: AccountingMode = AccountingMode.REQUEST_SPANS
     extensions: tuple[ExtensionRef, ...] = ()
     execution_tool: Literal["bash", "code_execution"] = "code_execution"
     implicit_execution: bool = False

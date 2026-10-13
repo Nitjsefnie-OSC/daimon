@@ -15,6 +15,7 @@ from daimon.core._models import AccountingOutbox, TenantLedger, UsageObservation
 from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from mux.contracts.usage import UsageObservation as UsageDTO
 from mux.errors import ScopeViolation
+from mux.profiles import accounting_mode_for
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -135,7 +136,7 @@ async def load_revisions(
         or prior.observation.grain != current.observation.grain
         or prior.observation.basis != current.observation.basis
         or (
-            current.observation.session.provider != "anthropic"
+            accounting_mode_for(current.observation.session.provider).settles_natively
             and (
                 prior.observation.turn_id != current.observation.turn_id
                 or prior.observation.thread_id != current.observation.thread_id

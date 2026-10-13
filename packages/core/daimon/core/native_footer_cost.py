@@ -23,6 +23,7 @@ from daimon.core.usage_aggregation import disjoint_observations, replace_observa
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
+from mux.profiles import accounting_mode_for
 from mux.state.usage_ledger import AppliedUsage
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -82,7 +83,7 @@ class NativeFooterCostContext:
     def __post_init__(self) -> None:
         uuid.UUID(self.scope.tenant_id)
         if (
-            self.session.provider not in ("openai", "gemini")
+            not accounting_mode_for(self.session.provider).settles_natively
             or self.scope.platform_reason is not None
             or self.scope.legacy_call_site is not None
             or self.session.kind != "session"

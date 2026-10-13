@@ -31,6 +31,7 @@ from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from daimon.core.usage_compat import event_observation
 from mux.contracts.usage import UsageObservation
+from mux.profiles import accounting_mode_for
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -120,7 +121,7 @@ class TurnObservation:
         existing = tuple(sample.usage for sample in self._samples.values())
         for value in (*existing, *values):
             if (
-                value.session.provider == "anthropic"
+                not accounting_mode_for(value.session.provider).settles_natively
                 or value.session.tenant_id != str(self.tenant_id)
                 or (self.session_id is not None and value.session.id != self.session_id)
                 or value.turn_id != root_turn_id
@@ -139,7 +140,10 @@ class TurnObservation:
         infrastructure_usd: Decimal | None = None,
         reuse_provider_price: bool = True,
     ) -> None:
-        if isinstance(event, UsageObservation) and event.session.provider != "anthropic":
+        if (
+            isinstance(event, UsageObservation)
+            and accounting_mode_for(event.session.provider).settles_natively
+        ):
             if event.session.kind != "session" or event.session.tenant_id != (
                 str(self.tenant_id) if self.tenant_id is not None else None
             ):
@@ -228,7 +232,10 @@ class TurnObservation:
         )
         terminal_error = error or (state.error if state else None)
         samples = list(self._samples.values())
-        if any(sample.usage.session.provider != "anthropic" for sample in samples):
+        if any(
+            accounting_mode_for(sample.usage.session.provider).settles_natively
+            for sample in samples
+        ):
             selected = disjoint_observations(sample.usage for sample in samples)
             identities = {(usage.session, usage.id) for usage in selected}
             samples = [

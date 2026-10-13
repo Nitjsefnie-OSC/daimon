@@ -167,6 +167,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Select Discord legacy event rendering and neutral action cards from the registered profile policy, preserving existing drafts, controls and terminal behavior.
 
 - Route Slack and Teams legacy event rendering and native action callbacks through one declared profile capability, preserving existing adapter behavior.
+- Select accounting settlement from declared profile modes while preserving legacy billing, native pending costs and delegated usage coverage.
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 - Derive live OpenAI probe authorization from a registered canonical GO pin, matching financial envelope and unused attempt identity instead of fixing one attempt in the runner.

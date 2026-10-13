@@ -26,6 +26,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import TurnLedgerReason
 from mux.contracts.usage import UsageObservation
 from mux.errors import ScopeViolation
+from mux.profiles import accounting_mode_for
 from mux.state.usage_ledger import AppliedUsage, OutboxRow, UsageRevisionConflict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,7 +93,7 @@ async def apply_usage_outbox(
     if not session.in_transaction():
         raise ValueError("accounting requires a caller-owned transaction")
     revisions = await accounting_outbox.load_revisions(session, row, tenant_id=tenant_id)
-    if row.observation.session.provider != "anthropic":
+    if accounting_mode_for(row.observation.session.provider).settles_natively:
         await accounting_outbox.check_provider_ingest(
             session, row.binding_id, row.observation, tenant_id=tenant_id
         )
@@ -107,7 +108,7 @@ async def apply_usage_outbox(
             row,
             tenant_id=tenant_id,
             billing_grain=billing_grain,
-            require_settled=observation.session.provider != "anthropic",
+            require_settled=accounting_mode_for(observation.session.provider).settles_natively,
         ):
             return False
     elif observation.grain != billing_grain:
@@ -117,7 +118,10 @@ async def apply_usage_outbox(
     current = _effective(revisions.current)
     exact_amount: Decimal | None = None
     first_exact_settlement = False
-    if not observation.covers and observation.session.provider != "anthropic":
+    if (
+        not observation.covers
+        and accounting_mode_for(observation.session.provider).settles_natively
+    ):
         if provider_price is None:
             return False  # persist unknown pricing for post-run reconciliation
         latest, settled = await accounting_outbox.settled_amount(
@@ -141,7 +145,11 @@ async def apply_usage_outbox(
         return True
     if observation.model is None:
         raise ValueError("a billable usage observation requires a model")
-    projection = observation if observation.session.provider != "anthropic" else current
+    projection = (
+        observation
+        if accounting_mode_for(observation.session.provider).settles_natively
+        else current
+    )
     await usage_events.project_revision(
         session,
         tenant_id=tenant_id,
@@ -209,12 +217,12 @@ async def record_observation_usage(
         return False
     if not session.in_transaction():
         raise ValueError("accounting requires a caller-owned transaction")
-    if observation.session.provider != "anthropic":
+    if accounting_mode_for(observation.session.provider).settles_natively:
         await accounting_outbox.check_provider_ingest(
             session, binding_id, observation, tenant_id=tenant_id
         )
     row = await mux_state.record_usage(session, binding_id, observation)
-    if row is None and observation.session.provider != "anthropic":
+    if row is None and accounting_mode_for(observation.session.provider).settles_natively:
         row = await accounting_outbox.pending_revision(
             session, binding_id, observation.id, observation.revision
         )
