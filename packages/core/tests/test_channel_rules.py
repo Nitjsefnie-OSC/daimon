@@ -1115,9 +1115,9 @@ async def test_space_members_take_one_agent_rule_and_refuse_their_own_rules(
         "c1",
         "c2",
     ), "two members of one own Space are one home, so one rule names both"
-    with pytest.raises(ChannelRuleRefused, match="Space client") as refused:
+    with pytest.raises(ChannelRuleRefused, match="Space client.*daimon spaces remove") as refused:
         await _set_rule(client, db_session_factory, tenant.id, "c1", readers="inside")
     assert refused.value.reason == "in_space", "a member's rule is set on its Space"
-    with pytest.raises(ChannelRuleRefused) as across:
+    with pytest.raises(ChannelRuleRefused, match="names only that Space's channels") as across:
         await _agent_rule(client, db_session_factory, tenant.id, "local", ("c1", "c3"))
     assert across.value.reason == "agent_has_home", "the Space's agent stays inside it"

@@ -47,6 +47,7 @@ from daimon.core.permissions import (
     check_channel_rule,
     describe_home,
     home_key,
+    is_space_key,
     runs_only_in,
     space_of,
     with_agent_rule,
@@ -188,7 +189,8 @@ def render_rule_refusal(
             return f"{channel_id} is set to Own agents only, so an agent rule names it alone."
         case "in_space":
             return (
-                "This channel is in a Space, which sets its rule; change it with `daimon spaces`."
+                "This channel is in a Space, which sets its rule. A deployment operator can "
+                "take it out with `daimon spaces remove` first."
             )
 
 
@@ -484,8 +486,8 @@ async def _write_rule(
     if (space := space_of(policy, ask.channel_id)) is not None:
         raise ChannelRuleRefused(
             "in_space",
-            message=f"This channel is in Space {space.name}, which sets its rule. "
-            "A deployment operator changes it with `daimon spaces`.",
+            message=f"This channel is in Space {space.name}, which sets its rule. A deployment "
+            "operator can take it out with `daimon spaces remove` first.",
         )
     before = channel_rule(policy, ask.channel_id)
     rule = resolve_rule(before, readers=ask.readers, writers=ask.writers)
@@ -798,8 +800,16 @@ async def set_agent_rule(
         # An own Space counts as one home: a rule may name any of its channels.
         keys = {home_key(policy, c) for c in target or ()}
         if home is not None and keys != {home}:
+            where = describe_home(policy, home)
             raise ChannelRuleRefused(
-                "agent_has_home", agent_name=agent_name, channel_id=describe_home(policy, home)
+                "agent_has_home",
+                agent_name=agent_name,
+                channel_id=where,
+                message=f"{agent_name} is an agent of {where}, so its rule names only that "
+                "Space's channels. A deployment operator changes the Space with "
+                "`daimon spaces remove` or `daimon spaces delete`."
+                if is_space_key(home)
+                else None,
             )
         own = [c for c in target or () if channel_rule(policy, c).readers == "own"]
         if own and len(keys) > 1:
