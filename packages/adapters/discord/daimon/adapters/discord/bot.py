@@ -858,6 +858,8 @@ class DaimonBot(commands.Bot):
             or post.kind != "message"
             or post.turn_card_intent_id is None
             or post.parent_channel_id != str(thread.parent_id)
+            or post.requester_platform_user_id is None
+            or not post.requester_platform_user_id.isdecimal()
         ):
             return None
         transport = DiscordPostTransport(
@@ -878,7 +880,7 @@ class DaimonBot(commands.Bot):
 
         return self.fleet_card_for(
             thread=thread,
-            requester_id=interaction.user.id,
+            requester_id=int(post.requester_platform_user_id),
             send=lambda: send,
             edit=transport.edit,
             run_id=run_id,
@@ -3794,6 +3796,7 @@ class DaimonBot(commands.Bot):
                         + seed_message
                     ),
                     lifecycle=lifecycle,
+                    turn_card_intent_id=turn_card_intent.id,
                     cancel=cancel,
                     reseed_user_message=_reseed_continuation_message,
                     recovery_lifecycle=_recovery_lifecycle,
@@ -5018,6 +5021,7 @@ class DaimonBot(commands.Bot):
                         + user_message
                     ),
                     lifecycle=lifecycle,
+                    turn_card_intent_id=turn_card_intent.id,
                     cancel=cancel,
                     reseed_user_message=_reseed_user_message,
                     recovery_lifecycle=_recovery_lifecycle,

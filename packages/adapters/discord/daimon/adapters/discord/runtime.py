@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from secrets import randbits
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
@@ -30,12 +30,14 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.discord_gateway_lease import GatewayLease, GatewayLeaseLost
+from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.worker_ownership import (
     OWNER_LOSS_GRACE_S,
     OWNER_PROBE_INTERVAL_S,
     OWNER_PROBE_TIMEOUT_S,
     OWNER_RETRY_BUDGET_S,
 )
+from daimon.core.turn.admission import AdmissionGrant
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy import text
@@ -46,6 +48,7 @@ if TYPE_CHECKING:
     from daimon.adapters.discord.lifecycle import EditFn, SendFn
     from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard, ParentResolver
     from daimon.core.fleet_orchestration import FleetOrchestrator
+    from daimon.core.neutral_resources import WorkerPermissions
     from daimon.core.stores.agent_posts import AgentPostRow
 
     import discord
@@ -273,15 +276,18 @@ async def build_runtime(
     *,
     fleet_service: FleetOrchestrator | None = None,
     fleet_parent_loader: ParentResolver | None = None,
+    fleet_root_grants: Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]]
+    | None = None,
 ) -> AsyncIterator[DiscordRuntime]:
     fleet_factory: FleetCardFactory | None = None
     if settings.fleet.enabled:
         from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCardFactory
         from daimon.core.fleet_orchestration import FleetRefused
 
-        if fleet_service is None or fleet_parent_loader is None:
+        if fleet_service is None or (fleet_parent_loader is None and fleet_root_grants is None):
             raise FleetRefused("prerequisites_unavailable")
-        fleet_factory = DiscordFleetCardFactory(fleet_service, fleet_parent_loader)
+        if fleet_parent_loader is not None:
+            fleet_factory = DiscordFleetCardFactory(fleet_service, fleet_parent_loader)
     engine = build_engine(
         str(settings.database.url),
         pool_size=settings.database.pool_size,
@@ -314,7 +320,19 @@ async def build_runtime(
             deployment_default=deployment_default,
             resolver_cache=resolver_cache,
             billing_config=billing_config,
+            fleet_root_grants=fleet_root_grants if settings.fleet.enabled else None,
         )
+        if settings.fleet.enabled:
+            from daimon.core.stores.mux_state import PostgresStateStore
+
+            turn_deps = replace(
+                turn_deps, state_store=turn_deps.state_store or PostgresStateStore(sessionmaker)
+            )
+            if fleet_factory is None:
+                from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCardFactory
+
+                assert fleet_service is not None
+                fleet_factory = DiscordFleetCardFactory.from_runtime(fleet_service, turn_deps)
         owner_key = randbits(63)
         ownership_lost = asyncio.Event()
         # Keep ownership outside the turn pool's preparation/mutation budget.

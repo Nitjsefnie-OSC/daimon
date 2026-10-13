@@ -10,6 +10,7 @@ import asyncio
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
@@ -27,6 +28,7 @@ import discord
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.bot import DaimonBot
+    from daimon.core.turn.deps import TurnDeps
 
 type ParentLoader = Callable[
     [discord.Interaction | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None]
@@ -244,6 +246,70 @@ class DiscordFleetCardFactory:
         self._service = service
         self._resolve = load_parent
 
+    @classmethod
+    def from_runtime(cls, service: FleetOrchestrator, deps: TurnDeps) -> Self:
+        """Bind the real intent/root owner, retaining its original scope."""
+        from daimon.core.channel_admins import load_live_subject, load_stored_subject
+        from daimon.core.mux_backend import resource_scope
+        from daimon.core.stores.identity import find_platform_principal
+        from daimon.core.turn.runtime_manifest import read_frozen_root
+        from mux.errors import ScopeViolation
+        from sqlalchemy.exc import SQLAlchemyError
+
+        async def resolve(
+            thread: discord.Thread,
+            requester_id: int,
+            intent_id: uuid.UUID | None,
+            run_id: uuid.UUID | None,
+            interaction: discord.Interaction | None,
+        ) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+            from daimon.adapters.discord.checks import channel_admin_caller
+
+            if intent_id is None or (interaction is not None and run_id is None):
+                raise FleetRefused("prerequisites_unavailable")
+            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
+            try:
+                async with deps.sessionmaker() as db:
+                    original = await find_platform_principal(
+                        db, tenant_id=tenant_id, platform="discord", external_id=str(requester_id)
+                    )
+                    if original is None:
+                        raise FleetRefused("prerequisites_unavailable")
+                    subject = (
+                        await load_stored_subject(
+                            db,
+                            tenant_id=tenant_id,
+                            platform="discord",
+                            account_id=original.account_id,
+                            platform_user_id=str(requester_id),
+                        )
+                        if interaction is None
+                        else await load_live_subject(
+                            db,
+                            tenant_id=tenant_id,
+                            platform="discord",
+                            caller=channel_admin_caller(interaction.user),
+                        )
+                    )
+                parent, policy = await read_frozen_root(
+                    deps,
+                    resource_scope(
+                        tenant_id=str(tenant_id),
+                        account_id=str(original.account_id),
+                        authorization_id="discord-fleet-card",
+                    ),
+                    intent_id=intent_id,
+                    run_id=run_id,
+                    now=datetime.now(UTC),
+                )
+                if parent.subject.platform_user_id != str(requester_id):
+                    raise FleetRefused("foreign_run")
+                return replace(parent, subject=subject), policy
+            except (WorkerSpecRefused, ScopeViolation, SQLAlchemyError):
+                raise FleetRefused("prerequisites_unavailable") from None
+
+        return cls(service, resolve)
+
     def __call__(
         self,
         thread: discord.abc.Messageable,
@@ -263,7 +329,7 @@ class DiscordFleetCardFactory:
         async def current(interaction: discord.Interaction | None):
             actor_id = interaction.user.id if interaction is not None else requester_id
             result = await self._resolve(
-                thread, actor_id, turn_card_intent_id, card.run_id, interaction
+                thread, requester_id, turn_card_intent_id, card.run_id, interaction
             )
             if result is None:
                 if card.run_id is not None:
@@ -282,7 +348,7 @@ class DiscordFleetCardFactory:
                 raise FleetRefused("foreign_run")
             if recorded_post is not None and (
                 parent.agent_id != recorded_post.agent_id
-                or parent.fleet.scope.principal_id != recorded_post.requester_platform_user_id
+                or str(requester_id) != recorded_post.requester_platform_user_id
                 or recorded_post.tenant_id != uuid.UUID(parent.fleet.scope.tenant_id)
             ):
                 raise FleetRefused("foreign_run")

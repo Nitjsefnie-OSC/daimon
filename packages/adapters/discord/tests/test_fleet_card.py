@@ -1125,11 +1125,18 @@ async def test_runtime_installs_factory_only_with_opted_in_owner_bindings(
     monkeypatch.setattr(runtime_module, "AsyncAnthropic", lambda **kwargs: build_stub_anthropic())
     owner = create_autospec(FleetPorts, instance=True)
     resolver = AsyncMock()
+    grants = AsyncMock(side_effect=AssertionError("bootstrap must not discover root grants"))
     async with runtime_module.build_runtime(
-        settings, fleet_service=FleetOrchestrator(owner), fleet_parent_loader=resolver
+        settings,
+        fleet_service=FleetOrchestrator(owner),
+        fleet_parent_loader=resolver,
+        fleet_root_grants=grants,
     ) as runtime:
         assert isinstance(runtime.fleet_card_factory, DiscordFleetCardFactory) is enabled
         resolver.assert_not_awaited()
+        grants.assert_not_awaited()
+        assert (runtime.turn_deps.state_store is None) is (not enabled)
+        assert runtime.turn_deps.fleet_root_grants is (grants if enabled else None)
 
 
 async def test_runtime_refuses_missing_fleet_binding_before_sdk_or_db_construction(monkeypatch):
@@ -1257,3 +1264,213 @@ async def test_stored_replacement_attribution_cannot_be_overridden_before_writin
     with pytest.raises(ValueError, match="recorded attribution|must name its turn"):
         await record_turn_post(sessionmaker, recorded_post=stored, message_id="901", **overrides)
     sessionmaker.begin.assert_not_called()
+
+
+@pytest.fixture
+async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkeypatch):
+    """Reuse the root owner's SDK/PG fixture with Discord destination metadata."""
+    from packages.core.tests.turn import test_frozen_root as root_owner
+
+    make_tenant = root_owner.make_tenant
+    make_principal = root_owner.make_platform_principal
+    root_permissions = root_owner.parent
+    subject = root_owner.Subject
+
+    async def tenant(db, **kwargs):
+        return await make_tenant(db, id=TENANT, platform="discord", workspace_id="60", **kwargs)
+
+    async def principal(db, **kwargs):
+        kwargs["external_id"] = "123"
+        return await make_principal(db, **kwargs)
+
+    def original_subject(**kwargs):
+        if kwargs.get("platform_user_id") == "requester":
+            kwargs["platform_user_id"] = "123"
+        return subject(**kwargs)
+
+    def permissions(provider):
+        value = root_permissions(provider)
+        destination = value.fleet.root.model_copy(
+            update={
+                "channel": value.fleet.root.channel.model_copy(update={"channel_id": "50"}),
+                "thread_id": "70",
+            }
+        )
+        return replace(
+            value,
+            fleet=replace(
+                value.fleet, root=destination, place=Place(channel_id="70", parent_channel_id="50")
+            ),
+        )
+
+    monkeypatch.setattr(root_owner, "make_tenant", tenant)
+    monkeypatch.setattr(root_owner, "make_platform_principal", principal)
+    monkeypatch.setattr(root_owner, "Subject", original_subject)
+    monkeypatch.setattr(root_owner, "parent", permissions)
+    async for value in root_owner.root_turn.__wrapped__(db_preflight, db_nullpool_engine):
+        await root_owner.freeze(value)
+        yield value
+
+
+async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projection(
+    discord_frozen_root, db_nullpool_engine, db_schema, monkeypatch
+):
+    from pathlib import Path
+
+    from daimon.adapters.discord import runtime as runtime_module
+    from daimon.adapters.discord.turn_posts import TurnPostRecorder
+    from daimon.core.config import Settings
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.agent_posts import get_post
+    from daimon.core.turn.runtime_manifest import read_frozen_root
+    from daimon.testing.db import build_test_engine
+    from daimon.testing.ma import build_stub_anthropic
+
+    deps, prepared, _, intent, _, scope, _, _ = discord_frozen_root
+    original, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    shared = FleetOrchestrator(HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal("1")))
+    settings = Settings.model_validate(
+        {
+            "database": {
+                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "pool_size": 1,
+                "max_overflow": 3,
+            },
+            "anthropic": {"api_key": "offline-test-key"},
+            "crypto": {"allow_plaintext": True},
+            "defaults_root": Path("defaults"),
+            "fleet": {"enabled": True},
+            "turn": {"path": "mux"},
+        }
+    )
+    monkeypatch.setattr(runtime_module, "AsyncAnthropic", lambda **kwargs: build_stub_anthropic())
+    # Real PG connections use this process-owned schema, just as the shared fixture.
+    monkeypatch.setattr(
+        runtime_module,
+        "build_engine",
+        lambda url, **kwargs: build_test_engine(url, db_schema, **kwargs),
+    )
+    async with runtime_module.build_runtime(
+        settings, fleet_service=shared, fleet_root_grants=deps.fleet_root_grants
+    ) as runtime:
+        assert runtime.turn_deps.fleet_root_grants is deps.fleet_root_grants
+        assert isinstance(runtime.fleet_card_factory, DiscordFleetCardFactory)
+        thread = MagicMock(spec=discord.Thread)
+        thread.id, thread.parent_id = 70, 50
+        thread.guild.id = 60
+        accepted = MagicMock(spec=discord.Message)
+        accepted.id = 900
+        thread.send = AsyncMock(return_value=accepted)
+        recorder = TurnPostRecorder(runtime.sessionmaker, TENANT, prepared.admission.agent.id, 123)
+        card = runtime.fleet_card_factory(
+            thread,
+            123,
+            recorder.sender(thread, turn_card_intent_id=intent.id),
+            AsyncMock(),
+            turn_card_intent_id=intent.id,
+        )
+        assert card is not None and await card.refresh()
+        assert card.run_id == original.fleet.run_id
+        thread.send.assert_awaited_once()
+        async with runtime.sessionmaker() as db:
+            captured = await get_post(
+                db, tenant_id=TENANT, platform="discord", channel_id="70", message_id="900"
+            )
+        assert captured is not None
+        assert captured.agent_id == original.agent_id
+        assert (
+            captured.turn_card_intent_id == intent.id
+            and captured.requester_platform_user_id == "123"
+        )
+        preserved, _ = await read_frozen_root(
+            runtime.turn_deps, scope, intent_id=intent.id, now=datetime.now(UTC)
+        )
+        assert preserved.fleet.scope == original.fleet.scope
+
+        # Restart recovery uses the actual bot + stored post. Current admin
+        # identity differs from the original requester and never replaces its scope.
+        from .harness import make_bot
+
+        bot = make_bot(runtime)
+        click = interaction(456)
+        click.client, click.channel, click.message = bot, thread, accepted
+        accepted.webhook_id = None
+        accepted.author = MagicMock(spec=discord.User)
+        accepted.author.name = "root"
+        click.user = MagicMock(spec=discord.Member)
+        click.user.id = 456
+        click.user.roles = []
+        click.user.guild.owner_id = 999
+        click.user.guild_permissions.administrator = True
+        click.user.guild_permissions.manage_guild = False
+        recovered = await bot.recover_fleet_card(click, run_id=original.fleet.run_id)
+        assert recovered is not None
+        control = AsyncMock(wraps=shared.control)
+        monkeypatch.setattr(shared, "control", control)
+        assert not await recovered.control(click, worker_id=None, action="kill", expected_version=0)
+        current = control.await_args.args[0]
+        assert current.subject.platform_user_id == "456" and current.subject.is_admin
+        assert current.fleet.scope == original.fleet.scope
+        assert current.fleet.account_id == original.fleet.account_id
+        click.response.send_message.assert_awaited_once()
+
+
+@pytest.mark.parametrize("fault", ["intent", "run", "requester", "origin", "thread", "guild"])
+async def test_real_runtime_root_refuses_retargeting_before_a_card_post(discord_frozen_root, fault):
+    from uuid import uuid4
+
+    from daimon.core.fleet_orchestration import FleetRefused, HostFleetPorts
+    from daimon.core.stores.turn_origins import delete_origin
+
+    deps, _, _, intent, origin, _, _, _ = discord_frozen_root
+    if fault == "origin":
+        async with deps.sessionmaker.begin() as db:
+            await delete_origin(db, origin_id=origin.id)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = (71 if fault == "thread" else 70), 50
+    thread.guild.id = 61 if fault == "guild" else 60
+    send = AsyncMock()
+    shared = FleetOrchestrator(HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal("1")))
+    card = DiscordFleetCardFactory.from_runtime(shared, deps)(
+        thread,
+        456 if fault == "requester" else 123,
+        send,
+        AsyncMock(),
+        turn_card_intent_id=uuid4() if fault == "intent" else intent.id,
+        run_id=uuid4() if fault == "run" else None,
+    )
+    assert card is not None
+    with pytest.raises(FleetRefused):
+        await card.refresh()
+    send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_real_runtime_refreshes_click_subject_without_replacing_root_scope(
+    discord_frozen_root, admin
+):
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.turn.runtime_manifest import read_frozen_root
+
+    deps, _, _, intent, _, scope, _, _ = discord_frozen_root
+    original, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    shared = FleetOrchestrator(HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal("1")))
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = 70, 50
+    thread.guild.id = 60
+    factory = DiscordFleetCardFactory.from_runtime(shared, deps)
+    click = interaction(456)
+    click.user = MagicMock(spec=discord.Member)
+    click.user.id = 456
+    click.user.roles = []
+    click.user.guild.owner_id = 999
+    click.user.guild_permissions.administrator = admin
+    click.user.guild_permissions.manage_guild = False
+    current, _ = await factory._resolve(thread, 123, intent.id, original.fleet.run_id, click)
+    assert current.subject.platform_user_id == "456" and current.subject.is_admin is admin
+    assert current.fleet.scope == original.fleet.scope
+    assert current.fleet.account_id == original.fleet.account_id
+    assert current.fleet.scope.principal_id == "daimon"
+    assert (
+        current.limits == original.limits and current.source_revisions == original.source_revisions
+    )

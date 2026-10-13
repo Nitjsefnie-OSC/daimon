@@ -455,6 +455,7 @@ class TestNewThreadCreation:
         mock_find_env: AsyncMock,
         mock_find_agent: AsyncMock,
         completion_enabled: bool,
+        monkeypatch,
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -469,6 +470,10 @@ class TestNewThreadCreation:
         runtime = _make_runtime(tenant.id, db_session_factory)
         runtime.settings.completion_pings = {tenant.id: True} if completion_enabled else {}
         bot = make_bot(runtime)
+        from daimon.adapters.discord import bot as bot_module
+
+        prepared_entry = AsyncMock(wraps=bot_module.run_prepared_turn)
+        monkeypatch.setattr(bot_module, "run_prepared_turn", prepared_entry)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
@@ -493,6 +498,19 @@ class TestNewThreadCreation:
 
         mock_run_turn.side_effect = finish_turn
         await bot.on_message(message)
+        from daimon.core.stores.turn_card_intents import get_turn_card_intent
+
+        prepared_entry.assert_awaited_once()
+        async with db_session_factory() as session:
+            intent = await get_turn_card_intent(
+                session, id=prepared_entry.await_args.kwargs["turn_card_intent_id"]
+            )
+        assert intent is not None
+        assert (intent.tenant_id, intent.platform, intent.thread_id) == (
+            tenant.id,
+            "discord",
+            str(mock_thread.id),
+        )
         assert mock_thread.send.await_count == (2 if completion_enabled else 1)
         assert [call.args[0] for call in message.add_reaction.await_args_list] == (
             ["👀", "✅"] if completion_enabled else ["👀"]
