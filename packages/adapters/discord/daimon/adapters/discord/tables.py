@@ -17,7 +17,6 @@ from PIL import Image, ImageDraw, ImageFont
 import discord
 
 _FONTS = Path(__file__).with_name("fonts")
-_DESCRIPTION_LIMIT = 1024  # Discord's attachment description (alt text) limit
 
 
 def tables_enabled(table_rendering: Mapping[uuid.UUID, bool], tenant_id: uuid.UUID) -> bool:
@@ -111,10 +110,8 @@ async def render_discord_tables(
         if isinstance(part, str):
             rendered.append(part)
         else:
-            png, raw = part
+            png, raw = part  # Discord caps attachment descriptions (alt text) at 1024 chars
             name = f"table-{len(files) + 1}.png"
-            files.append(
-                discord.File(io.BytesIO(png), filename=name, description=raw[:_DESCRIPTION_LIMIT])
-            )
+            files.append(discord.File(io.BytesIO(png), filename=name, description=raw[:1024]))
             rendered.append(f"[Table attached: {name}]\n")
     return "".join(rendered), files

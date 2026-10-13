@@ -1054,9 +1054,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts is retried when the lease expires. One that dies after the turn
   starts is settled `interrupted` and never re-run. Migration
   `0028_feat003_wake_queue` adds the lease columns to `task_continuations`.
-- Tenants can opt in to final replies rendering Markdown tables as readable PNG attachments on Discord
-  and native wrapped table blocks on Slack, with plain-text fallback for other adapters.
-  Discord wizard replies honor the same opt-in; unsupported font glyphs retain the original Markdown.
+- Discord final replies, including wizard replies, render Markdown tables as readable PNG attachments
+  by default, with the raw table kept as the image's alt text; a tenant set to `false` in
+  `DAIMON_TABLE_RENDERING` keeps plain text. Slack renders native wrapped table blocks only for
+  tenants that opt in. Other adapters keep plain text; unsupported font glyphs retain the original Markdown.
   Rejected PNG uploads and Slack table blocks retry as plain Markdown without dropping the answer.
 
 - One-shot timers: `create_timer`, `list_timers` and `cancel_timer` let an agent

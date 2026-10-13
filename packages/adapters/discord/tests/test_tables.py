@@ -60,9 +60,12 @@ def test_tables_render_by_default_and_explicit_false_opts_out():
     assert tables_enabled({tenant: False}, tenant) is False
 
 
-@pytest.mark.parametrize("cell", ["short", "x" * 2000])
-async def test_attachment_description_is_raw_table_truncated_to_discord_limit(cell):
-    table = f"| Value |\n| --- |\n| {cell} |\n"
+@pytest.mark.parametrize("char", ["x", "é", "\U0001f130"])
+@pytest.mark.parametrize("length", [30, 1023, 1024, 1025, 2000])
+async def test_attachment_description_is_raw_table_truncated_to_discord_limit(char, length):
+    frame = "| Value |\n| --- |\n|  |\n"
+    table = frame[:-3] + char * (length - len(frame)) + frame[-3:]
+    assert len(table) == length
     _, files = await render_discord_tables(table, enabled=True)
     assert files[0].description == table[:1024]
 
