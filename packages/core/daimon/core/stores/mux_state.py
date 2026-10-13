@@ -510,6 +510,11 @@ async def get_fleet_root_operation(
     slot: Slot | None = None,
 ) -> OperationRecord | None:
     """Read or durably reserve the exact root association before run creation."""
+    query = select(MuxOperation).where(
+        MuxOperation.tenant_id == _tenant(scope.tenant_id),
+        MuxOperation.key.startswith("fleet_root:"),
+        MuxOperation.record["result"]["intent_id"].astext == str(intent_id),
+    )
     if request_digest is not None:
         if intent_id is None or origin_id is None or slot is None:
             raise ValueError("complete root reservation required")
@@ -525,8 +530,8 @@ async def get_fleet_root_operation(
         if intent is None:
             raise ScopeViolation(str(intent_id), "root intent is unavailable")
         key = f"fleet_root:{origin_id}:root:0"
-        previous = await get_fleet_root_operation(session, scope, intent_id=intent_id)
-        if previous is not None and previous.operation.key != key:
+        previous = (await session.scalars(query)).one_or_none()
+        if previous is not None and (previous.account_id, previous.key) != (scope.account_id, key):
             raise OperationConflict(key)
         begun = await begin_operation(
             session,
@@ -548,16 +553,11 @@ async def get_fleet_root_operation(
         raise ValueError("exactly one root selector required")
     if origin_id is not None:
         return await get_operation(session, scope, f"fleet_root:{origin_id}:root:0")
-    query = select(MuxOperation.record).where(
-        MuxOperation.tenant_id == _tenant(scope.tenant_id),
-        MuxOperation.account_id == scope.account_id,
-        MuxOperation.key.startswith("fleet_root:"),
-        MuxOperation.record["result"]["intent_id"].astext == str(intent_id),
-    )
+    query = query.where(MuxOperation.account_id == scope.account_id)
     body = (await session.scalars(query)).one_or_none()
     if body is None:
         return None
-    record = OperationRecord.model_validate(body)
+    record = OperationRecord.model_validate(body.record)
     operations.check_owner(record, scope)
     return record
 

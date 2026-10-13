@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from daimon.core._models import FleetRun
+from daimon.core._models import FleetRun, MuxOperation
 from daimon.core.authz import Subject, Surface, build_agent_ref
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
@@ -21,6 +22,7 @@ from daimon.core.session_ports_compat import create_session_record
 from daimon.core.sessions import project_session_resources
 from daimon.core.stores import access_policy, fleet, mux_state, turn_card_intents, turn_origins
 from daimon.core.stores.domain import Role
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import PreparedTurn
@@ -642,3 +644,207 @@ async def test_interleaved_intents_reserve_one_origin_before_run_receipt(root_tu
     async with deps.sessionmaker() as db:
         assert await mux_state.get_fleet_root_operation(db, scope, intent_id=other.id) is None
     assert retained.fleet.origin_id == origin.id
+
+
+@asynccontextmanager
+async def another_account_root(value):
+    deps, prepared, grants, intent, _, _, binding, _ = value
+    tenant_id = intent.tenant_id
+    async with deps.sessionmaker.begin() as db:
+        tenant = await get_tenant(db, tenant_id)
+        assert tenant is not None
+        account = await make_account(db, tenant=tenant)
+        await make_platform_principal(
+            db,
+            tenant=tenant,
+            account=account,
+            platform="discord",
+            external_id="another-requester",
+        )
+    scope = resource_scope(
+        tenant_id=str(tenant_id), account_id=str(account.id), authorization_id="another-turn"
+    )
+    native = prepared.admission.agent
+    snapshot = ma_session(
+        id="another-root-" + str(uuid4()),
+        agent=native,
+        environment_id=prepared.admission.environment.id,
+    )
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents/root-source",
+        lambda request, match: httpx.Response(200, json=native.model_dump(mode="json")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda request, match: httpx.Response(200, json=snapshot.model_dump(mode="json")),
+    )
+    transport = ScriptedTransport(router=router)
+    async with transport.client() as client:
+        actual = await retrieve_agent(client, native.id, scope=scope)
+        source = await load_backend_agent(
+            client, deps.sessionmaker, tenant_id=tenant_id, agent_name="root", actual_agent=actual
+        )
+        source = await project_session_resources(
+            source,
+            agent=actual,
+            environment=prepared.admission.environment,
+            session_factory=deps.sessionmaker,
+            tenant_id=tenant_id,
+            agent_uuid=source.agent_id,
+            account_id=account.id,
+            resource_scope=scope,
+            memory_read_only=True,
+        )
+        acknowledged = await create_session_record(
+            client,
+            scope=scope,
+            agent=actual.id,
+            environment_id=prepared.admission.environment.id,
+            metadata=None,
+            resources=None,
+        )
+        grant = replace(
+            prepared.admission.grant, subject=Subject(platform_user_id="another-requester")
+        )
+        admission = replace(prepared.admission, account_id=account.id, agent=actual, grant=grant)
+        binding = binding.model_copy(
+            update={
+                "id": str(uuid4()),
+                "legacy_account_id": str(account.id),
+                "native_refs": {"session": acknowledged.id, "agent": actual.id},
+            }
+        )
+        await deps.state_store.put_binding(binding, expected_generation=0)
+        backend = managed_agents(
+            client, scope=scope, resources=frozenset({("session", acknowledged.id)})
+        )
+        prepared = replace(
+            prepared,
+            admission=admission,
+            ma_session_id=acknowledged.id,
+            session_account_id=account.id,
+            backend=backend,
+            session_ref=resource_ref(backend, "session", acknowledged.id, scope=scope),
+            _scope=scope,
+            _source=source,
+        )
+        async with turn_origin(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id=intent.channel_id,
+            thread_id=intent.thread_id,
+            responder_ma_agent_id=actual.id,
+            responder_name="root",
+            role=Role.USER,
+        ) as origin:
+            root = replace(
+                grants[0],
+                fleet=replace(
+                    grants[0].fleet, scope=scope, origin_id=origin.id, account_id=account.id
+                ),
+                subject=grant.subject,
+                source_agents=(source.source.ref,),
+                source_revisions=((source.source.ref, source.source.revision),),
+            )
+
+            async def load(_grant, _source):
+                return root
+
+            deps = replace(deps, anthropic=client, fleet_root_grants=load)
+            yield deps, prepared, [root], intent, origin, scope, binding, transport
+
+
+@pytest.mark.parametrize("status", ("pending", "sent", "outcome_unknown", "processed"))
+async def test_one_intent_cannot_be_reserved_by_another_account(root_turn, status):
+    deps, _, _, intent, origin, scope, binding, _ = root_turn
+    if status == "processed":
+        await freeze(root_turn)
+    else:
+        async with deps.sessionmaker.begin() as db:
+            reserved = await mux_state.get_fleet_root_operation(
+                db,
+                scope,
+                intent_id=intent.id,
+                origin_id=origin.id,
+                request_digest="original-account",
+                slot=binding_slot(binding),
+            )
+        if status != "pending":
+            lease = await deps.state_store.acquire_lease(
+                binding_slot(binding),
+                holder="original-account",
+                turn_id="original-turn",
+                now=datetime.now(UTC),
+                ttl=timedelta(seconds=30),
+            )
+            try:
+                await deps.state_store.claim_send(
+                    scope, reserved.operation.key, now=datetime.now(UTC), fence=lease
+                )
+                if status == "outcome_unknown":
+                    await deps.state_store.advance_operation(
+                        scope,
+                        reserved.operation.key,
+                        status,
+                        now=datetime.now(UTC),
+                        fence=lease,
+                    )
+            finally:
+                await deps.state_store.release_lease(lease)
+    async with deps.sessionmaker() as db:
+        original = await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id)
+    assert original.operation.status == status
+    async with another_account_root(root_turn) as other:
+        other_deps, _, _, _, other_origin, other_scope, _, other_transport = other
+        with pytest.raises(OperationConflict):
+            await freeze(other)
+        async with deps.sessionmaker() as db:
+            assert (
+                await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) == original
+            )
+            assert (
+                await mux_state.get_fleet_root_operation(db, other_scope, intent_id=intent.id)
+                is None
+            )
+            assert (
+                await db.scalar(
+                    select(func.count())
+                    .select_from(MuxOperation)
+                    .where(
+                        MuxOperation.tenant_id == intent.tenant_id,
+                        MuxOperation.key.startswith("fleet_root:"),
+                    )
+                )
+                == 1
+            )
+            assert await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == intent.tenant_id)
+            ) == int(status == "processed")
+        with pytest.raises(WorkerSpecRefused):
+            await read_frozen_root(
+                other_deps, other_scope, intent_id=intent.id, now=datetime.now(UTC)
+            )
+        assert len(other_transport.requests) == 2
+        distinct = await new_intent(other)
+        await freeze((*other[:3], distinct, *other[4:]))
+        retained, _ = await read_frozen_root(
+            other_deps, other_scope, intent_id=distinct.id, now=datetime.now(UTC)
+        )
+        assert retained.fleet.origin_id == other_origin.id
+        assert retained.fleet.scope == other_scope
+        async with deps.sessionmaker() as db:
+            assert (
+                await mux_state.get_fleet_root_operation(db, other_scope, intent_id=intent.id)
+                is None
+            )
+            assert (
+                await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) == original
+            )
+        assert len(other_transport.requests) == 2
