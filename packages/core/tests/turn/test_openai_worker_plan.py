@@ -482,8 +482,10 @@ async def test_materialization_capability_does_not_make_counterpart_read_mutate(
         assert owned.wire.requests and all(call.method == "GET" for call in owned.wire.requests)
 
 
-@pytest.fixture
-async def claimed_openai_worker(owned: Owned, monkeypatch: pytest.MonkeyPatch):
+@pytest.fixture(params=(False, True), ids=("fresh", "clone"))
+async def claimed_openai_worker(
+    owned: Owned, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+):
     from daimon.core.authz import Surface
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
     from daimon.core.ma_identity import derive_agent_uuid
@@ -594,9 +596,32 @@ async def claimed_openai_worker(owned: Owned, monkeypatch: pytest.MonkeyPatch):
         )
     root = replace(root, fleet=replace(root.fleet, run_id=run.id))
     source = await capture_preparation_source(selected)
+    assert source.source is not None
+    if request.param:
+        spec = spec.model_copy(update={"metadata": source.source.spec.metadata})
+        root = replace(
+            root,
+            spec=spec,
+            source_agents=(source.source.ref,),
+            source_revisions=((source.source.ref, source.source.revision),),
+        )
     resolved = resolve_worker_spec(
         root,
-        spec.model_copy(update={"name": "fresh-worker", "declared_drops": ("memory",)}),
+        source.source
+        if request.param
+        else spec.model_copy(update={"name": "fresh-worker", "declared_drops": ("memory",)}),
+        overrides=AgentPatch(
+            name="clone-worker",
+            model=spec.model,
+            system=spec.system,
+            tools=spec.tools,
+            skills=(),
+            mcp_servers=(),
+            extensions=None,
+            declared_drops=("memory",),
+        )
+        if request.param
+        else None,
         policy=POLICY,
         now=selected.now(),
         backend=BackendConfig.model_validate(
@@ -718,7 +743,7 @@ async def claimed_openai_worker(owned: Owned, monkeypatch: pytest.MonkeyPatch):
             pool.release()
 
 
-async def test_fresh_openai_worker_uses_actual_dispatch_allocation_binding_and_journal(
+async def test_openai_fresh_or_clone_worker_uses_actual_dispatch_allocation_binding_and_journal(
     claimed_openai_worker,
 ) -> None:
     from daimon.core.fleet import spawn_operation_key
