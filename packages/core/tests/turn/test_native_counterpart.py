@@ -406,6 +406,7 @@ async def test_owned_counterpart_reads_actual_native_resources_and_returns_retai
         "skill_id",
         "profile",
         "model",
+        "model_provider",
         "thread_mode",
         "requires",
         "exact_digest",
@@ -414,7 +415,7 @@ async def test_owned_counterpart_reads_actual_native_resources_and_returns_retai
     ],
 )
 async def test_source_bounds_and_catalog_mismatches_refuse_before_native_io(
-    owned: Owned, defect: str
+    owned: Owned, defect: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request, source, plan, resources, _, wire, manifest_path = owned
     values = owned.plan.model_dump(mode="json")
@@ -476,6 +477,26 @@ async def test_source_bounds_and_catalog_mismatches_refuse_before_native_io(
         request = replace(request, session_account_id=uuid.UUID(int=777))
     elif defect == "exact_digest":
         values.update(configuration_grant=None, config_digest="caller-supplied-digest")
+    elif defect == "model_provider":
+        original_entry = resources.entry
+
+        async def foreign_model(catalog_id: str) -> AgentRevision:
+            row = await original_entry(catalog_id)
+            # Isolate the manifest pin check from the resource host's own checks.
+            spec = row.agent.spec
+            model = spec.model.model_copy(update={"provider": "anthropic"})
+            return replace(
+                row,
+                agent=row.agent.model_copy(
+                    update={"spec": spec.model_copy(update={"model": model})}
+                ),
+            )
+
+        async def forbidden_read(catalog_id: str) -> AgentRevision:
+            pytest.fail("a foreign pinned model provider reached native readback")
+
+        monkeypatch.setattr(resources, "entry", foreign_model)
+        monkeypatch.setattr(resources, "read", forbidden_read)
     else:
         selection: dict[str, Any] = {
             "backend": wire.provider,
