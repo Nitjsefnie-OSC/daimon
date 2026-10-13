@@ -338,7 +338,7 @@ async def _explain_thread_open_failure(message: discord.Message) -> None:
 
 
 def _resolve_bot_display_name(settings: Settings) -> str:
-    """Read the operator-configured bot presented name (SPEC req 9).
+    """Read the operator-configured bot presented name.
 
     Defaults to "daimon" when Discord settings are unset — the same default
     ``DiscordSettings.bot_display_name`` carries, kept here too so callers
@@ -621,7 +621,7 @@ class DaimonBot(commands.Bot):
         self._pending: dict[int, list[discord.Message]] = {}
         self._queued_reactions: set[int] = set()
         # Threads whose running turn lost its thread (deleted) or its right to write
-        # to it (archived), so the card lifecycle and the bot agree on one answer (#809).
+        # to it (archived), so the card lifecycle and the bot agree on one answer.
         self._thread_stops = ThreadStops()
         # Continuation dispatches skipped because the thread was processing,
         # keyed by thread id: re-run when the thread is released (see
@@ -2687,10 +2687,7 @@ class DaimonBot(commands.Bot):
                 # registered in self._processing at creation time (inside
                 # _orchestrate, immediately after create_thread), so an in-thread
                 # follow-up mention that arrives during the *same* originating turn
-                # queues instead of racing a second turn onto that thread's session —
-                # this is the actual fix for the in-thread queue race. The earlier closure of
-                # #163 was documentation-only; its regression test covered parallel
-                # channel mentions, not the channel→in-thread sequence this closes.
+                # queues instead of racing a second turn onto that thread's session.
                 #
                 # Only follow-up mentions *within an existing thread* are queued and
                 # coalesced: a thread is one conversation on one MA session, and
@@ -2715,7 +2712,7 @@ class DaimonBot(commands.Bot):
                             except Exception:
                                 # Once the thread exists nothing for it is posted in the
                                 # parent channel, so a drain failing on a lost thread ends
-                                # here instead of reaching the prologue error post (#809).
+                                # here instead of reaching the prologue error post.
                                 if self._thread_stops.get(created_thread_ids[0]) is None:
                                     raise
                                 log.warning("thread_gone.drain_failed", exc_info=True)
@@ -2798,7 +2795,7 @@ class DaimonBot(commands.Bot):
                 await self._remove_mention_reaction(message, "⌛")
 
     def _thread_lost(self, message: discord.Message) -> bool:
-        """Whether `message` sits in a thread that is gone or closed (#809).
+        """Whether `message` sits in a thread that is gone or closed.
 
         A reaction there fails the same way every other write does, so none is
         issued. A message in the parent channel (the 👀 on a channel mention) is
@@ -2831,7 +2828,7 @@ class DaimonBot(commands.Bot):
             await self._remove_mention_reaction(message, "⌛")
 
     async def _drop_queued(self, messages: list[discord.Message], tenant_id: uuid.UUID) -> None:
-        """Give up on messages queued behind a turn whose thread is gone or closed (#809).
+        """Give up on messages queued behind a turn whose thread is gone or closed.
 
         No turn will run them, so their admission rows are finished (startup
         replay must not start them again). Their hourglass stays: it sits in the
@@ -2873,7 +2870,7 @@ class DaimonBot(commands.Bot):
         *,
         post_state: ProtectionState,
     ) -> None:
-        """Best-effort error render for on_message prologue failures (#170 backstop).
+        """Best-effort error render for on_message prologue failures (a backstop).
 
         Never raises — a failure here would defeat the whole point of the
         boundary it's called from. Mirrors _flip_failed_best_effort's
@@ -3060,7 +3057,7 @@ class DaimonBot(commands.Bot):
         still up, else into its thread, and into the mention's channel only when
         no thread was opened. Never raises: a failed error post is logged, so
         nothing escapes `_handle_mention` into the prologue handler, which would
-        post into the parent channel for a thread that no longer exists (#809).
+        post into the parent channel for a thread that no longer exists.
 
         A thread that is gone or closed gets no error anywhere: there is nobody
         to read it, and the parent channel must not be told about it.
@@ -4101,7 +4098,7 @@ class DaimonBot(commands.Bot):
                     "\n".join(strip_mentions(line) for line in message.content.splitlines()),
                     default=attachment_names[0][:THREAD_NAME_MAX_CHARS]
                     if attachment_names
-                    else _resolve_bot_display_name(self.runtime.settings),
+                    else f"Chat with {_resolve_bot_display_name(self.runtime.settings)}",
                 )
                 try:
                     if naming.enabled and opening_text:
@@ -4340,7 +4337,7 @@ class DaimonBot(commands.Bot):
             "_orchestrate called without discord settings — entrypoint must validate at boot"
         )
         # Each caller in a thread keys their own session on their own account,
-        # so nobody reuses another caller's session identity (#162).
+        # so nobody reuses another caller's session identity.
         session_account_id = admission.account_id
 
         # --- Stage two: bind_session (find-or-create, mapping write,
@@ -4873,7 +4870,7 @@ class DaimonBot(commands.Bot):
         )
         if self._thread_stops.get(thread.id) is not None:
             # The thread is gone or closed: the turn was interrupted and there is no
-            # answer, notice, reaction, file or archive left to deliver (#809).
+            # answer, notice, reaction, file or archive left to deliver.
             return
         state = outcome.state
         mapping_id = outcome.mapping_id

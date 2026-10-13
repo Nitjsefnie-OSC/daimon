@@ -109,7 +109,7 @@ def test_parse_thread_name_truncates_at_word_boundary_when_title_is_too_long() -
 
 
 def test_fallback_thread_name_quotes_the_opening_message_not_an_agent_name() -> None:
-    title = fallback_thread_name("hi! what can you do? I'm new here.", default="daimon")
+    title = fallback_thread_name("hi! what can you do? I'm new here.", default="Chat with daimon")
     assert title == "Hi! what can you do? I'm new here.", (
         "a greeting is titled from its own words, capitalised, never from the agent slug"
     )
@@ -119,7 +119,7 @@ def test_fallback_thread_name_quotes_the_opening_message_not_an_agent_name() -> 
 def test_fallback_thread_name_uses_first_line_and_fits_the_cap() -> None:
     title = fallback_thread_name(
         "\n  please   look at " + " ".join(["word"] * 30) + "\nsecond line",
-        default="daimon",
+        default="Chat with daimon",
     )
     assert title.startswith("Please look at word"), "first non-empty line, whitespace collapsed"
     assert len(title) <= THREAD_NAME_MAX_CHARS, "the fallback obeys the same cap"
@@ -128,10 +128,10 @@ def test_fallback_thread_name_uses_first_line_and_fits_the_cap() -> None:
 
 @pytest.mark.parametrize("text", ["", "   \n ", "hi", "Hello!"])
 def test_fallback_thread_name_uses_default_when_message_says_nothing(text: str) -> None:
-    assert fallback_thread_name(text, default="daimon") == "daimon", (
+    assert fallback_thread_name(text, default="Chat with daimon") == "Chat with daimon", (
         "nothing to quote, or only a bare greeting, falls back to the bot's presented name"
     )
-    assert not is_generic_thread_name("daimon"), "the default itself names the bot, not nothing"
+    assert is_generic_thread_name("Chat with daimon"), "the default is a generic placeholder"
 
 
 @pytest.mark.parametrize(

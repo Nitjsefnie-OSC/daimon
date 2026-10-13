@@ -336,7 +336,7 @@ def _channel_message(*, guild_id: int, content: str) -> Any:
             "My PyMC model diverges",
         ),
         (False, "<@999> my PyMC model diverges", [], None, "My PyMC model diverges"),
-        (True, "<@999>", [], None, "daimon"),
+        (True, "<@999>", [], None, "Chat with daimon"),
         (True, "<@999>", ["q3_sales.csv"], "Attached: q3_sales.csv", "q3_sales.csv"),
         (
             True,
