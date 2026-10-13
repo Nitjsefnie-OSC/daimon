@@ -8,7 +8,8 @@ what the refusal is checked against. A missing destination, a rule refusal or
 a bot that may not post pauses the mirror.
 
 In a channel, a session's first post opens a thread on a short header and
-later posts go into it; a deleted thread is replaced by a new one. Posts are
+later posts go into it; a thread deleted, locked or closed to the bot is
+replaced by a new one. Posts are
 the bot's own with mentions disabled, and they are not recorded as agent
 posts, so a reply to one starts no turn.
 """
@@ -47,16 +48,23 @@ def _unavailable() -> MirrorOutcome:
 async def _session_thread(
     thread_id: str | None, channel: discord.TextChannel, fetch_channel: ChannelFetcher
 ) -> discord.Thread | None:
-    """The session's earlier thread under `channel`, or None when it is gone."""
+    """The session's earlier thread under `channel`, or None when it is gone,
+    locked or closed to the bot: the session then opens a new one."""
     if thread_id is None:
         return None
     try:
         thread = await fetch_channel(int(thread_id))
-    except discord.NotFound:
+    except (discord.NotFound, discord.Forbidden):
         return None
-    if isinstance(thread, discord.Thread) and thread.parent_id == channel.id:
+    if isinstance(thread, discord.Thread) and thread.parent_id == channel.id and not thread.locked:
         return thread
     return None
+
+
+async def _send(target: discord.TextChannel | discord.Thread, texts: tuple[str, ...]) -> None:
+    for text in texts:
+        for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
+            await target.send(content=chunk, allowed_mentions=_NO_MENTIONS)
 
 
 def make_discord_mirror_poster(
@@ -75,8 +83,12 @@ def make_discord_mirror_poster(
             return MirrorOutcome(status="skipped", note="tenant_archived")
         try:
             channel = await fetch_channel(int(mirror.dest_id))
-        except discord.HTTPException:
+        except (discord.NotFound, discord.Forbidden):
             return _unavailable()
+        except discord.HTTPException as err:
+            # A 5xx or rate limit says nothing about the destination: skip, never pause.
+            log.warning("mirror.destination_fetch_failed", status=err.status)
+            return MirrorOutcome(status="skipped", note="destination_unreachable")
         placement = await channel_placement(channel, fetch_channel)
         kind = discord.Thread if mirror.dest_kind == "thread" else discord.TextChannel
         if (
@@ -106,17 +118,20 @@ def make_discord_mirror_poster(
             agent_name=mirror.source_agent_name,
             max_chars=answer_limit(mirror, max_answer_chars),
         )
+        texts = (post.question, post.answer)
         try:
             target: discord.TextChannel | discord.Thread = channel
             if isinstance(channel, discord.TextChannel):
                 thread = await _session_thread(job.thread_id, channel, fetch_channel)
-                if thread is None:
-                    header = await channel.send(content=post.header, allowed_mentions=_NO_MENTIONS)
-                    thread = await header.create_thread(name=post.thread_name)
-                target = thread
-            for text in (post.question, post.answer):
-                for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
-                    await target.send(content=chunk, allowed_mentions=_NO_MENTIONS)
+                if thread is not None:
+                    try:
+                        await _send(thread, texts)
+                        return MirrorOutcome(status="delivered", dest_thread_id=str(thread.id))
+                    except discord.Forbidden:
+                        log.info("mirror.session_thread_closed", mirror_id=str(mirror.id))
+                header = await channel.send(content=post.header, allowed_mentions=_NO_MENTIONS)
+                target = await header.create_thread(name=post.thread_name)
+            await _send(target, texts)
         except discord.Forbidden:
             return MirrorOutcome(status="skipped", note="forbidden", pause_reason="bot_cannot_post")
         thread_id = str(target.id) if mirror.dest_kind == "channel" else None

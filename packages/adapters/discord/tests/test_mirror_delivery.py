@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.mirror_delivery import make_discord_mirror_poster
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import MirrorsSettings
@@ -30,16 +33,37 @@ def _channel(*, guild_id: int = _GUILD) -> MagicMock:
     channel.id = _CHANNEL
     channel.guild = SimpleNamespace(id=guild_id)
     channel.category_id = None
-    thread = MagicMock(spec=discord.Thread)
-    thread.id, thread.parent_id, thread.send = 777, _CHANNEL, AsyncMock()
-    channel.thread = thread
+    channel.thread = _thread(777)
     header = MagicMock()
-    header.create_thread = AsyncMock(return_value=thread)
+    header.create_thread = AsyncMock(return_value=channel.thread)
     channel.send = AsyncMock(return_value=header)
     return channel
 
 
-async def _setup(db_session: AsyncSession, policy: TenantAccessPolicy | None = None) -> MirrorRow:
+def _thread(thread_id: int, *, parent_id: int = _CHANNEL, locked: bool = False) -> MagicMock:
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id, thread.locked, thread.send = (
+        thread_id,
+        parent_id,
+        locked,
+        AsyncMock(),
+    )
+    thread.guild = SimpleNamespace(id=_GUILD)
+    thread.parent = None
+    return thread
+
+
+def _http_error(kind: type[discord.HTTPException], status: int) -> discord.HTTPException:
+    return kind(MagicMock(status=status, reason="error"), "error")
+
+
+async def _setup(
+    db_session: AsyncSession,
+    policy: TenantAccessPolicy | None = None,
+    *,
+    dest_kind: Literal["channel", "thread"] = "channel",
+    dest_id: int = _CHANNEL,
+) -> MirrorRow:
     tenant = await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD))
     if policy is not None:
         await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
@@ -51,8 +75,8 @@ async def _setup(db_session: AsyncSession, policy: TenantAccessPolicy | None = N
         source_agent_name="helper",
         source_agent_names=("helper",),
         dest_platform="discord",
-        dest_kind="channel",
-        dest_id=str(_CHANNEL),
+        dest_kind=dest_kind,
+        dest_id=str(dest_id),
         consent_note=None,
         max_answer_chars=None,
         account_id=None,
@@ -68,6 +92,7 @@ async def _ask_and_poll(
     channel: MagicMock,
     *,
     seal_ids: tuple[str, ...] = (),
+    fetch: Callable[[int], Awaitable[object]] | None = None,
 ) -> None:
     event = ConversationEventV1(
         id=uuid.uuid4(),
@@ -82,10 +107,12 @@ async def _ask_and_poll(
     )
     await record_conversation_event(sm, event, now=_NOW)
 
-    async def fetch(channel_id: int) -> object:
+    async def fetch_default(channel_id: int) -> object:
         return channel if channel_id == _CHANNEL else channel.thread
 
-    poster = make_discord_mirror_poster(sm, fetch_channel=fetch, max_answer_chars=3000)
+    poster = make_discord_mirror_poster(
+        sm, fetch_channel=fetch or fetch_default, max_answer_chars=3000
+    )
     await poll_mirror_deliveries_once(
         sm, platform="discord", post=poster, settings=MirrorsSettings(), now=_NOW
     )
@@ -151,3 +178,78 @@ async def test_a_sealed_session_is_skipped_and_the_mirror_goes_on(
     channel.send.assert_not_awaited()
     after = await store.get_mirror(db_session, mirror.id)
     assert after is not None and after.status == "active", "one session's refusal pauses nothing"
+
+
+async def _status(db_session: AsyncSession, mirror: MirrorRow) -> tuple[str, str | None]:
+    after = await store.get_mirror(db_session, mirror.id)
+    assert after is not None, "the mirror exists"
+    return after.status, after.paused_reason
+
+
+async def test_a_passing_discord_error_skips_the_post_without_pausing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    mirror = await _setup(db_session)
+
+    async def fetch(_channel_id: int) -> object:
+        raise _http_error(discord.HTTPException, 503)
+
+    await _ask_and_poll(db_session_factory, mirror, _channel(), fetch=fetch)
+
+    assert await _status(db_session, mirror) == ("active", None), "a 5xx pauses nothing"
+
+
+async def test_a_bot_that_may_not_post_pauses_the_mirror(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    mirror = await _setup(db_session)
+    channel = _channel()
+    channel.send.side_effect = _http_error(discord.Forbidden, 403)
+
+    await _ask_and_poll(db_session_factory, mirror, channel)
+
+    assert await _status(db_session, mirror) == ("paused", "bot_cannot_post")
+
+
+@pytest.mark.parametrize(
+    "gone", ["deleted", "forbidden", "foreign_parent", "locked", "send_refused"]
+)
+async def test_a_session_thread_the_bot_cannot_use_is_replaced(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], gone: str
+) -> None:
+    mirror = await _setup(db_session)
+    channel = _channel()
+    await _ask_and_poll(db_session_factory, mirror, channel)
+    channel.thread = _thread(
+        888, parent_id=1 if gone == "foreign_parent" else _CHANNEL, locked=gone == "locked"
+    )
+    channel.send.return_value.create_thread.return_value = _thread(999)
+    if gone == "send_refused":
+        channel.thread.send.side_effect = _http_error(discord.Forbidden, 403)
+
+    async def fetch(channel_id: int) -> object:
+        if channel_id == _CHANNEL:
+            return channel
+        if gone in ("deleted", "forbidden"):
+            kind = discord.NotFound if gone == "deleted" else discord.Forbidden
+            raise _http_error(kind, 404 if gone == "deleted" else 403)
+        return channel.thread
+
+    await _ask_and_poll(db_session_factory, mirror, channel, fetch=fetch)
+
+    replacement = channel.send.return_value.create_thread.return_value
+    assert channel.send.await_count == 2, "a new thread is opened for the session"
+    assert replacement.send.await_count == 2, "the question and answer go to the new thread"
+    assert await _status(db_session, mirror) == ("active", None), "the mirror goes on"
+
+
+async def test_a_thread_destination_takes_posts_straight_in(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    mirror = await _setup(db_session, dest_kind="thread", dest_id=777)
+    channel = _channel()
+
+    await _ask_and_poll(db_session_factory, mirror, channel)
+
+    channel.send.assert_not_awaited()
+    assert channel.thread.send.await_count == 2, "the question and answer, no header"

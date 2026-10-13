@@ -17,7 +17,8 @@ another organisation. Posts carry no mentions, and a reply to one starts no
 turn.
 
 In a channel, each conversation gets one thread, opened on a short header and
-reused for its later questions; a deleted thread is replaced. In a thread,
+reused for its later questions; a thread deleted, locked or closed to the
+bot is replaced. In a thread,
 posts go straight in. The `ask` result's `shared_to` lists where the answer
 will be posted, so the asker sees it.
 
@@ -62,8 +63,9 @@ it never fails because of a mirror. The Discord bot drains the queue every
 `poll_interval_s`, one post per conversation at a time so threads keep their
 order. Delivery is at most once: a post whose lease ran out, or one older than
 `max_pending_age_s`, is skipped rather than retried, since it may already have
-landed. A missing destination, a refusal or a bot that may not post pauses the
-mirror; `list_mirrors` shows why, and calling `create_mirror` again with the
+landed. A missing destination, a refusal of the destination or a bot that may
+not post pauses the mirror; a refusal of one conversation alone, or a passing
+Discord error, skips that post only; `list_mirrors` shows why, and calling `create_mirror` again with the
 same name resumes it. A settled row keeps no question or answer. The
 scheduler settles stale, interrupted and paused rows on every tick, whether
 or not mirrors or the bot's poller are on, archived workspaces included.
