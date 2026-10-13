@@ -677,7 +677,8 @@ async def resolve_turn_backend(
             or worker.permissions.models != (worker.spec.model,)
             or (worker.backend.model is not None and worker.spec.model.id != worker.backend.model)
             or (
-                worker.permissions.agent_id is not None
+                worker.source_agent is None
+                and worker.permissions.agent_id is not None
                 and worker.permissions.agent_id != agent.agent_id
             )
         ):

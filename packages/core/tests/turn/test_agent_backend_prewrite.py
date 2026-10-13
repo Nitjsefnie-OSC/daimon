@@ -87,7 +87,7 @@ async def test_exact_candidate_is_verified_before_write_and_existing_revision_re
     assert len(checks) == 2
 
 
-def canonical_worker(agent, provider):
+def canonical_worker(agent, provider, source=None):
     from dataclasses import replace
 
     from mux.contracts.ids import ThreadRef
@@ -106,7 +106,20 @@ def canonical_worker(agent, provider):
             place=replace(root.fleet.place, parent_channel_id=channel.channel_id),
         ),
     )
-    return resolve(root), channel
+    if source is not None:
+        from uuid import UUID
+
+        root = replace(
+            root,
+            fleet=replace(
+                root.fleet,
+                account_id=UUID(source.ref.account_id),
+                scope=root.fleet.scope.model_copy(update={"account_id": source.ref.account_id}),
+            ),
+            source_agents=(source.ref,),
+            source_revisions=((source.ref, source.revision),),
+        )
+    return resolve(root, source), channel
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
@@ -238,3 +251,42 @@ async def test_worker_source_refusal_and_cancel_precede_allocation_revision(owne
                 session, channel, agent, enabled=True, worker=worker, validate_origin=refuse
             )
         assert await mux_state.latest_config_revision(session, channel) is None
+
+
+async def test_clone_uses_actual_source_identity_and_keeps_distinct_root_authority(owned):
+    from dataclasses import replace
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from mux.contracts.ids import ResourceRef, Revision
+    from mux.contracts.resources import Agent
+
+    service, root_agent, actor, sessions = owned
+    await enable(service, root_agent, actor)
+    fresh, channel = canonical_worker(root_agent, "openai")
+    source = Agent(
+        ref=ResourceRef(
+            id="actual-clone-source",
+            kind="agent",
+            provider="openai",
+            account_scope_id="project",
+            tenant_id=channel.tenant_id,
+            account_id=fresh.permissions.fleet.scope.account_id,
+        ),
+        revision=Revision(local=3),
+        created_at=datetime.now(UTC),
+        spec=fresh.spec,
+    )
+    worker, channel = canonical_worker(root_agent, "openai", source)
+    actual_source = replace(root_agent, agent_id=uuid4(), source=source)
+    assert worker.permissions.agent_id != actual_source.agent_id
+
+    async def verify(selection, origin, candidate):
+        assert selection == worker.backend and origin == "agent"
+
+    async with sessions.begin() as session:
+        revision, _, origin = await resolve_turn_backend(
+            session, channel, actual_source, enabled=True, worker=worker, validate_origin=verify
+        )
+        assert revision is not None and origin == "agent"
+        assert worker.source_agent == (source.ref, source.revision)
