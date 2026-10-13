@@ -39,6 +39,7 @@ from mux.drivers.anthropic.resources._authorization import (
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.schemas import AgentTool, NativeConfig
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import MigrationUnsupported, ProviderError, ScopeViolation, UnsupportedCapability
 
 
@@ -349,14 +350,18 @@ class AnthropicSessions:
             )
 
             async def send(kwargs: dict[str, object]) -> BetaManagedAgentsSession:
-                return await self._client.beta.sessions.create(**cast(SessionCreateParams, kwargs))
+                return await mutation_client(self._client).beta.sessions.create(
+                    **cast(SessionCreateParams, kwargs)
+                )
 
             native = await credential_request(
                 scope, request, self._secrets or unavailable_secret, send
             )
         else:
             native = await provider_call(
-                self._client.beta.sessions.create(**cast(SessionCreateParams, payload))
+                mutation_client(self._client).beta.sessions.create(
+                    **cast(SessionCreateParams, payload)
+                )
             )
         return self._session(scope, native)
 
