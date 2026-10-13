@@ -694,3 +694,76 @@ async def test_default_factory_does_not_import_or_discover_a_fleet_service(
         anthropic=build_stub_anthropic(),
     )
     assert not NAMES & {tool.name for tool in await app.state.mcp.local_provider.list_tools()}
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "foreign", "expired", "wrong_responder", "wrong_thread", "valid"]
+)
+async def test_installed_bridge_requires_the_exact_active_origin(
+    db_session_factory, db_clean, fault
+):
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.turn_origins import create_origin
+
+    root = host_parent()
+    source_id = "native-root"
+    caller = replace(
+        AUTH, chat_agent_id=derive_agent_uuid(tenant_id=AUTH.tenant_id, ma_agent_id=source_id)
+    )
+    root = replace(root, agent_id=caller.chat_agent_id)
+    now = datetime.now(UTC)
+    async with db_session_factory() as db, db.begin():
+        tenant = await make_tenant(db, id=AUTH.tenant_id)
+        await make_account(db, id=AUTH.account_id, tenant=tenant)
+        origin = await create_origin(
+            db,
+            tenant_id=AUTH.tenant_id,
+            account_id=AUTH.account_id,
+            platform="discord",
+            parent_channel_id="channel",
+            thread_id="thread",
+            responder_ma_agent_id="other" if fault == "wrong_responder" else source_id,
+            responder_name="root",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=now + timedelta(minutes=-1 if fault == "expired" else 10),
+            now=now,
+        )
+    root = replace(
+        root,
+        fleet=replace(
+            root.fleet,
+            origin_id=origin.id,
+            root=root.fleet.root.model_copy(update={"thread_id": "other"})
+            if fault == "wrong_thread"
+            else root.fleet.root,
+        ),
+    )
+    loads = []
+
+    async def load(caller_, *, origin_context_id, run_id):
+        assert caller_ is caller
+        loads.append((origin_context_id, run_id))
+        return root, TenantAccessPolicy(enabled_backends=("anthropic",))
+
+    owner = host_owner()
+    bridge = HostFleetToolService(
+        FleetOrchestrator(owner),
+        load,
+        runtime=replace(runtime(), session_factory=db_session_factory),
+    )
+    handle = None if fault == "missing" else uuid.uuid4() if fault == "foreign" else origin.id
+    if fault == "valid":
+        reply = await bridge.status(caller, run_id=RUN, origin_context_id=handle)
+        assert reply["status"] == "running"
+        assert loads == [(origin.id, RUN)]
+        owner.read_run.assert_awaited_once()
+    else:
+        with pytest.raises(
+            ToolError,
+            match="caller_root_mismatch" if fault == "wrong_thread" else "active_origin_required",
+        ):
+            await bridge.status(caller, run_id=RUN, origin_context_id=handle)
+        assert owner.mock_calls == []
+        assert loads == ([(origin.id, RUN)] if fault == "wrong_thread" else [])
