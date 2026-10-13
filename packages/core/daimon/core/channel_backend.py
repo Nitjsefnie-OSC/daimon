@@ -56,7 +56,7 @@ from mux.contracts.config import (
     resolve_default,
 )
 from mux.contracts.ids import ChannelRef, Provider
-from mux.contracts.profile import SUPPORTED, Capability
+from mux.contracts.profile import SUPPORTED, Capability, Profile
 from mux.contracts.resources import AgentSpec
 from mux.errors import InvalidConfig, UnsupportedCapability
 from mux.profiles import (
@@ -200,6 +200,15 @@ def _digest(facts: object) -> str:
     ).hexdigest()
 
 
+def compatibility_missing(
+    item: CompatibilityItem, target_backend: Provider, profile: Profile
+) -> bool:
+    """One provider/capability predicate for preview and worker derivation."""
+    return target_backend not in item.providers or any(
+        profile.support_for(cap) not in SUPPORTED for cap in item.requires
+    )
+
+
 def compatibility_preview(
     agent: BackendAgent,
     target_backend: Provider,
@@ -214,11 +223,6 @@ def compatibility_preview(
     selection = backend_selection(target_backend)
     profile = get_profile(selection.profile)
 
-    def missing(item: CompatibilityItem) -> bool:
-        return target_backend not in item.providers or any(
-            profile.support_for(cap) not in SUPPORTED for cap in item.requires
-        )
-
     preview = CompatibilityPreview(
         digest="",
         tenant_id=agent.tenant_id,
@@ -226,11 +230,21 @@ def compatibility_preview(
         target_backend=target_backend,
         setting_revision=setting_revision,
         policy_revision=tenant.revision,
-        unsupported_skills=tuple(sorted(i.name for i in agent.skills if missing(i))),
-        unsupported_mcps=tuple(sorted(i.name for i in agent.mcps if missing(i))),
+        unsupported_skills=tuple(
+            sorted(
+                i.name for i in agent.skills if compatibility_missing(i, target_backend, profile)
+            )
+        ),
+        unsupported_mcps=tuple(
+            sorted(i.name for i in agent.mcps if compatibility_missing(i, target_backend, profile))
+        ),
         unsupported_capabilities=tuple(
             sorted(
-                c for c in agent.required_capabilities if profile.support_for(c) not in SUPPORTED
+                c
+                for c in agent.required_capabilities
+                if compatibility_missing(
+                    CompatibilityItem(name=c, requires=(c,)), target_backend, profile
+                )
             )
         ),
         shared_thread_limits=("Shared threads are unavailable on this selection.",)

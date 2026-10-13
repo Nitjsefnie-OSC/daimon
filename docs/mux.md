@@ -2286,3 +2286,49 @@ journal and usage are the store's existing ones. The worker's result is one
 journal entry of its own, with an id and source key derived from the worker
 (`fleet:<worker>:result`), so it never repeats an event the turn already
 journaled and a lease successor appending it again is a duplicate.
+### Worker permission derivation
+
+The core resource owner exposes one worker spec resolver over existing
+`AgentSpec` and sparse `AgentPatch` shapes. Host-supplied current root facts bind
+the real tenant, account, channel, thread and origin, and retain the existing
+host-loaded `Place`, including category and unresolved-category facts; the same
+facts are retained in the derived grant and reused by every agent decision.
+The place must match the root thread and channel. Hosted network omission is
+an unknown provider default and refuses until the driver supplies a proved,
+normalized network ceiling. Spawning uses the existing
+writer, invoker and agent policy on the fleet surface, with no private-admin
+exemption. Worker depth is one; workers cannot spawn more workers.
+
+The resolver preserves the protected root prompt and derives finite model,
+backend, exact skill version, tool schema, MCP endpoint and credential, resource,
+network, budget, deadline and turn-count subsets. A clone requires an authorized
+source reference and independently loaded current revision. Opaque native
+extensions, effort options and environment knobs refuse when their effect has
+no proven attenuation mapping. Neutral per-tool confirmation also refuses until
+its compiler maps that control. MCP attenuation requires one resolver-bound
+server and the profile-declared finite tool policy keys; a native compiler that
+drops those keys cannot admit the connection. An implicit execution tool still counts toward
+authority when omitted from the requested tool list.
+
+Worker skills and MCP use the same provider and capability predicate as the
+backend compatibility preview. Native skill pins stay on their proved source
+provider; equal names or IDs do not prove cross-provider portability. Unknown
+or unsupported selected-profile capabilities refuse before derivation returns.
+Credential-backed MCP also requires the preview's declared vault capability;
+a native compiler alone does not establish that profile contract.
+
+Clone metadata uses patch semantics: omitted keys stay, an empty patch changes
+nothing, and null values remove individual source-only keys. An explicit null
+map clears metadata only when the root has no stamps. All root metadata is an
+immutable ceiling for fresh specs and clones: removing or changing a root stamp,
+or adding an ungranted stamp, refuses. The clone source is never mutated.
+
+This is an admission primitive, not a launch operation. The host must
+preflight the resolved configuration through the existing native compiler
+before allocation; known generic controls can still be unsupported natively.
+It must reload current authority at preparation and resume, retain the original ceiling, apply
+the derived grants at every resource/tool edge, and reserve funds with the worker
+transition in one transaction. Audit uses the existing scoped append-only store
+and contains identities and typed outcomes rather than prompts or credentials.
+A missing or erased actor cannot authorize launch. Existing turn paths do not
+call the resolver and remain unchanged.

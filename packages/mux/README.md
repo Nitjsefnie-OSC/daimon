@@ -919,3 +919,18 @@ Conformance and manual live-probe helpers now live in `daimon.testing.conformanc
 The legacy mux conformance package is removed; its tests, saved receipts and
 reference docs are under `packages/testing` outside the wheel package. CI also
 checks built workspace wheels for test modules, QA helpers and receipt files.
+
+### Implicit execution authority
+
+Profiles declare whether execution is intrinsic to their host harness. The
+persistent OpenAI workspace declares implicit Bash; an empty agent tool list
+does not remove it. New profiles default to no implicit execution. Host worker
+attenuation checks this declaration against the root's actual execution and
+environment grants before returning a derived spec.
+
+Profiles also declare the MCP tool policy keys their native compiler preserves.
+An empty declaration refuses worker MCP delegation. OpenAI preserves finite
+`allowed_tools` and the exact `required` flag; Gemini preserves the bound finite
+allowlist. Anthropic's neutral MCP compiler does not preserve policy controls,
+so its declaration stays empty. Native confirmation support does not by itself
+prove that the neutral per-tool permission field is compiled.

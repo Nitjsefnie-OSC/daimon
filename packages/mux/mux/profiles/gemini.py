@@ -19,6 +19,7 @@ INLINE_REUSE = Profile(
     core=False,
     extensions=(ExtensionRef(namespace="gemini.session", version=1),),
     execution_tool="code_execution",
+    mcp_policy_keys=("allowed_tools",),
     skill_digest="version",
     catalog_readback="verify",
     support={
