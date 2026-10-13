@@ -10,6 +10,7 @@ from daimon.core.config import MirrorsSettings
 from daimon.core.mirror_delivery import (
     MirrorJob,
     MirrorOutcome,
+    MirrorPoster,
     poll_mirror_deliveries_once,
     record_conversation_event,
     sweep_mirror_deliveries,
@@ -275,6 +276,54 @@ async def test_the_sweep_drops_stale_posts_of_archived_tenants_without_a_poller(
         ("skipped", "stale", True),
         ("pending", None, False),
     ], rows
+
+
+async def test_a_poller_whose_lease_ran_out_never_posts_what_another_took_over(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Two pollers overlap: the second interrupts the first's expired claim and
+    posts the session's next question; the first must not post the old one late."""
+    agent = uuid.uuid4()
+    tenant = await make_tenant(db_session)
+    mirror = await _mirror(db_session, tenant.id, agent)
+    events = {name: _event(tenant.id, agent, session_key=name[0]) for name in ("a1", "b1", "b2")}
+    for offset, event in enumerate(events.values()):
+        await store.insert_deliveries(
+            db_session, event=event, mirror_ids=[mirror.id], now=_NOW + timedelta(seconds=offset)
+        )
+    await db_session.commit()
+    names = {event.id: name for name, event in events.items()}
+    posted: list[tuple[str, str]] = []
+    settings = MirrorsSettings(lease_s=int(_LEASE.total_seconds()))
+
+    def poster(owner: str) -> MirrorPoster:
+        async def post(job: MirrorJob) -> MirrorOutcome:
+            posted.append((owner, names[job.event.id]))
+            if owner == "w1":
+                await poll_mirror_deliveries_once(
+                    db_session_factory,
+                    platform="discord",
+                    post=poster("w2"),
+                    settings=settings,
+                    now=_NOW + _LEASE + timedelta(minutes=1),
+                    owner="w2",
+                )
+            return MirrorOutcome(status="delivered")
+
+        return post
+
+    await poll_mirror_deliveries_once(
+        db_session_factory,
+        platform="discord",
+        post=poster("w1"),
+        settings=settings,
+        now=_NOW + timedelta(seconds=5),
+        owner="w1",
+    )
+
+    assert posted == [("w1", "a1"), ("w2", "b2")], (
+        "the first poller's interrupted claim is never posted after the second took over"
+    )
 
 
 async def test_purge_deletes_the_persons_queued_questions(

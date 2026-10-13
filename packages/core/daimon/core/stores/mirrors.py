@@ -253,6 +253,24 @@ async def claim_mirror_deliveries(
     return sorted(rows, key=lambda row: row.created_at)
 
 
+async def extend_mirror_claim(
+    session: AsyncSession, delivery_id: uuid.UUID, *, owner: str, now: datetime, lease: timedelta
+) -> bool:
+    """Renew a claim `owner` still holds unexpired. False: it was lost, do not post."""
+    renewed = await session.scalar(
+        update(MirrorDelivery)
+        .where(
+            MirrorDelivery.id == delivery_id,
+            MirrorDelivery.status == "claimed",
+            MirrorDelivery.lease_owner == owner,
+            MirrorDelivery.lease_expires_at >= now,
+        )
+        .values(lease_expires_at=now + lease)
+        .returning(MirrorDelivery.id)
+    )
+    return renewed is not None
+
+
 async def settle_mirror_delivery(
     session: AsyncSession,
     delivery_id: uuid.UUID,

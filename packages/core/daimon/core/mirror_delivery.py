@@ -115,13 +115,16 @@ async def poll_mirror_deliveries_once(
 ) -> int:
     """Claim due posts for `platform`, post each, settle. Returns how many."""
     lease_owner = owner or f"{platform}:{uuid.uuid4()}"
+    lease = timedelta(seconds=settings.lease_s)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     async with sessionmaker() as session, session.begin():
         claimed = await mirrors_store.claim_mirror_deliveries(
             session,
             platform=platform,
             owner=lease_owner,
             now=now,
-            lease=timedelta(seconds=settings.lease_s),
+            lease=lease,
             max_pending_age=timedelta(seconds=settings.max_pending_age_s),
         )
     for delivery in claimed:
@@ -129,6 +132,19 @@ async def poll_mirror_deliveries_once(
         if isinstance(prepared, MirrorOutcome):
             outcome = prepared
         else:
+            # Posts before this one may have outlived the lease, and another
+            # poller may have taken the session's next post: never post late.
+            async with sessionmaker() as session, session.begin():
+                held = await mirrors_store.extend_mirror_claim(
+                    session,
+                    delivery.id,
+                    owner=lease_owner,
+                    now=now + timedelta(seconds=loop.time() - started),
+                    lease=lease,
+                )
+            if not held:
+                log.warning("mirror.claim_lost", delivery_id=str(delivery.id))
+                continue
             try:
                 outcome = await post(prepared)
             except Exception as err:
