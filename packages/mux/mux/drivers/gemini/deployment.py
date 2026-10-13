@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 import httpx
 from pydantic import JsonValue
 
+from mux.drivers import isolated_ssl_context
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.transport import Object, SDKTransport, Transport
 
@@ -82,7 +83,7 @@ class _ConfiguredTransport:
         from google import genai
         from google.genai.types import HttpOptions, HttpRetryOptions
 
-        context = httpx.create_ssl_context(trust_env=False)
+        context = isolated_ssl_context()
         with httpx.Client(trust_env=False, timeout=60, verify=context, proxy=None) as synchronous:
             async with httpx.AsyncClient(
                 trust_env=False, timeout=60, verify=context, proxy=None

@@ -1,5 +1,6 @@
 """Fresh Discord authority, bound to an existing tenant and account."""
 
+import ssl
 import uuid
 from unittest.mock import patch
 
@@ -88,7 +89,8 @@ async def test_default_producer_is_bounded_and_does_not_inherit_environment(acto
     calls, real_client = [], httpx.AsyncClient
 
     def build(**kwargs):
-        assert kwargs == {"trust_env": False}
+        assert kwargs["trust_env"] is False and isinstance(kwargs["verify"], ssl.SSLContext)
+        assert kwargs["verify"].keylog_filename is None
         return real_client(transport=transport(payloads(), calls), **kwargs)
 
     with patch("daimon.core.channel_admins.httpx.AsyncClient", side_effect=build):
@@ -96,6 +98,38 @@ async def test_default_producer_is_bounded_and_does_not_inherit_environment(acto
             sm, tenant_id=tenant.id, platform_user_id=USER, settings=SETTINGS
         )
     assert result.subject.is_admin and len(calls) == 3
+
+
+@pytest.mark.parametrize("keylog", ["SSLKEYLOGFILE", "empty", "sSlKeYlOgFiLe"])
+async def test_default_client_refuses_keylogging_before_ssl_or_file_creation(
+    actor, monkeypatch, tmp_path, keylog
+):
+    sm, tenant, _ = actor
+    invented = tmp_path / "tls-secrets-never-written.log"
+    monkeypatch.setenv(
+        "SSLKEYLOGFILE" if keylog == "empty" else keylog, "" if keylog == "empty" else str(invented)
+    )
+    real_client, contexts = httpx.AsyncClient, []
+
+    def build(**kwargs):
+        client = real_client(**kwargs)
+        contexts.append(client._transport._pool._ssl_context.keylog_filename)
+
+        async def offline_get(url, **request_kwargs):
+            path = httpx.URL(url).path.removeprefix(f"/api/v10/guilds/{GUILD}")
+            return httpx.Response(200, json=payloads()[path], request=httpx.Request("GET", url))
+
+        client.get = offline_get
+        return client
+
+    with (
+        patch("daimon.core.channel_admins.httpx.AsyncClient", side_effect=build),
+        pytest.raises(AgentBackendRefused, match="admin attestation unavailable"),
+    ):
+        await verify_backend_actor(
+            sm, tenant_id=tenant.id, platform_user_id=USER, settings=SETTINGS
+        )
+    assert contexts == [] and not invented.exists()
 
 
 @pytest.mark.parametrize(

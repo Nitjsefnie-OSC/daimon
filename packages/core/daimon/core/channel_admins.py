@@ -116,6 +116,7 @@ async def verify_backend_actor(
     from daimon.core.channel_backend import AgentBackendRefused, BackendActor
     from daimon.core.stores.identity import find_platform_principal
     from daimon.core.stores.tenants import get_tenant
+    from mux.drivers import isolated_ssl_context
 
     if settings.discord is None or not re.fullmatch(_USER_ID["discord"], platform_user_id):
         raise AgentBackendRefused("admin_attestation_unavailable")
@@ -183,7 +184,9 @@ async def verify_backend_actor(
     try:
         async with asyncio.timeout(10):
             if http_client is None:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient(
+                    trust_env=False, verify=isolated_ssl_context()
+                ) as client:
                     admin = await attest(client)
             else:
                 admin = await attest(http_client)
