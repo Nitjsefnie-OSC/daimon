@@ -1081,9 +1081,12 @@ fresh financial admission uses the tenant FOR UPDATE fence and authorizes
 native allocation.
 
 Hosts start one `watch_fleet_budget` loop per run, passing the run's mapping
-of worker IDs to cancellation events and a run-finished event. It fans out
+of worker IDs to cancellation events and a run-finished event. Register each
+worker event after its admission transaction commits. It fans out
 these decisions at four Hz by default, including producer time in the interval,
-and fails closed on unavailable usage. The watcher has no separate worker
+and remains active across completed or cancelled cohorts until the run owner
+sets the run-finished event. Unavailable usage fails closed and cancels all
+registered workers. The watcher has no separate worker
 deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
 admission, replacement inventory and exact final settlement remain unavailable
 here. These interfaces create no ledger charge or provider-native hard cap;

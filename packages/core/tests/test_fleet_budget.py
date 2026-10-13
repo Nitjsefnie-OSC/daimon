@@ -384,8 +384,14 @@ async def test_watchdog_uses_product_usage_and_retains_hold_on_cancel(sm):
         )
     )
     await usage(sm, parent, run, worker, inputs=10_000, outputs=None)
-    reason = await asyncio.wait_for(task, 5)
-    assert reason == "budget_exceeded" and cancelled.is_set()
+    try:
+        await asyncio.wait_for(cancelled.wait(), 5)
+        assert not task.done()
+        finished.set()
+        assert await asyncio.wait_for(task, 3) == "finished"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     current = await read(sm, parent, worker)
     assert current.worker_exposure_usd == Decimal(".02")
 
@@ -788,20 +794,26 @@ async def test_never_claimed_cancel_releases_zero_spend_and_next_run_can_use_fun
         assert worker.id not in stamps
         ledger = await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)
     assert len(ledger) == 1 and ledger[0].delta_usd == 3
-    cancelled = asyncio.Event()
-    assert (
-        await watch_fleet_budget(
+    cancelled, finished = asyncio.Event(), asyncio.Event()
+    task = asyncio.create_task(
+        watch_fleet_budget(
             sessionmaker=sm,
             parent=parent,
             prices=tariffs(parent),
             markup=Decimal(1),
             cancelled={worker.id: cancelled},
-            finished=asyncio.Event(),
+            finished=finished,
             read_timeout=3,
         )
-        == "terminal"
     )
-    assert cancelled.is_set()
+    try:
+        await asyncio.wait_for(cancelled.wait(), 3)
+        assert not task.done()
+        finished.set()
+        assert await asyncio.wait_for(task, 3) == "finished"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize("evidence", ["claim", "requeue", "zero_revision"])
@@ -1126,3 +1138,119 @@ async def test_passive_refresh_allows_same_tenant_writes_but_financial_admission
         release.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("cohort_end", ["cancelled", "failed", "event_already_set"])
+async def test_run_watch_survives_ended_cohort_and_cancels_a_later_workers_usage(
+    sm, monkeypatch, cohort_end
+):
+    from daimon.core import channel_budget
+
+    parent, run = await setup(sm, cap="3")
+    first = await add(sm, parent)
+    assert (await reserve(sm, parent, first)).admitted
+    async with sm.begin() as db:
+        claimed = await fleet.claim_worker(db, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+        assert claimed is not None and claimed.id == first.id
+        if cohort_end != "event_already_set":
+            await fleet.finish(
+                db,
+                tenant_id=run.tenant_id,
+                worker_id=first.id,
+                expected_version=claimed.version,
+                status=cohort_end,
+                error_code="cohort_ended",
+            )
+    cancelled = {first.id: asyncio.Event()}
+    if cohort_end == "event_already_set":
+        cancelled[first.id].set()
+    finished, refreshed_ended_cohort = asyncio.Event(), asyncio.Event()
+    original = channel_budget.produce_fleet_budget
+    passes = 0
+
+    async def observed(*args, **kwargs):
+        nonlocal passes
+        result = await original(*args, **kwargs)
+        passes += 1
+        if passes >= 2 and cancelled[first.id].is_set():
+            refreshed_ended_cohort.set()
+        return result
+
+    monkeypatch.setattr(channel_budget, "produce_fleet_budget", observed)
+    task = asyncio.create_task(
+        watch_fleet_budget(
+            sessionmaker=sm,
+            parent=parent,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            cancelled=cancelled,
+            finished=finished,
+            poll_interval=0.01,
+            read_timeout=3,
+        )
+    )
+    try:
+        await asyncio.wait_for(cancelled[first.id].wait(), 3)
+        assert not task.done()
+        await asyncio.wait_for(refreshed_ended_cohort.wait(), 3)
+        assert not task.done()
+        async with sm.begin() as db:
+            current_run, _ = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+        assert current_run.status == "running"
+
+        later = await add(sm, parent, ordinal=1)
+        assert (await reserve(sm, parent, later)).admitted
+        cancelled[later.id] = asyncio.Event()
+        await usage(sm, parent, run, later, inputs=600_000, outputs=None)
+        await asyncio.wait_for(cancelled[later.id].wait(), 3)
+        assert not task.done()
+        current = await read(sm, parent, later)
+        assert current.worker_floor_usd == current.worker_exposure_usd == Decimal("1.2")
+        assert current.reason == "worker_budget_exceeded"
+        assert current.run.status == "running"
+        finished.set()
+        assert await asyncio.wait_for(task, 0.5) == "finished"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_run_watch_timeout_still_cancels_every_registered_worker_and_retains_holds(
+    sm, monkeypatch
+):
+    from daimon.core import channel_budget
+
+    parent, _ = await setup(sm)
+    a = await add(sm, parent)
+    b = await add(sm, parent, ordinal=1)
+    assert (await reserve(sm, parent, a)).admitted
+    assert (await reserve(sm, parent, b)).admitted
+    cancelled = {a.id: asyncio.Event(), b.id: asyncio.Event()}
+    cancelled[a.id].set()
+    original = channel_budget.produce_fleet_budget
+    blocked = asyncio.Event()
+
+    async def delayed(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        await blocked.wait()
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(channel_budget, "produce_fleet_budget", delayed)
+        result = await asyncio.wait_for(
+            watch_fleet_budget(
+                sessionmaker=sm,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=asyncio.Event(),
+                poll_interval=0.01,
+                read_timeout=0.1,
+            ),
+            3,
+        )
+    assert result == "usage_unavailable"
+    assert all(event.is_set() for event in cancelled.values())
+    assert (await read(sm, parent, a)).worker_exposure_usd == 1
+    assert (await read(sm, parent, b)).worker_exposure_usd == 1

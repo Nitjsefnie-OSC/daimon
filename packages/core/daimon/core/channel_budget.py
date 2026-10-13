@@ -511,6 +511,8 @@ async def _produce_fleet_budget(
         )
         run, workers = next(pair for pair in graph if pair[0].id == run.id)
         residual = sum((r.reserved_usd - r.observed_usd for r, _ in graph), Decimal(0))
+        # Read original debits before balance: concurrent new debits can only
+        # conservatively reduce passive room. Financial admission fences writers.
         balance = await tenant_ledger.get_prepaid_balance(session, tenant_id=tenant_id)
         available = None if balance is None else balance - residual
         channel = await get_channel_budget_status(
@@ -702,15 +704,16 @@ async def watch_fleet_budget(
     Poll at four Hz by default, counting producer time inside each interval.
     run_prepared_turn owns the only worker deadline. Unknown reservations at
     the run bound remain held; verified worker floors at their bound cancel.
-    Caller supplies this run's cancellation events, including new workers in
-    the same mapping, and sets finished when the run has ended.
+    Caller registers each worker's cancellation event in the same mapping only
+    after its admission commits, and sets finished when the run ends. A cancelled or
+    completed cohort never ends the active run watch; unavailable usage still
+    fails closed and requests cancellation of all registered workers.
     """
     if parent.fleet.enabled is not True or parent.fleet.depth != 0:
         raise FleetConflict("fleet watch requires explicit root opt-in")
     timeout = read_timeout if read_timeout is not None else poll_interval * 8
     if not all(math.isfinite(v) and v > 0 for v in (poll_interval, timeout)):
         raise ValueError("budget poll and read timeout must be positive finite durations")
-    budget_exceeded = False
     try:
         while not finished.is_set():
             started = asyncio.get_running_loop().time()
@@ -744,9 +747,6 @@ async def watch_fleet_budget(
                 elif not usage.admitted:
                     log.warning("fleet.budget_cancel", reason=usage.reason or "not_admitted")
                     event.set()
-                    budget_exceeded = True
-            if cancelled and all(event.is_set() for event in cancelled.values()):
-                return "budget_exceeded" if budget_exceeded else "terminal"
             delay = max(0, poll_interval - (asyncio.get_running_loop().time() - started))
             with suppress(TimeoutError):
                 await asyncio.wait_for(finished.wait(), timeout=delay)
