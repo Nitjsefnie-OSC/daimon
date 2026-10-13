@@ -424,13 +424,14 @@ def test_percent_encoded_capability_urls_in_headers_and_spans_are_scrubbed() -> 
 
 
 def _best_of_three(fn: Callable[[], object]) -> float:
+    """Measure capturing-thread work, excluding other lanes' scheduling delays."""
     import time
 
     best = float("inf")
     for _ in range(3):
-        started = time.perf_counter()
+        started = time.thread_time()
         fn()
-        best = min(best, time.perf_counter() - started)
+        best = min(best, time.thread_time() - started)
     return best
 
 
