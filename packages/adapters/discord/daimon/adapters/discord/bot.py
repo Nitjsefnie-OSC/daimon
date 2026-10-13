@@ -881,10 +881,6 @@ class DaimonBot(commands.Bot):
             tasks.discard(current)
         return tasks
 
-    def _keeps_turn_for_recovery(self) -> bool:
-        """Whether the current task is unwinding from the shutdown drain's cancel."""
-        return self.runtime.turn_deps.running_turns.is_drain_cancel()
-
     async def _drain_and_close(self) -> None:
         """Graceful shutdown drain.
 

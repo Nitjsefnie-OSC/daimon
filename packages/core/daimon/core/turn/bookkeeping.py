@@ -1,8 +1,8 @@
 """Durable turn cleanup shared by adapters.
 
-The callers retain their admission gates, snapshots, transaction boundaries
-and transport error handling. Store and provider calls are injected so each
-adapter keeps its existing failure policy.
+The callers retain their admission gates, snapshots and transport error
+handling. Most store and provider calls are injected so each adapter keeps its
+existing failure policy; `release_turn_markers` calls the marker stores itself.
 """
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping
