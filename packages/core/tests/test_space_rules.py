@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
-from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, SpaceRule, TenantAccessPolicy
 from daimon.core.authz import Subject
 from daimon.core.permissions import agent_permissions, channel_rule, with_channel_rule
 from daimon.core.space_rules import (
@@ -11,6 +13,7 @@ from daimon.core.space_rules import (
     add_space_channel,
     create_space,
     delete_space,
+    join_refusal,
     remove_space_channel,
 )
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
@@ -21,6 +24,30 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ADMIN = Subject(is_admin=True)
 OWN = ChannelRule(readers="own", writers="own")
+INSIDE = ChannelRule(readers="inside")
+
+
+def _space(rule: ChannelRule) -> SpaceRule:
+    return SpaceRule(key=space_key(uuid.uuid4()), name="s", rule=rule, channel_ids=frozenset())
+
+
+@pytest.mark.parametrize(
+    ("member", "space", "lost"),
+    [
+        (OWN, INSIDE, "readers own to inside"),
+        (ChannelRule(readers="inside", writers="none"), INSIDE, "writers none to any"),
+        (ChannelRule(writers="none"), OWN, "writers none to own"),
+    ],
+)
+def test_join_refuses_to_loosen_a_members_rule_unless_asked(
+    member: ChannelRule, space: ChannelRule, lost: str
+) -> None:
+    """Joining replaces a channel's rule, so a stricter one is never loosened silently."""
+    policy = TenantAccessPolicy(channel_rules={"a": member})
+    refusal = join_refusal(policy, _space(space), "a")
+    assert refusal is not None and lost in refusal, f"refused, naming {lost}: {refusal}"
+    assert join_refusal(policy, _space(space), "a", loosen_rules=True) is None, "unless asked"
+    assert join_refusal(TenantAccessPolicy(), _space(space), "a") is None, "an open channel joins"
 
 
 async def test_create_writes_the_space_rule_onto_each_member_and_not_the_space(

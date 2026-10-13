@@ -50,6 +50,8 @@ class SpaceChange:
     """Its channels afterwards."""
     agents: tuple[str, ...] = ()
     """Agents whose rule the change extended to, or dropped, the channel."""
+    rules_before: tuple[tuple[str, ChannelRule], ...] = ()
+    """Each channel that joined, with its rule before it took the Space's."""
 
 
 def _space_rule(space: SpaceRow, channel_ids: Sequence[str]) -> SpaceRule:
@@ -68,13 +70,33 @@ def _own_agents(policy: TenantAccessPolicy, space: SpaceRule) -> tuple[str, ...]
     return runs_only_in(policy, min(space.channel_ids))
 
 
-def join_refusal(policy: TenantAccessPolicy, space: SpaceRule, channel_id: str) -> str | None:
+def loosened(before: ChannelRule, after: ChannelRule) -> tuple[str, ...]:
+    """What `after` gives up of `before`: readers own, or writers none. Pure."""
+    lost: list[str] = []
+    if before.readers == "own" and after.readers != "own":
+        lost.append(f"readers own to {after.readers}")
+    if before.writers == "none" and after.writers != "none":
+        lost.append(f"writers none to {after.writers}")
+    return tuple(lost)
+
+
+def join_refusal(
+    policy: TenantAccessPolicy, space: SpaceRule, channel_id: str, *, loosen_rules: bool = False
+) -> str | None:
     """Why `channel_id` may not join `space`; None when it may. Pure.
 
-    Two own channels each keeping their own agents would merge two agents'
-    memory into one audience, which must be asked for, not implied.
+    Joining replaces the channel's rule with the Space's, so loosening it must
+    be asked for (`loosen_rules`). Two own channels each keeping their own
+    agents would merge two agents' memory into one audience, which must be
+    asked for, not implied.
     """
-    if space.rule.readers != "own" or channel_rule(policy, channel_id).readers != "own":
+    before = channel_rule(policy, channel_id)
+    if not loosen_rules and (lost := loosened(before, space.rule)):
+        return (
+            f"joining Space {space.name} would change {channel_id} from {'; '.join(lost)}; "
+            "ask to loosen its rule (--loosen-rules)"
+        )
+    if space.rule.readers != "own" or before.readers != "own":
         return None
     joining, staying = runs_only_in(policy, channel_id), _own_agents(policy, space)
     if joining and staying and set(joining) != set(staying):
@@ -115,9 +137,10 @@ async def _join(
     members: list[str],
     channel_id: str,
     extend_agents: bool,
+    loosen_rules: bool,
 ) -> tuple[TenantAccessPolicy, tuple[str, ...]]:
     before = _space_rule(space, members)
-    if refusal := join_refusal(policy, before, channel_id):
+    if refusal := join_refusal(policy, before, channel_id, loosen_rules=loosen_rules):
         raise SpaceRefused(refusal)
     extended = _own_agents(policy, before) if extend_agents else ()
     await store.add_space_channel(
@@ -142,8 +165,12 @@ async def create_space(
     rule: ChannelRule,
     channel_ids: Sequence[str],
     subject: Subject,
+    loosen_rules: bool = False,
 ) -> SpaceChange:
-    """Create Space `name` of `channel_ids`; raise `SpaceRefused` if refused."""
+    """Create Space `name` of `channel_ids`; raise `SpaceRefused` if refused.
+
+    `loosen_rules` lets a channel whose rule is stricter than the Space's join.
+    """
     if rule.readers not in ("inside", "own"):
         raise SpaceRefused("a Space's readers are inside or own")
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
@@ -159,10 +186,12 @@ async def create_space(
                 members=members,
                 channel_id=channel_id,
                 extend_agents=False,
+                loosen_rules=loosen_rules,
             )
         await set_access_policy(session, tenant_id=tenant_id, policy=updated)
     _log.info("space.created", tenant_id=str(tenant_id), space_id=str(space.id))
-    return SpaceChange(space, tuple(members))
+    before = tuple((c, channel_rule(policy, c)) for c in members)
+    return SpaceChange(space, tuple(members), rules_before=before)
 
 
 async def add_space_channel(
@@ -173,11 +202,13 @@ async def add_space_channel(
     channel_id: str,
     subject: Subject,
     extend_agents: bool = False,
+    loosen_rules: bool = False,
 ) -> SpaceChange:
     """Add `channel_id` to Space `name`, its rule becoming the Space's.
 
     `extend_agents` adds the channel to the rule of each of the Space's own
-    agents, so they answer there too.
+    agents, so they answer there too; `loosen_rules` lets a channel whose rule
+    is stricter than the Space's join.
     """
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         policy = await _locked(session, tenant_id=tenant_id, subject=subject)
@@ -190,10 +221,12 @@ async def add_space_channel(
             members=members,
             channel_id=channel_id,
             extend_agents=extend_agents,
+            loosen_rules=loosen_rules,
         )
         await set_access_policy(session, tenant_id=tenant_id, policy=updated)
     _log.info("space.channel_added", tenant_id=str(tenant_id), space_id=str(space.id))
-    return SpaceChange(space, tuple(members), extended)
+    before = ((channel_id, channel_rule(policy, channel_id)),)
+    return SpaceChange(space, tuple(members), extended, before)
 
 
 async def remove_space_channel(
@@ -262,5 +295,6 @@ __all__ = [
     "create_space",
     "delete_space",
     "join_refusal",
+    "loosened",
     "remove_space_channel",
 ]
