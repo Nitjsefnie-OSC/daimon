@@ -2,12 +2,16 @@
 
 import asyncio
 from dataclasses import replace
+from datetime import timedelta
+from decimal import Decimal
 
 import pytest
+from daimon.core.fleet import FleetConflict
 from daimon.core.headless_runner import run_worker
 from daimon.core.neutral_resources import WorkerLimits, WorkerSpecRefused
 from daimon.core.stores import fleet
 
+from . import test_agent_native_runtime as native_fixtures
 from .test_agent_native_runtime import (
     application as application,
 )
@@ -27,9 +31,6 @@ from .test_agent_native_runtime import (
     db_session_factory as db_session_factory,
 )
 from .test_agent_native_runtime import (
-    explicit_worker_request as explicit_worker_request,
-)
-from .test_agent_native_runtime import (
     owned as owned,
 )
 from .test_agent_native_runtime import (
@@ -38,6 +39,32 @@ from .test_agent_native_runtime import (
 from .test_agent_native_runtime import (
     provider as provider,
 )
+
+original_worker_request = native_fixtures.explicit_worker_request
+
+
+@pytest.fixture(params=[False])
+def single_input(request):
+    return request.param
+
+
+@pytest.fixture
+def explicit_worker_request(original_worker_request, single_input):
+    if not single_input:
+        return original_worker_request
+    request, *rest = original_worker_request
+    limits = WorkerLimits.model_validate(request.worker.limits.model_dump() | {"max_turns": 1})
+    return (
+        replace(
+            request,
+            worker=replace(
+                request.worker,
+                limits=limits,
+                permissions=replace(request.worker.permissions, limits=limits),
+            ),
+        ),
+        *rest,
+    )
 
 
 @pytest.mark.parametrize("provider", ["gemini"], indirect=True)
@@ -77,3 +104,57 @@ async def test_requested_unsupported_ceiling_cannot_allocate_or_consume_a_worker
     assert persisted.status == "starting"
     assert persisted.binding_id is None and persisted.turns_used == 0
     assert persisted.reserved_usd == 0 and persisted.result is None
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("single_input", [True], indirect=True)
+async def test_single_input_is_persisted_once_and_cannot_be_dispatched_again(
+    claimed_worker_request,
+):
+    request, root, worker, prices, owned, native_requests = claimed_worker_request
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the assigned task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded" and result.turns_used == result.max_turns == 1
+    assert sum(call.method == "POST" for call in native_requests) == 1
+    with pytest.raises(FleetConflict):
+        await run_worker(
+            request,
+            parent=root,
+            worker=result,
+            trigger_message="Do not send another request",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert sum(call.method == "POST" for call in native_requests) == 1
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("bad_limit", ["max_turns", "deadline"])
+async def test_soft_budget_malformed_host_bounds_refuse_before_any_native_work(
+    claimed_worker_request, bad_limit
+):
+    request, root, worker, prices, owned, native_requests = claimed_worker_request
+    values = request.worker.limits.model_dump() | {
+        "native_budget_usd": Decimal("0.02"),
+        "max_turns": 1,
+        "deadline": request.now() + timedelta(seconds=120),
+    }
+    values[bad_limit] = 2 if bad_limit == "max_turns" else request.now() + timedelta(seconds=121)
+    limits = WorkerLimits.model_validate(values)
+    candidate = replace(request, worker=replace(request.worker, limits=limits))
+    with pytest.raises(WorkerSpecRefused, match=bad_limit):
+        await run_worker(
+            candidate,
+            parent=root,
+            worker=worker,
+            trigger_message="Complete the assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert native_requests == [] and owned.wire.requests == []

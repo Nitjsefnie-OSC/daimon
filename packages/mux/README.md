@@ -997,3 +997,8 @@ refuses a requested worker ceiling. Output ceilings require native enforcement;
 host request admission can be emulated only where the host controls each actual
 model request. Observing a managed agent's inference events does not establish
 that admission control. Unrequested limits preserve existing serialized intent.
+
+`session_spend_control` declares support for compiling an explicitly requested
+native spend control. It does not promise a hard final bill or imply support
+for model-request or token ceilings. Hosts retain their original input claims,
+deadlines, cancellation and unknown-usage holds around that control.

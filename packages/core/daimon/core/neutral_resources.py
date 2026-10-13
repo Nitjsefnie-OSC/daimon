@@ -841,6 +841,7 @@ WorkerField = Literal[
     "max_input_tokens",
     "max_output_tokens",
     "provider_limits_usd",
+    "native_budget_usd",
     "declared_drops",
 ]
 WorkerReason = DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale"]
@@ -868,6 +869,15 @@ class WorkerLimits(Contract):
     max_output_tokens: int | None = Field(
         default=None, gt=0, strict=True, exclude_if=lambda value: value is None
     )
+    native_budget_usd: Decimal | None = Field(
+        default=None,
+        gt=0,
+        strict=True,
+        allow_inf_nan=False,
+        max_digits=12,
+        decimal_places=2,
+        exclude_if=lambda value: value is None,
+    )
     provider_limits_usd: (
         FrozenMap[
             Provider,
@@ -887,6 +897,11 @@ class WorkerLimits(Contract):
 
     def require_profile(self, profile: Profile) -> None:
         """Refuse requested ceilings before a driver can allocate native work."""
+        if (
+            self.native_budget_usd is not None
+            and profile.support_for("session_spend_control") != "native"
+        ):
+            raise WorkerSpecRefused("native_budget_usd", "unsupported")
         if self.provider_limits_usd is not None and (
             self.provider_limits_usd.get(profile.provider, Decimal(0)) <= 0
         ):
@@ -900,6 +915,17 @@ class WorkerLimits(Contract):
             allowed = ("native",) if capability == "output_token_limit" else SUPPORTED
             if value is not None and profile.support_for(capability) not in allowed:
                 raise WorkerSpecRefused("budget", "unsupported")
+
+    def require_native_dispatch(self, now: datetime) -> None:
+        """Soft native budgets still require a bounded, single-input host attempt."""
+        if self.native_budget_usd is None:
+            return
+        if self.native_budget_usd > self.budget_usd:
+            raise WorkerSpecRefused("native_budget_usd", "not_subset")
+        if self.max_turns != 1:
+            raise WorkerSpecRefused("max_turns", "not_subset")
+        if not 0 < (self.deadline - now).total_seconds() <= 120:
+            raise WorkerSpecRefused("deadline", "not_subset")
 
 
 @dataclass(frozen=True)
@@ -1457,6 +1483,7 @@ def resolve_worker_spec(
     ):
         raise WorkerSpecRefused("sandbox", "unbound")
     cap = limits or parent.limits
+    cap.require_native_dispatch(now)
     if cap.budget_usd <= 0 or cap.budget_usd > parent.limits.budget_usd:
         raise WorkerSpecRefused("budget", "not_subset")
     if (
@@ -1467,6 +1494,10 @@ def resolve_worker_spec(
         raise WorkerSpecRefused("deadline", "not_subset")
     if cap.max_turns > parent.limits.max_turns:
         raise WorkerSpecRefused("max_turns", "not_subset")
+    if parent.limits.native_budget_usd is not None and (
+        cap.native_budget_usd is None or cap.native_budget_usd > parent.limits.native_budget_usd
+    ):
+        raise WorkerSpecRefused("native_budget_usd", "not_subset")
     request_fields: tuple[WorkerField, ...] = (
         "max_model_requests",
         "max_input_tokens",

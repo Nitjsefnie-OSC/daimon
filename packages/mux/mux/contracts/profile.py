@@ -49,6 +49,7 @@ Capability = Literal[
     "model_request_limit",
     "input_token_limit",
     "output_token_limit",
+    "session_spend_control",
     "workspace_export_import",
     "neutral_catalog",
     "agent_delete",

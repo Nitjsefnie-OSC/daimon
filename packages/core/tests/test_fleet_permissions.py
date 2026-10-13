@@ -272,6 +272,62 @@ def test_an_emulated_output_ceiling_cannot_claim_native_enforcement():
         limits.require_profile(profile)
 
 
+@pytest.mark.parametrize("value", (True, 0, -1, 0.02, "0.02", Decimal("NaN"), Decimal("0.001")))
+def test_native_budget_requires_positive_exact_cents(value):
+    with pytest.raises(ValidationError):
+        WorkerLimits.model_validate(parent().limits.model_dump() | {"native_budget_usd": value})
+
+
+def test_native_budget_requires_single_input_and_short_deadline():
+    root = parent()
+    values = root.limits.model_dump() | {
+        "native_budget_usd": Decimal("0.02"),
+        "deadline": NOW + timedelta(seconds=120),
+        "max_turns": 1,
+    }
+    WorkerLimits.model_validate(values).require_native_dispatch(NOW)
+    for changes, field in (
+        ({"deadline": NOW + timedelta(seconds=121)}, "deadline"),
+        ({"deadline": NOW}, "deadline"),
+        ({"max_turns": 2}, "max_turns"),
+        ({"budget_usd": Decimal("0.01")}, "native_budget_usd"),
+    ):
+        with pytest.raises(WorkerSpecRefused, match=field):
+            WorkerLimits.model_validate(values | changes).require_native_dispatch(NOW)
+
+
+def test_soft_native_budget_does_not_waive_unsupported_hard_limits():
+    root = parent()
+    values = root.limits.model_dump() | {"native_budget_usd": Decimal("0.02")}
+    profile = get_profile(root.backend_grants[0].profile)
+    with pytest.raises(WorkerSpecRefused, match="native_budget_usd: unsupported"):
+        WorkerLimits.model_validate(values).require_profile(profile)
+    supported = profile.model_copy(
+        update={"support": dict(profile.support) | {"session_spend_control": "native"}}
+    )
+    WorkerLimits.model_validate(values).require_profile(supported)
+    for field in ("max_model_requests", "max_input_tokens", "max_output_tokens"):
+        with pytest.raises(WorkerSpecRefused, match="budget: unsupported"):
+            WorkerLimits.model_validate(values | {field: 1}).require_profile(supported)
+
+
+def test_native_budget_cannot_be_dropped_or_increased_by_a_child():
+    root = parent()
+    limits = WorkerLimits.model_validate(
+        root.limits.model_dump()
+        | {
+            "native_budget_usd": Decimal("0.02"),
+            "max_turns": 1,
+            "deadline": NOW + timedelta(seconds=120),
+        }
+    )
+    root = replace(root, limits=limits)
+    for value in (None, Decimal("0.03")):
+        candidate = WorkerLimits.model_validate(limits.model_dump() | {"native_budget_usd": value})
+        with pytest.raises(WorkerSpecRefused, match="native_budget_usd: not_subset"):
+            resolve(root, limits=candidate)
+
+
 @pytest.mark.parametrize("value", (Decimal("NaN"), Decimal("Infinity"), Decimal("-1"), True, 0.1))
 def test_provider_sublimits_require_exact_finite_money(value):
     with pytest.raises(ValidationError):

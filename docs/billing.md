@@ -1126,3 +1126,15 @@ overruns before admission, under its existing lock and exact decimal context.
 These worker sublimits do not reserve root inference or install credential-line
 guards. The caller must separately bind root admission and native request
 controls; a financial snapshot alone never certifies a provider spending cap.
+
+An optional `native_budget_usd` requests a native session spend control, in
+positive exact cents. It is a soft control, separate from the held worker
+budget. Its worker must have one host input and a deadline within 120 seconds;
+the existing input claim counts that input before dispatch and retains the
+count after an uncertain acknowledgement. Additional turn-input mutations are
+refused, while cancellation and archive remain available. A child cannot drop
+or increase a configured native budget. The driver must compile the control;
+missing profile support refuses it. Omission preserves ordinary execution.
+Native internal inference, token overshoot and remote cancellation delay are
+not bounded by that host input count. Requested hard token or model-request
+limits retain their separate unsupported-capability refusal.

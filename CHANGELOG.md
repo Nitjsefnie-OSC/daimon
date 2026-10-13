@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Freeze explicit finite fleet root grants against their original admission and scoped source capture through the existing worker attenuation owner.
 - Revalidate frozen worker wakes against their durable original root before normal admission; hosts without a completion decision leave those rows unclaimed.
 - Revalidate frozen worker wakes against their durable original root before normal admission; hosts without a completion decision defer those rows with the existing unavailable backoff.
+- Attenuate optional native worker session budgets with a one-input host claim and a short deadline, preserving separate refusal of unsupported hard limits.
 
 - Reuse verified Gemini worker readback and share native worker publication authority checks.
 - Freeze independent worker batches in the existing wake queue and publish readiness atomically with terminal writes, without reopening legacy unarmed completion writes.
