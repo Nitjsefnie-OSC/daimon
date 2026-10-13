@@ -32,6 +32,7 @@ class AuthorizedRepo(BaseModel):
     max_access: Literal["read", "write"]
     authorized_by_github_user_id: int
     authorized_by_account_id: uuid.UUID | None
+    authorized_permission: str | None = None
     authorized_at: datetime
     status: Literal["active", "suspended", "revoked"]
     status_reason: str | None

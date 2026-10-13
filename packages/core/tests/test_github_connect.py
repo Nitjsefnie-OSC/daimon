@@ -1349,6 +1349,109 @@ async def test_reconfirmation_respects_inactive_repo_choice(
     assert repo.version == 2
 
 
+async def _confirm_repo(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    admin_id: uuid.UUID,
+    *,
+    github_user_id: int,
+    state: str,
+    max_access: str,
+    permission: str | None,
+) -> bool:
+    token = await github_connect.mint_invitation(
+        session, tenant_id=tenant_id, requester_account_id=admin_id
+    )
+    await github_connect.create_flow(
+        session,
+        invitation_hash=github_connect.digest(token),
+        state=state,
+        cookie="cookie",
+        encrypted_verifier=b"encrypted",
+    )
+    return await github_connect.confirm(
+        session,
+        state=state,
+        cookie="cookie",
+        github_user_id=github_user_id,
+        repos=[
+            github_connect.RepoConfirmation.model_validate(
+                {
+                    "repo_id": 101,
+                    "owner_id": 55,
+                    "installation_id": 77,
+                    "full_name": "example/repo",
+                    "max_access": max_access,
+                    "authorizer_permission": permission,
+                }
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_records_the_authorizers_permission(db_session: AsyncSession) -> None:
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    assert await _confirm_repo(
+        db_session,
+        tenant_id,
+        admin_id,
+        github_user_id=17,
+        state="first",
+        max_access="write",
+        permission="maintain",
+    )
+    repo = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
+    assert repo is not None
+    assert repo.authorized_permission == "maintain" and repo.max_access == "write"
+
+    # A later read-level confirmation keeps the write ceiling the maintainer set, and
+    # with it the maintainer as the authorizer: read cannot take credit for write.
+    assert await _confirm_repo(
+        db_session,
+        tenant_id,
+        admin_id,
+        github_user_id=99,
+        state="second",
+        max_access="read",
+        permission="read",
+    )
+    repo = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
+    assert repo is not None
+    assert repo.max_access == "write"
+    assert (repo.authorized_by_github_user_id, repo.authorized_permission) == (17, "maintain")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission", ["read", "triage"])
+async def test_confirm_refuses_write_from_a_read_level_authorizer(
+    db_session: AsyncSession, permission: str
+) -> None:
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    with pytest.raises(ValueError, match="write access on GitHub"):
+        await _confirm_repo(
+            db_session,
+            tenant_id,
+            admin_id,
+            github_user_id=17,
+            state="denied",
+            max_access="write",
+            permission=permission,
+        )
+
+
 @pytest.mark.asyncio
 async def test_workspace_a_can_connect_org_repo_after_workspace_b(
     db_session: AsyncSession,

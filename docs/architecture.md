@@ -1568,7 +1568,11 @@ admission before any of this runs.
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
   `/oauth/github/confirm`. The browser flow checks the confirming person's
-  GitHub admin access before authorizing tenant repositories. These routes
+  GitHub permission before authorizing tenant repositories: read, triage, write,
+  maintain or admin lets them offer a repo, and the access they can give is capped by
+  that permission (read or triage gives read, write, maintain or admin allows
+  write) and by the App installation's own permissions. Each repo row records
+  the permission (`authorized_permission`). These routes
   are absent when GitHub connection is unconfigured.
   Discord `/github home` and Slack `/github`, plus agent setup on Discord,
   Slack, and Teams, show GitHub repositories without grant controls. Each agent's
@@ -1594,21 +1598,34 @@ admission before any of this runs.
   or unavailable status, including repos the signed-in GitHub account cannot
   edit. The person may add repos, remove repos, and select or clear the one
   working repo, then confirm with **Save changes**. **Add repos** opens a
-  centered dialog on desktop and a bottom sheet on mobile. Tick repos, select
-  **Add 1 repo** (or **Add N repos**) in the dialog, then **Save changes** on the
-  page. When the card came from a chat ask that named one repo, the dialog
-  opens with that repo already ticked if the person can add it. Each addition has
-  its own access choice, defaulting to Read only. Added and removed rows stay
+  centered dialog on desktop and a bottom sheet on mobile. Tick repos one by one,
+  or use the filter box (a case-insensitive match on the full repo name),
+  **Select all N shown** (only the repos the filter shows), **Clear**, or one
+  **Everything in <owner>** button per GitHub account the App is installed on.
+  One access choice, Read only (the default) or Read and write, covers the whole
+  selection; each repo is capped at the signed-in person's own GitHub permission
+  and the installation's, and a repo capped at read shows a "Read only on GitHub"
+  tag when Read and write is chosen. The dialog lists every repo GitHub
+  returns, with no limit per addition. Select **Grant N repos** (N is the live
+  count) in the dialog, then **Grant N repos** (or **Save changes** when
+  only removing) on the page. When the card came from a chat ask that named one
+  repo, the dialog opens with that repo already ticked if the person can add
+  it. Added and removed rows stay
   visible as pending changes, and removals can be undone before saving.
-  Working-repo actions live on the repo row. Adding permits at most ten repos
-  per save and never lowers existing access.
+  Working-repo actions live on the repo row. Adding never lowers existing
+  access.
   Canceling shows **No changes saved** and leaves connected repos unchanged.
   A missing working or skill repo remains visible as a setup requirement.
   Repos that need more access can be confirmed again to finish setup.
   The invitation requester must still manage the agent when the page opens
-  and when it saves. The signed-in GitHub account needs current admin access
-  to each affected repo, including the previous working repo when changing
-  or clearing that selection. Other repos stay visible without edit controls.
+  and when it saves. The signed-in GitHub account needs current read access
+  or better to each affected repo, including the previous working repo when
+  changing or clearing that selection. Read and triage permission offer only
+  Read only for a repo and the save refuses Read and write from them; write,
+  maintain and admin permission offer both. A repo the agent needs at write is
+  added at read for someone who cannot write, and stays listed as still needed.
+  The dialog notes how many repos are hidden because the account has no
+  permission on them. Other repos stay visible without edit controls.
   Each save consumes one invitation and applies its changes in one database
   transaction. A signed snapshot rejects edits made against an outdated page;
   the person reloads if chat has changed the repo list or working selection.
