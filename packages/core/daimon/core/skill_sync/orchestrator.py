@@ -180,7 +180,7 @@ def _compute_skills_union_list(
 class SyncReport:
     synced: int = 0  # newly created skills on MA
     updated: int = 0  # new versions pushed to existing MA skills
-    deleted: int = 0  # orphan-deleted from MA + local (filled by 07b)
+    deleted: int = 0  # orphan-deleted from MA + local
     skipped_repos: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     failed_uploads: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     # (agent_name, reason) — attach step refused by MA (e.g. per-agent skill cap).

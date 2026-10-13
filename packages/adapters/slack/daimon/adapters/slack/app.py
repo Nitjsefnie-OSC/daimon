@@ -699,7 +699,7 @@ class SlackApp:
         )
         received_before_drain = is_app_mention and not self.draining
 
-        # view_submission acks WITH the computed response_action payload (Pattern 2).
+        # view_submission acks WITH the computed response_action payload.
         # evaluate_delete_submission is PURE (no I/O), safe to call before the ack.
         # All other envelope types fall through to the unconditional empty ack below.
         if req.type == "interactive" and payload.get("type") == "view_submission":
@@ -879,7 +879,7 @@ class SlackApp:
 
                     self._spawn(_run_agent_setup_submission())
             elif cb_id.startswith("credential_request__"):
-                # Pure pre-ack evaluation (Pattern 2, as feedback/agent_setup).
+                # Pure pre-ack evaluation (as feedback/agent_setup).
                 _cred_decision = evaluate_credential_submission(payload)
                 await client.send_socket_mode_response(
                     SocketModeResponse(
@@ -2028,7 +2028,7 @@ class SlackApp:
         # admin_status distinguishes "not an admin" (False) from "lookup failed"
         # (None) so the role write below can skip on failure rather than
         # demoting a real admin on a transient Slack error. is_admin is the
-        # single local Task 2's context builders also consume — a second lookup
+        # single local value the context builders also consume — a second lookup
         # would violate the one-call-per-turn constraint.
         author_id = str(event.get("user") or "")
         admin_status = await resolve_admin_status(web_client, user_id=author_id)

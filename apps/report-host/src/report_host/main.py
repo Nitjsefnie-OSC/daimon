@@ -62,7 +62,7 @@ def create_app(settings: Settings) -> FastAPI:
     def now() -> datetime:
         return datetime.now(UTC)
 
-    # A plain closure flag, not a module-level global (architecture rule 3):
+    # A plain closure flag, not a module-level global:
     # `create_app` is the one place that owns it, and every `run_turn` call
     # this app schedules — from `ask`'s background task and from the resume
     # sweep alike — reads the exact same flag through `_run_turn` below. This
