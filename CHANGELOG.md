@@ -12,12 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 - Synchronize Discord gateway-lease tests with completed PostgreSQL backend shutdown before a successor attempts the released advisory lock.
+- Prepare worker-completion decoding and dispatch on the existing leased continuation ladder, while refusing new completion writes until a compatible-reader release protects legacy timer scans. Missing host decisions defer without a provider fallback.
 
 - Keep Discord conformance tests on the adapter's shared database fixture lifetime so switching modules does not trigger premature schema teardown.
 - Build turn-test dependencies from the real TurnDeps bundle and validate replay behavior against recorded payloads instead of freezing implementation source bytes.
 - Add the durable fleet store behind orchestrated worker fleets (off by default, `DAIMON_FLEET__*`): run and worker rows, a per-tenant and per-process worker pool separate from chat turns, worker results kept in each worker's own journal, and migration `0093_fleet_runs`.
 
 - Add read-only attribution of distinct host-worker usage and conservative token floors, preserving original debit identities and explicit pending revisions.
+- Queue worker-completion wakes transactionally on the existing continuation ladder, using stored fleet all-worker or quorum readiness and the existing at-most-once lease fence. Missing host decisions defer without a provider fallback.
+
+- Add the durable fleet store behind orchestrated worker fleets (off by default, `DAIMON_FLEET__*`): run and worker rows, a per-tenant and per-process worker pool separate from chat turns, worker results kept in each worker's own journal, and migration `0093_fleet_runs`.
 - Preserve complete root place and category authority when deriving fleet workers, and refuse unknown hosted-network defaults without guessing provider permissions.
 - Share backend preview capability checks with worker derivation, preserve root stamps through metadata patches, and return typed refusals for invalid worker backend selections.
 

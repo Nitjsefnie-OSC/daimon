@@ -36,7 +36,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 import structlog
-from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.continuity.continuation import ContinuationRequest, require_writable_reason
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
@@ -71,6 +71,7 @@ __all__ = [
     "cancel_wake",
     "claim_wake",
     "enqueue_wake",
+    "enqueue_worker_finished",
     "list_dispatchable_wakes",
     "list_due_wake_threads",
     "poll_wakes_once",
@@ -79,6 +80,7 @@ __all__ = [
     "settle_wake",
     "skip_thread_wakes",
     "start_wake",
+    "worker_finished_key",
 ]
 
 #: How long a claim may sit before its turn starts. Covers the decision reads
@@ -143,29 +145,76 @@ class WakeThread(BaseModel):
 WakeOpener = Callable[[WakeThread], Awaitable[bool]]
 
 
+async def _record_wake(
+    session: AsyncSession, request: ContinuationRequest, *, available_at: datetime
+) -> None:
+    await record_continuation(
+        session,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        parent_channel_id=request.parent_channel_id,
+        thread_id=request.thread_id,
+        requester_account_id=request.requester_account_id,
+        requester_external_user_id=request.requester_external_user_id,
+        target_ma_agent_id=request.target_ma_agent_id,
+        target_name=request.target_name,
+        reason=request.reason,
+        idempotency_key=request.idempotency_key,
+        requested_work=request.requested_work,
+        available_at=available_at,
+    )
+
+
 async def enqueue_wake(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: async_sessionmaker[AsyncSession] | AsyncSession,
     request: ContinuationRequest,
     *,
     available_at: datetime,
 ) -> None:
-    """Queue `request` to run in its thread no earlier than `available_at`."""
+    """Queue work, using an existing transaction when supplied.
+
+    A factory retains the existing independent commit. A session must already
+    hold a transaction: its owning state transition commits or rolls back both
+    that transition and the wake, with no commit inside this function.
+    """
+    require_writable_reason(request.reason)
+    if isinstance(sessionmaker, AsyncSession):
+        if not sessionmaker.in_transaction():
+            raise ValueError("Enqueuing with a session requires an active transaction")
+        await _record_wake(sessionmaker, request, available_at=available_at)
+        return
     async with sessionmaker.begin() as session:
-        await record_continuation(
-            session,
-            tenant_id=request.tenant_id,
-            platform=request.platform,
-            parent_channel_id=request.parent_channel_id,
-            thread_id=request.thread_id,
-            requester_account_id=request.requester_account_id,
-            requester_external_user_id=request.requester_external_user_id,
-            target_ma_agent_id=request.target_ma_agent_id,
-            target_name=request.target_name,
-            reason=request.reason,
-            idempotency_key=request.idempotency_key,
-            requested_work=request.requested_work,
-            available_at=available_at,
-        )
+        await _record_wake(session, request, available_at=available_at)
+
+
+def worker_finished_key(run_id: uuid.UUID) -> uuid.UUID:
+    """One durable completion wake for the run's initial worker batch."""
+    return uuid.uuid5(run_id, "worker_finished")
+
+
+async def enqueue_worker_finished(
+    session: AsyncSession,
+    request: ContinuationRequest,
+    *,
+    run_id: uuid.UUID,
+    now: datetime,
+) -> bool:
+    """Refuse completion writes until compatible queue readers are deployed.
+
+    The public signature remains available for host integrations, but no run
+    transition or wake is written. False leaves the caller's terminal worker
+    update free to commit, including at or after the deadline. The prior
+    release cannot read this reason; a caller cannot opt past the rolling
+    release boundary. Publication and the readiness transition are deferred
+    together; the run owner remains responsible for ending an expired run.
+    """
+    if not session.in_transaction():
+        raise ValueError("Worker completion requires an active transaction")
+    if request.reason != "worker_finished" or request.idempotency_key != worker_finished_key(
+        run_id
+    ):
+        raise ValueError("Worker completion requires the run's stable wake identity")
+    return False
 
 
 async def claim_wake(
