@@ -482,11 +482,6 @@ async def test_materialization_capability_does_not_make_counterpart_read_mutate(
         assert owned.wire.requests and all(call.method == "GET" for call in owned.wire.requests)
 
 
-@pytest.fixture
-def native_budget():
-    return None
-
-
 @pytest.fixture(params=(False, True), ids=("fresh", "clone"))
 async def claimed_openai_worker(
     owned: Owned, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest, native_budget
@@ -733,7 +728,11 @@ async def claimed_openai_worker(
         response = wire.handle(call)
         for turn in wire.turns:
             turn["agent_id"] = "allocated-worker"
-        if path.endswith("native-openai-session"):
+        if (
+            call.method == "GET"
+            and response.status_code == 200
+            and path.endswith("native-openai-session")
+        ):
             raw = json.loads(response.content)
             raw["agent"]["id"] = "allocated-worker"
             return httpx.Response(200, json=raw)
@@ -1220,3 +1219,125 @@ async def test_budgeted_worker_can_cancel_after_its_one_input(claimed_openai_wor
     async with request.deps.sessionmaker.begin() as db:
         _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
     assert next(row for row in rows if row.id == worker.id).turns_used == 1
+
+
+@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
+@pytest.mark.parametrize("stage", ["ack", "get"])
+@pytest.mark.parametrize("echo", [None, True, "1", 1.0, 2])
+async def test_bad_budget_echo_retains_ack_and_deletes_owned_session(
+    claimed_openai_worker, monkeypatch, stage, echo
+):
+    from daimon.core.errors import TurnError
+    from daimon.core.fleet import spawn_operation_key
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import fleet, mux_state
+    from mux.errors import ContinuityLost
+
+    request, root, worker, prices, _, calls, wire = claimed_openai_worker
+    key = spawn_operation_key(worker.run_id, worker.ordinal) + ":session_create:0"
+    cleanup_receipts = []
+    original = httpx.MockTransport.handle_async_request
+
+    async def echo_and_inspect(transport, call):
+        if call.method == "DELETE":
+            async with request.deps.sessionmaker() as db:
+                receipt = await mux_state.get_operation(db, request.scope, key)
+            assert receipt is not None and receipt.operation.status == "processed"
+            assert receipt.result["ref"]["id"] == "native-openai-session"
+            assert receipt.result["state"] == "provisioning"
+            cleanup_receipts.append(receipt)
+        response = await original(transport, call)
+        selected = (
+            call.method == "POST" and call.url.path == "/v1/agents/sessions"
+            if stage == "ack"
+            else call.method == "GET" and call.url.path.endswith("native-openai-session")
+        )
+        if selected and response.status_code == 200:
+            raw = json.loads(response.content)
+            if echo is None:
+                raw.pop("spend_control", None)
+            else:
+                raw["spend_control"] = {"limit": echo}
+            return httpx.Response(200, json=raw)
+        return response
+
+    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", echo_and_inspect)
+    with pytest.raises((ContinuityLost, TurnError, AdmissionDenied)):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Refused budget",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert wire.deleted and len(cleanup_receipts) == 1
+    restarted_store = mux_state.PostgresStateStore(request.deps.sessionmaker)
+    receipt = await restarted_store.get_operation(request.scope, key)
+    assert receipt is not None and receipt.result["ref"]["id"] == "native-openai-session"
+    deletion = await restarted_store.get_operation(
+        request.scope, spawn_operation_key(worker.run_id, worker.ordinal) + ":session_delete:0"
+    )
+    assert deletion is not None and deletion.operation.status == "processed"
+    assert deletion.result["deleted"][0]["id"] == "native-openai-session"
+    restarted = replace(request, deps=replace(request.deps, state_store=restarted_store))
+    with pytest.raises((ContinuityLost, TurnError, AdmissionDenied)):
+        await run_worker(
+            restarted,
+            parent=root,
+            worker=worker,
+            trigger_message="No reallocation",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert (
+        sum(call.method == "POST" and call.url.path == "/v1/agents/sessions" for call in calls) == 1
+    )
+    assert sum(call.method == "DELETE" for call in calls) == 1
+    assert not any(call.method == "POST" and call.url.path.endswith("/events") for call in calls)
+    async with request.deps.sessionmaker.begin() as db:
+        _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
+    retained = next(row for row in rows if row.id == worker.id)
+    assert retained.turns_used == 0 and retained.binding_id is None
+    assert retained.reserved_usd == worker.budget_usd
+
+
+@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
+async def test_budgeted_session_without_ack_remains_unknown(claimed_openai_worker, monkeypatch):
+    from daimon.core.fleet import spawn_operation_key
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import mux_state
+
+    request, root, worker, prices, _, calls, wire = claimed_openai_worker
+    original = httpx.MockTransport.handle_async_request
+
+    async def lost_ack(transport, call):
+        response = await original(transport, call)
+        if call.method == "POST" and call.url.path == "/v1/agents/sessions":
+            raise httpx.ReadError("offline no session ACK", request=call)
+        return response
+
+    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", lost_ack)
+    with pytest.raises(ProviderError):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="No ACK",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert not wire.deleted
+    key = spawn_operation_key(worker.run_id, worker.ordinal) + ":session_create:0"
+    receipt = await mux_state.PostgresStateStore(request.deps.sessionmaker).get_operation(
+        request.scope, key
+    )
+    assert receipt is not None and receipt.operation.status == "outcome_unknown"
+    assert receipt.operation.resource is None and not receipt.result
+    assert (
+        sum(call.method == "POST" and call.url.path == "/v1/agents/sessions" for call in calls) == 1
+    )
+    assert not any(
+        call.method == "DELETE" or call.method == "POST" and call.url.path.endswith("/events")
+        for call in calls
+    )

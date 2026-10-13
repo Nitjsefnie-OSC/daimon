@@ -43,6 +43,7 @@ from daimon.core.turn.prepare import (
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
+from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import ProviderBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.openai import OpenAIDriver
@@ -343,7 +344,41 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         # An acknowledged cached create may predate a process restart. Validate
         # actual provider ownership/model/environment before publishing it.
         verifying = driver(runtime, revision, request.scope, native.binding)
-        native = await verifying.sessions.retrieve(request.scope, native.ref)
+        try:
+            verifying.sessions.validate_spend_control(native)
+            native = await verifying.sessions.retrieve(request.scope, native.ref)
+        except (ContinuityLost, ProviderError, ScopeViolation):
+            if runtime.controls.spend_limit_usd_cents is not None:
+                from daimon.core.turn.run import (
+                    _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
+                )
+
+                async def cleanup() -> DeletionReceipt:
+                    active = current_persistence.get()
+                    if active is not None:
+                        return await active.mutate(
+                            None,
+                            "session_delete",
+                            {"session": native.ref.model_dump(mode="json")},
+                            lambda key: verifying.sessions.delete(
+                                request.scope, native.ref, key=key
+                            ),
+                            DeletionReceipt,
+                            lambda _: "processed",
+                            retry_failed=False,
+                        )
+                    return await verifying.sessions.delete(
+                        request.scope,
+                        native.ref,
+                        key=f"openai:rejected:{native.ref.id}",
+                    )
+
+                await _archive_orphaned_session(
+                    request.deps.anthropic,
+                    session_id=native.ref.id,
+                    archive=cleanup,
+                )
+            raise
         if (
             native.ref.provider != "openai"
             or native.ref.account_scope_id != runtime.account_scope_id

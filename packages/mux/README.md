@@ -1010,3 +1010,12 @@ string and is merged through the SDK `extra_body`; OpenAI uses strict positive
 integer cents in `spend_control.limit`, verifying its native echo. Neither flag
 advertises hard internal model-request or output limits. Missing controls remain
 omitted for unconfigured callers.
+
+
+Budgeted OpenAI creation returns a provisioning acknowledgement with its scoped
+session reference and control echo. The host retains that receipt before using
+the driver's single spend-control validator; retrieval validates independently.
+Execution checks retrieve the session again, so a provisioning receipt does not
+authorize model input. Rejected allocations use owned session deletion through
+the existing bounded cleanup path; OpenAI's unsupported archive port is not
+reported as a successful archive.

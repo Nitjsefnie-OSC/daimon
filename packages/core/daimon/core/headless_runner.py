@@ -759,8 +759,6 @@ async def run_worker(
                 verdict = await recapture(db)
                 if not verdict.admitted:
                     return False
-                if verdict.worker.turns_used >= resolved.limits.max_turns:
-                    return False
                 await fleet_store.use_turn(
                     db,
                     tenant_id=request.tenant_id,

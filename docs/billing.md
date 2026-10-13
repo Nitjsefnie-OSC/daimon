@@ -1150,3 +1150,18 @@ The OpenAI preparation edge compiles the amount into the existing
 or missing, malformed or changed native echoes. Native rejection never retries
 without the control. Unconfigured calls omit these additional request fields;
 soft controls do not make provider-internal inference a hard bounded bill.
+
+
+A scoped OpenAI creation acknowledgement is retained as a provisioning receipt
+before its native spend-control echo is validated. The receipt includes the
+native session reference and budget echo; it does not establish a runnable
+binding. A rejected acknowledgement or fresh readback refuses input and uses
+the existing owned, bounded session cleanup path. Cleanup failure retains the
+creation identity and financial hold for reconciliation; restart never allocates
+a replacement for that receipt. Unknown transport acceptance stays unknown.
+
+A configured provider map also requires a positive line for the financial
+parent's provider. This is an admission condition; the worker exposure producer
+does not thereby price or reserve root inference. Root admission, native budget,
+request count, wake lifetime and trusted grant installation remain separate
+caller obligations. Worker lines must fit alongside the reserved root room.

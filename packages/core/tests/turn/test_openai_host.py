@@ -78,6 +78,7 @@ class Wire:
         self.fail_create = False
         self.bad_model = False
         self.cancelled = False
+        self.deleted = False
         self.saved_delegation = False
         self.session_delegation = False
         self.expected_spend_limit = 4
@@ -105,6 +106,14 @@ class Wire:
         self.requests.append(req)
         assert req.headers["OpenAI-Beta"] == "agents=v1"
         path = req.url.path.removeprefix("/v1")
+        if path == "/agents/sessions/" + SESSION_ID:
+            if req.method == "DELETE":
+                self.deleted = True
+                return httpx.Response(200, json={"id": SESSION_ID, "deleted": True})
+            if self.deleted:
+                return httpx.Response(
+                    404, json={"error": {"message": "session deleted", "type": "not_found"}}
+                )
         if path == "/agents/native-agent":
             return httpx.Response(
                 200,
