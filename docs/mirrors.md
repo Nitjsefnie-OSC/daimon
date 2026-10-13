@@ -65,8 +65,9 @@ it never fails because of a mirror. The Discord bot drains the queue every
 `poll_interval_s`, one post per conversation at a time so threads keep their
 order. Delivery is at most once: a post whose lease ran out, or one older than
 `max_pending_age_s`, is skipped rather than retried, since it may already have
-landed. A missing destination, a refusal of the destination or a bot that may
-not post pauses the mirror; a refusal of one conversation alone, or a passing
+landed. Rules are checked against the agent's names at delivery, so a renamed
+agent meets its current rules. A missing destination or agent, a refusal of the
+destination or a bot that may not post pauses the mirror; a refusal of one conversation alone, or a passing
 Discord error, skips that post only; `list_mirrors` shows why, and calling `create_mirror` again with the
 same name resumes it. A settled row keeps no question or answer. The
 scheduler settles stale, interrupted and paused rows on every tick, whether

@@ -11,15 +11,23 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.adapters.discord.mirror_delivery import make_discord_mirror_poster
-from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.adapters.discord.mirror_delivery import (
+    AgentNames,
+    ma_agent_names,
+    make_discord_mirror_poster,
+)
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.config import MirrorsSettings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mirror_delivery import poll_mirror_deliveries_once, record_conversation_event
 from daimon.core.mirror_events import ActorRef, ConversationEventV1, SourceRef
 from daimon.core.stores import mirrors as store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import MirrorRow
+from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _GUILD = 424242
@@ -63,6 +71,7 @@ async def _setup(
     *,
     dest_kind: Literal["channel", "thread"] = "channel",
     dest_id: int = _CHANNEL,
+    ma_agent_id: str | None = None,
 ) -> MirrorRow:
     tenant = await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD))
     if policy is not None:
@@ -71,7 +80,11 @@ async def _setup(
         db_session,
         tenant_id=tenant.id,
         name="qa",
-        source_agent_id=_AGENT,
+        source_agent_id=(
+            _AGENT
+            if ma_agent_id is None
+            else derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_agent_id)
+        ),
         source_agent_name="helper",
         source_agent_names=("helper",),
         dest_platform="discord",
@@ -93,13 +106,14 @@ async def _ask_and_poll(
     *,
     seal_ids: tuple[str, ...] = (),
     fetch: Callable[[int], Awaitable[object]] | None = None,
+    names: AgentNames | None = None,
 ) -> None:
     event = ConversationEventV1(
         id=uuid.uuid4(),
         surface="agent_chat",
         occurred_at=_NOW,
         tenant_id=mirror.tenant_id,
-        agent_id=_AGENT,
+        agent_id=mirror.source_agent_id,
         source=SourceRef(channel_id="300", seal_ids=seal_ids, session_key="sesn_abc123"),
         actor=ActorRef(display_name="Ada"),
         question="Ping @everyone?",
@@ -110,8 +124,14 @@ async def _ask_and_poll(
     async def fetch_default(channel_id: int) -> object:
         return channel if channel_id == _CHANNEL else channel.thread
 
+    async def helper(_mirror: MirrorRow) -> tuple[str, ...] | None:
+        return ("helper",)
+
     poster = make_discord_mirror_poster(
-        sm, fetch_channel=fetch or fetch_default, max_answer_chars=3000
+        sm,
+        fetch_channel=fetch or fetch_default,
+        agent_names=names or helper,
+        max_answer_chars=3000,
     )
     await poll_mirror_deliveries_once(
         sm, platform="discord", post=poster, settings=MirrorsSettings(), now=_NOW
@@ -254,3 +274,39 @@ async def test_a_thread_destination_takes_posts_straight_in(
 
     channel.send.assert_not_awaited()
     assert channel.thread.send.await_count == 2, "the question and answer, no header"
+
+
+@pytest.mark.parametrize(
+    ("agents", "reason"),
+    [([], "agent_missing"), (["home-bot"], "own_agents_only")],
+    ids=["gone", "renamed_into_a_home"],
+)
+async def test_the_agents_current_names_decide_at_delivery(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    agents: list[str],
+    reason: str,
+) -> None:
+    policy = TenantAccessPolicy(
+        channel_rules={"100": ChannelRule(readers="own", writers="own")},
+        agent_rules={"home-bot": AgentRule(runs_in=("100",))},
+    )
+    mirror = await _setup(db_session, policy, ma_agent_id="ag_helper")
+    channel = _channel()
+    router = MARouter()
+    listed = [
+        ma_agent(
+            id="ag_helper",
+            name=name,
+            model=ma_model_config("claude-sonnet-4-6", speed="standard"),
+            metadata={MA_METADATA_KEY_TENANT: str(mirror.tenant_id)},
+        ).model_dump(mode="json")
+        for name in agents
+    ]
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response(listed))
+    names = ma_agent_names(build_fake_anthropic(router.dispatch))
+
+    await _ask_and_poll(db_session_factory, mirror, channel, names=names)
+
+    channel.send.assert_not_awaited()
+    assert await _status(db_session, mirror) == ("paused", reason), "the stored name is not trusted"

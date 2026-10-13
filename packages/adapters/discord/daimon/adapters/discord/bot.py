@@ -47,7 +47,7 @@ from daimon.adapters.discord.lifecycle import (
     drain_retained_card_tasks,
     edit_recovered_card,
 )
-from daimon.adapters.discord.mirror_delivery import make_discord_mirror_poster
+from daimon.adapters.discord.mirror_delivery import ma_agent_names, make_discord_mirror_poster
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
@@ -1021,6 +1021,7 @@ class DaimonBot(commands.Bot):
                         post=make_discord_mirror_poster(
                             self.runtime.sessionmaker,
                             fetch_channel=self._channel_by_id,
+                            agent_names=ma_agent_names(self.runtime.anthropic),
                             max_answer_chars=mirrors.max_answer_chars,
                         ),
                         settings=mirrors,
