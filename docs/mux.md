@@ -2554,6 +2554,7 @@ or release the caller's pool slot. The caller releases its slot in `finally` and
 uses the existing journal operation readback before classifying a possibly-sent
 input. A count returned inside the claim transaction is never adopted as durable
 worker state; terminal updates reread the worker through the budget lock owner.
+
 The existing `TurnRuntime` can expose an optional `materialize_worker(request)`
 callback returning the existing `AgentRevision` acknowledgement. It is absent by
 default. Read-only counterpart proof does not invoke it. The headless worker
@@ -2563,3 +2564,13 @@ The existing publisher owns the lease, single-attempt mutation and acknowledgmen
 Counterpart readback verifies that actual publication through the catalog owner,
 then preparation recaptures the source and checks the worker deadline before
 handoff. Missing authority, unknown outcomes and mismatched readback refuse.
+
+Source environment capture projects a closed cloud policy only when networking
+and every package-manager list are explicit. Limited networking must explicitly
+disable implicit MCP-server and package-manager access. Apt, pip and npm map to
+the neutral system, Python and npm lists; other managers must be explicitly
+empty. Unknown fields, missing defaults and self-hosted policy retain their
+native obligation and refuse when unrepresented. The source's native snapshot,
+identity metadata and visibility remain intact. Ordinary Anthropic environment
+requests retain their native configuration bytes. A projected environment is
+still subject to the root's sandbox grant and independent native readback.

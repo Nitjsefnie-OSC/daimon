@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Project fully explicit cloud source policies into the existing neutral worker environment while refusing implicit or unrepresented native permissions.
 - Make preparation lock and redaction work budgets independent of host scheduling.
 - Refuse a worker allocation under a foreign persistence scope before source or credential reads.
 - Execute claimed fleet workers through canonical source normalization, atomic funded input claims and authoritative journal results, without retrying unknown deliveries.

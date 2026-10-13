@@ -2511,10 +2511,8 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
     assert projected.memory_store_id == ("mem-existing" if warm else None)
     assert projected.memory_read_only is read_only
     assert projected.memory_instructions == memory_instructions(read_only=read_only)
-    assert (
-        projected.environment.spec.native_config.value["config"]["networking"]["type"]
-        == "unrestricted"
-    )
+    assert projected.environment.spec.network.mode == "unrestricted"
+    assert projected.environment.native["config"]["networking"]["type"] == "unrestricted"
     assert projected.resource_scope.tenant_id == str(tenant.id)
     assert projected.resource_scope.account_id == str(account.id)
     async with sessions() as db:
@@ -2805,7 +2803,9 @@ async def test_projection_uses_composer_vault_copilot_and_app_filters(
         assert "private-" not in output and "owned-repo-credential" not in output
 
 
-async def worker_source_context(db_nullpool_engine, *, original_tools=(), granted_tools=()):
+async def worker_source_context(
+    db_nullpool_engine, *, original_tools=(), granted_tools=(), environment_config=None
+):
     from dataclasses import replace
 
     from daimon.core.channel_backend import load_backend_agent
@@ -2832,6 +2832,10 @@ async def worker_source_context(db_nullpool_engine, *, original_tools=(), grante
         tools=original_tools,
     )
     environment = ma_environment(tenant_id=str(tenant.id))
+    if environment_config is not None:
+        environment = BetaEnvironment.model_validate(
+            {**environment.model_dump(mode="json"), "config": environment_config}
+        )
     root = parent()
     root = replace(
         root,
@@ -3184,3 +3188,120 @@ async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
         )
     with pytest.raises(WorkerSpecRefused):
         resolve_worker_spec(root, requested, policy=POLICY, now=NOW, captured_source=captured)
+
+
+@pytest.mark.parametrize("network", ["unrestricted", "limited"])
+async def test_actual_sdk_source_explicit_cloud_policy_is_preserved_by_normalization(
+    db_preflight, db_nullpool_engine, network
+):
+    from dataclasses import replace
+
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    from .test_fleet_permissions import NOW, POLICY
+
+    networking = {"type": network}
+    if network == "limited":
+        networking.update(
+            allowed_hosts=["pypi.org"], allow_mcp_servers=False, allow_package_managers=False
+        )
+    config = {
+        "type": "cloud",
+        "networking": networking,
+        "packages": {
+            "apt": ["git"],
+            "pip": ["pandas"],
+            "npm": [],
+            "cargo": [],
+            "gem": [],
+            "go": [],
+        },
+    }
+    _, _, _, _, environment, worker, captured = await worker_source_context(
+        db_nullpool_engine, environment_config=config
+    )
+    assert captured.environment.native == environment.model_dump(mode="json", exclude_unset=True)
+    projected = captured.environment.spec
+    assert projected.native_config is None
+    assert projected.network.mode == network
+    assert projected.packages == {"system": ("git",), "python": ("pandas",), "npm": ()}
+    assert projected.sources == ()
+    assert projected.metadata == environment.metadata
+    root = replace(
+        worker.permissions,
+        fleet=replace(worker.permissions.fleet, depth=0),
+        agent_id=captured.agent_id,
+        environment=projected,
+    )
+    requested = worker.spec.model_copy(update={"declared_drops": ("memory",)})
+    resolved = resolve_worker_spec(
+        root, requested, policy=POLICY, now=NOW, captured_source=captured
+    )
+    assert resolved.environment == projected
+    assert not classify_source_obligations(
+        captured, resolved.spec, environment=resolved.environment
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing_network",
+        "missing_packages",
+        "package_default",
+        "extra_manager",
+        "network_permission",
+        "network_default",
+        "unknown",
+        "self_hosted",
+    ],
+)
+async def test_source_environment_projection_retains_unrepresented_native_policy(failure):
+    from daimon.core.mux_compat import retrieve_environment, source_environment_record
+    from daimon.testing.ma import MARouter
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.contracts.ids import Scope
+
+    config = {
+        "type": "cloud",
+        "networking": {
+            "type": "limited",
+            "allowed_hosts": [],
+            "allow_mcp_servers": False,
+            "allow_package_managers": False,
+        },
+        "packages": {"apt": [], "pip": [], "npm": [], "cargo": [], "gem": [], "go": []},
+    }
+    if failure == "missing_network":
+        del config["networking"]
+    elif failure == "missing_packages":
+        del config["packages"]
+    elif failure == "package_default":
+        del config["packages"]["pip"]
+    elif failure == "extra_manager":
+        config["packages"]["cargo"] = ["ripgrep"]
+    elif failure == "network_permission":
+        config["networking"]["allow_mcp_servers"] = True
+    elif failure == "network_default":
+        del config["networking"]["allow_package_managers"]
+    elif failure == "unknown":
+        config["future_policy"] = {"secrets": "unrepresented"}
+    else:
+        config = {"type": "self_hosted"}
+    raw = ma_environment(tenant_id="tenant").model_dump(mode="json")
+    raw["config"] = config
+    scope = Scope(
+        tenant_id="tenant", account_id="account", principal_id="caller", authorization_id="owned"
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/environments/.*", lambda request, match: httpx.Response(200, json=raw))
+    transport = ScriptedTransport(router=router)
+    async with transport.client() as client:
+        environment = await retrieve_environment(client, raw["id"], scope=scope)
+    projected = source_environment_record(environment, scope)
+    assert projected.spec.native_config is not None
+    assert projected.spec.native_config.value["config"] == config
+    assert projected.native == environment.model_dump(mode="json", exclude_unset=True)
+    transport.assert_consumed()
+    assert [request.method for request in transport.requests] == ["GET"]

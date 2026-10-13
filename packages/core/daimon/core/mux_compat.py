@@ -53,6 +53,7 @@ from mux.drivers.anthropic.resources.environments import EnvironmentReads, envir
 from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
 from mux.drivers.anthropic.resources.memory_stores import StoreCreate
 from mux.drivers.anthropic.resources.walk import ResourceWalk
+from mux.drivers.anthropic.schemas import EnvironmentConfig
 from mux.errors import ProviderError
 
 if TYPE_CHECKING:
@@ -176,7 +177,27 @@ def source_agent_record(item: BetaManagedAgentsAgent, scope: Scope) -> Agent | N
 
 def source_environment_record(item: BetaEnvironment, scope: Scope) -> Environment:
     """Project an already-authorized native environment without I/O."""
-    return environment_record(item, "", scope)
+    record = environment_record(item, "", scope)
+    native = record.spec.native_config
+    if native is None:
+        return record
+    try:
+        network, packages = EnvironmentConfig.model_validate(dict(native.value)).intent()
+    except ValueError:
+        return record
+    return record.model_copy(
+        update={
+            "spec": EnvironmentSpec.model_validate(
+                {
+                    **record.spec.model_dump(mode="json"),
+                    "native_config": None,
+                    "network": network,
+                    "packages": packages,
+                    "sources": (),
+                }
+            )
+        }
+    )
 
 
 def agent_patch(payload: Mapping[str, object]) -> AgentPatch:
