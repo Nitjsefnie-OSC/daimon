@@ -18,6 +18,7 @@ from daimon.core.continuity.continuation import (
     claim_continuation,
     record_continuation,
 )
+from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.wakes import (
     WAKE_CLAIM_LEASE,
     WAKE_MAX_ATTEMPTS,
@@ -37,7 +38,9 @@ from daimon.core.continuity.wakes import (
 )
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
+from daimon.core.stores.task_continuations import record_continuation as insert_reader_fixture
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
@@ -333,8 +336,10 @@ async def test_a_thread_with_many_rows_takes_one_slot_in_the_batch(
     assert sorted(t.thread_id for t in due) == ["busy", "quiet"]
 
 
+@pytest.mark.parametrize("unavailable", ["opener", "decision"])
 async def test_unopenable_threads_do_not_starve_the_101st(
     db_session_factory: async_sessionmaker[AsyncSession],
+    unavailable: str,
 ) -> None:
     """100 threads the adapter cannot open (no token, archived) ahead of a healthy one.
 
@@ -346,14 +351,38 @@ async def test_unopenable_threads_do_not_starve_the_101st(
     for n in range(100):
         dead = _request(tenant_id, thread_id=f"dead-{n:03d}")
         dead_keys.append(dead.idempotency_key)
-        await enqueue_wake(db_session_factory, dead, available_at=_NOW - timedelta(minutes=10))
+        if unavailable == "decision":
+            dead = dead.model_copy(update={"reason": "worker_finished"})
+            async with db_session_factory.begin() as db:
+                await insert_reader_fixture(
+                    db, **dead.model_dump(), available_at=_NOW - timedelta(minutes=10)
+                )
+        else:
+            await enqueue_wake(db_session_factory, dead, available_at=_NOW - timedelta(minutes=10))
     healthy = _request(tenant_id, thread_id="healthy")
     await enqueue_wake(db_session_factory, healthy, available_at=_NOW)
     reached: list[str] = []
 
+    async def forbidden(*args):
+        raise AssertionError("An unbound completion must not look up history, send or post")
+
     async def _open(thread: WakeThread) -> bool:
         if thread.thread_id.startswith("dead-"):
-            return False
+            if unavailable == "opener":
+                return False
+            async with build_fake_anthropic(forbidden) as client:
+                await dispatch_pending_continuations(
+                    db_session_factory,
+                    client,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id=thread.thread_id,
+                    run_follow_up=forbidden,
+                    post_notice=forbidden,
+                    latest_user_message_at=forbidden,
+                    now=lambda: _NOW,
+                )
+            return True
         reached.append(thread.thread_id)
         return True
 
@@ -366,6 +395,7 @@ async def test_unopenable_threads_do_not_starve_the_101st(
     deferred = await _read(db_session_factory, dead_keys[0])
     assert deferred.status == "pending", "unopenable threads are deferred, never dropped"
     assert deferred.available_at == _NOW + WAKE_UNAVAILABLE_DELAY
+    assert deferred.attempts == 0 and deferred.started_at is None
 
 
 def _concurrency_dsn() -> str:

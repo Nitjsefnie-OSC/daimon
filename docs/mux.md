@@ -2380,8 +2380,8 @@ handoffs. Reader tests can inject future rows directly into an isolated test
 schema; those fixtures are not successful host production or fleet execution.
 
 Bind `worker_finished_decision` to `decide_worker_finished` with the host factory.
-It re-reads frozen batches, original roots and live turns. Missing hooks leave rows
-unclaimed; stale facts defer. Normal runner checks remain required, without a legacy agent
+It re-reads frozen batches, original roots and live turns. Missing hooks use the
+unavailable backoff; stale facts defer. Normal runner checks remain required, without a legacy agent
 lookup or human-history supersession rule. The existing claim/start/settle
 ladder fences the turn before its first effect, so an expired started wake is
 interrupted rather than automatically replayed. Native execution and result
