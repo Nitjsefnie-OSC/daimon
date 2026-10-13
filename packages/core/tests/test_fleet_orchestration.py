@@ -158,6 +158,7 @@ def worker(result: Event | None = None, **changes: Any) -> FleetWorker:
 
 def ports(*rows: FleetWorker, fleet: FleetRun | None = None) -> Mock:
     owner = create_autospec(FleetPorts, instance=True)
+    owner.capture_source.return_value = None
     owner.controller_account.side_effect = lambda parent: (
         ACCOUNT if parent.subject.platform_user_id == "person" else None
     )

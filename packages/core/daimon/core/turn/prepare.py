@@ -97,7 +97,7 @@ from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
-    from daimon.core.neutral_resources import ResolvedWorkerSpec
+    from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerPermissions
     from daimon.core.session_preparation_stages import WorkspaceTransfer
     from daimon.core.stores.neutral_catalog import AgentRevision
 
@@ -210,6 +210,118 @@ class ProviderPreparationRequest:
     before_native: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
+
+    async def capture_root(
+        self, parent: WorkerPermissions, *, deadline: dt.datetime | None = None
+    ) -> ProviderPreparationRequest:
+        """Read the pinned source once under the original root grant and ceiling."""
+        from daimon.core.mux_compat import retrieve_agent
+        from daimon.core.neutral_resources import WorkerSpecRefused
+        from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+        bound = min(self.deadline, parent.limits.deadline, deadline or self.deadline)
+        remaining_s(bound, now=self.now(), refuse_expired=True)
+        grant = self.admission.grant
+        if (
+            self.worker is not None
+            or grant is None
+            or self.admission.shared_owner is not None
+            or grant.subject != parent.subject
+            or grant.run_place != parent.fleet.place
+            or self.tenant_id != grant.tenant_id
+            or str(self.tenant_id) != parent.fleet.scope.tenant_id
+            or self.session_account_id != parent.fleet.account_id
+            or self.admission.account_id != parent.fleet.account_id
+            or self.scope != parent.fleet.scope
+            or grant.agent != parent.agent
+            or grant.turn_place != parent.fleet.place
+        ):
+            raise WorkerSpecRefused("scope", "unbound")
+        pins = tuple(pin for pin in parent.source_revisions if pin[0].id == self.admission.agent.id)
+        if len(pins) != 1:
+            raise WorkerSpecRefused("scope", "unbound")
+        async with asyncio.timeout(remaining_s(bound, now=self.now(), refuse_expired=True)):
+            actual = await retrieve_agent(self.deps.anthropic, pins[0][0].id, scope=self.scope)
+            root = replace(
+                self,
+                admission=replace(self.admission, agent=actual),
+                source=None,
+                counterpart=None,
+                verified_counterpart=None,
+            )
+            source = await capture_preparation_source(root)
+            if source.source is None or (source.source.ref, source.source.revision) != pins[0]:
+                raise WorkerSpecRefused("scope", "stale")
+            remaining_s(bound, now=self.now(), refuse_expired=True)
+            return replace(root, source=source, deadline=bound)
+
+    async def for_worker(
+        self, parent: WorkerPermissions, worker: ResolvedWorkerSpec
+    ) -> ProviderPreparationRequest:
+        """Derive a bounded worker request from the original grant and pinned source."""
+        from daimon.core.channel_backend import resolve_turn_backend
+        from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+        from daimon.core.stores.access_policy import load_access_policy
+        from mux.contracts.config import BackendConfig
+        from mux.contracts.resources import AgentPatch, AgentSpec
+
+        bound = min(self.deadline, parent.limits.deadline, worker.limits.deadline)
+        async with asyncio.timeout(remaining_s(bound, now=self.now(), refuse_expired=True)):
+            root = await self.capture_root(parent, deadline=bound)
+            source = root.source
+            if source is None or source.source is None:
+                raise WorkerSpecRefused("scope", "unbound")
+            definition = (
+                source.source if worker.source_agent else AgentSpec.model_validate(worker.spec)
+            )
+            overrides = (
+                AgentPatch.model_validate(worker.spec.model_dump(mode="json"))
+                if worker.source_agent
+                else None
+            )
+            async with self.deps.sessionmaker.begin() as db:
+
+                async def validate_origin(*_args: object) -> None:
+                    remaining_s(bound, now=self.now(), refuse_expired=True)
+                    policy = await load_access_policy(db, tenant_id=self.tenant_id)
+                    normalized = resolve_worker_spec(
+                        parent,
+                        definition,
+                        overrides=overrides,
+                        policy=policy,
+                        now=self.now(),
+                        backend=BackendConfig.model_validate(
+                            worker.backend.model_dump(include=set(BackendConfig.model_fields))
+                        ),
+                        resources=worker.resources,
+                        environment=worker.environment,
+                        limits=worker.limits,
+                        captured_source=source,
+                    )
+                    if normalized.digest != worker.digest:
+                        raise WorkerSpecRefused("scope", "stale")
+
+                await validate_origin()
+                revision, _, origin = await resolve_turn_backend(
+                    db,
+                    parent.fleet.root.channel,
+                    source,
+                    enabled=True,
+                    worker=worker,
+                    validate_origin=validate_origin,
+                )
+            remaining_s(bound, now=self.now(), refuse_expired=True)
+            if revision is None or origin != "agent":
+                raise WorkerSpecRefused("backend", "unsupported")
+            return replace(
+                root,
+                admission=replace(
+                    root.admission, backend_revision=revision, backend_revision_origin=origin
+                ),
+                worker=worker,
+                scope=worker.permissions.fleet.scope,
+                deadline=bound,
+            )
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]

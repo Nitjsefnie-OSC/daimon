@@ -560,6 +560,8 @@ async def _produce_fleet_budget(
             reason = None
             if run.status != "running" or worker.status not in ("pending", "starting", "running"):
                 reason = "terminal"
+            elif worker.error_code == "stop_requested":
+                reason = "worker_stop_requested"
             elif balance is None:
                 reason = "funding_unavailable"
             elif available is not None and (
