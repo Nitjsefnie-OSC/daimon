@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Derive refused source obligations only from captured intent and verify each classification with sensitive baseline tests.
 
 - Capture complete source and effective resource intent at the shared turn-preparation seam, including implicit memory, and refuse every unproved obligation before publishing a backend revision or preparing a native turn.
+- Share session repository, caller-vault and Copilot credential selection with read-only source projection, retaining opaque vault requirements without reading or minting secrets.
+
+- Allow fleet worker specs to declare closed resource drops, narrow their grants, remove sandbox execution tools, and record the declarations in existing scoped audits.
 
 - Retain complete scoped backend source records and read-only session resource facts without exposing secrets; the preparation boundary derives unproved native preservation obligations and refuses execution.
 
