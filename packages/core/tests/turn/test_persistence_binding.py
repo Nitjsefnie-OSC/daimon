@@ -399,7 +399,7 @@ async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_
             query=(
                 ("beta", "true"),
                 ("limit", "100"),
-                ("order", "asc"),
+                ("order", "desc"),
                 ("types[]", "span.model_request_end"),
             ),
         ),

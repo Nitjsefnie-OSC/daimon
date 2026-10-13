@@ -1,5 +1,4 @@
-"""Real expired notebook links show browsers an HTML page; other clients keep JSON
-unless the operator gives every client the page."""
+"""Real expired notebook links show browsers an HTML page; other clients keep JSON."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -8,7 +7,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from notebook_host.blogs_store import BlogRecord, register_blog
-from notebook_host.config import Settings, load_settings
+from notebook_host.config import Settings
 from notebook_host.jail import get_slug_paths
 from notebook_host.main import create_app
 
@@ -18,19 +17,15 @@ BROWSER_ACCEPT = (
 HTML_ACCEPTS = {"text/html", BROWSER_ACCEPT}
 
 
-@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("kind", ["missing", "expired", "wrong-token"])
 @pytest.mark.parametrize(
     "accept", ["*/*", "text/html", "application/json", BROWSER_ACCEPT, "text/html;q=0, */*"]
 )
 async def test_document_refusal_retains_expiry_and_authentication(
-    tmp_path: Path, enabled: bool, kind: str, accept: str
+    tmp_path: Path, kind: str, accept: str
 ) -> None:
     settings = Settings(
-        _env_file=None,
-        data_dir=tmp_path,
-        public_url_base="https://notebooks.invalid/n",
-        html_link_errors=enabled,
+        _env_file=None, data_dir=tmp_path, public_url_base="https://notebooks.invalid/n"
     )
     app = create_app(settings)
     slug = "private-slug"
@@ -62,7 +57,7 @@ async def test_document_refusal_retains_expiry_and_authentication(
     assert response.status_code == 404
     assert "set-cookie" not in response.headers
     assert app.state.admin_state.processes == {}
-    if enabled or accept in HTML_ACCEPTS:
+    if accept in HTML_ACCEPTS:
         assert response.headers["content-type"] == "text/html; charset=utf-8"
         assert "Ask the sender to share a new link." in response.text
         assert all(value not in response.text for value in (slug, token, supplied, "detail"))
@@ -86,27 +81,21 @@ async def test_document_refusal_retains_expiry_and_authentication(
     ],
 )
 @pytest.mark.parametrize("accept", ["*/*", BROWSER_ACCEPT])
-async def test_opt_in_changes_no_other_route_or_method(
+async def test_no_other_route_or_method_gets_the_page(
     tmp_path: Path, method: str, path: str, accept: str
 ) -> None:
-    responses = []
-    for enabled in (False, True):
-        app = create_app(Settings(_env_file=None, data_dir=tmp_path, html_link_errors=enabled))
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), trust_env=False
-        ) as client:
-            response = await client.request(
-                method, "https://notebooks.invalid" + path, headers={"Accept": accept}
-            )
-        responses.append((response.status_code, response.content, dict(response.headers)))
-    assert responses[0] == responses[1]
-    assert responses[1][2]["content-type"] == "application/json"
+    app = create_app(Settings(_env_file=None, data_dir=tmp_path))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), trust_env=False) as client:
+        response = await client.request(
+            method, "https://notebooks.invalid" + path, headers={"Accept": accept}
+        )
+    assert response.headers["content-type"] == "application/json"
 
 
-async def test_opt_in_does_not_render_a_start_failure(
+async def test_a_start_failure_is_not_rendered_as_the_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    settings = Settings(_env_file=None, data_dir=tmp_path, html_link_errors=True)
+    settings = Settings(_env_file=None, data_dir=tmp_path)
     app = create_app(settings)
     register_blog(
         settings.resolved_blogs_file,
@@ -127,11 +116,10 @@ async def test_opt_in_does_not_render_a_start_failure(
     assert response.content == b'{"detail":"notebook is starting"}'
 
 
-@pytest.mark.parametrize("enabled", [False, True])
 async def test_running_notebook_keeps_the_same_upstream_response(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app = create_app(Settings(_env_file=None, data_dir=tmp_path, html_link_errors=enabled))
+    app = create_app(Settings(_env_file=None, data_dir=tmp_path))
     process = MagicMock()
     process.poll.return_value = None
     state = app.state.admin_state
@@ -161,12 +149,3 @@ async def test_running_notebook_keeps_the_same_upstream_response(
     assert response.headers["content-type"] == "text/plain"
     assert len(forwarded) == 1
     assert str(forwarded[0].url) == "http://localhost:8100/n/running/?access_token=saved-token"
-
-
-@pytest.mark.parametrize("raw", [None, "false", "true"])
-def test_html_errors_for_every_client_require_explicit_environment_opt_in(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None
-) -> None:
-    if raw is not None:
-        monkeypatch.setenv("DAIMON_NOTEBOOK__HTML_LINK_ERRORS", raw)
-    assert load_settings(_env_file=None).html_link_errors is (raw == "true")

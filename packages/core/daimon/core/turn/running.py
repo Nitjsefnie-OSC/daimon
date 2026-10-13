@@ -8,8 +8,8 @@ message waiting for a turn slot, then preparing its session) also register for
 the whole accepted operation, through its cleanup; entries nest per task.
 
 A shutdown drain reads it to know what is still in progress. When its grace
-runs out it calls `begin_shutdown` and cancels the tasks: cleanup code reads
-`shutting_down` to tell that cancellation from any other and to leave the
+runs out it calls `begin_shutdown` and cancels the tasks: cleanup code asks
+`is_drain_cancel` to tell that cancellation from any other and to leave the
 provider session recoverable (`docs/architecture.md`, shutdown drain).
 
 One instance lives on `TurnDeps`, so it is shared by every turn the adapter
@@ -34,7 +34,7 @@ class RunningTurns:
     def track(self) -> Iterator[None]:
         """Count the current task as in progress until the block exits."""
         task = asyncio.current_task()
-        if task is None:  # pragma: no cover - only reachable outside an event loop
+        if task is None:  # a loop callback, not a task: nothing to count
             yield
             return
         self._entries[task] = self._entries.get(task, 0) + 1
@@ -62,3 +62,8 @@ class RunningTurns:
     def shutting_down(self) -> bool:
         """Whether a shutdown drain has started cancelling turns in this process."""
         return self._shutting_down
+
+    def is_drain_cancel(self) -> bool:
+        """Whether the current task is unwinding from the shutdown drain's cancel."""
+        task = asyncio.current_task()
+        return self._shutting_down and task is not None and task.cancelling() > 0

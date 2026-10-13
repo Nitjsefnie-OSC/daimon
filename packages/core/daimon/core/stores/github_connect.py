@@ -6,6 +6,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
@@ -1246,12 +1247,42 @@ async def finish_cancel_revocation(session: AsyncSession, *, state: str, cookie:
         await session.flush()
 
 
+GitHubPermission = Literal["admin", "maintain", "write", "triage", "read"]
+
+_WRITE_PERMISSIONS: frozenset[str] = frozenset({"admin", "maintain", "write"})
+
+
+def github_permission(permissions: Mapping[str, bool]) -> GitHubPermission | None:
+    """The highest permission in a GitHub repo's `permissions` object, or None.
+
+    GitHub reports `admin`, `maintain`, `push` (write), `triage` and `pull`
+    (read) as booleans; None means the person has no usable access.
+    """
+    for key, level in (
+        ("admin", "admin"),
+        ("maintain", "maintain"),
+        ("push", "write"),
+        ("triage", "triage"),
+        ("pull", "read"),
+    ):
+        if permissions.get(key) is True:
+            return cast(GitHubPermission, level)
+    return None
+
+
+def permission_max_access(permission: GitHubPermission) -> Literal["read", "write"]:
+    """The most an agent grant can carry for someone with this GitHub permission."""
+    return "write" if permission in _WRITE_PERMISSIONS else "read"
+
+
 class RepoConfirmation(BaseModel):
     repo_id: int
     owner_id: int
     installation_id: int
     full_name: str
     max_access: Literal["read", "write"]
+    # The confirming person's GitHub permission on the repo; None when unknown.
+    authorizer_permission: GitHubPermission | None = None
 
 
 class StaleAgentReposError(ValueError):
@@ -1357,6 +1388,13 @@ async def confirm(
     now = datetime.now(UTC)
     scope = invitation.agent_id
     for repo in repos:
+        if (
+            repo.max_access == "write"
+            and repo.authorizer_permission is not None
+            and permission_max_access(repo.authorizer_permission) != "write"
+        ):
+            raise ValueError("A write grant needs write access on GitHub.")
+    for repo in repos:
         existing = await session.scalar(
             select(TenantGitHubRepo)
             .where(
@@ -1380,14 +1418,17 @@ async def confirm(
         existing.owner_id = repo.owner_id
         existing.installation_id = repo.installation_id
         existing.repo_full_name = repo.full_name
-        existing.max_access = (
-            "write"
-            if (keep_higher and existing.max_access == "write") or repo.max_access == "write"
-            else "read"
-        )
-        existing.authorized_by_github_user_id = github_user_id
-        existing.authorized_by_account_id = invitation.requester_account_id
-        existing.authorized_at = now
+        retained_write = keep_higher and existing.max_access == "write"
+        existing.max_access = "write" if retained_write or repo.max_access == "write" else "read"
+        # A write ceiling that only survives because the row was already
+        # active stays attributed to whoever raised it; a confirmation that
+        # grants read cannot take that credit. The agent's own grant is never
+        # raised past `repo.max_access` (see `activate_confirmed_agent`).
+        if not (retained_write and repo.max_access != "write"):
+            existing.authorized_by_github_user_id = github_user_id
+            existing.authorized_by_account_id = invitation.requester_account_id
+            existing.authorized_permission = repo.authorizer_permission
+            existing.authorized_at = now
         existing.status = "active"
         existing.status_reason = None
     invitation.used_at = now

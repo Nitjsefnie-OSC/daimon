@@ -10,7 +10,7 @@ import pytest
 from fastapi import FastAPI
 from pydantic import HttpUrl, SecretStr
 from report_host import reports_store
-from report_host.config import Settings, load_settings
+from report_host.config import Settings
 from report_host.main import create_app
 
 BROWSER_ACCEPT = (
@@ -20,9 +20,7 @@ HTML_ACCEPTS = {"text/html", BROWSER_ACCEPT}
 
 
 @pytest.fixture
-async def host_pair(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[tuple[FastAPI, FastAPI]]:
+async def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[FastAPI]:
     conn = reports_store.connect(tmp_path)
     now = datetime.now(UTC)
     reports_store.save_report(
@@ -62,21 +60,17 @@ async def host_pair(
         return client
 
     monkeypatch.setattr("report_host.main.httpx.AsyncClient", offline_client)
-    apps = tuple(
-        create_app(
-            Settings(
-                _env_file=None,
-                data_dir=tmp_path,
-                admin_secrets=[SecretStr("private-admin")],
-                mcp_url=HttpUrl("https://mcp.invalid/mcp"),
-                public_url_base=HttpUrl("https://reports.invalid"),
-                html_link_errors=enabled,
-            )
+    app = create_app(
+        Settings(
+            _env_file=None,
+            data_dir=tmp_path,
+            admin_secrets=[SecretStr("private-admin")],
+            mcp_url=HttpUrl("https://mcp.invalid/mcp"),
+            public_url_base=HttpUrl("https://reports.invalid"),
         )
-        for enabled in (False, True)
     )
     try:
-        yield apps
+        yield app
     finally:
         for client in outbound_clients:
             await client.aclose()
@@ -100,7 +94,7 @@ async def request(
     "accept", ["*/*", "text/html", "application/json", BROWSER_ACCEPT, "text/html;q=0, */*"]
 )
 async def test_document_refusal_is_indistinguishable_and_keeps_403(
-    host_pair: tuple[FastAPI, FastAPI], kind: str, accept: str
+    host: FastAPI, kind: str, accept: str
 ) -> None:
     path = {
         "missing": "/r/missing",
@@ -109,35 +103,29 @@ async def test_document_refusal_is_indistinguishable_and_keeps_403(
         "expired": "/r/private-report?k=private-expired",
         "revoked": "/r/private-report?k=private-revoked",
     }[kind]
-    default = await request(host_pair[0], path, accept=accept)
-    opted = await request(host_pair[1], path, accept=accept)
-    assert default.status_code == opted.status_code == 403
-    if accept in HTML_ACCEPTS:
-        assert default.content == opted.content, "a browser gets the page without the opt-in"
-    else:
-        assert default.headers["content-type"] == "application/json"
-        assert default.content == b'{"detail":"this link is not valid for this report"}'
-    assert opted.headers["content-type"] == "text/html; charset=utf-8"
-    assert "Ask the sender to share a new link." in opted.text
-    assert "set-cookie" not in opted.headers
+    response = await request(host, path, accept=accept)
+    assert response.status_code == 403
+    assert "set-cookie" not in response.headers
+    if accept not in HTML_ACCEPTS:
+        assert response.headers["content-type"] == "application/json"
+        assert response.content == b'{"detail":"this link is not valid for this report"}'
+        return
+    assert response.headers["content-type"] == "text/html; charset=utf-8"
+    assert "Ask the sender to share a new link." in response.text
     assert all(
-        value not in opted.text for value in ("private", "missing", "detail", "expired", "revoked")
+        value not in response.text
+        for value in ("private", "missing", "detail", "expired", "revoked")
     )
-    other_refusal = await request(host_pair[1], "/r/private-report?k=private-unknown")
-    assert opted.content == other_refusal.content
+    other_refusal = await request(host, "/r/private-report?k=private-unknown", accept=accept)
+    assert response.content == other_refusal.content
 
 
 @pytest.mark.parametrize("accept", ["*/*", "text/html", "application/json", BROWSER_ACCEPT])
-async def test_valid_viewer_bytes_and_cookie_are_unchanged(
-    host_pair: tuple[FastAPI, FastAPI], accept: str
-) -> None:
-    responses = [
-        await request(app, "/r/private-report?k=private-valid", accept=accept) for app in host_pair
-    ]
-    assert responses[0].status_code == responses[1].status_code == 200
-    assert responses[0].content == responses[1].content
-    assert dict(responses[0].headers) == dict(responses[1].headers)
-    assert "httponly" in responses[1].headers["set-cookie"].lower()
+async def test_a_valid_link_gets_the_viewer_and_its_cookie(host: FastAPI, accept: str) -> None:
+    response = await request(host, "/r/private-report?k=private-valid", accept=accept)
+    assert response.status_code == 200
+    assert "Link unavailable" not in response.text
+    assert "httponly" in response.headers["set-cookie"].lower()
 
 
 @pytest.mark.parametrize(
@@ -154,24 +142,8 @@ async def test_valid_viewer_bytes_and_cookie_are_unchanged(
     ],
 )
 @pytest.mark.parametrize("accept", ["*/*", BROWSER_ACCEPT])
-async def test_opt_in_changes_no_api_file_admin_or_other_method(
-    host_pair: tuple[FastAPI, FastAPI], method: str, path: str, accept: str
+async def test_no_api_file_admin_or_other_method_gets_the_page(
+    host: FastAPI, method: str, path: str, accept: str
 ) -> None:
-    responses = [await request(app, path, method=method, accept=accept) for app in host_pair]
-    assert responses[0].status_code == responses[1].status_code
-    assert responses[0].content == responses[1].content
-    assert dict(responses[0].headers) == dict(responses[1].headers)
-    assert responses[1].headers["content-type"] == "application/json"
-
-
-@pytest.mark.parametrize("raw", [None, "false", "true"])
-def test_html_errors_for_every_client_require_explicit_environment_opt_in(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None
-) -> None:
-    monkeypatch.delenv("DAIMON_REPORT__HTML_LINK_ERRORS", raising=False)
-    monkeypatch.setenv("DAIMON_REPORT__ADMIN_SECRETS", "offline-admin")
-    monkeypatch.setenv("DAIMON_REPORT__MCP_URL", "https://mcp.invalid/mcp")
-    monkeypatch.setenv("DAIMON_REPORT__PUBLIC_URL_BASE", "https://reports.invalid")
-    if raw is not None:
-        monkeypatch.setenv("DAIMON_REPORT__HTML_LINK_ERRORS", raw)
-    assert load_settings(_env_file=None).html_link_errors is (raw == "true")
+    response = await request(host, path, method=method, accept=accept)
+    assert response.headers["content-type"] == "application/json"

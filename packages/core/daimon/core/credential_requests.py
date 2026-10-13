@@ -62,7 +62,8 @@ CredentialRequestKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "
 # same thread for the same agent, and the newer form retired this one so the
 # thread never holds two live buttons for one intent. "token_rejected" — the
 # server refused the pasted token before anything was written. "declined" —
-# the person cancelled an OAuth sign-in at the provider.
+# the person cancelled an OAuth sign-in at the provider. "expired" — nobody
+# clicked it before its deadline, and the expiry poller retired its card.
 CredentialRequestOutcome = Literal[
     "applied",
     "stale_replacement",
@@ -71,6 +72,7 @@ CredentialRequestOutcome = Literal[
     "replaced_by_newer",
     "token_rejected",
     "declined",
+    "expired",
     "expired_card_pending",
     "expired_card_updated",
 ]

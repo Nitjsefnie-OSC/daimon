@@ -65,9 +65,10 @@ async def test_lease_inserts_preserve_host_uuid_sequence(
         )
         assert lease_id == uuid.UUID(int=(1 << 120) + index + 1)
     # Direct controls and a second host-table server default keep their ordinals.
+    # The second host row is an account: a second tenant would share the first's
+    # 8-hex id prefix, which tenants may not.
+    accounts = metadata.tables["accounts"]
     assert uuid.uuid4() == uuid.UUID(int=before.int + 2)
     assert await db_session.scalar(
-        insert(tenants)
-        .values(platform="discord", external_id="uuid-probe-after-leases")
-        .returning(tenants.c.id)
+        insert(accounts).values(tenant_id=tenant_id).returning(accounts.c.id)
     ) == uuid.UUID(int=before.int + 3)

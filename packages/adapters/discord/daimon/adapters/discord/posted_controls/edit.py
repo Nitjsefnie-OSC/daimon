@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from contextlib import suppress
 
+import aiohttp
 import structlog
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.posted_controls.view import build_card_view
@@ -49,10 +50,11 @@ async def edit_posted_card(
 ) -> None:
     """Re-render the request's own message into `state`.
 
-    Never raises. By the time this runs the state it is announcing is already
-    durable — the row is consumed, the write has landed or been refused — so
-    an edit that cannot be delivered (message deleted, thread archived,
-    permissions lost) is a downgrade in feedback, not in correctness.
+    Never raises on a platform or transport failure. By the time this runs
+    the state it is announcing is already durable — the row is consumed, the
+    write has landed or been refused — so an edit that cannot be delivered
+    (message deleted, thread archived, permissions lost, a timeout) is a
+    downgrade in feedback, not in correctness.
 
     Returns silently for a row with no posted message to edit; the ids are
     recorded right after the post, so a row without them never had a card.
@@ -100,7 +102,9 @@ async def edit_posted_card(
                 )
             else:
                 await message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
-        except discord.HTTPException as err:
+        except (discord.HTTPException, OSError, aiohttp.ClientError) as err:
+            # OSError covers a timeout or dropped connection discord.py does
+            # not retry, so a caller editing many cards still reaches the rest.
             _log.warning(
                 "posted_card.edit_failed", err_type=type(err).__name__, state=state, kind=row.kind
             )

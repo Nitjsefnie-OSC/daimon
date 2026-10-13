@@ -248,9 +248,9 @@ async def mcp_janitor(*, rt: CliRuntime, console: Console, apply: bool) -> None:
         "Matches ONLY the static_bearer at the current public_url — never Copilot or "
         "user-added external creds. "
         "Default is dry-run (read-only); pass --apply to mutate. "
-        "NOTE: this sweep is NOT the fix for the #162 escalation — that is closed at "
-        "the 88-03 gate. This sweep aligns the existing credential fleet with the "
-        "post-88-03 no-is_admin invariant."
+        "NOTE: this sweep is NOT the fix for the admin escalation — that is closed at "
+        "the MCP admin gate. This sweep aligns the existing credential fleet with the "
+        "no-is_admin invariant."
     ),
 )
 def mcp_sweep_credentials_command(

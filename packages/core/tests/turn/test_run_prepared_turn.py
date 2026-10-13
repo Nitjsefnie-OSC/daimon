@@ -431,10 +431,10 @@ async def test_reattaching_to_a_session_debits_calls_no_worker_streamed(
     assert sorted(r.event_id for r in rows) == ["evt_gap_0", "evt_gap_1"], (
         "every call the dead worker never streamed is metered on reattach"
     )
-    reconciled = [e for e in logs if e["event"] == "billing.reconciled_unbilled"]
-    assert [e["debited"] for e in reconciled] == [2], "debited once, at turn end"
+    settled = [e for e in logs if e["event"] == "billing.settled"]
+    assert [e["debited"] for e in settled] == [2], "debited once, at turn end"
     events = [e["event"] for e in logs]
-    assert events.index("billing.reconciled_unbilled") > events.index("turn.completed"), (
+    assert events.index("billing.settled") > events.index("turn.completed"), (
         "the catch-up runs after the turn, never in front of the user's message"
     )
     assert sent, "the turn still sent its message"
@@ -450,10 +450,7 @@ async def test_a_slow_billing_catch_up_neither_fails_nor_holds_the_turn(
     """The catch-up is bounded by its own budget and runs outside the ceiling: a
     stalled MA read cannot turn a healthy turn into a ceiling failure, and the
     turn returns about one budget later, with its outcome intact."""
-    import functools
     import time
-
-    from daimon.core.usage_reconcile import reconcile_unbilled
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -477,9 +474,7 @@ async def test_a_slow_billing_catch_up_neither_fails_nor_holds_the_turn(
     router.routes.insert(
         0, ("GET", re.compile(r"/v1/sessions/(?P<sid>[^/]+)/events"), cast(Any, _stalled_list))
     )
-    monkeypatch.setattr(
-        run_module, "reconcile_unbilled", functools.partial(reconcile_unbilled, budget_s=budget_s)
-    )
+    monkeypatch.setattr(run_module, "SETTLE_BUDGET_S", budget_s)
     deps = _deps(sessionmaker=db_session_factory, router=router)
     prepared = _prepared_turn(
         deps=deps,
@@ -517,7 +512,7 @@ async def test_a_slow_billing_catch_up_neither_fails_nor_holds_the_turn(
     assert elapsed < budget_s + 2.0 < stall_s, f"the turn was held {elapsed:.2f}s by its catch-up"
     expected = TerminationReason.CEILING if ceiling else TerminationReason.COMPLETED
     assert outcome.termination is expected
-    assert [e["truncated"] for e in logs if e["event"] == "billing.reconciled_unbilled"] == [True]
+    assert [e["complete"] for e in logs if e["event"] == "billing.settled"] == [False]
 
 
 async def test_a_turn_is_registered_as_running_for_exactly_the_call(

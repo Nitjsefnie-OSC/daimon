@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
@@ -84,7 +85,7 @@ from daimon.core.turn.provider_actions import (
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
-from daimon.core.usage_reconcile import reconcile_unbilled
+from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
@@ -203,33 +204,31 @@ def _turn_port_kwargs(
 log = structlog.get_logger(__name__)
 
 
-async def _reconcile_unbilled(
-    deps: TurnDeps, *, session_id: str, scope: Scope, record: UsageRecorder
-) -> None:
+async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: UsageRecorder) -> None:
     """Debit model calls on `session_id` that no live stream metered.
 
     Runs once the turn is over -- after its answer or failure was rendered --
     so it never delays the user's message or spends the turn's ceiling.
-    `reconcile_unbilled` bounds itself (pages and one wall-clock budget over
-    MA and database work); its durable cursor lets the next turn resume.
+    `settle_session` is bounded by its own page count and budget.
 
-    Named boundary: a failed backfill must not fail the user's turn.
-    Recording is idempotent, so the next pass on the session (or the
-    scheduler sweep) retries whatever this one could not write.
+    Named boundary: a failed settle must not fail the user's turn. Recording
+    is idempotent, so the next settle on the session retries whatever this one
+    could not write.
     """
     try:
-        await reconcile_unbilled(
-            anthropic=deps.anthropic,
-            sessionmaker=deps.sessionmaker,
-            managed_session_id=session_id,
+        await settle_session(
+            deps.anthropic,
+            deps.sessionmaker,
+            session_id,
             scope=scope,
             record=record,
+            deadline=time.monotonic() + SETTLE_BUDGET_S,
         )
     except _anthropic.NotFoundError:
         # A deleted session: its events can no longer be listed.
-        log.info("billing.reconcile_skipped", managed_session_id=session_id)
+        log.info("billing.settle_skipped", managed_session_id=session_id)
     except (_anthropic.APIError, SQLAlchemyError):
-        log.exception("billing.reconcile_failed", managed_session_id=session_id)
+        log.exception("billing.settle_failed", managed_session_id=session_id)
 
 
 __all__ = ["RunOutcome", "run_prepared_turn"]
@@ -1290,7 +1289,7 @@ async def run_prepared_turn_impl(
     active_admission = active_admission_cell[0]
     revision = active_admission.backend_revision
     if revision is None or revision.profile == "anthropic.managed_agents":
-        await _reconcile_unbilled(
+        await _settle(
             deps,
             session_id=active_session_id_cell[0],
             scope=admitted_session_scope(

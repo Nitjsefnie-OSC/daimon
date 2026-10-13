@@ -32,7 +32,7 @@ from daimon.adapters.cli.tenant import (
 from daimon.core import channel_backend
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import ensure_agent_face
-from daimon.core.agent_lifecycle import archive_memory_store_best_effort
+from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
 from daimon.core.authz import Subject
 from daimon.core.config import load_settings, load_turn_settings
 from daimon.core.defaults.ma_index import (
@@ -58,7 +58,6 @@ from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.tenants import list_tenants_by_platform
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
@@ -461,6 +460,7 @@ async def agents_create(
         account_id=derive_guild_account_uuid(tenant_id),
         public_url=public_url,
         managed=False,
+        references=rt.sessionmaker,
     )
     await ensure_agent_face(
         rt.sessionmaker,
@@ -531,6 +531,7 @@ async def agents_update(
         account_id=derive_guild_account_uuid(tenant_id),
         public_url=public_url,
         managed=False,
+        references=rt.sessionmaker,
     )
     console.print(f"[green]✓ updated agent {spec.name!r}[/green]")
 
@@ -698,10 +699,11 @@ async def agents_archive(
     yes: bool,
     selector: TenantSelector | None = None,
 ) -> None:
-    """Archive an agent, its memory store, and every scope row that names it.
+    """Archive an agent, its memory store, its rule and every scope row that names it.
 
-    Same three-step shape as the Discord and Slack panel deletes: archive the
-    MA agent, archive its memory store best-effort, then clear the scope rows.
+    Same three-step shape as the MCP archive tool and the Slack panel delete:
+    archive the MA agent, archive its memory store best-effort, then drop its
+    rule and clear the scope rows (`forget_archived_agent`).
     Without the clear, a channel or tenant default naming this agent survives
     the archive and turn resolution misses instead of falling through the
     cascade.
@@ -730,11 +732,10 @@ async def agents_archive(
         log_context={"tenant_id": str(tenant_id), "agent_name": name, "ma_agent_id": agent.id},
     )
     # After the MA archive, never before: a failure here leaves an archived
-    # agent with stale scope rows rather than a live agent with cleared ones.
+    # agent with a stale rule and scope rows rather than a live agent with cleared ones.
     # Deliberately unguarded — a failure must reach run_cli's error boundary
     # rather than degrade silently.
-    async with rt.sessionmaker.begin() as session:
-        await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
+    await forget_archived_agent(rt.sessionmaker, tenant_id=tenant_id, name=name, agent=agent)
 
     console.print(f"[green]✓ archived agent {name!r}[/green]")
 

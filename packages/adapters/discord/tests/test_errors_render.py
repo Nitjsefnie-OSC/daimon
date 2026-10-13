@@ -288,3 +288,24 @@ def test_an_unreadable_access_policy_keeps_its_words_and_the_ref() -> None:
         "this workspace's access settings can't be read, so no turn was started; "
         f"ask an admin to fix them\n\n{REF}"
     )
+
+
+def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
+    """Findings #6/#11: the turn names the gone skill and who must remove it."""
+    from daimon.core.skills.unresolved import skill_unavailable
+    from daimon.testing.ma_models import ma_agent
+
+    exc = TurnError(
+        kind="upstream",
+        cause=skill_unavailable(
+            skill_id="skill_01PBRj",
+            agent=ma_agent(id="ag_qa", name="qa"),
+            channel_skills=(),
+            channel_skill_name=None,
+        ),
+    )
+
+    text = render_error(exc, request_id="")
+
+    assert '"skill_01PBRj"' in text and "remove_skill" in text
+    assert "couldn't accept the request" not in text

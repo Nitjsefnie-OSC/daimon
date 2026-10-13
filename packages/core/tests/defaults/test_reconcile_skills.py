@@ -241,6 +241,7 @@ async def test_reconcile_skill_deletes_duplicates_keeping_newest(
 
     # delete_skill_and_versions does: list versions, delete each, then delete skill.
     router.add("GET", r"/v1/skills/[^/]+/versions", lambda req, _m: list_response([]))
+    router.add_agent_list()  # the guarded duplicate delete checks references
     router.add("DELETE", r"/v1/skills/[^/]+", on_skill_delete)
     router.add(
         "POST",

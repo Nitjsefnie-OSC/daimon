@@ -34,7 +34,12 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
+from anthropic.types.beta import (
+    BetaEnvironment,
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsSession,
+    SkillRetrieveResponse,
+)
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.testing.ma_models import (
     DEFAULT_MODEL_ID,
@@ -163,6 +168,19 @@ def not_found_response(message: str) -> httpx.Response:
         404,
         json={"type": "error", "error": {"type": "not_found_error", "message": message}},
     )
+
+
+def skill_response(skill_id: str, display_title: str | None = None) -> dict[str, Any]:
+    """A validated `GET /v1/skills/{id}` body for a custom skill."""
+    return SkillRetrieveResponse(
+        id=skill_id,
+        type="skill",
+        source="custom",
+        display_title=display_title or skill_id,
+        latest_version="1",
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+    ).model_dump(mode="json")
 
 
 def sse_response(events: list[dict[str, Any]]) -> httpx.Response:
@@ -580,6 +598,10 @@ def make_fake_ma_handler(
         if method == "GET" and path == "/v1/skills":
             return httpx.Response(200, json={"data": [], "next_page": None})
 
+        # GET /v1/skills/{id}/versions — a delete lists versions first
+        if method == "GET" and re.fullmatch(r"/v1/skills/[^/]+/versions", path):
+            return httpx.Response(200, json={"data": [], "has_more": False})
+
         # POST /v1/agents — create
         if method == "POST" and path == "/v1/agents":
             body: dict[str, Any] = json.loads(request.content)
@@ -650,6 +672,9 @@ def make_fake_ma_handler(
             body = json.loads(request.content)
             existing = store[agent_id]
             merged: dict[str, object] = {**existing, **body}
+            if isinstance(body.get("model"), str):
+                # The response carries the model config form, as a create's does.
+                merged["model"] = {"id": body["model"], "speed": "standard"}
             err = _validate_mcp_toolset_crossref(merged)
             if err:
                 return httpx.Response(
@@ -751,7 +776,7 @@ def make_fake_memory_store_handler(
 
     Raises NotHandled for non-memory paths — compose with other handlers via
     combine_handlers. Covers: store create/retrieve/archive/delete, memory
-    create/list/retrieve. (update/versions endpoints are out of v1 scope.)
+    create/list/retrieve/delete. (update/versions endpoints are out of v1 scope.)
 
     When combining with make_fake_ma_handler (which returns a 404 catch-all),
     pass this handler first to combine_handlers() so requests are tried here before fallthrough.
@@ -801,6 +826,23 @@ def make_fake_memory_store_handler(
             return list_response(data)
 
         m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/memories/(?P<mid>[^/]+)", path)
+        if m and method == "DELETE":
+            sid, mid = m.group("sid"), m.group("mid")
+            expected = request.url.params.get("expected_content_sha256")
+            current = next((x for x in st.memories.get(sid, []) if x["id"] == mid), None)
+            if (
+                expected is not None
+                and current is not None
+                and current.get("content_sha256") != expected
+            ):
+                return httpx.Response(
+                    409, json={"type": "error", "error": {"type": "conflict_error"}}
+                )
+            kept = [x for x in st.memories.get(sid, []) if x["id"] != mid]
+            if len(kept) == len(st.memories.get(sid, [])):
+                return not_found_response("no such memory")
+            st.memories[sid] = kept
+            return httpx.Response(200, json={"id": mid, "type": "memory_deleted"})
         if m and method == "GET":
             sid, mid = m.group("sid"), m.group("mid")
             view = request.url.params.get("view", "basic")

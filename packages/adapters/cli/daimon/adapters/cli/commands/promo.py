@@ -74,6 +74,16 @@ def promo_create_command(
         typer.Option("--code", help="Use this code (12+ characters) instead of a generated one."),
     ] = None,
     note: Annotated[str | None, typer.Option("--note", help="Operator note.")] = None,
+    channel_cap: Annotated[
+        str | None,
+        typer.Option(
+            "--channel-cap",
+            help=(
+                "Make a channel code: any member redeems it into their own channel's budget,"
+                " once each, until that channel has taken this much (USD, at least --amount)."
+            ),
+        ),
+    ] = None,
 ) -> None:
     async def _go(rt: CliRuntime, console: Console) -> None:
         await promo_create(
@@ -88,6 +98,7 @@ def promo_create_command(
             max_redemptions=max_redemptions,
             code=code,
             note=note,
+            channel_cap=channel_cap,
         )
 
     _run(_go)
@@ -106,11 +117,16 @@ async def promo_create(
     max_redemptions: int | None = None,
     code: str | None = None,
     note: str | None = None,
+    channel_cap: str | None = None,
 ) -> None:
     try:
         amount_usd = Decimal(amount)
     except (InvalidOperation, ValueError) as exc:
         raise typer.BadParameter("amount must be a dollar amount") from exc
+    try:
+        channel_cap_usd = None if channel_cap is None else Decimal(channel_cap)
+    except (InvalidOperation, ValueError) as exc:
+        raise typer.BadParameter("channel cap must be a dollar amount") from exc
     try:
         terms = build_promo_code_terms(
             amount_usd=amount_usd,
@@ -121,6 +137,7 @@ async def promo_create(
             redeem_ends_at=_timestamp(redeem_until),
             max_redemptions=max_redemptions,
             note=note,
+            channel_cap_usd=channel_cap_usd,
         )
         shown = code.strip() if code is not None else generate_promo_code()
         normalized = normalize_chosen_promo_code(shown)
@@ -134,6 +151,11 @@ async def promo_create(
         raise StoreError("a promo code with this code already exists")
     console.print(f"promo code: {shown}")
     console.print(f"id: {row.id}")
+    if row.channel_cap_usd is not None:
+        console.print(
+            f"Any member can redeem it in their channel: ${row.amount_usd:,.2f} each,"
+            f" up to ${row.channel_cap_usd:,.2f} per channel."
+        )
     console.print("Only a hash is stored, so this is the one time the code is shown.")
 
 
@@ -162,6 +184,7 @@ async def promo_list(*, rt: CliRuntime, console: Console, as_json: bool) -> None
             "redeem_starts_at",
             "redeem_ends_at",
             "revoked_at",
+            "channel_cap_usd",
             "note",
         ),
         as_json=as_json,
@@ -212,6 +235,7 @@ async def promo_redemptions(
         columns=(
             "tenant_platform",
             "tenant_external_id",
+            "channel_id",
             "redeemed_at",
             "granted_at",
             "expired_at",

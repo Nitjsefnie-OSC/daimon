@@ -52,26 +52,17 @@ async def run():
                     require(os.environ is original_environment, "environment mapping leaked beyond construction")
                     flags = profiles.applied_product_flags()
                     require(flags == frozenset(profile.flags) if name == "opt-in" else not flags,
-                            "actual factories did not apply exactly the selected six switches")
+                            "actual factories did not apply exactly the selected switches")
                     observations = []
                     for entry in entries:
                         for backend in ("anthropic", "openai", "gemini"):
                             plan = plan_scenario(entry, Path("packages/testing/fixtures/http_sources").resolve(), backend, run_id="profile-control")
                             cell = await execute_http_cell(plan, observer)
                             restored = CellResult.model_validate_json(cell.model_dump_json(exclude_computed_fields=True))
-                            expected = "PASS" if name == "opt-in" and entry.id.startswith("QA-NEW24") else "FAIL"
-                            require(restored.status == expected, "response oracle ignored the real profile setting")
+                            expected = "FAIL"  # no profile switch remains; non-browser link errors stay JSON
+                            require(restored.status == expected, f"response oracle ignored the real profile setting: {name} {entry.id} {backend} {restored.status} != {expected}")
                             require(restored.request_count == 2 and not restored.evidence.turns, "HTTP source lost scope or observations")
                             observations.append(tuple((o.status, o.headers, o.body, o.requested_url) for o in restored.admin_http.observations))
-                            if expected == "PASS":
-                                raw = restored.model_dump(mode="json", exclude_computed_fields=True)
-                                raw["admin_http"]["observations"][0]["body"] = '{"detail":"injected regression"}'
-                                try:
-                                    CellResult.model_validate(raw)
-                                except ValueError:
-                                    pass
-                                else:
-                                    raise AssertionError("profile configuration overrode a real response failure")
                     if name == "opt-in":
                         selected = observations
                     elif baseline:
@@ -79,7 +70,7 @@ async def run():
                     else:
                         baseline = observations
             require(profiles.current_product_profile() == profiles.DEFAULT_PRODUCT_PROFILE and not profiles.applied_product_flags(), "profile scope did not restore")
-        require(selected != baseline, "opt-in factory replayed the default responses")
+        require(selected == baseline, "a profile switch changed the HTTP hosts' responses")  # no host switch remains
         with patch.object(http, "build_async_anthropic", denied):
             try:
                 async with http.offline_http_apps(Path(folder, "mismatch"), nonce="same", profile=profiles.OPT_IN_PRODUCT_PROFILE):
@@ -95,7 +86,7 @@ async def run():
                 except ValueError as error:
                     require("refuses ambient" in str(error), "hostile environment reached app construction")
                 require(not Path(folder, "hostile").exists(), "ambient refusal created a store")
-    print("PASS: None byte parity, six applied settings, 18 real cells, response corruption refusal, profile/ambient admission, cleanup")
+    print("PASS: None byte parity, applied settings, 18 real cells, host responses unchanged by profile, profile/ambient admission, cleanup")
 
 asyncio.run(run())
 """

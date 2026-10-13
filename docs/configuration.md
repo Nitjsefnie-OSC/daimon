@@ -100,9 +100,9 @@ Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
 
 `dict[UUID, bool]` · optional · default `{}`
 
-Per-tenant table rendering opt-in, keyed by tenant UUID. True renders final Markdown
-tables as PNG on Discord and native tables on Slack. Missing/false preserves plain text.
-Set DAIMON_TABLE_RENDERING to a JSON object.
+Per-tenant table rendering, keyed by tenant UUID. Discord renders final Markdown tables
+as PNG unless the tenant is set to false. Slack renders native tables only when set to
+true. Set DAIMON_TABLE_RENDERING to a JSON object.
 
 ### `DAIMON_PRIVACY_POLICY_URL`
 
@@ -492,6 +492,15 @@ kept in memory, so each restart allows one more hint per thread.
 
 Hours before the unmentioned-reply hint may be shown again in the same thread. Kept in
 memory, so a restart allows one more.
+
+### `DAIMON_DISCORD__PROTECTED_CHANNEL_NOTICE_COOLDOWN_MIN`
+
+`float` · optional · default `10.0`
+
+Minutes before the same person is told again that Daimon can't reply in a channel whose
+Who can post rule is Nobody. Their mention gets a 🔒 reaction and a direct message naming
+the rule and who can change it; nothing else is posted and no turn runs. Kept in memory
+per person and channel, so a restart allows one more.
 
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS_PER_TENANT`
 
@@ -1211,7 +1220,8 @@ title (``tests/parity/ test_thread_naming_discord_only.py``).
 
 Title bot-created Discord threads from the opening message with a short Haiku-generated
 name, chosen before the thread is created. The call is metered to the tenant like any
-other model call. Set false to keep the static 'Chat with &lt;agent&gt;' title.
+other model call. Set false to title threads with the opening message itself, cut to 50
+characters.
 
 ### `DAIMON_THREAD_NAMING__MAX_INPUT_CHARS`
 
@@ -1224,9 +1234,9 @@ here. Bounds the per-thread naming cost.
 
 `float` · optional · default `5.0`
 
-Seconds to wait for the naming model before the thread opens under the static title. The
-thread is created only after this call, so this is the most a mention can wait before
-anything appears.
+Seconds to wait for the naming model before the thread opens under a title taken from
+the opening message. The thread is created only after this call, so this is the most a
+mention can wait before anything appears.
 
 ## Turn Queue
 
@@ -1431,14 +1441,12 @@ pauses the same interval between passes.
 
 ### `DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
-Run the headless usage sweep (usage backfill for MCP start_turn sessions). Off by
-default: the current sweep lists every session in the shared Managed Agents workspace
-and drains its request rate limit. While off, headless MCP turns are not metered and
-usage a live adapter missed is not recovered; turning it back on backfills them, since
-recording is idempotent and the startup pass reads every stamped session still in the
-workspace.
+Run the headless usage sweep: settle the MCP agent-chat sessions whose turns nobody read
+to the end (each headless send leaves a settle request; a status read that sees the turn
+end settles it first). It reads only the sessions those requests name. When off, such a
+session is billed the next time a read sees its last turn ended.
 
 ### `DAIMON_SCHEDULER__MAX_AGE_S`
 
@@ -1555,15 +1563,6 @@ shared env file would set both.
 ### `DAIMON_NOTEBOOK__PUBLIC_URL_BASE`
 
 `str | None` · optional · default unset
-
-### `DAIMON_NOTEBOOK__HTML_LINK_ERRORS`
-
-`bool` · optional · default `False`
-
-Show the static HTML page for unavailable notebook document links (GET /n/{slug}/,
-status 404) to every client. Browsers (Accept: text/html) always get it; with this off,
-other clients keep the JSON error. Other routes and methods keep their existing
-responses.
 
 ### `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES`
 
@@ -1730,14 +1729,6 @@ Cap on concurrently running turns across one report's threads.
 `int` · optional · default `90`
 
 How long a per-recipient link remains valid before expiring.
-
-### `DAIMON_REPORT__HTML_LINK_ERRORS`
-
-`bool` · optional · default `False`
-
-Show the static HTML page for refused report document links (GET /r/{slug}, status 403)
-to every client. Browsers (Accept: text/html) always get it; with this off, other
-clients keep the JSON error. API, file and admin routes keep their existing responses.
 
 ### `DAIMON_REPORT__THREAD_IDLE_ARCHIVE_HOURS`
 

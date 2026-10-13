@@ -45,7 +45,7 @@ from daimon.core.specs import AgentSpec, SkillRef, dump_agent_spec
 READER_SKILL_NAME = "report-reader"
 
 # Appended to the source agent's system prompt. Prose the model reads, not a
-# spec citation — carries the five clauses SPEC §1.7 names for a reader
+# spec citation — carries the five clauses the spec names for a reader
 # variant's behaviour.
 READER_BLOCK = """
 
@@ -114,13 +114,6 @@ async def ensure_reader_variant(
     source_name: str,
 ) -> BetaManagedAgentsAgent:
     """Find, create or update the reader variant of `source_name`, on MA only.
-
-    Deliberate deviation from SPEC §1.7's literal signature: the spec writes
-    `ensure_reader_variant(anthropic, session_factory, *, ...)`, but nothing
-    in this function's work touches the database — resolving the source,
-    deriving the spec, resolving skill refs and creating or updating the
-    agent are all Managed Agents calls. `guideline:architecture` forbids
-    taking a collaborator you do not use, so `session_factory` is omitted.
 
     Reuse is keyed on `daimon_reader_of`, a fingerprint of the *source's*
     shape: `daimon_spec_hash` off the source's own metadata when it carries

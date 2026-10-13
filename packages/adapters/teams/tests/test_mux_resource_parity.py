@@ -131,7 +131,7 @@ async def test_imported_skill_attachment_keeps_requests_retry_limit_and_notice(
             ResourceOutcome(kind="skill", name="added", action=Action.CREATED, anthropic_id="added")
         ]
         result = await credentials.attach_imported_skills(
-            cast(TeamsRuntime, SimpleNamespace(anthropic=new)),
+            cast(TeamsRuntime, SimpleNamespace(anthropic=new, sessionmaker=None)),
             tenant_id=tenant,
             agent_id=UUID("00000000-0000-0000-0000-000000000008"),
             outcomes=outcomes,

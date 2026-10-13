@@ -1,4 +1,4 @@
-"""Operator queries for content-free turn usage; no upstream API calls."""
+"""Operator usage commands: content-free turn telemetry, and the backlog settle."""
 
 from __future__ import annotations
 
@@ -8,12 +8,15 @@ from typing import Annotated
 from uuid import UUID
 
 import typer
+from anthropic import AsyncAnthropic
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.core.config import load_settings
+from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.context_prompt import DEFAULT_FRAGMENTS
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.stores.turn_usage import list_turn_usage, usage_by_channel
+from daimon.core.usage_sweep import settle_backlog
 from rich.console import Console
 
 usage_app = typer.Typer(help="Content-free turn telemetry (measurement only).")
@@ -101,3 +104,76 @@ def usage_turns_command(
             await engine.dispose()
 
     asyncio.run(query())
+
+
+@usage_app.command("settle-backlog")
+def usage_settle_backlog_command(
+    internal: Annotated[
+        list[UUID] | None,
+        typer.Option(help="An internal tenant whose backlog is debited; repeat for each."),
+    ] = None,
+    session: Annotated[
+        list[str] | None,
+        typer.Option(help="Only these MA session ids (default: every MCP agent-chat session)."),
+    ] = None,
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Debit and waive. Without it this is a dry run.")
+    ] = False,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Settle the calls made before the settle path was deployed.
+
+    An internal tenant's backlog is debited; every other tenant's is waived
+    (its would-be debit logged, nothing charged). A dry run by default, which
+    writes nothing. Prints a receipt: the cutoff, the mode, and per tenant the
+    sessions, calls, raw cost, would-be debit, and what was debited (internal,
+    applied) or waived (external). `--json` prints it as one JSON object to
+    keep as evidence; the command writes no files.
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def run() -> None:
+        engine = build_engine(
+            str(settings.database.url),
+            pool_size=settings.database.pool_size,
+            max_overflow=settings.database.max_overflow,
+            pool_timeout=settings.database.pool_timeout,
+        )
+        try:
+            async with AsyncAnthropic(
+                api_key=settings.anthropic.api_key.get_secret_value(),
+                base_url=str(settings.anthropic.base_url),
+                max_retries=MA_MAX_RETRIES,
+            ) as client:
+                receipt = await settle_backlog(
+                    client,
+                    build_session_factory(engine),
+                    internal=frozenset(internal or ()),
+                    markup=settings.billing.markup,
+                    session_ids=session or (),
+                    apply=apply,
+                )
+        finally:
+            await engine.dispose()
+        if as_json:
+            console.print(receipt.model_dump_json(), soft_wrap=True, highlight=False, markup=False)
+            return
+        console.print(f"cutoff: {receipt.cutoff}  mode: {receipt.mode}", markup=False)
+        emit_rows(
+            console,
+            receipt.tenants,
+            columns=(
+                "tenant_id",
+                "kind",
+                "sessions",
+                "calls",
+                "cost_usd",
+                "would_debit_usd",
+                "debited_usd",
+                "waived_usd",
+            ),
+            as_json=False,
+        )
+
+    asyncio.run(run())

@@ -51,6 +51,7 @@ from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
+from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
@@ -94,7 +95,6 @@ from daimon.core.specs import (
 )
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
-from daimon.core.stores.scoped_config_write import clear_agent_references
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import Provider
@@ -501,6 +501,7 @@ async def _create_agent_impl(
         # sweep-eligible, so the next defaults apply (every boot/deploy)
         # archives them because they aren't in the seeded spec list.
         managed=False,
+        references=runtime.session_factory,
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
@@ -997,8 +998,9 @@ async def _archive_agent_impl(
     # failure must not skip the scope clear, or every turn in the affected
     # channel — or the whole install, for the workspace row — keeps resolving
     # to an archived agent. A failure here surfaces to the tool caller.
-    async with runtime.session_factory() as session, session.begin():
-        await clear_agent_references(session, tenant_id=auth.tenant_id, agent_name=name)
+    await forget_archived_agent(
+        runtime.session_factory, tenant_id=auth.tenant_id, name=name, agent=agent
+    )
 
 
 async def _set_agent_backend_impl(

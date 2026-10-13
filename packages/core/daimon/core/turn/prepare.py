@@ -68,6 +68,7 @@ from daimon.core.shared_threads import (
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
+from daimon.core.stores.agent_memory_stores import get_personal_memory_store_id
 from daimon.core.stores.domain import BackendAgent, TransferKind
 from daimon.core.stores.github_access import get_agent_mode, list_authorized_repos
 from daimon.core.stores.github_issued_tokens import list_session_tokens
@@ -569,6 +570,9 @@ async def create_ma_session(
         is_external=admission.is_external,
         extra_resources=extra_resources,
         memory_read_only=admission.memory_read_only,
+        # A chat session is keyed on the caller's account, so it belongs to one
+        # person and may carry that person's own memory.
+        personal_memory=True,
         tool_safety=deps.tool_safety,
         asks_before_publishing=admission.asks_before_publishing,
         confirmed_tools=backend_switch_tools_for_turn(deps),
@@ -585,6 +589,10 @@ async def create_ma_session(
         allocation=allocate if preparation is not None else None,
     )
 
+    async with deps.sessionmaker() as session:
+        personal_memory_store_id = await get_personal_memory_store_id(
+            session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=admission.account_id
+        )
     has_repo = any(
         isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
         for resource in ma_session.resources
@@ -635,6 +643,9 @@ async def create_ma_session(
         ),
         sent_skills=session_skills(admission.agent, admission.channel_skills),
         github_mode=github_mode,
+        personal_memory_store_ids=(
+            () if personal_memory_store_id is None else (personal_memory_store_id,)
+        ),
     ).model_copy(update={"token_repo_urls": token_repo_urls})
     return CreatedSession(
         ma_session_id=ma_session.id,

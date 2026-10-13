@@ -26,9 +26,11 @@ from daimon.adapters.slack.agent_setup.write import (
     owner_repo_from_url,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import get_tenant
@@ -338,6 +340,11 @@ async def test_delete_agent_clears_tenant_default_naming_the_agent(
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_DELETE_SCOPE")
     scope = TenantScopeRef(tenant_id=tenant.id)
     await set_fields(db_session, scope=scope, tenant_id=tenant.id, agent_name="doomed")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_rules={"doomed": AgentRule(runs_in=("C_OTHER",))}),
+    )
     await db_session.commit()
 
     client = build_fake_anthropic(
@@ -363,6 +370,9 @@ async def test_delete_agent_clears_tenant_default_naming_the_agent(
         assert await get_scope(s, scope=scope) is None, (
             "the tenant row naming the deleted agent must be gone so resolution "
             "falls through to the deployment default"
+        )
+        assert (await load_access_policy(s, tenant_id=tenant.id)).agent_rules == {}, (
+            "the deleted agent's rule goes with it, or a later agent taking the name inherits it"
         )
 
 

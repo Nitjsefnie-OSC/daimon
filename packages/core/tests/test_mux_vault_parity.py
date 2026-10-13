@@ -75,7 +75,7 @@ async def test_vault_list_create_archive_preserves_pagination_and_models():
     ]
     old, new = transport(replies), transport(replies)
     async with old.client() as before, new.client() as after:
-        expected = [v.model_dump(mode="json") async for v in before.beta.vaults.list()]
+        expected = [v.model_dump(mode="json") async for v in before.beta.vaults.list(limit=100)]
         actual = [v.model_dump(mode="json") async for v in compat.list_vaults(after, scope=SCOPE)]
         assert actual == expected
         expected = await before.beta.vaults.create(display_name="test")

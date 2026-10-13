@@ -4,7 +4,7 @@ The sweep polls the session's Files API listing, downloads each downloadable
 entry, hands it to an injected ``post`` callable, and deletes the listing
 entry only after the post succeeded. Because a posted file leaves the listing,
 the listing itself is the delivery ledger: it only ever holds undelivered
-work, so there is no dedup state, no clock heuristic, and no age cutoff. A
+work, so delivery keeps no dedup state, no clock heuristic, and no age cutoff. A
 poster whose delivery finishes later (a consent prompt) raises
 ``OutputDeliveryDeferred`` and deletes the entry itself when it is done.
 
@@ -18,8 +18,9 @@ cumulative poll time has elapsed.
 
 An output over the per-file delivery cap is never deleted: the sweep leaves it
 listed, so the file stays downloadable and in the agent's workspace, and asks
-the poster to say so once per file (``noticed``). Only a delivered file, or an
-empty one, leaves the listing.
+the poster to say so once per file. That needs the one piece of dedup state,
+``NoticedFiles``: the ids already noticed. Only a delivered file, or an empty
+one, leaves the listing.
 
 Two trade-offs are accepted by design: the MA-side copy of a file is destroyed
 after a successful post, and a crash between the post and the delete

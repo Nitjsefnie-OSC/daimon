@@ -38,6 +38,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Route
 
+_INSTALLATION_WRITE = {
+    "metadata": "read",
+    "contents": "write",
+    "issues": "write",
+    "pull_requests": "write",
+}
+
 
 def _settings(key: str, *, configured: bool = True) -> Settings:
     return Settings(
@@ -80,7 +87,7 @@ def test_picker_names_owner_type_for_screen_readers() -> None:
             owner_id=index,
             owner_login=login,
             repository_selection="selected",
-            repos=(oauth_github._Repo(index, index, index, f"{login}/repo", True),),
+            repos=(oauth_github._Repo(index, index, index, f"{login}/repo", "admin"),),
             owner_type=owner_type,
         )
         for index, login, owner_type in (
@@ -129,8 +136,8 @@ def test_picker_preselects_only_available_requested_repo(
         owner_login="company",
         repository_selection="selected",
         repos=(
-            oauth_github._Repo(1, 1, 1, "company/repo", True),
-            oauth_github._Repo(2, 1, 1, "company/private", False),
+            oauth_github._Repo(1, 1, 1, "company/repo", "admin"),
+            oauth_github._Repo(2, 1, 1, "company/private", None),
         ),
         owner_type="Organization",
     )
@@ -169,7 +176,7 @@ def test_agent_editor_preselects_requested_repo_in_add_dialog(
         owner_id=1,
         owner_login="acme",
         repository_selection="selected",
-        repos=(oauth_github._Repo(1, 1, 1, "acme/data", True),),
+        repos=(oauth_github._Repo(1, 1, 1, "acme/data", "admin"),),
     )
     grants = (
         [
@@ -433,6 +440,7 @@ async def test_requested_repo_picker_posts_only_selected_repo(
                     "account": {"id": 55, "login": "example", "type": "Organization"},
                     "repository_selection": "selected",
                     "suspended_at": None,
+                    "permissions": _INSTALLATION_WRITE,
                 },
             )
         if request.url.path == "/user":
@@ -570,6 +578,7 @@ async def test_connection_happy_path_and_rechecks(
                     "account": {"id": 55, "login": "example", "type": "Organization"},
                     "repository_selection": "selected",
                     "suspended_at": None,
+                    "permissions": _INSTALLATION_WRITE,
                 },
             )
         assert request.headers["authorization"] == "Bearer user-token"
@@ -607,7 +616,7 @@ async def test_connection_happy_path_and_rechecks(
                             "id": 102,
                             "owner": {"id": 55},
                             "full_name": "example/two",
-                            "permissions": {"pull": True, "admin": repo_two_admin},
+                            "permissions": {"admin": repo_two_admin},
                         },
                     ]
                 },
@@ -759,12 +768,6 @@ async def test_connection_happy_path_and_rechecks(
         empty = await browser.post("/oauth/github/confirm", data={"state": state})
         assert "Select at least one repo" in empty.text
         assert 'id="github-connect-form"' in empty.text
-        too_many = await browser.post(
-            "/oauth/github/confirm",
-            data={"state": state, "repo": [str(n) for n in range(1, 12)], "access": "read"},
-        )
-        assert "Pick up to 10 repos at a time" in too_many.text
-        assert 'id="github-connect-form"' in too_many.text
         spoof = await browser.get(
             "/oauth/github/setup", params={"state": state, "installation_id": "999999"}
         )
@@ -956,7 +959,9 @@ async def test_connection_happy_path_and_rechecks(
 def _agent_picker(
     *, already_added: frozenset[int] = frozenset(), needed: dict[int, bool] | None = None
 ) -> str:
-    repos = tuple(oauth_github._Repo(index, 5, 7, f"lab/repo-{index}", True) for index in (1, 2, 3))
+    repos = tuple(
+        oauth_github._Repo(index, 5, 7, f"lab/repo-{index}", "admin") for index in (1, 2, 3)
+    )
     installation = oauth_github._Installation(
         id=7, owner_id=5, owner_login="lab", repository_selection="all", repos=repos
     )
@@ -1130,6 +1135,7 @@ async def test_channel_admin_completes_connect_for_their_agent(
                     "account": {"id": 55, "login": "ana", "type": "User"},
                     "repository_selection": "selected",
                     "suspended_at": None,
+                    "permissions": _INSTALLATION_WRITE,
                 },
             )
         if request.url.path == "/user":
@@ -1331,6 +1337,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
                     "account": {"id": 55, "login": "editor", "type": "User"},
                     "repository_selection": "selected",
                     "suspended_at": None,
+                    "permissions": _INSTALLATION_WRITE,
                 },
             )
         raise AssertionError(path)
@@ -1436,7 +1443,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
             _state, _hidden, unavailable = await page()
         assert "Waiting for GitHub approval from editor" in unavailable
         assert "editor/repo-101" in unavailable and "editor/repo-102" in unavailable
-        assert "GitHub admin access required to edit" in unavailable
+        assert "has no permission on this repo" in unavailable
         assert "Choose repos on GitHub" in unavailable
         admin_ids.update({101, 102, 103})
 

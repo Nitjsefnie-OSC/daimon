@@ -106,7 +106,7 @@ async def test_tenant_index_uses_tenant_scope_and_preserves_pagination(
         sdk = before.beta.agents if resource == "agents" else before.beta.environments
         expected = [
             row.model_dump(mode="json")
-            async for row in sdk.list(include_archived=False)
+            async for row in sdk.list(limit=100, include_archived=False)
             if row.metadata.get("daimon_tenant") == str(TENANT)
         ]
         if entry_point == "find_agents_by_daimon_tag":
@@ -163,6 +163,7 @@ async def test_tenant_reconcile_scopes_create_update_retry_and_duplicate_archive
             AgentSpec(name="example", model="claude-sonnet-4-6"),
             tenant_id=TENANT,
             dry_run=False,
+            references=None,
         )
     transport.assert_consumed()
     assert result.action == (Action.UPDATED if existing else Action.CREATED)
@@ -260,6 +261,7 @@ async def test_tenant_skill_reconcile_scopes_create_publish_and_duplicate_delete
     canonical = skill_row("canonical", f"{str(TENANT)[:8]}-example")
     duplicate = skill_row("duplicate", canonical.display_title or "", day=1)
     router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
     router.add("GET", r"/v1/skills/duplicate/versions", lambda _r, _m: list_response([]))
     router.add(
         "DELETE",
@@ -306,6 +308,7 @@ async def test_tenant_skill_reconcile_scopes_create_publish_and_duplicate_delete
     assert result.action == (Action.UPDATED if existing else Action.CREATED)
     expected = (
         [
+            ("GET", "/v1/agents"),
             ("GET", "/v1/skills/duplicate/versions"),
             ("DELETE", "/v1/skills/duplicate"),
             ("POST", "/v1/skills/canonical/versions"),
@@ -314,12 +317,17 @@ async def test_tenant_skill_reconcile_scopes_create_publish_and_duplicate_delete
         else [("POST", "/v1/skills")]
     )
     assert [(r.method, r.path) for r in transport.requests] == expected
-    assert_tenant_scopes(observed_scopes, len(expected))
+    if existing:
+        # The duplicate's references are read across all tenants; its delete is the tenant's.
+        assert observed_scopes[0].is_platform
+        assert_tenant_scopes(observed_scopes[1:], len(expected) - 1)
+    else:
+        assert_tenant_scopes(observed_scopes, len(expected))
 
 
 @pytest.mark.parametrize("resource", ["agents", "environments", "skills"])
 async def test_tenant_sweeps_use_tenant_scope_for_mutation(
-    resource: str, observed_scopes: list[Scope]
+    resource: str, observed_scopes: list[Scope], db_session: AsyncSession
 ) -> None:
     router = MARouter()
     if resource == "skills":
@@ -368,6 +376,8 @@ async def test_tenant_sweeps_use_tenant_scope_for_mutation(
                 present_names=set(),
                 tenant_id=TENANT,
                 dry_run=False,
+                channel_skill_ids=set(),
+                session=db_session,
                 skills_view=[
                     skill_row("owned", f"{str(TENANT)[:8]}-gone"),
                     skill_row("foreign", "ffffffff-gone"),
@@ -378,13 +388,14 @@ async def test_tenant_sweeps_use_tenant_scope_for_mutation(
     if resource == "skills":
         assert [(r.method, r.path) for r in transport.requests] == [
             ("GET", "/v1/agents"),
+            ("GET", "/v1/agents"),
             ("GET", "/v1/skills/owned/versions"),
             ("DELETE", "/v1/skills/owned"),
         ]
-        assert observed_scopes[
-            0
-        ].is_platform  # References across all tenants protect shared skills.
-        assert_tenant_scopes(observed_scopes[1:], 2)
+        # References across all tenants protect shared skills: read once for the
+        # sweep and again under the delete's reference lock.
+        assert observed_scopes[0].is_platform and observed_scopes[1].is_platform
+        assert_tenant_scopes(observed_scopes[2:], 2)
     else:
         assert [(r.method, r.path) for r in transport.requests] == [
             ("GET", f"/v1/{resource}"),
@@ -433,8 +444,9 @@ def test_core_platform_scopes_are_limited_to_workspace_operations() -> None:
         Scan(path.relative_to(core).as_posix()).visit(ast.parse(path.read_text()))
     assert calls == Counter(
         {
-            ("usage_sweep.py", "sweep_headless_usage"): 1,
+            ("usage_sweep.py", "_platform_settle_scope"): 1,
             ("defaults/ma_index.py", "list_agents_by_tenants"): 1,
+            ("defaults/ma_index.py", "list_agents_referencing_skill"): 1,
             ("defaults/ma_index.py", "list_referenced_skill_ids"): 1,
             ("defaults/ma_index.py", "_collect_skills_page"): 1,
             ("defaults/platform_export.py", "export_platform"): 1,

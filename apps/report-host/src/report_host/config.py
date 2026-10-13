@@ -101,15 +101,6 @@ class Settings(BaseSettings):
     recipient_link_ttl_days: int = Field(
         default=90, description="How long a per-recipient link remains valid before expiring."
     )
-    html_link_errors: bool = Field(
-        default=False,
-        description=(
-            "Show the static HTML page for refused report document links "
-            "(GET /r/{slug}, status 403) to every client. Browsers (Accept: text/html) "
-            "always get it; with this off, other clients keep the JSON error. API, file "
-            "and admin routes keep their existing responses."
-        ),
-    )
     thread_idle_archive_hours: int = Field(
         default=24,
         description="A thread idle longer than this is archived by the host's sweep.",

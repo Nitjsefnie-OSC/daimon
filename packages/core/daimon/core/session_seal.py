@@ -41,7 +41,7 @@ __all__ = [
 log = structlog.get_logger(__name__)
 
 _SEPARATOR = ","
-# Older sessions stamped a bare "true" for a session sealed at creation without saying
+# Older code stamped a bare "true" for a session sealed at creation without saying
 # which id sealed it; it is read as the strictest: the stamped channel and
 # thread both.
 _LEGACY_SEALED = "true"

@@ -51,15 +51,13 @@ def install_declarations(monkeypatch):
     monkeypatch.setattr(profiles, "import_module", module)
 
 
-def test_exact_seven_flags_and_unknown_profile_are_closed() -> None:
+def test_exact_five_flags_and_unknown_profile_are_closed() -> None:
     expected = {
         "core.mcp.require_routine_destination": True,
         "core.discord.credential_form_expiry": True,
         "core.discord.writers_none_notice": True,
         "core.discord.tenant_cap_waiting_card": True,
         "core.turn.native_footer_cost": True,
-        "notebook.html_link_errors": True,
-        "report.html_link_errors": True,
     }
     assert profiles.OPT_IN_PRODUCT_PROFILE.flags == expected
     assert profiles.DEFAULT_PRODUCT_PROFILE.flags == dict.fromkeys(expected, False)
@@ -91,9 +89,8 @@ def test_copy_preserves_secrets_backend_and_unrelated_flags_without_constructor_
     assert base.discord.writers_none_notice is False
     assert base.discord.tenant_cap_waiting_card is False
     for service in ("notebook", "report"):
-        copy = profiles.OPT_IN_PRODUCT_PROFILE.apply(host, service=service)
-        assert copy.html_link_errors is True and copy.other_feature is False
-        assert host.html_link_errors is False
+        # The notebook and report hosts have no granted switch: their settings pass through.
+        assert profiles.OPT_IN_PRODUCT_PROFILE.apply(host, service=service) is host
     disabled = profiles.DEFAULT_PRODUCT_PROFILE.apply(enabled, service="core")
     assert disabled.turn.native_footer_cost is False
     assert disabled.mcp.require_routine_destination is False
@@ -103,7 +100,7 @@ def test_copy_preserves_secrets_backend_and_unrelated_flags_without_constructor_
     constructor.assert_not_called()
 
 
-@pytest.mark.parametrize("service", ["core", "notebook", "report"])
+@pytest.mark.parametrize("service", ["core"])
 def test_absent_settings_refuse_instead_of_injecting_unknown_fields(service):
     class Old(BaseModel):
         other: bool = False
@@ -178,11 +175,14 @@ def test_invalid_service_and_nonboolean_field_refuse() -> None:
     with pytest.raises(ValueError, match="unknown QA product service"):
         profiles.OPT_IN_PRODUCT_PROFILE.apply(Host(_env_file=None), service="unknown")
 
+    class MalformedMcp(BaseModel):
+        require_routine_destination: str = "off"
+
     class Malformed(BaseModel):
-        html_link_errors: str = "off"
+        mcp: MalformedMcp = MalformedMcp()
 
     with pytest.raises(profiles.ProductProfileUnavailable):
-        profiles.OPT_IN_PRODUCT_PROFILE.apply(Malformed(), service="report")
+        profiles.OPT_IN_PRODUCT_PROFILE.apply(Malformed(), service="core")
 
 
 def test_missing_granted_declarations_are_named_without_partial_application(monkeypatch):

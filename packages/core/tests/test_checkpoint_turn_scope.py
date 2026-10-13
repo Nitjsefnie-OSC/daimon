@@ -75,7 +75,10 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
             )
         )
     async with old.client() as legacy, new.client() as client:
-        _ = [item async for item in legacy.beta.sessions.events.list(session_id="sess_old")]
+        _ = [
+            item
+            async for item in legacy.beta.sessions.events.list(session_id="sess_old", limit=100)
+        ]
         result = await workspace_transfer.transfer_workspace(
             client,
             factory(),

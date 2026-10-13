@@ -26,7 +26,11 @@ from daimon.core.channel_admins import GroupMembers
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.github_app_auth import build_app_jwt, get_app_installation_details
+from daimon.core.github_app_auth import (
+    build_app_jwt,
+    get_app_installation_details,
+    installation_supports_write,
+)
 from daimon.core.github_connect_cards import (
     ADD_REPOS_LABEL,
     ALREADY_ADDED,
@@ -67,7 +71,66 @@ class _Repo:
     owner_id: int
     installation_id: int
     full_name: str
-    admin: bool
+    # The signed-in person's GitHub permission on the repo; None when GitHub
+    # reports none the flow can use.
+    permission: github_connect.GitHubPermission | None
+
+    @property
+    def usable(self) -> bool:
+        return self.permission is not None
+
+    @property
+    def max_access(self) -> Literal["read", "write"]:
+        """The most this person may grant an agent on the repo."""
+        if self.permission is None:
+            return "read"
+        return github_connect.permission_max_access(self.permission)
+
+
+def _repo_confirmation(
+    repo: _Repo,
+    *,
+    requested: Literal["read", "write"],
+    needs_write: bool,
+    installation_writes: Mapping[int, bool],
+) -> github_connect.RepoConfirmation:
+    """What to confirm for one repo: the request, capped by the person and the installation.
+
+    A repo the agent needs at write is raised to write, but only when the
+    person's GitHub permission allows it; otherwise it gets what they chose
+    (read). The installation's own permissions cap the result the same way.
+    """
+    access: Literal["read", "write"] = (
+        "write" if needs_write and repo.max_access == "write" else requested
+    )
+    if access == "write" and (
+        repo.max_access != "write" or not installation_writes.get(repo.installation_id, False)
+    ):
+        access = "read"
+    return github_connect.RepoConfirmation(
+        repo_id=repo.id,
+        owner_id=repo.owner_id,
+        installation_id=repo.installation_id,
+        full_name=repo.full_name,
+        max_access=access,
+        authorizer_permission=repo.permission,
+    )
+
+
+def _hidden_count(installations: list[_Installation]) -> int:
+    return sum(1 for item in installations for repo in item.repos if not repo.usable)
+
+
+def _hidden_note(installations: list[_Installation]) -> str:
+    hidden = _hidden_count(installations)
+    if not hidden:
+        return ""
+    return (
+        f'<p class="gh-repo-state" id="hidden-repos">{hidden} '
+        f"{'repo is' if hidden == 1 else 'repos are'} hidden because your GitHub account "
+        "has no permission on "
+        f"{'it' if hidden == 1 else 'them'}.</p>"
+    )
 
 
 @dataclass(frozen=True)
@@ -298,8 +361,8 @@ def _no_repos_page(link: str, install_url: str) -> Response:
     return github_page(
         title="No repos available to connect",
         body_html=(
-            "<p>This GitHub account does not manage any repos Daimon can see. "
-            "Send the link to someone who manages them, or choose another account.</p>"
+            "<p>This GitHub account has no access to any repos Daimon can see. "
+            "Send the link to someone who has access to them, or choose another account.</p>"
             '<div class="gh-actions"><button class="gh-primary" '
             'type="button" id="copy-link">Copy link</button>'
             f'<a class="gh-link" href="{install_url}">Choose another account</a></div>'
@@ -389,6 +452,8 @@ _EDITOR_SCRIPT = """
   const search = document.getElementById("search-repos");
   const save = document.getElementById("save-repos");
   const stage = document.getElementById("stage-repos");
+  const selectShown = document.getElementById("select-shown");
+  const clearSelection = document.getElementById("clear-selection");
   const workingInput = document.getElementById("working-input");
   const initialWorking = form.dataset.working || null;
   const mayChangeWorking = form.dataset.mayChangeWorking === "true";
@@ -479,29 +544,40 @@ _EDITOR_SCRIPT = """
     if (empty) empty.hidden = rows().length > 0;
     document.getElementById("discard-repos").hidden = !parts.length;
     save.disabled = !parts.length;
+    save.textContent = added ? "Grant " + added + " " + plural(added) : "Save changes";
     workingInput.value = workingExplicit ||
       (working !== initialWorking && !removed.has(initialWorking))
       ? (working || "clear") : "keep";
   }
+  const accessRadios = [...dialog.querySelectorAll('input[name="picker_access"]')];
+  const pickerAccess = () => accessRadios.find(radio => radio.checked).value;
+  const checkbox = option => option.querySelector(".gh-picker-toggle");
+  const plural = n => n === 1 ? "repo" : "repos";
   function resetPicker() {
     for (const option of options) {
       const id = option.dataset.repoId;
-      option.querySelector(".gh-picker-toggle").checked = staged.has(id) || preselected.has(id);
-      option.querySelector(".gh-picker-access").value = staged.get(id) ||
-        (option.dataset.requiredWrite === "true" ? "write" : "read");
-      option.querySelector(".gh-choice-access").hidden =
-        !staged.has(id) && !preselected.has(id);
+      checkbox(option).checked = staged.has(id) || preselected.has(id);
     }
+    const anyWrite = [...staged.values()].includes("write");
+    for (const radio of accessRadios) radio.checked = radio.value === (anyWrite ? "write" : "read");
     search.value = "";
     for (const option of options) option.hidden = false;
+    document.getElementById("no-search-results").hidden = true;
     updatePicker();
   }
   function updatePicker() {
-    const count = options.filter(o => o.querySelector(".gh-picker-toggle").checked).length;
-    stage.disabled = count === 0 || count > 10;
-    stage.textContent = count ? "Add " + count + (count === 1 ? " repo" : " repos") : "Add repos";
-    document.getElementById("picker-count").textContent =
-      count > 10 ? "Choose up to 10 repos." : "Changes apply when you save.";
+    const count = options.filter(o => checkbox(o).checked).length;
+    const shown = options.filter(o => !o.hidden).length;
+    stage.disabled = count === 0;
+    stage.textContent = count ? "Grant " + count + " " + plural(count) : "Grant repos";
+    selectShown.textContent = "Select all " + shown + " shown";
+    selectShown.disabled = shown === 0;
+    clearSelection.disabled = count === 0;
+    const write = pickerAccess() === "write";
+    for (const option of options) {
+      const tag = option.querySelector(".gh-cap-tag");
+      if (tag) tag.hidden = !write;
+    }
   }
   document.getElementById("open-repo-picker").addEventListener("click", event => {
     opener = event.currentTarget;
@@ -512,29 +588,49 @@ _EDITOR_SCRIPT = """
   document.getElementById("close-repo-picker").addEventListener("click", () => dialog.close());
   dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
   dialog.addEventListener("close", () => { resetPicker(); if (opener) opener.focus(); });
-  dialog.addEventListener("change", event => {
-    if (event.target.classList.contains("gh-picker-toggle")) {
-      event.target.closest(".gh-picker-choice").querySelector(".gh-choice-access").hidden =
-        !event.target.checked;
-    }
+  dialog.addEventListener("change", updatePicker);
+  selectShown.addEventListener("click", () => {
+    for (const option of options) if (!option.hidden) checkbox(option).checked = true;
     updatePicker();
   });
+  clearSelection.addEventListener("click", () => {
+    for (const option of options) checkbox(option).checked = false;
+    updatePicker();
+  });
+  for (const button of dialog.querySelectorAll(".gh-owner-all")) {
+    button.addEventListener("click", () => {
+      search.value = "";
+      for (const option of options) {
+        option.hidden = false;
+        if (option.dataset.installation === button.dataset.installation) {
+          checkbox(option).checked = true;
+        }
+      }
+      document.getElementById("no-search-results").hidden = true;
+      updatePicker();
+    });
+  }
   search.addEventListener("input", () => {
     const query = search.value.trim().toLowerCase();
     for (const option of options) {
       option.hidden = !option.dataset.name.toLowerCase().includes(query);
     }
     document.getElementById("no-search-results").hidden = options.some(o => !o.hidden);
+    updatePicker();
   });
   stage.addEventListener("click", () => {
-    const selected = options.filter(o => o.querySelector(".gh-picker-toggle").checked);
-    if (!selected.length || selected.length > 10) return;
+    const selected = options.filter(o => checkbox(o).checked);
+    if (!selected.length) return;
     preselected.clear();
     staged.clear();
+    const chosen = pickerAccess();
     for (const option of selected) {
       const id = option.dataset.repoId;
-      const access = option.querySelector(".gh-picker-access").value;
-      staged.set(id, option.dataset.requiredWrite === "true" ? "write" : access);
+      // Each repo is capped at the person's own GitHub permission; the server
+      // caps again, and by the App installation's permissions.
+      const access = option.dataset.requiredWrite === "true" ||
+        (chosen === "write" && option.dataset.maxAccess === "write") ? "write" : "read";
+      staged.set(id, access);
       if (!rowFor(id)) makeAddedRow(id, option.dataset.name, staged.get(id));
       removed.delete(id);
     }
@@ -608,6 +704,25 @@ _EDITOR_SCRIPT = """
 """
 
 
+@dataclass(frozen=True)
+class _PickerOption:
+    repo_id: int
+    name: str
+    repair: bool
+    needs_write: bool
+    can_write: bool
+    installation_id: int
+
+
+def _access_options(*, required_write: bool, can_write: bool) -> str:
+    """The access choices for one repo: write only when the person's GitHub permission allows it."""
+    if required_write and can_write:
+        return '<option value="write">Read and write</option>'
+    return '<option value="read">Read only</option>' + (
+        '<option value="write">Read and write</option>' if can_write else ""
+    )
+
+
 def _agent_editor_page(
     *,
     root: str,
@@ -632,12 +747,15 @@ def _agent_editor_page(
     """Render one agent's grants and an optional staged add dialog."""
     esc = html.escape
     needed = needed or {}
-    admin = {
-        repo.id: repo for installation in installations for repo in installation.repos if repo.admin
+    usable = {
+        repo.id: repo
+        for installation in installations
+        for repo in installation.repos
+        if repo.usable
     }
     current = {repo.repo_id for repo in grants}
     available = sorted(
-        (repo for repo_id, repo in admin.items() if repo_id not in current),
+        (repo for repo_id, repo in usable.items() if repo_id not in current),
         key=lambda repo: repo.full_name.casefold(),
     )
     requested_id = next(
@@ -649,14 +767,34 @@ def _agent_editor_page(
         None,
     )
     repairable = [
-        repo for repo in grants if repo.repo_id in admin and (repo.staged or repo.repo_id in needed)
+        repo
+        for repo in grants
+        if repo.repo_id in usable and (repo.staged or repo.repo_id in needed)
     ]
     working = next((repo for repo in grants if repo.is_working_repo), None)
-    may_change_working = working is None or working.repo_id in admin
+    may_change_working = working is None or working.repo_id in usable
     place = "Server" if platform == "discord" else "Workspace"
-    options: list[tuple[int, str, bool, bool]] = [
-        (repo.repo_id, repo.full_name, True, bool(needed.get(repo.repo_id))) for repo in repairable
-    ] + [(repo.id, repo.full_name, False, bool(needed.get(repo.id))) for repo in available]
+    options = [
+        _PickerOption(
+            repo_id=repo.repo_id,
+            name=repo.full_name,
+            repair=True,
+            needs_write=bool(needed.get(repo.repo_id)),
+            can_write=usable[repo.repo_id].max_access == "write",
+            installation_id=usable[repo.repo_id].installation_id,
+        )
+        for repo in repairable
+    ] + [
+        _PickerOption(
+            repo_id=repo.id,
+            name=repo.full_name,
+            repair=False,
+            needs_write=bool(needed.get(repo.id)),
+            can_write=repo.max_access == "write",
+            installation_id=repo.installation_id,
+        )
+        for repo in available
+    ]
     parts = [
         '<form id="github-connect-form" class="gh-editor" method="post" '
         f'data-working="{working.repo_id if working else ""}" '
@@ -702,7 +840,7 @@ def _agent_editor_page(
         parts.append('<p class="gh-editor-empty">No repos connected yet.</p>')
     for repo in grants:
         repo_name = esc(repo.full_name)
-        editable = repo.repo_id in admin
+        editable = repo.repo_id in usable
         parts.append(
             f'<article class="gh-agent-row" data-repo-id="{repo.repo_id}" '
             f'data-name="{esc(repo.full_name, quote=True)}" '
@@ -749,9 +887,20 @@ def _agent_editor_page(
             parts.append('<span class="gh-repo-state">Unavailable</span>')
         parts.append("</div>")
         if not editable:
-            parts.append('<p class="gh-repo-locked">GitHub admin access required to edit.</p>')
+            parts.append(
+                '<p class="gh-repo-locked">Your GitHub account has no permission on this repo, '
+                "so you can't edit it here.</p>"
+            )
         if repo.repo_id in needed and needed[repo.repo_id]:
-            parts.append('<p class="gh-repo-state">Needs read and write to finish setup.</p>')
+            parts.append(
+                '<p class="gh-repo-state">Needs read and write to finish setup'
+                + (
+                    "."
+                    if usable[repo.repo_id].max_access == "write" or not editable
+                    else ". Your GitHub permission allows read only, so only read can be added."
+                )
+                + "</p>"
+            )
         if editable:
             parts.append(f'<input type="hidden" name="remove" value="{repo.repo_id}" disabled>')
             if repo in repairable:
@@ -791,36 +940,65 @@ def _agent_editor_page(
         f'<div class="gh-dialog-search">{icon("search")}'
         '<input id="search-repos" class="gh-search" type="search" '
         'aria-label="Search repos" placeholder="Search repos" autocomplete="off"></div>'
+        '<div class="gh-dialog-link gh-dialog-bulk">'
+        '<button id="select-shown" class="gh-link-button" type="button">'
+        f"Select all {len(options)} shown</button>"
+        '<button id="clear-selection" class="gh-link-button" type="button">Clear</button>'
+        + "".join(
+            f'<button class="gh-link-button gh-owner-all" type="button" '
+            f'data-installation="{installation.id}">'
+            f"Everything in {esc(installation.owner_login)}</button>"
+            for installation in installations
+            if any(option.installation_id == installation.id for option in options)
+        )
+        + "</div>"
+        '<fieldset class="gh-dialog-link gh-dialog-access">'
+        "<legend>Access for the repos you grant</legend>"
+        '<label><input type="radio" name="picker_access" value="read" checked> Read only</label> '
+        '<label><input type="radio" name="picker_access" value="write"> Read and write</label>'
+        '<small id="picker-cap-note"> Repos where your GitHub permission is read-only get read.'
+        "</small></fieldset>"
         '<div class="gh-dialog-choices">'
     )
     if not options:
         parts.append("<p>No repos available to add.</p>")
-    for repo_id, name, repair, required_write in options:
+    for option in options:
+        # A repo the agent needs at write is forced to write only for someone
+        # whose GitHub permission allows it; anyone else can still add read.
+        required_write = option.needs_write and option.can_write
         parts.append(
-            f'<div class="gh-picker-choice" data-repo-id="{repo_id}" '
-            f'data-name="{esc(name, quote=True)}" '
+            f'<div class="gh-picker-choice" data-repo-id="{option.repo_id}" '
+            f'data-name="{esc(option.name, quote=True)}" '
+            f'data-installation="{option.installation_id}" '
+            f'data-max-access="{"write" if option.can_write else "read"}" '
             f'data-required-write="{str(required_write).lower()}">'
             '<label class="gh-picker-label"><input class="gh-picker-toggle" type="checkbox"'
-            + (" checked" if repo_id == requested_id else "")
+            + (" checked" if option.repo_id == requested_id else "")
             + ">"
-            f"<span>{esc(name)}"
-            + ("<small>Finish setup</small>" if repair else "")
-            + '</span></label><div class="gh-choice-access" hidden>'
-            f'<label for="picker-access-{repo_id}">Access</label>'
-            f'<select id="picker-access-{repo_id}" class="gh-picker-access" '
-            f'aria-label="Access for {esc(name, quote=True)}">'
-            + ("" if required_write else '<option value="read">Read only</option>')
-            + '<option value="write">Read and write</option></select>'
-            + ("<small>Required to finish setup</small>" if required_write else "")
-            + "</div></div>"
+            f"<span>{esc(option.name)}"
+            + ("<small>Finish setup</small>" if option.repair else "")
+            + (
+                "<small>Required to finish setup</small>"
+                if required_write
+                else "<small>Needs read and write; your GitHub permission allows read only</small>"
+                if option.needs_write
+                else ""
+            )
+            + (
+                '<small class="gh-cap-tag" hidden>Read only on GitHub</small>'
+                if not option.can_write and not option.needs_write
+                else ""
+            )
+            + "</span></label></div>"
         )
     parts.append(
         '<p id="no-search-results" hidden>No matching repos.</p></div>'
-        '<p class="gh-dialog-link"><a href="'
+        + _hidden_note(installations)
+        + '<p class="gh-dialog-link"><a href="'
         + esc(install_url, quote=True)
         + '">Missing a repo? Choose repos on GitHub</a></p>'
         '<div class="gh-dialog-footer"><span id="picker-count">Changes apply when you save.</span>'
-        '<button id="stage-repos" class="gh-primary" type="button" disabled>Add repos</button>'
+        '<button id="stage-repos" class="gh-primary" type="button" disabled>Grant repos</button>'
         "</div></dialog>"
     )
     parts.append(
@@ -859,7 +1037,7 @@ def _agent_editor_page(
     # Browsers without scripting still get a complete native form.
     parts.append('<noscript><section class="gh-fallback"><h2>Edit repos</h2>')
     for repo in grants:
-        if repo.repo_id not in admin:
+        if repo.repo_id not in usable:
             continue
         parts.append(
             f'<label><input type="checkbox" name="remove" value="{repo.repo_id}">'
@@ -871,8 +1049,11 @@ def _agent_editor_page(
                 f"Finish setup for {esc(repo.full_name)}</label>"
                 f'<select name="access_{repo.repo_id}" '
                 f'aria-label="Access for {esc(repo.full_name, quote=True)}">'
-                + ("" if needed.get(repo.repo_id) else '<option value="read">Read only</option>')
-                + '<option value="write">Read and write</option></select>'
+                + _access_options(
+                    required_write=bool(needed.get(repo.repo_id)),
+                    can_write=usable[repo.repo_id].max_access == "write",
+                )
+                + "</select>"
             )
     for repo in available:
         parts.append(
@@ -882,8 +1063,11 @@ def _agent_editor_page(
             f"Add {esc(repo.full_name)}</label>"
             f'<select name="access_{repo.id}" '
             f'aria-label="Access for {esc(repo.full_name, quote=True)}">'
-            + ("" if needed.get(repo.id) else '<option value="read">Read only</option>')
-            + '<option value="write">Read and write</option></select>'
+            + _access_options(
+                required_write=bool(needed.get(repo.id)),
+                can_write=repo.max_access == "write",
+            )
+            + "</select>"
         )
     parts.append(
         '<label>Working repo <select name="working"><option value="keep">Keep current</option>'
@@ -891,7 +1075,7 @@ def _agent_editor_page(
     if may_change_working:
         parts.append('<option value="clear">None</option>')
         for repo in grants:
-            if repo.repo_id in admin and repo.status == "active":
+            if repo.repo_id in usable and repo.status == "active":
                 parts.append(f'<option value="{repo.repo_id}">{esc(repo.full_name)}</option>')
         for repo in available:
             parts.append(f'<option value="{repo.id}">{esc(repo.full_name)} (add above)</option>')
@@ -910,9 +1094,6 @@ def _agent_editor_page(
     parts.append(_EDITOR_SCRIPT)
     return github_page(title=f"{agent_name}'s repos", body_html="".join(parts), kind="picker")
 
-
-#: A safety net on one Add action; a person rarely needs more at once.
-MAX_REPOS_PER_ADD = 10
 
 _PICKER_SCRIPT = """
 <script>
@@ -958,14 +1139,13 @@ _PICKER_SCRIPT = """
     const visibleBoxes = boxes.filter(box => !box.closest(".gh-choice").hidden);
     const allVisibleChecked = visibleBoxes.length > 0 && visibleBoxes.every(box => box.checked);
     bulk.textContent = allVisibleChecked ? "Clear selection" : `Select all ${visibleBoxes.length}`;
-    // No select-all: one stray click ticked 75 repos on 2026-10-10.
-    bulk.hidden = true;
+    bulk.hidden = visibleBoxes.length === 0;
     const access = form.querySelector('input[name="access"]:checked').value;
     const accessLabel = access === "write" ? "Read and write" : "Read only";
     status.textContent = selected ? `${selected} selected. ${accessLabel}.` : "0 selected";
     submit.disabled = selected === 0;
     submitLabel.textContent = selected ?
-      `${verb} ${selected} ${plural(selected)}` : `${verb} repos`;
+      `Grant ${selected} ${plural(selected)}` : `${verb} repos`;
     if (audience) {
       const can = access === "write" ? "read and change" : "read";
       audience.textContent =
@@ -1093,11 +1273,11 @@ def _confirmation_page(
             "Show selected</button>"
             '<button class="gh-link-button" type="button" '
             'id="select-all-repos" hidden></button></div>',
-            '<div class="gh-repo-list" aria-label="Repos you manage">',
+            '<div class="gh-repo-list" aria-label="Repos you can connect">',
         ]
     )
     for installation in installations:
-        owned = [repo for repo in installation.repos if repo.admin]
+        owned = [repo for repo in installation.repos if repo.usable]
         if not owned:
             continue
         parts.append('<div class="gh-repo-owner">')
@@ -1137,12 +1317,19 @@ def _confirmation_page(
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
                 f'<span class="gh-repo-name">{html.escape(name)}</span>'
                 + (f'<span class="gh-added">{note}</span>' if note else "")
+                + (
+                    '<span class="gh-added">Read only on GitHub</span>'
+                    if repo.max_access != "write" and not added
+                    else ""
+                )
                 + "</span></label>"
             )
         parts.append("</div>")
     parts.extend(
         [
-            '<p class="gh-empty" hidden>No repos match this search.</p></div></section>',
+            '<p class="gh-empty" hidden>No repos match this search.</p></div>'
+            + _hidden_note(installations)
+            + "</section>",
             '<aside class="gh-side">',
             _access_choices(agent=agent_name is not None),
             "</aside></div>",
@@ -1207,7 +1394,7 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
                     owner_id=owner_id,
                     installation_id=installation_id,
                     full_name=repo.full_name,
-                    admin=repo.permissions.get("admin") is True,
+                    permission=github_connect.github_permission(repo.permissions),
                 )
             )
         result.append(
@@ -1676,7 +1863,7 @@ def build_oauth_github_routes(
             repo.id: missing_access[repo.full_name.casefold()]
             for installation in installations
             for repo in installation.repos
-            if repo.admin and repo.full_name.casefold() in missing_access
+            if repo.usable and repo.full_name.casefold() in missing_access
         }
         if invitation.agent_id is not None:
             install_url = (
@@ -1704,7 +1891,7 @@ def build_oauth_github_routes(
             cancel_url = f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
             if request.method == "GET":
                 pending_installation = _PendingInstallationRequest(False)
-                if not any(repo.admin for item in installations for repo in item.repos):
+                if not any(repo.usable for item in installations for repo in item.repos):
                     try:
                         async with factory() as client:
                             pending_installation = await has_pending_installation_request(
@@ -1756,7 +1943,6 @@ def build_oauth_github_routes(
                 or len(working_values) != 1
                 or len(selected_ids) != len(set(selected_ids))
                 or len(removed_ids) != len(set(removed_ids))
-                or len(selected_ids) > MAX_REPOS_PER_ADD
             ):
                 return _error("Selection could not be verified.", 400, retry_confirm_url)
             selected_access: dict[int, str] = {}
@@ -1774,7 +1960,7 @@ def build_oauth_github_routes(
                 repo.id: repo
                 for installation in installations
                 for repo in installation.repos
-                if repo.admin
+                if repo.usable
             }
             old = {repo.repo_id: repo for repo in grants}
             repairable = {repo.repo_id for repo in grants if repo.staged or repo.repo_id in needed}
@@ -1808,7 +1994,7 @@ def build_oauth_github_routes(
                     )
                 )
             ):
-                return _error("GitHub admin access could not be verified.", 403, retry_confirm_url)
+                return _error("GitHub access could not be verified.", 403, retry_confirm_url)
             if not selected_ids and not removed_ids and working_choice == "keep":
                 return _agent_editor_page(
                     root=root,
@@ -1833,19 +2019,6 @@ def build_oauth_github_routes(
                 return _error(
                     "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                 )
-            repos = [
-                github_connect.RepoConfirmation(
-                    repo_id=visible[repo_id].id,
-                    owner_id=visible[repo_id].owner_id,
-                    installation_id=visible[repo_id].installation_id,
-                    full_name=visible[repo_id].full_name,
-                    max_access=cast(
-                        Literal["read", "write"],
-                        "write" if needed.get(repo_id) else selected_access[repo_id],
-                    ),
-                )
-                for repo_id in selected_ids
-            ]
             app_jwt = build_app_jwt(private_key, app_id, now=int(time.time()))
             by_installation = {install.id: install for install in installations}
             try:
@@ -1854,7 +2027,9 @@ def build_oauth_github_routes(
                         await get_app_installation_details(
                             client, jwt=app_jwt, installation_id=installation_id
                         )
-                        for installation_id in sorted({repo.installation_id for repo in repos})
+                        for installation_id in sorted(
+                            {visible[repo_id].installation_id for repo_id in selected_ids}
+                        )
                     ]
             except (httpx.HTTPError, ValueError):
                 return _error("Couldn't reach GitHub", 502, retry_confirm_url)
@@ -1866,6 +2041,19 @@ def build_oauth_github_routes(
                 for detail in details
             ):
                 return _error("GitHub access could not be verified.", 403, retry_confirm_url)
+            installation_writes = {
+                detail.installation_id: installation_supports_write(detail.permissions)
+                for detail in details
+            }
+            repos = [
+                _repo_confirmation(
+                    visible[repo_id],
+                    requested=cast(Literal["read", "write"], selected_access[repo_id]),
+                    needs_write=bool(needed.get(repo_id)),
+                    installation_writes=installation_writes,
+                )
+                for repo_id in selected_ids
+            ]
             activation: github_connect.ConfirmedActivation | None = None
             try:
                 async with sessionmaker.begin() as session:
@@ -1985,13 +2173,8 @@ def build_oauth_github_routes(
                 return _error("Selection could not be verified.", retry_url=retry_confirm_url)
             # Repos already on the agent keep their access; only new ticks count.
             selected_ids = [repo_id for repo_id in selected_ids if repo_id not in already_added]
-            if len(selected_ids) > MAX_REPOS_PER_ADD:
-                selection_error: str | None = f"Pick up to {MAX_REPOS_PER_ADD} repos at a time"
-            elif not selected_ids:
+            if not selected_ids:
                 selection_error = "Select at least one repo"
-            else:
-                selection_error = None
-            if selection_error is not None:
                 return _confirmation_page(
                     root=root,
                     state=state,
@@ -2011,30 +2194,15 @@ def build_oauth_github_routes(
                     requested_repo=invitation.requested_repo,
                 )
             visible = {
-                repo.id: repo for install in installations for repo in install.repos if repo.admin
+                repo.id: repo for install in installations for repo in install.repos if repo.usable
             }
             if len(set(selected_ids)) != len(selected_ids):
                 return _error("Selection could not be verified.", retry_url=retry_confirm_url)
             if any(repo_id not in visible for repo_id in selected_ids):
                 return _error("Selection could not be verified.", 403, retry_confirm_url)
-            repos: list[github_connect.RepoConfirmation] = []
-            for repo_id in selected_ids:
-                repo = visible[repo_id]
-                access = fields.get("access", ["read"])[0]
-                if access not in ("read", "write"):
-                    return _error("Selection could not be verified.", retry_url=retry_confirm_url)
-                # A repo the agent needs write on is added with write; never lower.
-                if needed.get(repo_id):
-                    access = "write"
-                repos.append(
-                    github_connect.RepoConfirmation(
-                        repo_id=repo.id,
-                        owner_id=repo.owner_id,
-                        installation_id=repo.installation_id,
-                        full_name=repo.full_name,
-                        max_access=access,
-                    )
-                )
+            access = fields.get("access", ["read"])[0]
+            if access not in ("read", "write"):
+                return _error("Selection could not be verified.", retry_url=retry_confirm_url)
             app_jwt = build_app_jwt(private_key, app_id, now=int(time.time()))
             by_installation = {installation.id: installation for installation in installations}
             try:
@@ -2043,7 +2211,9 @@ def build_oauth_github_routes(
                         await get_app_installation_details(
                             client, jwt=app_jwt, installation_id=installation_id
                         )
-                        for installation_id in sorted({repo.installation_id for repo in repos})
+                        for installation_id in sorted(
+                            {visible[repo_id].installation_id for repo_id in selected_ids}
+                        )
                     ]
             except (httpx.HTTPError, ValueError):
                 return _error("Couldn't reach GitHub", 502, retry_confirm_url)
@@ -2055,6 +2225,19 @@ def build_oauth_github_routes(
                 for detail in details
             ):
                 return _error("GitHub access could not be verified.", 403, retry_confirm_url)
+            installation_writes = {
+                detail.installation_id: installation_supports_write(detail.permissions)
+                for detail in details
+            }
+            repos: list[github_connect.RepoConfirmation] = [
+                _repo_confirmation(
+                    visible[repo_id],
+                    requested=access,
+                    needs_write=bool(needed.get(repo_id)),
+                    installation_writes=installation_writes,
+                )
+                for repo_id in selected_ids
+            ]
             live = await live_agent(invitation)
             is_daimon_managed = (
                 None if live is None else live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
@@ -2175,8 +2358,8 @@ def build_oauth_github_routes(
             return response
 
         workspace = invitation.workspace_label
-        admin_repos = [
-            repo for installation in installations for repo in installation.repos if repo.admin
+        usable_repos = [
+            repo for installation in installations for repo in installation.repos if repo.usable
         ]
         install_url = (
             f"https://github.com/apps/{html.escape(config.app_slug or '', quote=True)}"
@@ -2187,7 +2370,7 @@ def build_oauth_github_routes(
             f"{urlencode({'state': state, 'cancel': '1'})}"
         )
         pending = _PendingInstallationRequest(False)
-        if not admin_repos and config.app_id is not None and config.private_key is not None:
+        if not usable_repos and config.app_id is not None and config.private_key is not None:
             try:
                 async with factory() as client:
                     pending = await has_pending_installation_request(
@@ -2206,7 +2389,7 @@ def build_oauth_github_routes(
             )
         if not installations:
             return _install_page(install_url, cancel_url)
-        if not admin_repos:
+        if not usable_repos:
             link = (
                 f"{root}/oauth/github/connect/"
                 f"{decrypt_token(fernet, flow.encrypted_invitation_token)}"

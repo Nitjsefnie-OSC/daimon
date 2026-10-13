@@ -2648,3 +2648,60 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
     await _usage_sweep_once(enabled=enabled, sweep=sweep)
 
     assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"
+
+
+async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_memory(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decided from the row at every fire: the same routine reads its owner's
+    personal memory while it posts nowhere, and stops once it gets a destination."""
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u-owner",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    calls: list[dict[str, object]] = []
+
+    async def capturing_run_turn(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "tail"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_z"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    posting = row.model_copy(
+        update={"destination_kind": "channel", "destination_id": "chan-9", "channel_id": "chan-9"}
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
+    ):
+        await fire(row)
+        await fire(posting)
+    await fake_client.close()
+
+    assert [call["personal_memory"] for call in calls] == [True, False]
+    assert calls[0]["account_id"] is not None, "the owner's account selects the store"

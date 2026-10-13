@@ -37,7 +37,7 @@ class GcloudTokenProvider:
         # gcloud identity exists to fall back to.
         allow_service_default: bool = False,
     ) -> str:
-        # Pitfall 2: config check FIRST, then binding check.
+        # Config check FIRST, then binding check.
         if settings.credentials.google_sa_json is None:
             raise ProviderConfigError(
                 "gcloud provider requires settings.credentials.google_sa_json"

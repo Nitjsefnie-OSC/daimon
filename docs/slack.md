@@ -29,6 +29,17 @@ required; a card that only gives a reason has no fields. The footer says
 `Channel setting. Threads can differ.` because Slack slash commands have no
 thread context. Credential names and values are absent from the card.
 
+### Agent memory
+
+An agent's shared memory is mounted in every member's session. Each member also
+has a personal memory with each agent, mounted only in their own sessions
+(channel threads and private conversations alike), so another member's session
+cannot read it. `/memory` shows the shared memory, `/memory mine` shows your
+own, and `/memory forget-mine` clears yours after you confirm with the code it
+gives you. Every reply is ephemeral, to the person who ran the command, and no
+argument names another member. See
+[architecture](architecture.md#shared-and-personal-memory).
+
 ### Session output files
 
 Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack

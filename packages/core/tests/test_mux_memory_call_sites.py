@@ -204,7 +204,11 @@ async def test_memory_archive_keeps_request_and_clears_binding_after_404(
     async def clear(*args: object, **kwargs: Any) -> None:
         cleared.append(kwargs)
 
+    async def no_personal(*args: object, **kwargs: object) -> list[tuple[uuid.UUID, str]]:
+        return []
+
     monkeypatch.setattr(host, "get_memory_store_id", binding)
+    monkeypatch.setattr(host, "list_personal_memory_stores_for_agent", no_personal)
     monkeypatch.setattr(host, "clear_memory_store", clear)
     original_archive = archive_memory_store
 

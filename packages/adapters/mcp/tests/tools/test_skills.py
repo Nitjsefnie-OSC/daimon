@@ -27,6 +27,7 @@ from daimon.adapters.mcp.tools.skills import (
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.channel_skills import add_channel_skill
 from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
@@ -299,12 +300,91 @@ async def test_delete_impl_calls_delete_skill_and_versions(
     )
     router.add("GET", r"/v1/skills/sk_d/versions", on_delete_versions)
     router.add("DELETE", r"/v1/skills/([^/]+)", on_delete_skill)
+    router.add_agent_list()
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     await _delete_impl(_runtime(client, sessionmaker), auth, "doomed")
 
     assert deleted == ["sk_d"], "should delete the correct skill ID"
+
+
+def _doomed_skill_router(tenant_id: uuid.UUID, deleted: list[str]) -> MARouter:
+    def on_delete_skill(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        deleted.append(m.group(1))
+        return httpx.Response(200)
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda _req, _m: list_response(
+            [
+                SkillListResponse(
+                    id="sk_d",
+                    display_title=f"{str(tenant_id)[:8]}-doomed",
+                    source="custom",
+                    type="custom",
+                    created_at="2026-01-01T00:00:00Z",
+                    updated_at="2026-01-01T00:00:00Z",
+                    latest_version="v1",
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/skills/sk_d/versions", lambda _r, _m: list_response([]))
+    router.add("DELETE", r"/v1/skills/([^/]+)", on_delete_skill)
+    return router
+
+
+async def test_delete_impl_refuses_while_attached_naming_only_own_places(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """QA-NEW19 in chat: refused while an agent or channel uses the skill.
+
+    The caller's own agents and channels are named; another workspace's are
+    only counted.
+    """
+    async with sessionmaker() as session, session.begin():
+        tenant_id = (await make_tenant(session)).id
+        other_tenant = (await make_tenant(session)).id
+        for tid, channel in ((tenant_id, "111"), (other_tenant, "999")):
+            await add_channel_skill(
+                session,
+                tenant_id=tid,
+                platform="discord",
+                channel_id=channel,
+                skill_id="sk_d",
+                version="1",
+                name="doomed",
+                owner_agent_name=None,
+                actor_account_id=None,
+            )
+    deleted: list[str] = []
+    router = _doomed_skill_router(tenant_id, deleted)
+    pinned = [{"type": "custom", "skill_id": "sk_d", "version": "latest"}]
+    router.add_agent_list(
+        ma_agent(id="agent_mine", name="research-bot", tenant_id=tenant_id, skills=pinned),
+        ma_agent(id="agent_theirs", name="secret-bot", tenant_id=other_tenant, skills=pinned),
+        ma_agent(id="agent_unrelated", name="other-bot", tenant_id=tenant_id),
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    with pytest.raises(ToolError, match="still attached to") as refused:
+        await _delete_impl(
+            _runtime(build_fake_anthropic(router.dispatch), sessionmaker), auth, "doomed"
+        )
+
+    message = str(refused.value)
+    assert "research-bot" in message and "discord channel 111" in message
+    assert "1 agent(s) in another workspace" in message
+    assert "1 channel(s) in another workspace" in message
+    assert "secret-bot" not in message and "999" not in message, "no cross-workspace names"
+    assert "other-bot" not in message
+    assert "remove_skill" in message and "remove_channel_skill" in message
+    assert deleted == [], "a refused delete deletes nothing"
 
 
 async def test_delete_impl_raises_tool_error_not_found(

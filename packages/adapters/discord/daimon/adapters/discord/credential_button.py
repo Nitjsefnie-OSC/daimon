@@ -38,7 +38,7 @@ The repo kind's non-admin branch bounds that pre-filter with
 That is sound only because `RepoBindModal.on_submit` repeats the identical
 gate before the consume — this pre-filter is advisory, not authoritative, so
 falling through never grants a write the submit-time check would not also
-grant. A timeout reverts this advisory check to its unfiltered shape
+grant. What a timeout costs is the pre-filter's protection lapsing
 for that one click: a member who will still be refused briefly sees the
 token field before the submit-time gate turns them away. Never confuse
 `is_done()`, used below to pick which half of the response already fired,
@@ -242,10 +242,10 @@ class CredentialRequestButton(
                 await interaction.response.send_message(
                     _expired_message_for_row(request_row), ephemeral=True
                 )
-                # Opportunistic, and only here: a card goes stale silently
-                # (nothing sweeps expiries), so the late click of the one
-                # person who could have used it is the event that can still
-                # correct the channel's copy. The refusal is sent first --
+                # The request-expiry poller retires an unclicked card on its
+                # next tick, but only best effort and in bounded batches; a
+                # click before then, or on a card its edit failed for,
+                # corrects the channel's copy here instead. The refusal is sent first --
                 # the edit is a different message, and the clicker's own
                 # answer must not wait on it. A wrong-requester click edits
                 # nothing: it would let anyone in the channel retire a card

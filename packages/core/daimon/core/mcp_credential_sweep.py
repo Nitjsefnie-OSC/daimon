@@ -3,18 +3,18 @@
 **Operator invocation:** ``daimon mcp sweep-credentials`` (dry-run by default;
 pass ``--apply`` to mutate).
 
-**Defense-in-depth / dormant-cred cleanup — NOT load-bearing for the
+**Defense-in-depth / dormant-cred cleanup — NOT load-bearing for the admin
 escalation.**
 
-Intra-tenant RBAC bypass via confused-deputy threads is
-closed at the trusted-token gate: a baked ``is_admin`` claim on a *non-internal* Discord
+The admin escalation (intra-tenant RBAC bypass via confused-deputy threads) is
+closed at the MCP admin gate: a baked ``is_admin`` claim on a *non-internal* Discord
 vault token never elevates a non-admin caller at the MCP admin gate, regardless
-of whether or when this sweep runs. The trusted-token gate alone is sufficient.
+of whether or when this sweep runs. The gate alone is sufficient.
 
 This module performs a *one-time backfill* to align the existing credential
-fleet with the credential invariant: ``mint_jwt`` called from
+fleet with the no-is_admin invariant: ``mint_jwt`` called from
 ``ensure_agent_mcp_vault`` now omits ``is_admin`` from long-lived credentials,
-but credentials minted before the 88-03 fix may still carry a frozen
+but credentials minted before the gate fix may still carry a frozen
 ``is_admin=True`` claim with no expiry. While these stale claims are already
 inert (the gate checks ``is_admin AND internal`` together; Discord vault tokens
 never carry ``internal``), sweeping them removes the confusion from operator

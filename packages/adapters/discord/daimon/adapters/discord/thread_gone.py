@@ -1,4 +1,4 @@
-"""A turn whose own thread was deleted or closed under it (#809).
+"""A turn whose own thread was deleted or closed under it.
 
 Two signals end a turn's right to write to its thread:
 

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from daimon.adapters.teams import feedback, memory, wizard
-from daimon.adapters.teams.billing_panel import redeemed_text
+from daimon.adapters.teams.billing_panel import redeemed_card_text
 from daimon.adapters.teams.help import help_card
 from daimon.core.promo_credit import PromoRedeemed
 
@@ -43,6 +43,6 @@ def test_timed_credit_has_the_approved_two_paragraph_reply() -> None:
         granted=True,
         balance_usd=Decimal("87.4"),
     )
-    text = redeemed_text(result)
+    text = redeemed_card_text(result)
     assert text.startswith("🎟️ Added **$25.00** of credit.\n\nUsed before credit with no expiry. ")
     assert "Anything unused expires" in text

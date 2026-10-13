@@ -130,7 +130,7 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(case, monkeypa
     token = mint_jwt(account_id=ACCOUNT, chat_agent_id=AGENT, secret=SECRET, now=NOW)
     async with old.client() as before, new.client() as after:
         # Original host leaf calls and literal payloads, independently pinned.
-        _ = [row async for row in before.beta.vaults.list()]
+        _ = [row async for row in before.beta.vaults.list(limit=100)]
         if case == "cold":
             await before.beta.vaults.create(display_name=name)
         else:

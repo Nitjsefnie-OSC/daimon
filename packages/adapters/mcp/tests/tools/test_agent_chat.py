@@ -154,6 +154,21 @@ def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(agent_chat, "session_mutation_fence", fence)
 
+    # Mock-database fixtures cannot hold a settle request; send without one
+    # (the billed send is covered in test_agent_chat_billing.py).
+    real_send = agent_chat._send_billed  # pyright: ignore[reportPrivateUsage]
+
+    async def send(runtime: Any, session_id: str, message: str, *, scope: Any) -> str:
+        if not isinstance(runtime.session_factory, MagicMock):
+            return await real_send(runtime, session_id, message, scope=scope)
+        sent = await runtime.client.beta.sessions.events.send(
+            session_id,
+            events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],
+        )
+        return agent_chat._turn_boundary(sent)  # pyright: ignore[reportPrivateUsage]
+
+    monkeypatch.setattr(agent_chat, "_send_billed", send)
+
     monkeypatch.setattr(_session_access, "load_read_policy", load)
 
 
@@ -2458,9 +2473,13 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "budget_channel_id",
         "origin_channel_id",
         "origin_seal_ids",
+        "personal_memory",
         "before_create",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
     assert call_kwargs["app_session_unmapped"] is True
+    assert call_kwargs["personal_memory"] is False, (
+        "an agent key is the agent, not a verified person: shared memory only"
+    )
 
 
 @pytest.mark.parametrize("billed", [True, False], ids=["billed", "unbilled"])

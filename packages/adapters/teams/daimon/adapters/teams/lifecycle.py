@@ -39,7 +39,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
-from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     ToolUseBlock,
@@ -73,8 +73,6 @@ TEAMS_SEND_ERRORS = (httpx.HTTPError, OSError, ValueError)
 # A send that timed out may still have landed.
 _TIMEOUTS = (TimeoutError, httpx.TimeoutException)
 SEND_TIMEOUT_S = 30.0
-# How a person reaches the billing card in Teams, for the top-up line.
-TEAMS_BILLING_COMMAND = "`billing` in a 1:1 chat with me"
 
 
 def bound_request_id() -> str:

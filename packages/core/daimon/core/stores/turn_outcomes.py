@@ -75,3 +75,14 @@ async def list_for_tenant(
         values["reason"] = TerminationReason(row["reason"])
         result.append(OutcomeRecord(**values))
     return result
+
+
+async def session_ids_for_platform(session: AsyncSession, platform: str) -> list[str]:
+    """Every MA session id an outcome on `platform` names, in id order."""
+    rows = await session.execute(
+        select(TurnOutcome.session_id)
+        .where(TurnOutcome.platform == platform, TurnOutcome.session_id.is_not(None))
+        .distinct()
+        .order_by(TurnOutcome.session_id)
+    )
+    return [sid for sid in rows.scalars() if sid is not None]

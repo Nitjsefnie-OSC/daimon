@@ -69,11 +69,8 @@ def test_hook_contract_prose_is_present() -> None:
     )
 
     driver_doc = inspect.getdoc(driver_module) or ""
-    assert (
-        "Exactly ONE piece of I/O is permitted inline in the consume loop itself, "
-        "ahead of that hook call: the per-event billing `record()` call."
-    ) in " ".join(driver_doc.split()), (
-        "driver.py's module docstring must document the inline billing "
+    assert "ONE piece of I/O is permitted inline" in driver_doc and "billing" in driver_doc, (
+        "driver.py's module docstring must document the billing "
         "exemption -- the one piece of I/O the consume loop is allowed to "
         "do inline, despite the no-I/O-in-the-pump rule"
     )

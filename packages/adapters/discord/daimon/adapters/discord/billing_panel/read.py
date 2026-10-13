@@ -155,14 +155,18 @@ async def resolve_shown_names(
     return named + rows[TOP_SPENDERS_SHOWN:], found
 
 
-async def _has_redeemable_promo_code_best_effort(session: AsyncSession, *, now: datetime) -> bool:
+async def _has_redeemable_promo_code_best_effort(
+    session: AsyncSession, *, now: datetime, channel_codes_only: bool = False
+) -> bool:
     """Whether a promo code is redeemable now; False when the lookup fails.
 
     Runs in a savepoint so a failed lookup leaves the session usable.
     """
     try:
         async with session.begin_nested():
-            return await has_redeemable_promo_code(session, now=now)
+            return await has_redeemable_promo_code(
+                session, now=now, channel_codes_only=channel_codes_only
+            )
     except SQLAlchemyError as exc:
         _log.warning("promo_code_lookup_failed", error=str(exc))
         return False
@@ -237,6 +241,9 @@ async def load_billing_snapshot(
             over_cap_count=0,
             timed_credit=timed_credit,
             channel_budget=channel_budget,
+            has_redeemable_promo_code=await _has_redeemable_promo_code_best_effort(
+                session, now=now, channel_codes_only=True
+            ),
         )
 
     # Admin path

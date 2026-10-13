@@ -1,4 +1,4 @@
-"""Requester-bound GitHub link reveal for a shared conversation thread."""
+"""GitHub link reveal on a Connect GitHub card in a shared conversation thread."""
 
 from __future__ import annotations
 
@@ -34,7 +34,13 @@ CUSTOM_ID_TEMPLATE = r"gh_connect:(?P<requester>[0-9]+):(?P<intent>[0-9a-f]{32})
 class GitHubConnectButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]], template=CUSTOM_ID_TEMPLATE
 ):
-    """Reveal one invitation only to its requester, even after a bot restart."""
+    """Reveal the card's invitation privately to whoever clicks, even after a bot restart.
+
+    Anyone in the thread may use it: what they can grant is capped by their own
+    GitHub permission on each repo, and the person who asked must still manage
+    the agent. The link adds repos to the agent; it never links the clicker's
+    GitHub account to the requester's Daimon account.
+    """
 
     def __init__(self, *, requester_id: str, intent_id: uuid.UUID) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
@@ -74,11 +80,6 @@ class GitHubConnectButton(
                 )
 
     async def _reveal(self, interaction: discord.Interaction[commands.Bot]) -> None:
-        if str(interaction.user.id) != self.requester_id:
-            await interaction.response.send_message(
-                f"Only <@{self.requester_id}> can use this.", ephemeral=True
-            )
-            return
         if interaction.guild_id is None or interaction.channel_id is None:
             await interaction.response.send_message(
                 "This connection is no longer available.", ephemeral=True
@@ -92,7 +93,8 @@ class GitHubConnectButton(
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            member = await guild.fetch_member(interaction.user.id)
+            # The invitation is the requester's, so they must still manage the agent.
+            requester = await guild.fetch_member(int(self.requester_id))
         except discord.HTTPException:
             await interaction.followup.send(
                 "This connection is no longer available.", ephemeral=True
@@ -101,8 +103,8 @@ class GitHubConnectButton(
         bot = cast(DaimonBot, interaction.client)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         manages = False
-        if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
-            refusal = await _manager_refusal(bot, member, tenant_id, self.intent_id)
+        if not is_member_guild_admin(requester, guild_owner_id=guild.owner_id):
+            refusal = await _manager_refusal(bot, requester, tenant_id, self.intent_id)
             if refusal is not None:
                 await interaction.followup.send(refusal, ephemeral=True)
                 return
@@ -159,7 +161,7 @@ class GitHubConnectButton(
 async def _manager_refusal(
     bot: DaimonBot, member: discord.Member, tenant_id: uuid.UUID, intent_id: uuid.UUID
 ) -> str | None:
-    """Why a clicker who is not a server admin may not add repos, or None if they manage it."""
+    """Why a requester who is not a server admin may not add repos, or None if they manage it."""
     async with bot.runtime.sessionmaker() as session:
         target = await connect_intent_agent(session, intent_id=intent_id)
     if target is None:

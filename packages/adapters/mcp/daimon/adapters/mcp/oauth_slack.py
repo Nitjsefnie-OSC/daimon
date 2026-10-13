@@ -107,7 +107,7 @@ def _install_landing_html(
     signup_credit: Decimal,
     display_name: str = "daimon",
 ) -> HTMLResponse:
-    """Branded install landing page (Page 1 per UI-SPEC).
+    """Branded install landing page.
 
     Shows the 6 locked SLACK_BOT_SCOPES in plain language before the user
     clicks through to Slack's consent screen.
@@ -134,7 +134,7 @@ def _success_html(
     display_name: str = "daimon",
     promo_codes: bool = False,
 ) -> HTMLResponse:
-    """Branded success page (Page 2 per UI-SPEC).
+    """Branded success page.
 
     ``promo_codes``: some code is redeemable now, so point admins at /billing.
 
@@ -159,7 +159,7 @@ def _success_html(
 
 
 def _enterprise_rejection_html() -> HTMLResponse:
-    """Branded Enterprise-Grid rejection page (Page 3 per UI-SPEC).
+    """Branded Enterprise-Grid rejection page.
 
     Called when `is_enterprise_install=true` in the OAuth response.
     No token was persisted, no tenant was provisioned.
@@ -218,7 +218,7 @@ def _error_html(
     *,
     kind: Literal["expired", "unconfigured", "exchange_failed", "wrong_account"],
 ) -> HTMLResponse:
-    """Branded error variant (Page 4 per UI-SPEC).
+    """Branded error variant.
 
     STATIC copy only — never interpolates exception text, request params, or
     any external value. Mirror of `oauth_github.py` static-string discipline.
@@ -290,7 +290,7 @@ def _resolve_config_or_error(
         client_id=s.client_id,
         client_secret=s.client_secret.get_secret_value(),
         signing_secret=s.signing_secret.get_secret_value(),
-        # Pitfall 6: derived ONCE, used identically in authorize + exchange.
+        # Derived ONCE, used identically in authorize + exchange.
         redirect_url=root_url + "/oauth/slack/callback",
         fernet=fernet,
     )

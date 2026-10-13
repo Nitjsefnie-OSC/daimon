@@ -396,8 +396,8 @@ _CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError, Tu
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
 # `lifecycle.on_render(state)` and advances the render anchor. Finalizers
-# use this (not the raw `lifecycle.on_render`) to honor design §6's
-# "exactly one render after the terminal event folds" under the race
+# use this (not the raw `lifecycle.on_render`) to keep "exactly one
+# render after the terminal event folds" under the race
 # where the render tick already rendered the terminal state.
 RenderOnce = Callable[[TurnState], Awaitable[None]]
 
@@ -573,7 +573,7 @@ async def run_turn(
     `run_prepared_turn`, whose `None` is fail-safe (`turn_deadline(now=now())`
     is computed for them). The reason: `run_prepared_turn` already wraps this
     whole call in `asyncio.wait_for`, and its own `TimeoutError` handler is
-    what performs `mark_dead` on the thread-session mapping, logs
+    what performs the `mark_dead` on the thread-session mapping, logs
     `turn.ceiling_exceeded` with the mapping id, and calls the caller's
     `on_terminal_failure` directly. A driver-level bound that ever won that
     race would silently bypass all of it — so the driver defers to the
@@ -915,9 +915,11 @@ async def _pump(
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
     async def _render_once(state: TurnState) -> None:
-        delta = _diff(prev_cell[0], state)
-        if delta.is_empty():
+        if _diff(prev_cell[0], state).is_empty():
             return
+        await _deliver(state)
+
+    async def _deliver(state: TurnState) -> None:
         # Named boundary (guideline:architecture): rendering is delivery,
         # not correctness, and the adapter exceptions it must survive are
         # open-ended (discord.HTTPException, Slack API errors, whatever a
@@ -927,9 +929,8 @@ async def _pump(
         # BaseException drain site in this module.
         #
         # On failure: log and return WITHOUT advancing `prev_cell[0]`. The
-        # next tick re-diffs from the unchanged anchor and naturally
-        # retries the identical delta -- no retry counter, no backoff, no
-        # extra state. This function always returns `None` either way, and
+        # next tick delivers the state again -- no retry counter, no
+        # backoff, no extra state. This function always returns `None` either way, and
         # every finalizer proceeds to its `on_terminal_*` call regardless,
         # so a render failure can never change the turn's own outcome.
         try:
@@ -946,9 +947,12 @@ async def _pump(
         prev_cell[0] = state
 
     async def _render_loop() -> None:
+        # Every tick delivers, changed or not: a long tool call changes
+        # nothing, yet the card's elapsed time must keep moving. Each
+        # adapter's own debounce decides which calls become platform edits.
         while True:
             await asyncio.sleep(render_interval_s)
-            await _render_once(state_cell[0])
+            await _deliver(state_cell[0])
 
     render_task = asyncio.create_task(_render_loop(), name="turn.render_loop")
 
@@ -2071,7 +2075,7 @@ async def _handle_interrupt_in_consume(
     log.info("turn.interrupt.sent", session_id=session_id)
     await lifecycle.on_interrupt_sent("cancel_event")
     log.info("turn.interrupt.acked", session_id=session_id)
-    # Ack arrived -- partial state is "clean" (refinements §5).
+    # Ack arrived -- partial state is "clean".
     state_cell[0] = dataclasses.replace(state_cell[0], termination=reason)
     await render_once(state_cell[0])
     log.info(
@@ -2093,7 +2097,7 @@ def _suppress_task_exc():
     """Swallow any exception (including CancelledError) raised while
     awaiting a cancelled task. Used only to drain the render task.
 
-    Per design §12.6 this is the sole permitted drain point for
+    This is the sole permitted drain point for
     `BaseException` in the driver.
     """
     with contextlib.suppress(BaseException):

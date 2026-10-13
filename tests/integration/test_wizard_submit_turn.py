@@ -44,6 +44,7 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.agent_memory_stores import insert_memory_store
+from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TenantRow, WizardSessionRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
@@ -371,6 +372,36 @@ async def test_the_wizard_turn_posts_through_the_agent_post_transport(
     (transport,) = made
     assert transport.channel is channel and transport.client is bot
     assert channel.send.await_count >= 1, "with identity off the transport posts as the bot"
+
+
+async def test_the_wizard_turns_answer_is_recorded_as_the_turns_post(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Recorded like a mention turn's answer, so a reply to it starts a turn."""
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800001010")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=5010, parent_id=4010)
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=[])
+    bot = _make_bot(_make_runtime(db_session_factory, router))
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    item = await WizardSubmitButton.from_custom_id(interaction, MagicMock(), _submit_match(row.id))
+    await item.callback(interaction)
+    await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+    async with db_session_factory() as session:
+        post = await get_post(
+            session, tenant_id=tenant.id, platform="discord", channel_id="5010", message_id="42"
+        )
+    assert post is not None, "the answer the wizard turn posted is recorded"
+    assert (post.source, post.requester_platform_user_id, post.parent_channel_id) == (
+        "turn",
+        _REQUESTER_ID,
+        "4010",
+    )
+    assert post.agent_id == derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID), (
+        "the post is the turn agent's own"
+    )
 
 
 # --- answer block as the user message ----------------------------------------
@@ -1047,11 +1078,14 @@ async def test_two_concurrent_submits_bill_exactly_one_turn(
 # --- per-tenant concurrency cap ---------------------------------------------------
 
 
-@pytest.mark.parametrize("table_rendering", [False, True])
+@pytest.mark.parametrize(
+    ("table_rendering", "renders"), [(None, True), (False, False), (True, True)]
+)
 async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    table_rendering: bool,
+    table_rendering: bool | None,
+    renders: bool,
 ) -> None:
     """A wizard turn costs the same upstream capacity as a mention turn, so it
     counts against the same cap -- and must give the slot back."""
@@ -1063,7 +1097,9 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     stream_hits: list[str] = []
     router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
     runtime = _make_runtime(db_session_factory, router)
-    runtime.settings.table_rendering = {tenant.id: table_rendering}
+    runtime.settings.table_rendering = (
+        {} if table_rendering is None else {tenant.id: table_rendering}
+    )
     bot = _make_bot(runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 
@@ -1083,9 +1119,9 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
             marker.thread_id == str(channel.id) and marker.active_turn_message_id == "42"
             for marker in active
         ), "wizard turn marker must be durable before run_prepared_turn starts"
-        assert kwargs["lifecycle"]._render_tables is table_rendering
+        assert kwargs["lifecycle"]._render_tables is renders
         recovery = kwargs["recovery_lifecycle"](asyncio.Event())
-        assert recovery._render_tables is table_rendering
+        assert recovery._render_tables is renders
         kwargs["lifecycle"] = recovery
         return await real_run_prepared_turn(*args, **kwargs)
 

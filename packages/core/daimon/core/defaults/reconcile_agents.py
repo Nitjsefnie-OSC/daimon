@@ -50,8 +50,11 @@ async def reconcile_agent(
     public_url: str | None = None,
     managed: bool = True,
     skills_view: list[SkillListResponse] | None = None,
+    references: object = None,
 ) -> ResourceOutcome:
     """Reconcile a single agent against MA.
+
+    `references` is ignored; it is still accepted because some callers pass it.
 
     `managed=True` (default) stamps `daimon_managed=true` in the agent's
     metadata so the sweep (defaults apply) can find and archive resources

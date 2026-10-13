@@ -43,6 +43,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 )
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import (
+    McpVaultIds,
     resolve_hidden_mcp_server_names,
     sync_agent_mcp_credentials,
 )
@@ -289,6 +290,7 @@ async def apply_update_ops(
     now: dt.datetime,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    mcp_vault_ids: McpVaultIds | None = None,
 ) -> AppliedOps | SessionBusy:
     """Run `ops` against the live session and return what it runs afterwards.
 
@@ -418,6 +420,7 @@ async def apply_update_ops(
                         public_url=str(mcp.public_url),
                         now=now,
                         exclude_github_copilot=snapshot.github_mode == "app",
+                        vault_ids=mcp_vault_ids,
                     )
 
     return AppliedOps(snapshot=snapshot, applied=tuple(applied))

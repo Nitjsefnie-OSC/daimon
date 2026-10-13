@@ -186,7 +186,7 @@ async def test_fork_partition_preserves_sdk_trace_and_raw_shared_pins(
         page = await sdk.beta.skills.list(limit=1000)
         # Both actual SDK rows accept null native version metadata.
         assert all(row.latest_version is None for row in page.data)
-        _agents = [row async for row in sdk.beta.agents.list(include_archived=False)]
+        _agents = [row async for row in sdk.beta.agents.list(include_archived=False, limit=100)]
     async with migrated.client() as sdk:
         split = await _split_scoped_skills(
             sdk, db_session_factory, tenant_id=tenant.id, source_name="source", skills=pins
