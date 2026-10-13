@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import daimon.adapters.mcp.tools._ask_mirrors as _ask_mirrors
 import daimon.adapters.mcp.tools.mirrors as tools
+import discord
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
@@ -139,6 +142,38 @@ async def test_create_refuses_a_home_kept_to_other_agents(
 
     with pytest.raises(ToolError, match="Refused"):
         await _create_in(_runtime(sessionmaker, tenant.id), admin, "100")
+
+
+async def test_create_checks_the_destinations_category(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(category_rules={"700": ChannelRule(writers="none")}),
+    )
+    admin = await _auth(db_session, tenant)
+    categories = {300: 700, 301: 701}
+
+    @contextlib.asynccontextmanager
+    async def rest_client(_token: str) -> AsyncIterator[MagicMock]:
+        client = MagicMock()
+
+        async def fetch_channel(channel_id: int) -> discord.TextChannel:
+            return MagicMock(spec=discord.TextChannel, category_id=categories[channel_id])
+
+        client.fetch_channel = fetch_channel
+        yield client
+
+    monkeypatch.setattr(tools, "rest_client", rest_client)
+    runtime = _runtime(sessionmaker, tenant.id)
+
+    with pytest.raises(ToolError, match="lets nobody post"):
+        await _create_in(runtime, admin, "300")
+    assert (await _create_in(runtime, admin, "301")).destination_id == "301", "another category"
 
 
 @pytest.mark.parametrize("caller", ["agent_key", "headless", "chat_turn_without_card"])

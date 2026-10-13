@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
+import discord
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -20,12 +21,16 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
+from daimon.adapters.mcp.tools.discord._client import (
+    _require_bot_token,  # pyright: ignore[reportPrivateUsage]
+    rest_client,
+)
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mirrors import MirrorRefusal, mirror_refusal
 from daimon.core.permissions import channel_permissions
-from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.routine_delivery import destination_shape_error, placement_unknown_is_unsafe
 from daimon.core.stores import mirrors as mirrors_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import MirrorRow
@@ -44,6 +49,25 @@ _REFUSALS: dict[MirrorRefusal, str] = {
         "own agent's conversations never leave its channel"
     ),
 }
+
+
+async def _discord_placement(
+    runtime: McpRuntime, destination_id: str
+) -> tuple[str | None, str | None]:
+    """(parent channel, category) of a Discord channel or thread."""
+    try:
+        async with rest_client(_require_bot_token(runtime)) as client:
+            channel = await client.fetch_channel(int(destination_id))
+            parent = None
+            if isinstance(channel, discord.Thread):
+                parent = str(channel.parent_id)
+                channel = await client.fetch_channel(channel.parent_id)
+            category = getattr(channel, "category_id", None)
+    except discord.HTTPException as err:
+        raise ToolError(
+            f"{destination_id} could not be looked up ({err.status}). Nothing was saved."
+        ) from err
+    return parent, str(category) if category else None
 
 
 class MirrorOut(BaseModel):
@@ -118,19 +142,27 @@ async def _create_mirror_impl(
         raise ToolError(f"no agent named {agent_name!r} found for this tenant")
     names = tuple(dict.fromkeys(n for n in agent_pin_names(match.name, match.metadata) if n))
     now = datetime.now(UTC)
-    async with runtime.session_factory() as session, session.begin():
+    async with runtime.session_factory() as session:
         try:
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
         except AccessPolicyUnreadable as err:
             raise ToolError(
                 "the workspace access policy could not be read; nothing was saved"
             ) from err
-        # A thread's channel is checked by the poster before every post.
-        refusal = mirror_refusal(
-            policy, agent_names=names, dest=channel_permissions(policy, channel_id=destination_id)
-        )
-        if refusal is not None:
-            raise ToolError(f"Refused: {_REFUSALS[refusal]}. Nothing was saved.")
+    # Looked up only when a protected category could hold it; the poster
+    # re-checks the full placement before every post.
+    parent, category = (
+        await _discord_placement(runtime, destination_id)
+        if placement_unknown_is_unsafe(policy, platform=auth.platform, kind=destination_kind)
+        else (None, None)
+    )
+    dest = channel_permissions(
+        policy, channel_id=destination_id, parent_channel_id=parent, category_id=category
+    )
+    refusal = mirror_refusal(policy, agent_names=names, dest=dest)
+    if refusal is not None:
+        raise ToolError(f"Refused: {_REFUSALS[refusal]}. Nothing was saved.")
+    async with runtime.session_factory() as session, session.begin():
         row = await mirrors_store.upsert_mirror(
             session,
             tenant_id=auth.tenant_id,
