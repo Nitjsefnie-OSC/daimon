@@ -37,7 +37,6 @@ from daimon.core.skill_sync.bundler import extract_and_bundle
 from daimon.core.skill_sync.fetcher import GitHubAuthError, GitHubTarballFetcher, GitHubUnreachable
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills.attachments import delete_skill_unless_attached
-from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.stores.user_skills import list_user_skills_for_tenant, upsert_user_skill
@@ -395,9 +394,11 @@ async def _apply_phase(
             # Retrieve fresh version before update (Pitfall 3 / rekey pattern)
             fresh = await client.beta.agents.retrieve(agent.id)
             try:
-                # Under the new skill's reference lock: it is discoverable by
-                # title already, so a delete could otherwise land first.
-                await guarded_agent_update(client, sessionmaker, fresh, skills=new_skills)
+                await client.beta.agents.update(
+                    fresh.id,
+                    version=fresh.version,
+                    skills=new_skills,  # type: ignore[arg-type]
+                )
             except Exception as exc:  # per-agent error; run continues
                 _log.warning(
                     "skills_backfill.repin_failed",
@@ -431,7 +432,7 @@ async def _apply_phase(
         for legacy_id, new_id in legacy_to_new.items():
             deleted = False
             if legacy_id not in referenced_ids:
-                # Decided again under the reference lock: an attach since the
+                # Decided again just before deleting: an attach since the
                 # snapshot keeps the legacy skill.
                 async with sessionmaker() as session, session.begin():
                     outcome = await delete_skill_unless_attached(

@@ -22,7 +22,6 @@ from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import upsert_credential_encrypted
 from daimon.core.ma import update_agent_with_version_retry
-from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 
 log = structlog.get_logger()
@@ -94,8 +93,8 @@ async def attach_imported_skills(
         )
         if collision is not None:
             raise DaimonError(f"cannot attach: {collision}")
-        return await guarded_agent_update(
-            runtime.anthropic, runtime.sessionmaker, fresh, skills=merged
+        return await runtime.anthropic.beta.agents.update(
+            fresh.id, version=fresh.version, skills=merged
         )
 
     try:

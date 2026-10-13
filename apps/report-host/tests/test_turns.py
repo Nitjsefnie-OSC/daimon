@@ -950,6 +950,44 @@ async def test_run_turn_with_generic_seam_error_releases_the_reservation(
     assert "could not answer" in system_texts[0].lower()
 
 
+async def test_run_turn_tells_the_reader_to_have_a_report_with_a_deleted_skill_re_published(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_fake_seam: FakeSeamBuilder,
+    fake_seam_lifespan: FakeSeamLifespan,
+) -> None:
+    """The report's agent pins a deleted skill: asking again can't help, re-publishing can."""
+    conn, _report, thread = _setup(tmp_path)
+    thread = _begin(conn, thread, deadline_at=NOW + timedelta(seconds=1200))
+
+    def start_turn(_args: dict[str, object]) -> dict[str, object]:
+        raise Exception(
+            'This report\'s agent uses the skill "skill_gone", which no longer exists, so it '
+            "can't answer. Ask the report's publisher to re-publish it."
+        )
+
+    app = build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=[])
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    async with fake_seam_lifespan(app):
+        await run_turn(
+            conn=conn,
+            seam=_seam_client(app),
+            settings=settings,
+            thread=thread,
+            message="hello",
+            now=lambda: NOW,
+        )
+
+    messages = threads_store.list_messages(conn, thread_id=thread.id)
+    system_texts = [m.text for m in messages if m.role == "system"]
+    assert len(system_texts) == 1
+    assert "deleted" in system_texts[0] and "re-publish" in system_texts[0]
+    assert "ask again" not in system_texts[0].lower()
+    updated_report = reports_store.load_report(conn, slug="acme")
+    assert updated_report is not None and updated_report.spent_usd == Decimal("0")
+
+
 async def test_run_turn_happy_path_settles_the_reservation_exactly_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

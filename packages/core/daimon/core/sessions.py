@@ -82,7 +82,11 @@ from daimon.core.session_snapshot import (
     session_tools,
     snapshot_from_created_session,
 )
-from daimon.core.skills.unresolved import skill_unavailable, unresolved_skill_id
+from daimon.core.skills.unresolved import (
+    report_skill_unavailable,
+    skill_unavailable,
+    unresolved_skill_id,
+)
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.github_access import get_agent_mode
@@ -799,7 +803,9 @@ async def create_isolated_session(
     `billing_exempt`, `budget_channel_id` and the origin stamp the session the
     same way `create_session` does: metadata only, never a mount.
 
-    On MA failure: `anthropic.APIError` propagates uncaught.
+    On MA failure: `anthropic.APIError` propagates, except a skill the agent
+    pins that no longer exists, which raises `SkillUnavailable` telling the
+    reader to have the report re-published.
     """
     metadata = _session_metadata(
         account_id=account_id,
@@ -812,9 +818,16 @@ async def create_isolated_session(
             origin_stamp(channel_id=origin_channel_id, thread_id=None, seal=origin_seal_ids)
         )
 
-    return await anthropic.beta.sessions.create(
-        agent=agent.id,
-        environment_id=environment.id,
-        metadata=metadata if metadata else omit,
-        resources=resources,
-    )
+    try:
+        return await anthropic.beta.sessions.create(
+            agent=agent.id,
+            environment_id=environment.id,
+            metadata=metadata if metadata else omit,
+            resources=resources,
+        )
+    except anthropic_pkg.BadRequestError as error:
+        unresolved = unresolved_skill_id(error)
+        if unresolved is None:
+            raise
+        _log.warning("session.skill_unresolved", agent_id=agent.id, skill_id=unresolved[0])
+        raise report_skill_unavailable(unresolved[0]) from error

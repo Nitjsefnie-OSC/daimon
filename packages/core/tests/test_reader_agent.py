@@ -254,7 +254,7 @@ async def test_ensure_reader_variant_creates_when_no_existing_variant() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     result = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha", references=None
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
     )
 
     assert result.id == "ag_reader"
@@ -272,7 +272,7 @@ async def test_ensure_reader_variant_reuses_on_unchanged_source() -> None:
     _add_create_route(router, created)
     client = build_fake_anthropic(router.dispatch)
     first = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha", references=None
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
     )
 
     # No POST route registered at all on this router — any create or update
@@ -284,7 +284,7 @@ async def test_ensure_reader_variant_reuses_on_unchanged_source() -> None:
     client2 = build_fake_anthropic(router2.dispatch)
 
     second = await ensure_reader_variant(
-        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha", references=None
+        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
     )
 
     assert second.id == "ag_reader"
@@ -298,7 +298,7 @@ async def test_ensure_reader_variant_updates_when_source_spec_hash_changes() -> 
     _add_create_route(router, created)
     client = build_fake_anthropic(router.dispatch)
     first = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha", references=None
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
     )
 
     changed_source = _source_agent_dict(id_="ag_src", spec_hash="src-hash-2")
@@ -331,7 +331,7 @@ async def test_ensure_reader_variant_updates_when_source_spec_hash_changes() -> 
     client2 = build_fake_anthropic(router2.dispatch)
 
     second = await ensure_reader_variant(
-        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha", references=None
+        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
     )
 
     assert updated["version"] == first.version, "update must use MA's version, not a stale one"
@@ -348,7 +348,7 @@ async def test_ensure_reader_variant_reader_of_fallback_changes_with_source_vers
     _add_create_route(router, created)
     client = build_fake_anthropic(router.dispatch)
     first = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha", references=None
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
     )
 
     expected_reader_of_v1 = compute_spec_fingerprint({"agent_id": "ag_src", "version": 1})
@@ -382,7 +382,7 @@ async def test_ensure_reader_variant_reader_of_fallback_changes_with_source_vers
     client2 = build_fake_anthropic(router2.dispatch)
 
     await ensure_reader_variant(
-        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha", references=None
+        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
     )
 
     expected_reader_of_v2 = compute_spec_fingerprint({"agent_id": "ag_src", "version": 2})
@@ -398,7 +398,7 @@ async def test_ensure_reader_variant_raises_for_unknown_source() -> None:
 
     with pytest.raises(DaimonError, match="ghost"):
         await ensure_reader_variant(
-            client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="ghost", references=None
+            client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="ghost"
         )
 
 
@@ -438,7 +438,7 @@ async def test_ensure_reader_variant_ignores_the_source_toolset_and_servers() ->
     client = build_fake_anthropic(router.dispatch)
 
     result = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha", references=None
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
     )
 
     assert result.id == "ag_reader"

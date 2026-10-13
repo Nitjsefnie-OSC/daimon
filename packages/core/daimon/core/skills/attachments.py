@@ -9,9 +9,10 @@ so any tenant's agent counts) and `channel_skills` rows. With references, the
 delete is refused naming them, unless the caller asked to detach everywhere
 first.
 
-The final check and the provider delete run under the skill's exclusive
-reference lock (`reference_lock`), which every attach path takes shared before
-it writes a reference, so nothing can be attached between them.
+This is the one place a delete checks for references. Attaches take no lock:
+one that lands between the final check and the provider delete leaves a
+reference to a gone skill, and the next session there fails with
+`SkillUnavailable`, which names the skill and says who must remove it.
 """
 
 from __future__ import annotations
@@ -27,12 +28,12 @@ from daimon.core.defaults.ma_index import list_agents_referencing_skill
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.errors import UserFacingError
 from daimon.core.ma import delete_skill_and_versions, update_agent_with_version_retry
-from daimon.core.skills.reference_lock import lock_skill_for_delete
 from daimon.core.stores.channel_skills import (
     list_skill_channel_rules,
     remove_skill_from_every_channel,
 )
 from daimon.core.stores.domain import ChannelSkillRow
+from daimon.core.stores.user_skills import delete_user_skills_for_skill_id
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -94,7 +95,7 @@ class GuardedDelete:
     deleted: bool
     """False when the skill is still attached and `detach` was not asked for."""
     attachments: SkillAttachments
-    """What was found under the lock: refused on, or detached before deleting."""
+    """What the final check found: refused on, or detached before deleting."""
 
 
 async def delete_skill_unless_attached(
@@ -107,17 +108,15 @@ async def delete_skill_unless_attached(
 ) -> GuardedDelete:
     """Delete `skill_id` unless something references it, or detach it first.
 
-    Runs in `session`'s open transaction: takes the exclusive reference lock,
-    checks again, detaches (channel rows are deleted on `session`, so they
-    commit with it), then deletes every version and the skill. The lock is
-    held until the caller's transaction ends, so an attach waiting on it sees
-    the skill gone and refuses.
+    Runs in `session`'s open transaction: checks again, detaches (channel
+    rows are deleted on `session`, so they commit with it), then deletes every
+    version and the skill, and forgets every saved upload or sync of it, so
+    re-adding the same content creates a new skill instead of re-pinning this id.
 
     `own_agent_ids` are agents whose pin the caller is retiring with the skill
     (a skill sync's orphan on the agent being synced): their pins are detached
     and never refuse the delete; any other reference still does.
     """
-    await lock_skill_for_delete(session, skill_id)
     attachments = await find_skill_attachments(client, session, skill_id=skill_id)
     others = SkillAttachments(
         agents=tuple(a for a in attachments.agents if a.agent_id not in own_agent_ids),
@@ -129,6 +128,7 @@ async def delete_skill_unless_attached(
         await _detach_agents(client, skill_id=skill_id, attachments=attachments)
         await remove_skill_from_every_channel(session, skill_id=skill_id)
     await delete_skill_and_versions(client, skill_id)
+    await delete_user_skills_for_skill_id(session, anthropic_id=skill_id)
     return GuardedDelete(deleted=True, attachments=attachments)
 
 

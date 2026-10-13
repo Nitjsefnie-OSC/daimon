@@ -25,7 +25,7 @@ from daimon.core.stores import channel_skills
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic, skill_response
+from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -57,9 +57,6 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession], tenant: TenantRow) 
                 "updated_at": _NOW,
             }
             return httpx.Response(200, json={"data": [skill], "next_page": None})
-        if request.url.path == "/v1/skills/skill_lib":
-            # The add checks the skill still exists under its reference lock.
-            return httpx.Response(200, json=skill_response("skill_lib"))
         assert request.url.path == "/v1/agents"
         agent = ma_agent(name="shared", tenant_id=tenant.id).model_dump(mode="json")
         return httpx.Response(200, json={"data": [agent], "next_page": None})

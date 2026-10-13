@@ -1500,7 +1500,7 @@ async def test_a_replacement_for_a_deleted_channel_skill_names_it_instead_of_ret
         )
 
     message = str(refused.value)
-    assert refused.value.attached_to == "channel"
+    assert "this channel adds" in message
     assert '"qa-haiku-canary"' in message and "remove_channel_skill" in message
     assert "Ask again to retry" not in message
     still_live = await _live_row(db_session_factory, tenant=tenant, account=account)
@@ -1544,14 +1544,14 @@ async def test_the_missing_skill_message_holds_through_the_replacement_backoff(
             BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_gone", version="1"),
         ),
     )
-    with pytest.raises(SkillUnavailable, match="qa-haiku-canary"):
+    with pytest.raises(SkillUnavailable, match="qa-haiku-canary") as first_refusal:
         await _prepare(deps, admission, tenant=tenant, account=account)
     creates = transport.creates
 
     with pytest.raises(SkillUnavailable, match="qa-haiku-canary") as again:
         await _prepare(deps, admission, tenant=tenant, account=account)
 
-    assert again.value.attached_to == "channel"
+    assert str(again.value) == str(first_refusal.value), "the same copy as the first refusal"
     assert transport.creates == creates, "the backoff still holds: no new create"
     live = await _live_row(sessionmaker, tenant=tenant, account=account)
     assert live is not None and live.ma_session_id == first.ma_session_id

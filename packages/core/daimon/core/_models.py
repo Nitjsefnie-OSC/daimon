@@ -2493,6 +2493,7 @@ class SessionPreparation(Base):
         nullable=True,
     )
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

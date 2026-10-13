@@ -15,7 +15,12 @@ import uuid as _uuid
 from datetime import datetime
 
 from daimon.core._models import SessionPreparation
-from daimon.core.stores.domain import PreparationStage, SessionPreparationRow, TransferKind
+from daimon.core.stores.domain import (
+    PreparationFailureKind,
+    PreparationStage,
+    SessionPreparationRow,
+    TransferKind,
+)
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,6 +109,7 @@ async def fail_preparation(
     id: _uuid.UUID,
     reason: str,
     now: datetime,
+    kind: PreparationFailureKind | None = None,
 ) -> None:
     """Record why a preparation stopped, keeping everything it already produced.
 
@@ -113,7 +119,7 @@ async def fail_preparation(
     await session.execute(
         update(SessionPreparation)
         .where(SessionPreparation.id == id)
-        .values(stage="failed", failure_reason=reason, updated_at=now)
+        .values(stage="failed", failure_reason=reason, failure_kind=kind, updated_at=now)
     )
     await session.flush()
 

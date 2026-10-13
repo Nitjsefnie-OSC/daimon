@@ -82,7 +82,6 @@ from daimon.core.skill_sync.fetcher import (
 )
 from daimon.core.skill_zip import canonical_zip_bytes
 from daimon.core.skills.attachments import delete_skill_unless_attached
-from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.specs import SkillRepo, merge_default_agent_toolset
 from daimon.core.stores.agent_repo_binding import get_tenant_repo_proof_kind
 from daimon.core.stores.agent_skill_repo_credentials import (
@@ -789,9 +788,9 @@ async def sync_agent_skills(
         # MA delete must succeed before the local row is removed: the row
         # intentionally survives an MA-delete failure so it is re-selected as
         # an orphan on the next sync (convergent retry, no new state).
-        # The delete runs under the skill's reference lock: this agent's own
-        # pin goes with it, but another agent or a channel rule still using
-        # the skill keeps it (and its row) so their turns don't fail.
+        # This agent's own pin goes with the skill, but another agent or a
+        # channel rule still using it keeps it (and its row) so their turns
+        # don't fail.
         if row.anthropic_id is not None:
             try:
                 async with sessionmaker() as session, session.begin():
@@ -934,14 +933,17 @@ async def sync_agent_skills(
             tools_arg = merge_default_agent_toolset(
                 [t.model_dump(mode="json", exclude_none=True) for t in fresh.tools]  # type: ignore[arg-type]  # dumped dicts satisfy Tool TypedDict shape
             )
-            return await guarded_agent_update(
-                anthropic_client,
-                sessionmaker,
-                fresh,
+            return await anthropic_client.beta.agents.update(
+                fresh.id,
+                version=fresh.version,
                 skills=union_list,
                 tools=tools_arg,  # type: ignore[arg-type]  # list[dict] satisfies list[Tool] at runtime
             )
-        return await guarded_agent_update(anthropic_client, sessionmaker, fresh, skills=union_list)
+        return await anthropic_client.beta.agents.update(
+            fresh.id,
+            version=fresh.version,
+            skills=union_list,
+        )
 
     try:
         updated = await update_agent_with_version_retry(anthropic_client, agent.id, _apply)

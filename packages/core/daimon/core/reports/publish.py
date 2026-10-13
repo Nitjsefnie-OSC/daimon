@@ -203,11 +203,7 @@ async def publish_report(
         await authorize_source(source_ma)
 
     variant = await ensure_reader_variant(
-        anthropic,
-        tenant_id=tenant_id,
-        account_id=account_id,
-        source_name=resolved_agent,
-        references=session_factory,
+        anthropic, tenant_id=tenant_id, account_id=account_id, source_name=resolved_agent
     )
 
     label = _report_token_label(slug)

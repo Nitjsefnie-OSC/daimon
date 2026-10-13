@@ -50,7 +50,6 @@ from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
-from daimon.core.skills.reference_lock import added_custom_skill_ids, skill_attach_guard
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
@@ -258,10 +257,7 @@ async def copy_agent(
     )
     if "skills" in fork_params:
         fork_params["skills"] = split.kept
-    # The copy keeps skills shared by id; hold them against a concurrent delete.
-    shared = added_custom_skill_ids(before=(), after=split.kept)
-    async with skill_attach_guard(sessionmaker, anthropic, shared):
-        created = await anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]  # a validated copy of the source's own create fields
+    created = await anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]  # a validated copy of the source's own create fields
     queue_agent_face(
         sessionmaker,
         tenant_id=tenant_id,

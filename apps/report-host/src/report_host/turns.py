@@ -39,6 +39,7 @@ from report_host.mcp_client import (
     SeamClient,
     SeamError,
     SeamUnauthorizedError,
+    SkillGoneError,
 )
 from report_host.reports_store import ReportRow
 from report_host.threads_store import ThreadRow
@@ -57,6 +58,10 @@ _CAP_REACHED_MESSAGE = (
 )
 _UNAUTHORIZED_MESSAGE = (
     "This report's connection to daimon has expired; ask the publisher to re-publish it."
+)
+_SKILL_GONE_MESSAGE = (
+    "This report uses a skill that has since been deleted, so it can't answer; "
+    "ask the publisher to re-publish it."
 )
 _REPORT_MISSING_MESSAGE = "This report could not be found; ask the publisher to re-publish it."
 _DEADLINE_MESSAGE = (
@@ -421,7 +426,9 @@ async def run_turn(
             thread_id=thread.id,
             role="system",
             text=(
-                f"daimon could not answer this ({type(err).__name__}). "
+                _SKILL_GONE_MESSAGE
+                if isinstance(err, SkillGoneError)
+                else f"daimon could not answer this ({type(err).__name__}). "
                 "Ask again; if it repeats, tell the report's publisher."
             ),
             now=now(),

@@ -30,6 +30,7 @@ CHAT_PLATFORMS: tuple[ChatPlatform, ...] = ("discord", "slack", "teams")
 # a preparation's `stage` is its resume point.
 TransferKind = Literal["full", "transcript", "history"]
 PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "completed", "failed"]
+PreparationFailureKind = Literal["skill_unavailable"]
 # What the caller answered about uncommitted repository changes: carry them
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
@@ -320,6 +321,7 @@ class SessionPreparationRow(BaseModel):
     transfer_kind: TransferKind | None
     new_mapping_id: uuid.UUID | None
     failure_reason: str | None
+    failure_kind: PreparationFailureKind | None
     attempts: int
     created_at: datetime
     updated_at: datetime

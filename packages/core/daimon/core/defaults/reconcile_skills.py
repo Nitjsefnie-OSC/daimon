@@ -87,8 +87,8 @@ async def reconcile_skill(
                 canonical_id=ma_match.id if ma_match else None,
                 duplicate_id=dup.id,
             )
-            # Under the duplicate's reference lock: a duplicate an agent or a
-            # channel rule still uses is kept, or its turns would all fail.
+            # A duplicate an agent or a channel rule still uses is kept, or
+            # its turns would all fail.
             if db_session is None:
                 async with session_factory() as dedup_session, dedup_session.begin():
                     outcome = await delete_skill_unless_attached(

@@ -118,9 +118,7 @@ async def test_reconcile_agent_creates_when_not_on_ma() -> None:
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     assert outcome.action is Action.CREATED
     assert outcome.anthropic_id == "ag_new"
     md = created_payload["metadata"]
@@ -151,9 +149,7 @@ async def test_reconcile_agent_updates_when_on_ma() -> None:
     router.add("POST", r"/v1/agents/ag_1", on_update)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     assert outcome.action is Action.UPDATED
     assert outcome.anthropic_id == "ag_1"
     assert updated_payload["version"] == 3, "version from MA match, not from DB"
@@ -166,9 +162,7 @@ async def test_reconcile_agent_dry_run_create() -> None:
     router = _router_with_agents([])
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=True, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=True)
     assert outcome.action is Action.CREATED
     assert outcome.anthropic_id is None
 
@@ -180,9 +174,7 @@ async def test_reconcile_agent_dry_run_update() -> None:
     router = _router_with_agents([_tagged_agent(id_="ag_1", name=spec.name, tenant_id=TENANT_ID)])
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=True, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=True)
     assert outcome.action is Action.UPDATED
     assert outcome.anthropic_id is None
 
@@ -229,7 +221,6 @@ async def test_reconcile_agent_creates_with_custom_skills() -> None:
         tenant_id=TENANT_ID,
         dry_run=False,
         skills_view=[],  # Apply must ignore a stale dry-run snapshot.
-        references=None,
     )
     assert outcome.action is Action.CREATED
     assert created_payload["skills"] == [{"type": "custom", "skill_id": "sk_resolved"}], (
@@ -259,7 +250,6 @@ async def test_reconcile_agent_appends_default_mcp_when_public_url_set_on_create
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     assert outcome.action is Action.CREATED, "create path must fire when no MA match"
     mcp_servers = created_payload.get("mcp_servers")
@@ -298,7 +288,7 @@ async def test_reconcile_agent_no_op_for_mcp_servers_when_public_url_is_none() -
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=None, references=None
+        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=None
     )
     assert outcome.action is Action.CREATED, "create path must fire when no MA match"
     assert "mcp_servers" not in created_payload, (
@@ -335,7 +325,6 @@ async def test_reconcile_agent_preserves_author_mcp_and_appends_default_on_updat
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     assert outcome.action is Action.UPDATED, "update path must fire when MA match found"
     mcp_servers = updated_payload.get("mcp_servers")
@@ -383,7 +372,6 @@ async def test_reconcile_agent_is_idempotent_when_default_already_in_spec() -> N
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     assert outcome.action is Action.CREATED, "create path must fire when no MA match"
     mcp_servers = created_payload.get("mcp_servers", [])
@@ -422,7 +410,7 @@ async def test_reconcile_agent_stamps_daimon_account_when_provided() -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, account_id=account_id, references=None
+        client, spec, tenant_id=TENANT_ID, dry_run=False, account_id=account_id
     )
     assert outcome.action is Action.CREATED
     metadata = created_payload.get("metadata")
@@ -450,7 +438,7 @@ async def test_reconcile_agent_omits_daimon_account_when_not_provided() -> None:
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic_http(router.dispatch)
 
-    await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False, references=None)
+    await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     metadata = created_payload.get("metadata", {})
     assert MA_METADATA_KEY_ACCOUNT not in metadata, (
         "no account_id → no daimon_account stamp (seeded-default 'everyone's agent' semantics)"
@@ -488,7 +476,6 @@ async def test_reconcile_agent_does_not_duplicate_mcp_toolset_when_already_in_sp
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     tools = created_payload.get("tools") or []
     mcp_toolsets = [
@@ -549,9 +536,7 @@ async def test_reconcile_agent_archives_duplicates_keeps_canonical() -> None:
     router.add("POST", r"/v1/agents/ag_dup/archive", on_dup_archive)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     assert outcome.action is Action.UPDATED, (
         "canonical (max created_at) is updated, not the duplicate"
     )
@@ -587,9 +572,7 @@ async def test_reconcile_agent_dry_run_does_not_archive_duplicates() -> None:
     router.add("POST", r"/v1/agents/ag_dup/archive", fail_if_called)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=True, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=True)
     assert outcome.action is Action.UPDATED
     assert archived == [], "dry_run must not archive duplicates"
 
@@ -635,9 +618,7 @@ async def test_reconcile_agent_returns_skipped_when_spec_hash_matches() -> None:
     router.add("POST", r"/v1/agents/ag_existing$", fail_if_update_called)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     assert outcome.action is Action.SKIPPED, (
         "matching spec_hash must short-circuit reconcile to SKIPPED"
     )
@@ -700,7 +681,6 @@ async def test_reconcile_agent_preserves_user_attached_mcp_on_update() -> None:
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     assert outcome.action is Action.UPDATED
 
@@ -776,7 +756,6 @@ async def test_reconcile_agent_spec_wins_on_mcp_name_collision() -> None:
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     sent_mcp = updated_payload.get("mcp_servers", [])
     daimon_entries = [m for m in sent_mcp if m.get("name") == "daimon-mcp"]
@@ -814,9 +793,7 @@ async def test_reconcile_agent_updates_when_spec_hash_mismatch() -> None:
     router.add("POST", r"/v1/agents/ag_existing$", on_update)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     assert outcome.action is Action.UPDATED, "stale hash must fall through to UPDATE"
 
 
@@ -840,9 +817,7 @@ async def test_reconcile_agent_injects_credential_guidance_into_system_on_create
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     assert outcome.action is Action.CREATED
     system = created_payload.get("system")
     assert system is not None, "POST body must contain system"
@@ -901,9 +876,7 @@ async def test_reconcile_agent_dedup_skips_archive_when_duplicate_account_differ
     router.add("POST", r"/v1/agents/ag_dup_b/archive", on_dup_archive)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     assert outcome.action is Action.UPDATED, (
         "reconcile must complete normally (canonical is updated)"
     )
@@ -958,9 +931,7 @@ async def test_reconcile_agent_dedup_archives_duplicate_when_account_matches() -
     router.add("POST", r"/v1/agents/ag_dup_same/archive", on_dup_archive)
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
     assert outcome.action is Action.UPDATED, (
         "canonical (max created_at) is updated, not the duplicate"
     )
@@ -1030,7 +1001,6 @@ async def test_reconcile_agent_bypasses_skipped_and_repairs_corrupted_daimon_mcp
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     assert outcome.action is Action.UPDATED, (
         "corrupted daimon-mcp entry must bypass the L13 SKIPPED short-circuit"
@@ -1100,7 +1070,6 @@ async def test_reconcile_agent_stays_skipped_when_hash_matches_and_mcp_healthy()
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     assert outcome.action is Action.SKIPPED, (
         "matching hash + healthy mcp_servers must short-circuit to SKIPPED (no perpetual churn)"
@@ -1172,9 +1141,7 @@ async def test_reconcile_agent_retries_once_on_version_conflict() -> None:
         max_retries=0,
     )
 
-    outcome = await reconcile_agent(
-        no_retry_client, spec, tenant_id=TENANT_ID, dry_run=False, references=None
-    )
+    outcome = await reconcile_agent(no_retry_client, spec, tenant_id=TENANT_ID, dry_run=False)
 
     assert outcome.action is Action.UPDATED, "reconcile must succeed after the retry, not raise"
     assert outcome.anthropic_id == "ag_conflict"
@@ -1219,7 +1186,6 @@ async def test_reconcile_agent_isolated_spec_gets_no_mcp_wiring_or_guidance() ->
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
     assert outcome.action is Action.CREATED
 
@@ -1255,7 +1221,7 @@ async def test_reconcile_agent_isolated_spec_stamps_daimon_isolated_metadata() -
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic_http(router.dispatch)
 
-    await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False, references=None)
+    await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
 
     assert created_payload["metadata"]["daimon_isolated"] == "true", (
         "reconcile must pass spec.isolated through to build_metadata"
@@ -1286,7 +1252,6 @@ async def test_reconcile_agent_non_isolated_spec_still_gets_full_mcp_wiring() ->
         tenant_id=TENANT_ID,
         dry_run=False,
         public_url=_DEFAULT_MCP_URL,
-        references=None,
     )
 
     mcp_servers = created_payload.get("mcp_servers")
