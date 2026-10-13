@@ -103,7 +103,7 @@ from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import Scope
-from mux.contracts.resources import AgentSpec, ProviderBinding
+from mux.contracts.resources import Agent, AgentPatch, AgentSpec, ProviderBinding
 from mux.errors import ScopeViolation
 from mux.state.lease import Lease
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -535,10 +535,23 @@ async def run_worker(
                 policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
             source_request = replace(request, scope=parent.fleet.scope, source=None, worker=None)
             source = await capture_preparation_source(source_request)
+            definition: Agent | AgentSpec = AgentSpec.model_validate(worker.spec)
+            overrides = None
+            if request.worker.source_agent is not None:
+                if source.source is None or request.worker.source_agent != (
+                    source.source.ref,
+                    source.source.revision,
+                ):
+                    raise FleetConflict(
+                        "worker clone source no longer matches its admitted lineage"
+                    )
+                definition = source.source
+                overrides = AgentPatch.model_validate(worker.spec)
             normalize = functools.partial(
                 resolve_worker_spec,
                 parent,
-                AgentSpec.model_validate(worker.spec),
+                definition,
+                overrides=overrides,
                 backend=BackendConfig.model_validate(
                     revision.model_dump(include=set(BackendConfig.model_fields))
                 ),

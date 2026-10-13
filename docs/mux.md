@@ -2574,3 +2574,7 @@ native obligation and refuse when unrepresented. The source's native snapshot,
 identity metadata and visibility remain intact. Ordinary Anthropic environment
 requests retain their native configuration bytes. A projected environment is
 still subject to the root's sandbox grant and independent native readback.
+
+Worker clone normalization retains the actual authorized source reference and
+revision through the existing resolver. A changed source or missing source grant
+refuses before allocation; stored worker intent and digests are never rewritten.

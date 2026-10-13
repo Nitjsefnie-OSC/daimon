@@ -1426,8 +1426,13 @@ async def test_normalized_source_prefix_is_consumed_by_actual_preparation(
     assert selected.source.effective_spec.system == "Retained instructions"
 
 
+@pytest.fixture(params=[False])
+def clone_source(request):
+    return request.param
+
+
 @pytest.fixture
-async def claimed_worker_request(explicit_worker_request, monkeypatch):
+async def claimed_worker_request(explicit_worker_request, monkeypatch, clone_source):
     from decimal import Decimal
 
     from daimon.core.authz import Surface
@@ -1493,9 +1498,21 @@ async def claimed_worker_request(explicit_worker_request, monkeypatch):
     source = await capture_preparation_source(
         replace(request, scope=root.fleet.scope, source=None, worker=None)
     )
+    if clone_source:
+        assert source.source is not None
+        root = replace(
+            root,
+            source_agents=(source.source.ref,),
+            source_revisions=((source.source.ref, source.source.revision),),
+        )
+    from mux.contracts.resources import AgentPatch
+
     resolved = resolve_worker_spec(
         root,
-        request.worker.spec,
+        source.source if clone_source else request.worker.spec,
+        overrides=AgentPatch.model_validate(request.worker.spec.model_dump())
+        if clone_source
+        else None,
         policy=POLICY,
         now=request.now(),
         backend=BackendConfig.model_validate(
@@ -1662,6 +1679,7 @@ async def test_claimed_worker_opaque_source_is_refused_before_funding_or_native_
 
 
 @pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("clone_source", [False, True], indirect=True)
 async def test_claimed_worker_runs_through_budget_binding_and_journal_result(
     claimed_worker_request,
 ):
@@ -1671,6 +1689,9 @@ async def test_claimed_worker_runs_through_budget_binding_and_journal_result(
     from daimon.core.stores import mux_state
 
     request, root, worker, prices, owned, native_requests = claimed_worker_request
+    if request.worker.source_agent is not None:
+        assert request.worker.source_agent[0] in root.source_agents
+        assert request.worker.source_agent in root.source_revisions
     result = await run_worker(
         request,
         parent=root,
@@ -2179,3 +2200,38 @@ async def test_dynamic_worker_pins_require_source_authority_without_a_fixed_targ
     else:
         with pytest.raises(ValueError, match="source pins without fixed target pins"):
             validate_counterpart_pins(plan, worker_materialization=True)
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("fault", ["identity", "revision", "missing_source_grant"])
+async def test_clone_dispatch_cannot_invent_or_reuse_source_lineage(
+    claimed_worker_request,
+    fault,
+):
+    import asyncio
+
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, root, worker, prices, owned, calls = claimed_worker_request
+    source = await capture_preparation_source(
+        replace(request, scope=root.fleet.scope, source=None, worker=None)
+    )
+    ref, revision = source.source.ref, source.source.revision
+    if fault == "identity":
+        ref = ref.model_copy(update={"id": "another-source"})
+    elif fault == "revision":
+        revision = revision.model_copy(update={"local": revision.local + 1})
+    request = replace(request, worker=replace(request.worker, source_agent=(ref, revision)))
+    with pytest.raises((FleetConflict, WorkerSpecRefused)):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert calls == [] and owned.wire.requests == []
