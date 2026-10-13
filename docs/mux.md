@@ -2444,3 +2444,10 @@ readback evidence; it cannot replace the complete source and resource proof.
 No installed source-preservation positive is claimed by this capture path.
 
 Obligation labels are derived only at the shared preparation boundary from the actual captured definition and resource intent. An empty source baseline still requires implicit memory and an unproved environment; unrelated instruction, tool, attachment and credential labels are not pre-filled. With agent backend capture enabled, existing balance, cap and channel-budget refusals win before source projection and publish no backend revision.
+
+
+### Declared worker restrictions
+
+Worker specs accept one default-empty `declared_drops` tuple: `memory`, `sandbox`, `skills`, `mcp`, `tools`, `files`, or `repository`. These declarations apply only to authorized fleet derivation; ordinary agent backend changes retain their source-preservation refusals. Unknown/duplicate declarations refuse. Scope, source revision, current policy, budget, protected guidance, seals and readonly ceilings still apply. Inherited declarations cannot be cleared.
+
+A sandbox declaration removes its environment and execution builtins and prevents implicit execution injection. Tools declarations remove tools and remote MCP connections; MCP declarations also remove their toolsets. Other declarations remove the corresponding owned mounts or attachments. The validated spec, digest and derived permissions retain the declarations; worker guidance describes relevant restrictions. Call the existing audit helper with `worker=resolved_spec` to record the closed labels in its existing reason field and verify root provenance. Pure attenuation is not native execution authority: the registered preparer must consume the exact restricted plan and independently refuse any implicit tool/resource it cannot remove.

@@ -1026,3 +1026,211 @@ def test_unsupported_skill_refuses_before_invalid_mcp_projection(monkeypatch, su
     # Preserve the existing skill refusal before inspecting the irrelevant MCP entry.
     with pytest.raises(WorkerSpecRefused, match="skills: unsupported"):
         resolve(root)
+
+
+@pytest.mark.parametrize("provider", ("anthropic", "openai", "gemini"))
+def test_declared_sandbox_and_memory_drops_are_explicit_narrowings(provider):
+    root = parent(provider)
+    executable = tuple(
+        ToolSpec(name=name, kind="builtin")
+        for name in ("bash", "code_execution", "read", "write", "apply_patch")
+    )
+    root = replace(
+        root,
+        spec=root.spec.model_copy(
+            update={
+                "tools": tuple(tool for tool in root.spec.tools or () if tool.kind != "builtin")
+                + executable
+            }
+        ),
+    )
+    requested = root.spec.model_copy(update={"declared_drops": ("sandbox", "memory")})
+    result = resolve(root, requested)
+    assert result.declared_drops == ("memory", "sandbox")
+    assert result.environment is None and result.permissions.environment is None
+    assert all(
+        tool.kind != "builtin"
+        or tool.name not in get_profile(result.backend.profile).execution_tools
+        for tool in result.spec.tools
+    )
+    assert result.permissions.memory_read_only is root.memory_read_only
+    assert result.spec.system.startswith(root.base_system + "\n\n")
+    assert (
+        "no persistent memory" in result.spec.system
+        and "no sandbox execution" in result.spec.system
+    )
+    assert result.permissions.spec.declared_drops == result.declared_drops
+    assert root.spec.declared_drops == () and root.environment is not None
+    assert resolve(root, requested).digest == result.digest
+    assert resolve(root).digest != result.digest
+
+
+@pytest.mark.parametrize(
+    "invalid", [("unknown",), ("Memory",), ("sandbox ",), ("memory", "memory"), "memory"]
+)
+def test_declared_drop_field_is_closed_and_revalidated(invalid):
+    root = parent()
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(root.spec.model_dump() | {"declared_drops": invalid})
+    with pytest.raises(WorkerSpecRefused):
+        resolve(root, root.spec.model_copy(update={"declared_drops": invalid}))
+
+
+def test_empty_declared_drops_preserve_existing_json_and_worker_behavior():
+    root = parent()
+    assert "declared_drops" not in root.spec.model_dump()
+    assert "declared_drops" not in AgentPatch().model_dump()
+    result = resolve(root)
+    assert result.declared_drops == () and result.spec == root.spec
+    assert result.environment == root.environment and result.permissions.memory_read_only
+
+
+@pytest.mark.parametrize("drop", ("skills", "mcp", "tools"))
+def test_declared_tools_skills_and_mcp_are_removed_before_unsupported_target_checks(drop):
+    root = parent("gemini")
+    if drop == "skills":
+        root = replace(
+            root,
+            spec=root.spec.model_copy(update={"skills": (SkillRef(id="source", version=None),)}),
+        )
+    else:
+        root = replace(
+            root,
+            spec=root.spec.model_copy(
+                update={
+                    "mcp_servers": (
+                        MCPConnection(
+                            name="source", url="https://source.invalid", credential_ref="owned"
+                        ),
+                    ),
+                    "tools": tuple(root.spec.tools or ())
+                    + (ToolSpec(name="source", kind="mcp_toolset"),),
+                }
+            ),
+        )
+    with pytest.raises(WorkerSpecRefused):
+        resolve(root)
+    result = resolve(root, root.spec.model_copy(update={"declared_drops": (drop,)}))
+    if drop == "skills":
+        assert result.spec.skills == ()
+    else:
+        assert result.spec.mcp_servers == ()
+        assert all(tool.kind != "mcp_toolset" for tool in result.spec.tools)
+    if drop == "tools":
+        assert result.spec.tools == ()
+
+
+@pytest.mark.parametrize(
+    "drop,kind,ref_kind",
+    [
+        ("files", "artifact", "file"),
+        ("repository", "repository", "repository"),
+        ("memory", "native", "memory_store"),
+    ],
+)
+def test_declared_resource_drops_still_validate_scope_and_existing_root_bounds(
+    drop, kind, ref_kind
+):
+    root = parent()
+    resource = ResourceBinding(
+        id="file",
+        kind=kind,
+        resource=ResourceRef(
+            id="file",
+            kind=ref_kind,
+            provider="anthropic",
+            account_scope_id="workspace",
+            tenant_id=root.fleet.scope.tenant_id,
+            account_id=root.fleet.scope.account_id,
+        ),
+    )
+    root = replace(root, resources=(resource,))
+    requested = root.spec.model_copy(update={"declared_drops": (drop,)})
+    assert resolve(root, requested, resources=(resource,)).resources == ()
+    foreign = resource.model_copy(
+        update={"resource": resource.resource.model_copy(update={"tenant_id": str(uuid4())})}
+    )
+    with pytest.raises(WorkerSpecRefused):
+        resolve(replace(root, resources=(foreign,)), requested, resources=(foreign,))
+    with pytest.raises(WorkerSpecRefused, match="budget"):
+        resolve(root, requested, limits=root.limits.model_copy(update={"budget_usd": Decimal("2")}))
+    with pytest.raises(WorkerSpecRefused, match="writers_none"):
+        resolve(
+            root,
+            requested,
+            policy=TenantAccessPolicy(channel_rules={"channel": ChannelRule(writers="none")}),
+        )
+
+
+def test_clone_cannot_clear_an_inherited_declared_drop_or_bypass_source_revision():
+    root = parent()
+    spec = root.spec.model_copy(update={"declared_drops": ("memory",)})
+    ref = ResourceRef(
+        id="source",
+        kind="agent",
+        provider="anthropic",
+        account_scope_id="workspace",
+        tenant_id=root.fleet.scope.tenant_id,
+        account_id=root.fleet.scope.account_id,
+    )
+    source = Agent(ref=ref, revision=Revision(local=1), spec=spec, created_at=NOW)
+    root = replace(root, source_agents=(ref,), source_revisions=((ref, source.revision),))
+    assert resolve(root, source).declared_drops == ("memory",)
+    with pytest.raises(WorkerSpecRefused, match="declared_drops"):
+        resolve(root, source, overrides=AgentPatch(declared_drops=()))
+    with pytest.raises(WorkerSpecRefused, match="stale"):
+        resolve(root, source.model_copy(update={"revision": Revision(local=2)}))
+
+
+async def test_declared_drops_are_recorded_in_existing_audit_without_source_payload(
+    db_preflight, db_session
+):
+    from daimon.core.stores.security_audit import list_events
+    from daimon.testing.factories import make_account, make_tenant
+
+    root = replace(parent(), agent_id=uuid4())
+    tenant = await make_tenant(db_session, id=UUID(root.fleet.scope.tenant_id))
+    await make_account(db_session, id=root.fleet.account_id, tenant=tenant)
+    worker = resolve(root, root.spec.model_copy(update={"declared_drops": ("sandbox", "memory")}))
+    row = await audit_worker_action(
+        db_session,
+        root,
+        worker_id=uuid4(),
+        operation="spawn",
+        outcome="allowed",
+        reason="authorized",
+        worker=worker,
+    )
+    assert row.reason == "authorized; declared_drops=memory,sandbox"
+    assert root.base_system not in row.model_dump_json()
+    assert len(await list_events(db_session, tenant_id=tenant.id)) == 1
+    foreign = replace(
+        worker,
+        permissions=replace(
+            worker.permissions, fleet=replace(worker.permissions.fleet, run_id=uuid4())
+        ),
+    )
+    with pytest.raises(WorkerSpecRefused, match="scope"):
+        await audit_worker_action(
+            db_session,
+            root,
+            worker_id=uuid4(),
+            operation="resume",
+            outcome="allowed",
+            reason="authorized",
+            worker=foreign,
+        )
+    malformed = replace(
+        worker, spec=worker.spec.model_copy(update={"declared_drops": ("private-credential",)})
+    )
+    with pytest.raises(WorkerSpecRefused, match="declared_drops"):
+        await audit_worker_action(
+            db_session,
+            root,
+            worker_id=uuid4(),
+            operation="resume",
+            outcome="allowed",
+            reason="authorized",
+            worker=malformed,
+        )
+    assert len(await list_events(db_session, tenant_id=tenant.id)) == 1

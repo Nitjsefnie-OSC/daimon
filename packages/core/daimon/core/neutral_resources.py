@@ -664,6 +664,7 @@ WorkerField = Literal[
     "budget",
     "deadline",
     "max_turns",
+    "declared_drops",
 ]
 WorkerReason = DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale"]
 
@@ -720,6 +721,12 @@ class ResolvedWorkerSpec:
     permissions: WorkerPermissions = dataclass_field(repr=False)
     digest: str
     source_agent: tuple[ResourceRef, Revision] | None = None
+
+    @property
+    def declared_drops(
+        self,
+    ) -> tuple[Literal["memory", "sandbox", "skills", "mcp", "tools", "files", "repository"], ...]:
+        return self.spec.declared_drops
 
 
 def _worker_subset(
@@ -946,6 +953,11 @@ def resolve_worker_spec(
         resolved = AgentSpec.model_validate(data)
     except ValueError:
         raise WorkerSpecRefused("spec", "unsupported") from None
+    drops = resolved.declared_drops
+    if not set(parent.spec.declared_drops) <= set(drops) or not set(source.declared_drops) <= set(
+        drops
+    ):
+        raise WorkerSpecRefused("declared_drops", "not_subset")
     # All root stamps remain immutable; omitted clone keys preserve, null
     # values delete source-only keys, and an explicit map clear cannot erase
     # the root's ownership or guidance metadata.
@@ -994,6 +1006,25 @@ def resolve_worker_spec(
     except DaimonError:
         raise WorkerSpecRefused("backend", "unsupported") from None
     profile = get_profile(selected.profile)
+    resolved = resolved.model_copy(
+        update={
+            "skills": () if "skills" in drops else resolved.skills,
+            "mcp_servers": () if "mcp" in drops or "tools" in drops else resolved.mcp_servers,
+            "tools": tuple(
+                tool
+                for tool in resolved.tools or ()
+                if "tools" not in drops
+                and not ("mcp" in drops and tool.kind == "mcp_toolset")
+                and not (
+                    "sandbox" in drops
+                    and tool.kind == "builtin"
+                    and tool.name in profile.execution_tools
+                )
+            )
+            if drops
+            else resolved.tools,
+        }
+    )
     skills, mcps = spec_compatibility_items(resolved, skill_providers=(parent.spec.model.provider,))
     for item in skills:
         if compatibility_missing(item, selected.backend, profile):
@@ -1001,9 +1032,14 @@ def resolve_worker_spec(
     for item in mcps:
         if compatibility_missing(item, selected.backend, profile):
             raise WorkerSpecRefused("mcp", "unsupported")
-    if profile.implicit_execution and not any(
-        tool.kind == "builtin" and tool.name == profile.execution_tool
-        for tool in resolved.tools or ()
+    if (
+        profile.implicit_execution
+        and "sandbox" not in drops
+        and "tools" not in drops
+        and not any(
+            tool.kind == "builtin" and tool.name == profile.execution_tool
+            for tool in resolved.tools or ()
+        )
     ):
         resolved = resolved.model_copy(
             update={
@@ -1023,8 +1059,6 @@ def resolve_worker_spec(
     _worker_subset("skills", tuple(resolved.skills or ()), tuple(parent.spec.skills or ()))
     _worker_subset("files", resources, parent.resources)
     for resource in resources:
-        if resource.native is not None:
-            raise WorkerSpecRefused("files", "unsupported")
         ref = resource.resource
         if ref is not None and (ref.tenant_id, ref.account_id) != (
             fleet.scope.tenant_id,
@@ -1035,7 +1069,33 @@ def resolve_worker_spec(
             part in ("..", "") for part in PurePosixPath(resource.target_path).parts
         ):
             raise WorkerSpecRefused("files", "unsupported")
+    resources = tuple(
+        resource
+        for resource in resources
+        if not ("files" in drops and resource.kind == "artifact")
+        and not ("repository" in drops and resource.kind == "repository")
+        and not (
+            "memory" in drops
+            and resource.resource is not None
+            and resource.resource.kind == "memory_store"
+        )
+    )
+    if any(resource.native is not None for resource in resources):
+        raise WorkerSpecRefused("files", "unsupported")
     environment = environment if environment is not None else parent.environment
+    if "sandbox" in drops:
+        environment = None
+    elif environment is not None and ("files" in drops or "repository" in drops):
+        environment = environment.model_copy(
+            update={
+                "sources": tuple(
+                    item
+                    for item in environment.sources or ()
+                    if not ("files" in drops and item.kind == "file")
+                    and not ("repository" in drops and item.kind == "repository")
+                ),
+            }
+        )
     _worker_environment(environment, parent.environment)
     if (environment is None or environment.execution == "none") and any(
         tool.kind == "builtin" and tool.name == profile.execution_tool
@@ -1057,6 +1117,17 @@ def resolve_worker_spec(
     if not (system == parent.base_system or system.startswith(parent.base_system + "\n\n")):
         system = parent.base_system + ("\n\n" + system if system else "")
     resolved = resolved.model_copy(update={"system": system})
+    if drops:
+        guidance = "Worker restrictions: " + "; ".join(
+            "no persistent memory"
+            if item == "memory"
+            else "no sandbox execution"
+            if item == "sandbox"
+            else f"no {item}"
+            for item in drops
+        )
+        if guidance not in system.split("\n\n"):
+            resolved = resolved.model_copy(update={"system": system + "\n\n" + guidance})
     body = {
         "spec": resolved.model_dump(mode="json"),
         "backend": selected.model_dump(mode="json"),
@@ -1110,6 +1181,7 @@ async def audit_worker_action(
     operation: Literal["spawn", "kill", "resume", "review"],
     outcome: Literal["allowed", "denied", "error"],
     reason: WorkerReason | Literal["authorized", "cancel_requested"],
+    worker: ResolvedWorkerSpec | None = None,
 ) -> security_audit.SecurityAuditRow | None:
     """Append in the caller's fleet transition transaction, with no input data.
 
@@ -1117,6 +1189,24 @@ async def audit_worker_action(
     Allowed means the transaction authorized a transition, not native completion.
     """
     fleet = parent.fleet
+    if worker is not None and (
+        worker.permissions.fleet.root != fleet.root
+        or worker.permissions.fleet.origin_id != fleet.origin_id
+        or worker.permissions.fleet.run_id != fleet.run_id
+        or worker.permissions.fleet.account_id != fleet.account_id
+        or worker.permissions.fleet.scope.tenant_id != fleet.scope.tenant_id
+        or worker.permissions.fleet.scope.account_id != fleet.scope.account_id
+        or worker.permissions.fleet.place != fleet.place
+        or worker.permissions.agent_id != parent.agent_id
+    ):
+        raise WorkerSpecRefused("scope", "not_subset")
+    try:
+        drops = AgentSpec.model_validate(
+            (worker.spec if worker is not None else parent.spec).model_dump(mode="json")
+        ).declared_drops
+    except ValueError:
+        raise WorkerSpecRefused("declared_drops", "unsupported") from None
+    reason_text = reason + ("; declared_drops=" + ",".join(drops) if drops else "")
     if (
         fleet.scope.is_platform
         or fleet.scope.is_legacy_host_authorized
@@ -1135,7 +1225,7 @@ async def audit_worker_action(
         tool_name="fleet",
         operation=operation,
         outcome=outcome,
-        reason=reason,
+        reason=reason_text,
         scope=f"fleet:{fleet.run_id}:worker:{worker_id}",
         turn_ref=f"origin:{fleet.origin_id}",
     )
