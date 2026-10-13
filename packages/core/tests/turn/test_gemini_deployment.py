@@ -30,6 +30,7 @@ from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiSto
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtimes import build_channel_runtime
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_tenant
 from daimon.testing.isolated_sdk import build_gemini_client
 from daimon.testing.turn_fakes import RecordingLifecycle
@@ -48,7 +49,6 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.core import compile_agent
-from daimon.testing.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord, Storage
 from mux.drivers.gemini.transport import Transport
