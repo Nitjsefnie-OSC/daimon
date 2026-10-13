@@ -12,11 +12,11 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
@@ -43,6 +43,11 @@ from mux.contracts.ports import ManagedAgents
 from mux.state.store import StateStore
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.neutral_resources import WorkerPermissions
+    from daimon.core.stores.domain import BackendAgent
+    from daimon.core.turn.admission import AdmissionGrant
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,11 @@ class TurnDeps:
     state_store: StateStore | None = None
     # Every turn inside `run_prepared_turn`, whatever started it; read by shutdown drains.
     running_turns: RunningTurns = field(default_factory=RunningTurns)
+    fleet_enabled: bool = False
+    fleet_max_workers: int = 8
+    fleet_root_grants: (
+        Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]] | None
+    ) = None
 
     @property
     def backend_selection_enabled(self) -> bool:
@@ -142,6 +152,8 @@ def build_turn_deps(
     deployment_default: DeploymentDefault,
     resolver_cache: ResolverCache,
     billing_config: BillingConfig | None,
+    fleet_root_grants: Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]]
+    | None = None,
 ) -> TurnDeps:
     """Derive `TurnDeps` from `settings`, once per adapter runtime."""
     turn_settings = cast(object, settings.turn)
@@ -177,4 +189,7 @@ def build_turn_deps(
         tool_safety=settings.tool_safety,
         preparation_gate=PreparationGate(_preparation_limit(settings)),
         budget_notices_off=_notices_off(settings),
+        fleet_enabled=settings.fleet.enabled,
+        fleet_max_workers=settings.fleet.max_workers_per_run,
+        fleet_root_grants=fleet_root_grants,
     )

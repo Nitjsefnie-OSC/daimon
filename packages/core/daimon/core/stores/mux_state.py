@@ -38,6 +38,7 @@ from daimon.core._models import (
     ProviderBindingSlot,
     ThreadLease,
     ThreadSession,
+    TurnCardIntent,
     UsageObservation,
 )
 from mux.contracts.config import ConfigRevision
@@ -47,7 +48,7 @@ from mux.contracts.receipts import OperationStatus
 from mux.contracts.resources import ProjectionSnapshot
 from mux.contracts.resources import ProviderBinding as BindingContract
 from mux.contracts.usage import UsageObservation as ObservationContract
-from mux.errors import BindingConflict, ScopeViolation
+from mux.errors import BindingConflict, OperationConflict, ScopeViolation
 from mux.state import journal, operations, usage_ledger
 from mux.state import lease as leases
 from mux.state.journal import JournalAppend, JournalEntry
@@ -496,6 +497,68 @@ async def get_operation(session: AsyncSession, scope: Scope, key: str) -> Operat
     record = await _operation(session, scope, key, lock=False)
     if record is not None:
         operations.check_owner(record, scope)
+    return record
+
+
+async def get_fleet_root_operation(
+    session: AsyncSession,
+    scope: Scope,
+    *,
+    intent_id: uuid.UUID | None = None,
+    origin_id: uuid.UUID | None = None,
+    request_digest: str | None = None,
+    slot: Slot | None = None,
+) -> OperationRecord | None:
+    """Read or durably reserve the exact root association before run creation."""
+    query = select(MuxOperation).where(
+        MuxOperation.tenant_id == _tenant(scope.tenant_id),
+        MuxOperation.key.startswith("fleet_root:"),
+        MuxOperation.record["result"]["intent_id"].astext == str(intent_id),
+    )
+    if request_digest is not None:
+        if intent_id is None or origin_id is None or slot is None:
+            raise ValueError("complete root reservation required")
+        intent = await session.scalar(
+            select(TurnCardIntent.id)
+            .where(
+                TurnCardIntent.id == intent_id,
+                TurnCardIntent.tenant_id == _tenant(scope.tenant_id),
+                TurnCardIntent.status.in_(("prepared", "posted")),
+            )
+            .with_for_update()
+        )
+        if intent is None:
+            raise ScopeViolation(str(intent_id), "root intent is unavailable")
+        key = f"fleet_root:{origin_id}:root:0"
+        previous = (await session.scalars(query)).one_or_none()
+        if previous is not None and (previous.account_id, previous.key) != (scope.account_id, key):
+            raise OperationConflict(key)
+        begun = await begin_operation(
+            session,
+            scope,
+            key=key,
+            request_digest=request_digest,
+            operation_id=key,
+            slot=slot,
+            now=await database_clock(session),
+        )
+        record = begun.record
+        if begun.fresh:
+            record = record.model_copy(
+                update={"result": {"intent_id": str(intent_id), "origin_id": str(origin_id)}}
+            )
+            await _save_operation(session, scope, record)
+        return record
+    if (intent_id is None) == (origin_id is None):
+        raise ValueError("exactly one root selector required")
+    if origin_id is not None:
+        return await get_operation(session, scope, f"fleet_root:{origin_id}:root:0")
+    query = query.where(MuxOperation.account_id == scope.account_id)
+    body = (await session.scalars(query)).one_or_none()
+    if body is None:
+        return None
+    record = OperationRecord.model_validate(body.record)
+    operations.check_owner(record, scope)
     return record
 
 

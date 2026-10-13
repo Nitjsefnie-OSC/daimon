@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import secrets
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextvars import ContextVar
@@ -19,7 +20,7 @@ from mux.drivers.anthropic.transport import single_attempt_mutation
 from mux.errors import ProviderError, ScopeViolation
 from mux.state.journal import JournalAppend, JournalEntry, is_authoritative
 from mux.state.lease import Lease, Slot, StaleFence
-from mux.state.operations import SendClaimed, request_digest
+from mux.state.operations import OperationRecord, SendClaimed, request_digest
 from mux.state.store import StateStore, binding_slot
 from pydantic import BaseModel, JsonValue
 
@@ -182,6 +183,8 @@ class TurnPersistence:
         *,
         guard: Callable[[], Awaitable[None]] | None = None,
         retry_failed: bool = True,
+        operation_key: str | None = None,
+        begin: Callable[[str, str], Awaitable[OperationRecord]] | None = None,
     ) -> M:
         """Intent then send CAS, or restore an acknowledged receipt.
 
@@ -200,16 +203,19 @@ class TurnPersistence:
         )
         attempt = 0
         while True:
-            key = f"{self.operation_key}:{kind}:{attempt}"
-            begun = await self.store.begin_operation(
-                self.scope,
-                key=key,
-                request_digest=digest,
-                operation_id=key,
-                slot=self._slot,
-                now=self._now(),
-            )
-            record = begun.record
+            key = f"{operation_key or self.operation_key}:{kind}:{attempt}"
+            if begin is None:
+                begun = await self.store.begin_operation(
+                    self.scope,
+                    key=key,
+                    request_digest=digest,
+                    operation_id=key,
+                    slot=self._slot,
+                    now=self._now(),
+                )
+                record = begun.record
+            else:
+                record = await begin(key, digest)
             if record.operation.status == "failed":
                 if not retry_failed:
                     raise ProviderError(
@@ -218,7 +224,7 @@ class TurnPersistence:
                 attempt += 1
                 continue
             if record.operation.status in ("accepted", "processed"):
-                cached = response.model_validate(dict(record.result))
+                cached = response.model_validate_json(json.dumps(dict(record.result)))
                 if isinstance(cached, CancelReceipt) and session is not None:
                     # M0 composes a fresh backend namespace around the same
                     # authorized client on restart. Preserve the native session

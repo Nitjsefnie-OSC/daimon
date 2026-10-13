@@ -183,6 +183,7 @@ class PreparedTurn:
     runtime: TurnRuntime | None = None
     native_footer_cost: NativeFooterCostContext | None = None
     _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
+    _source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -1047,6 +1048,33 @@ async def bind_session_impl(
     async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
         result = await preparing
         try:
+            if deps.fleet_enabled and worker is None and deps.fleet_root_grants is not None:
+                from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+                root_scope = admitted_session_scope(
+                    result.admission,
+                    tenant_id=tenant_id,
+                    session_id=result.ma_session_id,
+                    prepared=result._scope,  # pyright: ignore[reportPrivateUsage]
+                )
+                root_request = ProviderPreparationRequest(
+                    deps,
+                    result.admission,
+                    root_scope,
+                    tenant_id,
+                    platform,
+                    external_user_id,
+                    thread_id,
+                    session_account_id,
+                    reuse_existing,
+                    capabilities,
+                    transfer,
+                    effective_deadline,
+                    now,
+                )
+                source = await capture_preparation_source(root_request)
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+                result = replace(result, _source=source)
             if worker is not None:
                 remaining_s(effective_deadline, now=now(), refuse_expired=True)
             if _on_prepared is not None:
