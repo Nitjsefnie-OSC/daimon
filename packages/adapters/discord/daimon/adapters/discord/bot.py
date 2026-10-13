@@ -111,7 +111,15 @@ from daimon.core.continuity.messages import (
     render_replacement_summary,
     render_unexpected_loss,
 )
-from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
+from daimon.core.continuity.wakes import (
+    FrozenWorkerBatch,
+    WakeThread,
+    WorkerFinishedRootChanged,
+    decide_worker_finished,
+    require_worker_finished_root,
+    run_wake_poller,
+    skip_thread_wakes,
+)
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -3236,6 +3244,11 @@ class DaimonBot(commands.Bot):
             client=self,
             public_base_url=self.runtime.settings.mcp.app_root_url,
             identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
+            worker_finished_decision=(
+                functools.partial(decide_worker_finished, self.runtime.sessionmaker)
+                if self.runtime.turn_deps.fleet_enabled
+                else None
+            ),
         )
 
     async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
@@ -3514,6 +3527,19 @@ class DaimonBot(commands.Bot):
             admitted_name=admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
+        completion_batch = None
+        if row.reason == "worker_finished":
+            if not self.runtime.turn_deps.fleet_enabled:
+                raise WorkerFinishedRootChanged("Fleet completion is disabled")
+            completion_batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
+            await require_worker_finished_root(
+                self.runtime.sessionmaker,
+                row,
+                session_id=completion_batch.session_id,
+                account_id=admission.account_id,
+                agent_id=admission.agent.id,
+                now=datetime.now(UTC),
+            )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent
         try:
@@ -3637,6 +3663,21 @@ class DaimonBot(commands.Bot):
             reuse_existing=True,
             deadline=turn_deadline_at,
         )
+
+        async def completion_root() -> None:
+            if prepared.session_account_id != prepared.admission.account_id:
+                raise WorkerFinishedRootChanged("Prepared fleet account differs from admission")
+            await require_worker_finished_root(
+                self.runtime.sessionmaker,
+                row,
+                session_id=prepared.ma_session_id,
+                account_id=prepared.admission.account_id,
+                agent_id=prepared.admission.agent.id,
+                now=datetime.now(UTC),
+            )
+
+        if completion_batch is not None:
+            await completion_root()
         watch.session_id = prepared.ma_session_id
 
         marked_message_id: str | None = None
@@ -3809,6 +3850,7 @@ class DaimonBot(commands.Bot):
                         account_id=admission.account_id,
                     ),
                     active_turn_message_id=marked_message_id,
+                    before_send=completion_root if completion_batch is not None else None,
                     **provider_action_options(
                         prepared,
                         lambda: discord_provider_action_hook(
