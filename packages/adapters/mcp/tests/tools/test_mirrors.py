@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import uuid
 from typing import Any
@@ -17,6 +18,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
     AskResult,
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.mirrors import MirrorOut
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import MirrorsSettings
 from daimon.core.defaults.metadata import (
@@ -30,7 +32,10 @@ from daimon.core.stores import mirrors as mirrors_store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import MirrorDeliveryRow, Role, TenantRow
 from daimon.core.stores.security_audit import list_events
-from daimon.testing import ma_agent, ma_model_config, ma_session
+from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.core.stores.turn_origins import create_origin
+from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.testing import ma_agent, ma_model_config, ma_session, ma_session_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
@@ -63,6 +68,7 @@ def _runtime(
     settings.artifacts = None
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
+    settings.tool_safety = ToolSafetyPolicy(enabled=True)
     return McpRuntime(
         session_factory=sm,
         client=client,
@@ -84,7 +90,7 @@ async def _auth(
     )
 
 
-async def _create_in(runtime: McpRuntime, auth: AuthIdentity, dest: str, **kw: object):
+async def _create_in(runtime: McpRuntime, auth: AuthIdentity, dest: str, **kw: object) -> MirrorOut:
     return await _create(
         runtime,
         auth,
@@ -134,17 +140,91 @@ async def test_create_refuses_a_home_kept_to_other_agents(
         await _create_in(_runtime(sessionmaker, tenant.id), admin, "100")
 
 
-async def test_create_records_attested_consent_in_the_audit_trail_and_lists_it(
+@pytest.mark.parametrize("caller", ["agent_key", "headless", "chat_turn_without_card"])
+async def test_consent_is_refused_without_an_admins_approval_card(
+    sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession, caller: str
+) -> None:
+    tenant = await make_tenant(db_session)
+    admin = await _auth(db_session, tenant)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_helper")
+    auth = {
+        "agent_key": dataclasses.replace(admin, agent_id=agent_uuid),
+        # An internal routine or headless token: admin, with no chat turn.
+        "headless": admin,
+        "chat_turn_without_card": dataclasses.replace(admin, chat_agent_id=agent_uuid),
+    }[caller]
+
+    with pytest.raises(ToolError, match="presses Approve on a card"):
+        await _create_in(_runtime(sessionmaker, tenant.id), auth, "300", consent="they agreed")
+
+    assert await mirrors_store.list_for_tenant(db_session, tenant.id) == [], "nothing saved"
+
+
+async def test_consent_approved_on_a_card_is_recorded_audited_and_listed(
     sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
 ) -> None:
     tenant = await make_tenant(db_session)
-    runtime, auth = _runtime(sessionmaker, tenant.id), await _auth(db_session, tenant)
+    admin = await _auth(db_session, tenant)
+    now = dt.datetime.now(dt.UTC)
+    origin = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=admin.account_id,
+        platform="discord",
+        parent_channel_id="500",
+        thread_id="501",
+        responder_ma_agent_id="ag_helper",
+        responder_name="helper",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.ADMIN,
+        expires_at=now + dt.timedelta(minutes=10),
+        now=now,
+    )
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="501",
+        account_id=admin.account_id,
+        ma_session_id="sesn_chat",
+        ma_agent_id="ag_helper",
+    )
+    await db_session.commit()
+    gated = {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        "configs": [
+            {"name": "create_mirror", "enabled": True, "permission_policy": {"type": "always_ask"}}
+        ],
+    }
+    chat = ma_session(id="sesn_chat", agent=ma_session_agent(id="ag_helper", tools=[gated]))
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sesn_chat$",
+        lambda _r, _m: httpx.Response(200, json=chat.model_dump(mode="json")),
+    )
+    runtime = _runtime(sessionmaker, tenant.id, router=router)
+    auth = dataclasses.replace(
+        admin, chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_helper")
+    )
 
-    created = await _create_in(runtime, auth, "300", consent="team agreed on 1 Oct")
-    listed = await _list(runtime, auth)
+    created = await _create(
+        runtime,
+        auth,
+        name="qa",
+        agent_name="helper",
+        destination_id="300",
+        destination_kind="channel",
+        consent_note="team agreed on 1 Oct",
+        max_answer_chars=None,
+        origin_context_id=str(origin.id),
+    )
 
     assert created.consent is not None and "team agreed" in created.consent, created
-    assert [m.name for m in listed] == ["qa"], listed
+    assert [m.name for m in await _list(runtime, auth)] == ["qa"], "listed"
     events = await list_events(db_session, tenant_id=tenant.id)
     assert [(e.tool_name, e.operation) for e in events] == [("create_mirror", "attest_consent")]
     assert "team agreed on 1 Oct" in events[0].reason, "the attestation is audited"

@@ -33,8 +33,11 @@ the security audit trail.
 | A person's own (unbound key, hub) | the mirror has recorded consent |
 
 Recorded consent is the `consent_note` an admin gives: who agreed and how.
-Daimon stores it with the admin's account and the time, writes it to the
-audit trail, and shows it in `list_mirrors`. Without it, a person's own
+It is taken only from a chat conversation where the admin presses Approve on
+a card (approval cards on, [configuration.md](configuration.md#tool-safety)),
+never from an agent key, a routine or another headless call. Daimon stores it
+with the admin's account and the time, writes it to the audit trail, and
+shows it in `list_mirrors`. Without it, a person's own
 conversations are not queued at all.
 
 ## Channel rules

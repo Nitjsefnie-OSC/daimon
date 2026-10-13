@@ -1792,7 +1792,9 @@
         copied, never tool calls. Conversations of an agent key minted in a
         channel follow that channel's rules. A person's own conversations are
         copied only with ``consent_note``: the admin's record of the askers'
-        agreement (who agreed, how). It is audited. A channel kept to its own
+        agreement (who agreed, how). It is audited, and taken only from a chat
+        conversation where the admin approves it on a card: pass this turn's
+        ``origin_context_id``. A channel kept to its own
         agents only takes its own agents' conversations. Calling it again with
         the same ``name`` replaces that mirror and resumes it if paused.
         ``max_answer_chars`` cuts long text.
@@ -1838,6 +1840,17 @@
           }),
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([

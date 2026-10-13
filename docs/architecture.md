@@ -1176,8 +1176,9 @@ A pause shows one card per blocked call, and the driver sends one
 passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
 the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
-their `operation_policy` checks), except `add_skill`: its confirming call, the
-one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
+their `operation_policy` checks), except `add_skill` and `create_mirror`: the
+call naming a preview's `content_hash`, or a mirror's `consent_note`, is sent
+`always_ask`, so it waits on
 the same card in chat and is always refused in a routine, whatever
 `unattended_writes` allows. Each bind compares a reused session's tools with
 the gated ones a new session would get and updates them in place, so a

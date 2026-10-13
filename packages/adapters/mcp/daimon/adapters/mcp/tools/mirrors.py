@@ -14,10 +14,12 @@ from typing import Literal
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_agent_uuid
@@ -55,6 +57,29 @@ class MirrorOut(BaseModel):
     consent: str | None
 
 
+_NO_CONSENT_CARD = (
+    "Consent is recorded only when the admin presses Approve on a card in a chat "
+    "conversation, and {why}. Nothing was saved. Tell the caller; to mirror only "
+    "conversations of agent keys minted in a channel, call again without consent_note."
+)
+
+
+async def _require_consent_card(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> None:
+    """A consent note is the admin's own word on a card (`CONFIRMED_DAIMON_TOOLS`):
+    never an agent key's, a routine's or other headless run's, nor a model's."""
+    if auth.agent_id is not None:
+        raise ToolError(_NO_CONSENT_CARD.format(why="an agent key has no person to ask"))
+    if auth.chat_agent_id is None or not runtime.settings.tool_safety.enabled:
+        raise ToolError(_NO_CONSENT_CARD.format(why="this call is not from such a conversation"))
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    if await session_card_gap(runtime, auth, origin, tool_name="create_mirror") is not None:
+        raise ToolError(
+            _NO_CONSENT_CARD.format(why="this call named no origin_context_id or had no card")
+        )
+
+
 async def _create_mirror_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -65,8 +90,10 @@ async def _create_mirror_impl(
     destination_kind: Literal["channel", "thread"],
     consent_note: str | None,
     max_answer_chars: int | None,
+    origin_context_id: str | None = None,
 ) -> MirrorOut:
     _require_admin(auth)
+    consent_note = (consent_note or "").strip() or None
     if not runtime.settings.mirrors.enabled:
         raise ToolError("Mirrors are switched off on this deployment. Nothing was saved.")
     if auth.platform != "discord":
@@ -82,6 +109,8 @@ async def _create_mirror_impl(
         shape := destination_shape_error(auth.platform, destination_kind, destination_id)
     ) is not None:
         raise ToolError(f"{shape}. Nothing was saved.")
+    if consent_note is not None:
+        await _require_consent_card(runtime, auth, origin_context_id)
     match = await find_agent_by_daimon_tag(
         runtime.client, tenant_id=auth.tenant_id, name=agent_name
     )
@@ -112,7 +141,7 @@ async def _create_mirror_impl(
             dest_platform=auth.platform,
             dest_kind=destination_kind,
             dest_id=destination_id,
-            consent_note=(consent_note or "").strip() or None,
+            consent_note=consent_note,
             max_answer_chars=max_answer_chars,
             account_id=auth.account_id,
             now=now,
@@ -198,6 +227,7 @@ def register_mirror_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_kind: Literal["channel", "thread"] = "channel",
         consent_note: str | None = None,
         max_answer_chars: int | None = None,
+        origin_context_id: str | None = None,
     ) -> MirrorOut:
         """Copy an agent's agent-chat questions and answers into a Discord channel or
         thread of this server. Admin-only.
@@ -208,7 +238,9 @@ def register_mirror_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         copied, never tool calls. Conversations of an agent key minted in a
         channel follow that channel's rules. A person's own conversations are
         copied only with ``consent_note``: the admin's record of the askers'
-        agreement (who agreed, how). It is audited. A channel kept to its own
+        agreement (who agreed, how). It is audited, and taken only from a chat
+        conversation where the admin approves it on a card: pass this turn's
+        ``origin_context_id``. A channel kept to its own
         agents only takes its own agents' conversations. Calling it again with
         the same ``name`` replaces that mirror and resumes it if paused.
         ``max_answer_chars`` cuts long text.
@@ -222,6 +254,7 @@ def register_mirror_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             destination_kind=destination_kind,
             consent_note=consent_note,
             max_answer_chars=max_answer_chars,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool(tags={"admin"})
