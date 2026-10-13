@@ -8,6 +8,7 @@ recheck. No SDK client or provider configuration is loaded during app startup.
 from __future__ import annotations
 
 import os
+from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
@@ -269,6 +270,20 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     deployment = load_deployment(request)
     if deployment.worker_materialization and request.worker is None:
         raise AdmissionDenied(reason="backend_unsupported")
+    spend_limit = deployment.spend_limit_usd_cents
+    worker_budget_requested = False
+    if request.worker is not None and request.worker.limits.native_budget_usd is not None:
+        worker_budget_requested = True
+        request.worker.limits.require_native_dispatch(request.now())
+        with localcontext() as context:
+            context.prec = 80
+            cents = request.worker.limits.native_budget_usd * Decimal(100)
+            if cents != cents.to_integral_value():
+                raise AdmissionDenied(reason="backend_unsupported")
+            requested = int(cents)
+        if spend_limit is not None and spend_limit != requested:
+            raise AdmissionDenied(reason="backend_unsupported")
+        spend_limit = requested
     scope = request.scope
     worker_agent: ResourceRef | None = None
     allocating = False
@@ -423,7 +438,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             model="gpt-6-luna",
             multi_agent_enabled=False,
             container_size="small",
-            spend_limit_usd_cents=deployment.spend_limit_usd_cents,
+            spend_limit_usd_cents=spend_limit,
+            require_spend_control_echo=worker_budget_requested,
         ),
     )
 

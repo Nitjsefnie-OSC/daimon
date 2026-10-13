@@ -12,6 +12,7 @@ import functools
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
+from decimal import Decimal, localcontext
 from typing import TYPE_CHECKING, cast
 
 import anthropic as anthropic_pkg
@@ -1107,6 +1108,16 @@ async def create_session(
                 ),
                 resources=resources if resources else None,
             )
+            if worker is not None and worker.limits.native_budget_usd is not None:
+                with localcontext() as context:
+                    context.prec = 80
+                    cents = worker.limits.native_budget_usd * Decimal(100)
+                    if cents != cents.to_integral_value():
+                        raise ValueError("native session budget requires exact cents")
+                    create.keywords["budget"] = {
+                        "type": "limit",
+                        "max_list_cost": {"amount": str(int(cents)), "currency": "USD"},
+                    }
             created = (
                 await allocation(
                     create,
@@ -1148,6 +1159,11 @@ async def create_session(
                     and native_metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
                     and native_metadata.get(MA_METADATA_KEY_ACCOUNT) == str(account_id)
                 )
+                if "budget" in create.keywords and (
+                    created.model_dump(mode="json").get("budget") != create.keywords["budget"]
+                    or observed.get("budget") != create.keywords["budget"]
+                ):
+                    raise ScopeViolation("worker-resources", "native session budget differs")
                 scalars = ("id", "model", "system", "version", "multiagent")
                 fields = {*scalars, "tools", "mcp_servers", "skills"}
                 intent = agent.model_dump(mode="json")

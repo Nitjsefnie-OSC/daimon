@@ -163,6 +163,96 @@ async def setup(sm, *, provider="gemini", funds="10", cap="3", parent=None):
     return parent, run
 
 
+@pytest.mark.parametrize("provider", ("anthropic", "openai", "gemini"))
+async def test_concurrent_worker_reservations_cannot_borrow_another_provider_line(sm, provider):
+    other = "openai" if provider != "openai" else "gemini"
+    parent = root(provider)
+    parent = replace(
+        parent,
+        limits=WorkerLimits.model_validate(
+            parent.limits.model_dump()
+            | {
+                "provider_limits_usd": {provider: Decimal("0.9"), other: Decimal("2.1")},
+            }
+        ),
+    )
+    parent, _ = await setup(sm, provider=provider, parent=parent)
+    first = await add(sm, parent, ordinal=0, budget="0.6")
+    second = await add(sm, parent, ordinal=1, budget="0.6")
+    outcomes = await asyncio.gather(reserve(sm, parent, first), reserve(sm, parent, second))
+    assert sum(outcome.admitted for outcome in outcomes) == 1
+    refused = next(outcome for outcome in outcomes if not outcome.admitted)
+    assert refused.reason == "provider_budget_exceeded"
+    snapshot = await read(
+        sm, parent, next(outcome.worker for outcome in outcomes if outcome.admitted)
+    )
+    assert snapshot.run_exposure_usd == Decimal("0.6")
+    assert snapshot.worker_exposure_usd == Decimal("0.6")
+
+
+async def test_provider_reservation_boundary_uses_exact_money_at_low_precision(sm):
+    parent = root()
+    parent = replace(
+        parent,
+        limits=WorkerLimits.model_validate(
+            parent.limits.model_dump()
+            | {
+                "provider_limits_usd": {"gemini": Decimal("0.246913"), "openai": Decimal("2")},
+            }
+        ),
+    )
+    parent, _ = await setup(sm, parent=parent)
+    first = await add(sm, parent, ordinal=0, budget="0.123457")
+    second = await add(sm, parent, ordinal=1, budget="0.123457")
+    with localcontext() as arithmetic:
+        arithmetic.prec = 6
+        assert (await reserve(sm, parent, first)).admitted
+        refused = await reserve(sm, parent, second)
+    assert not refused.admitted
+    assert refused.reason == "provider_budget_exceeded"
+    assert refused.run_exposure_usd == Decimal("0.123457")
+
+
+async def test_provider_caps_cannot_claim_more_than_the_run_authority(sm):
+    parent = root()
+    parent = replace(
+        parent,
+        limits=WorkerLimits.model_validate(
+            parent.limits.model_dump()
+            | {
+                "provider_limits_usd": {"gemini": Decimal("2"), "openai": Decimal("2")},
+            }
+        ),
+    )
+    parent, _ = await setup(sm, parent=parent)
+    worker = await add(sm, parent)
+    with pytest.raises(FleetConflict, match="provider limits exceed"):
+        await reserve(sm, parent, worker)
+
+
+async def test_a_measured_provider_overrun_retains_its_exposure(sm):
+    parent = root()
+    parent = replace(
+        parent,
+        limits=WorkerLimits.model_validate(
+            parent.limits.model_dump()
+            | {
+                "provider_limits_usd": {"gemini": Decimal("1"), "openai": Decimal("2")},
+            }
+        ),
+    )
+    parent, run = await setup(sm, parent=parent)
+    worker = await add(sm, parent, budget="0.8")
+    assert (await reserve(sm, parent, worker)).admitted
+    await usage(sm, parent, run, worker, inputs=600_000, outputs=0)
+    current = await read(sm, parent, worker)
+    assert not current.admitted
+    assert current.reason == "provider_budget_exceeded"
+    assert current.worker_exposure_usd == current.run_exposure_usd == Decimal("1.2")
+    again = await read(sm, parent, worker)
+    assert again.run_exposure_usd == Decimal("1.2")
+
+
 async def add(sm, parent, *, ordinal=0, budget="1"):
     limits = parent.limits.model_copy(update={"budget_usd": Decimal(budget)})
     resolved = resolve_worker_spec(

@@ -34,6 +34,7 @@ MANAGED_AGENTS = Profile(
         "environments_fork": "native",
         "native_schedules": "native",
         "model_request_usage": "native",
+        "session_spend_control": "native",
         "workspace_export_import": "native",
     },
     extensions=ANTHROPIC_EXTENSIONS,

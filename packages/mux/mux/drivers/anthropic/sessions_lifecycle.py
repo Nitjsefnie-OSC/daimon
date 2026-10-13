@@ -95,11 +95,22 @@ class AgentVersion(NativeConfig):
     version: int
 
 
+class SessionBudgetAmount(NativeConfig):
+    amount: str = Field(pattern=r"^[1-9][0-9]*$", strict=True)
+    currency: Literal["USD"]
+
+
+class SessionBudget(NativeConfig):
+    type: Literal["limit"]
+    max_list_cost: SessionBudgetAmount
+
+
 class SessionCreateConfig(NativeConfig):
     """anthropic.session_create@1: only the native creation differences."""
 
     agent: Annotated[AgentOverrides | AgentVersion, Field(discriminator="type")] | None = None
     vault_ids: list[str] | None = None
+    budget: SessionBudget | None = None
 
 
 class SessionAgentUpdate(NativeConfig):
@@ -165,6 +176,7 @@ class SessionCreateRequest(NativeConfig):
     metadata: dict[str, str] | None = None
     vault_ids: list[str] | None = None
     resources: list[dict[str, JsonValue]] | None = None
+    budget: SessionBudget | None = None
 
 
 class SessionArchive(Protocol):
@@ -298,6 +310,8 @@ class AnthropicSessions:
             for vault_id in config.vault_ids:
                 authorize(self._authorization, scope, "vault", vault_id)
             values["vault_ids"] = config.vault_ids
+        if config.budget is not None:
+            values["budget"] = config.budget
         if "resources" in spec.model_fields_set:
             mounts: list[dict[str, JsonValue]] = []
             for resource in spec.resources:
@@ -342,6 +356,16 @@ class AnthropicSessions:
             )
         request = self._create_request(scope, spec)
         payload = request.model_dump(mode="python", exclude_unset=True)
+
+        async def send(kwargs: dict[str, object]) -> BetaManagedAgentsSession:
+            arguments = dict(kwargs)
+            budget = arguments.pop("budget", None)
+            if budget is not None:
+                arguments["extra_body"] = {"budget": budget}
+            return await mutation_client(self._client).beta.sessions.create(
+                **cast(SessionCreateParams, arguments)
+            )
+
         if any(resource["type"] == "github_repository" for resource in request.resources or ()):
             # Shared credential resolution and redaction live in resources._secrets.
             from mux.drivers.anthropic.resources._secrets import (
@@ -349,20 +373,11 @@ class AnthropicSessions:
                 unavailable_secret,
             )
 
-            async def send(kwargs: dict[str, object]) -> BetaManagedAgentsSession:
-                return await mutation_client(self._client).beta.sessions.create(
-                    **cast(SessionCreateParams, kwargs)
-                )
-
             native = await credential_request(
                 scope, request, self._secrets or unavailable_secret, send
             )
         else:
-            native = await provider_call(
-                mutation_client(self._client).beta.sessions.create(
-                    **cast(SessionCreateParams, payload)
-                )
-            )
+            native = await provider_call(send(payload))
         return self._session(scope, native)
 
     async def read_native(self, scope: Scope, ref: ResourceRef) -> dict[str, JsonValue]:

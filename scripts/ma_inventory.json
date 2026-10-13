@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2651,
+  "files_scanned": 2652,
   "parse_errors": [],
   "calls": [
     {
@@ -7134,8 +7134,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 420,
-      "end": 420,
+      "line": 435,
+      "end": 435,
       "scope": "walk",
       "category": "production",
       "resource": "sessions.list",
@@ -7145,8 +7145,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 371,
-      "end": 371,
+      "line": 365,
+      "end": 367,
+      "scope": "send",
+      "category": "production",
+      "resource": "sessions.create",
+      "call": "mutation_client(self._client).beta.sessions.create(**cast(SessionCreateParams, arguments))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 386,
+      "end": 386,
       "scope": "read_native",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -7156,8 +7167,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 405,
-      "end": 405,
+      "line": 420,
+      "end": 420,
       "scope": "list",
       "category": "production",
       "resource": "sessions.list",
@@ -7167,30 +7178,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 353,
-      "end": 355,
-      "scope": "send",
-      "category": "production",
-      "resource": "sessions.create",
-      "call": "mutation_client(self._client).beta.sessions.create(**cast(SessionCreateParams, kwargs))",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 362,
-      "end": 364,
-      "scope": "create",
-      "category": "production",
-      "resource": "sessions.create",
-      "call": "mutation_client(self._client).beta.sessions.create(**cast(SessionCreateParams, payload))",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 383,
-      "end": 383,
+      "line": 398,
+      "end": 398,
       "scope": "retrieve",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -7200,8 +7189,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 514,
-      "end": 516,
+      "line": 529,
+      "end": 531,
       "scope": "apply_update",
       "category": "production",
       "resource": "sessions.update",
@@ -7623,8 +7612,8 @@
     },
     {
       "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
-      "line": 183,
-      "end": 183,
+      "line": 184,
+      "end": 184,
       "scope": "test_create_preserves_override_tool_key_order_in_request_bytes",
       "category": "test",
       "resource": "sessions.create",
@@ -14516,7 +14505,7 @@
     },
     {
       "file": "packages/core/daimon/core/sessions.py",
-      "line": 20,
+      "line": 21,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -14525,7 +14514,7 @@
     },
     {
       "file": "packages/core/daimon/core/sessions.py",
-      "line": 21,
+      "line": 22,
       "module": "anthropic.types.beta",
       "names": [
         "BetaEnvironment",
@@ -14538,7 +14527,7 @@
     },
     {
       "file": "packages/core/daimon/core/sessions.py",
-      "line": 28,
+      "line": 29,
       "module": "anthropic.types.beta.agent_create_params",
       "names": [
         "Tool"
@@ -14547,7 +14536,7 @@
     },
     {
       "file": "packages/core/daimon/core/sessions.py",
-      "line": 29,
+      "line": 30,
       "module": "anthropic.types.beta.beta_managed_agents_agent_with_overrides_params",
       "names": [
         "BetaManagedAgentsAgentWithOverridesParams"
@@ -14556,7 +14545,7 @@
     },
     {
       "file": "packages/core/daimon/core/sessions.py",
-      "line": 32,
+      "line": 33,
       "module": "anthropic.types.beta.beta_managed_agents_url_mcp_server_params",
       "names": [
         "BetaManagedAgentsURLMCPServerParams"
@@ -14565,7 +14554,7 @@
     },
     {
       "file": "packages/core/daimon/core/sessions.py",
-      "line": 35,
+      "line": 36,
       "module": "anthropic.types.beta.session_create_params",
       "names": [
         "Agent",
@@ -17187,7 +17176,7 @@
     },
     {
       "file": "packages/core/tests/test_sessions.py",
-      "line": 12,
+      "line": 13,
       "module": "anthropic.types.beta",
       "names": [
         "BetaEnvironment",
@@ -17558,7 +17547,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 13,
+      "line": 14,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_agent_custom_tool_use_event",
       "names": [
         "BetaManagedAgentsAgentCustomToolUseEvent"
@@ -17567,7 +17556,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 16,
+      "line": 17,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_agent_mcp_tool_result_event",
       "names": [
         "BetaManagedAgentsAgentMCPToolResultEvent"
@@ -17576,7 +17565,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 19,
+      "line": 20,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_agent_mcp_tool_use_event",
       "names": [
         "BetaManagedAgentsAgentMCPToolUseEvent"
@@ -17585,7 +17574,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 22,
+      "line": 23,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_agent_message_event",
       "names": [
         "BetaManagedAgentsAgentMessageEvent"
@@ -17594,7 +17583,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 25,
+      "line": 26,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_agent_tool_result_event",
       "names": [
         "BetaManagedAgentsAgentToolResultEvent"
@@ -17603,7 +17592,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 28,
+      "line": 29,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_agent_tool_result_event",
       "names": [
         "Content"
@@ -17612,7 +17601,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 31,
+      "line": 32,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_agent_tool_use_event",
       "names": [
         "BetaManagedAgentsAgentToolUseEvent"
@@ -17621,7 +17610,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 34,
+      "line": 35,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_model_overloaded_error",
       "names": [
         "BetaManagedAgentsModelOverloadedError"
@@ -17630,7 +17619,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 37,
+      "line": 38,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_model_rate_limited_error",
       "names": [
         "BetaManagedAgentsModelRateLimitedError"
@@ -17639,7 +17628,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 40,
+      "line": 41,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_retry_status_terminal",
       "names": [
         "BetaManagedAgentsRetryStatusTerminal"
@@ -17648,7 +17637,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 43,
+      "line": 44,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_session_end_turn",
       "names": [
         "BetaManagedAgentsSessionEndTurn"
@@ -17657,7 +17646,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 46,
+      "line": 47,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_session_error_event",
       "names": [
         "BetaManagedAgentsSessionErrorEvent"
@@ -17666,7 +17655,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 49,
+      "line": 50,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_session_error_event",
       "names": [
         "Error"
@@ -17675,7 +17664,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 52,
+      "line": 53,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_session_requires_action",
       "names": [
         "BetaManagedAgentsSessionRequiresAction"
@@ -17684,7 +17673,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 55,
+      "line": 56,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_session_retries_exhausted",
       "names": [
         "BetaManagedAgentsSessionRetriesExhausted"
@@ -17693,7 +17682,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 58,
+      "line": 59,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event",
       "names": [
         "BetaManagedAgentsSessionStatusIdleEvent",
@@ -17703,7 +17692,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 62,
+      "line": 63,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_session_status_terminated_event",
       "names": [
         "BetaManagedAgentsSessionStatusTerminatedEvent"
@@ -17712,7 +17701,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 65,
+      "line": 66,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_text_block",
       "names": [
         "BetaManagedAgentsTextBlock"
@@ -17721,7 +17710,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 68,
+      "line": 69,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_user_custom_tool_result_event",
       "names": [
         "BetaManagedAgentsUserCustomToolResultEvent"
@@ -17730,7 +17719,7 @@
     },
     {
       "file": "packages/core/tests/turn/conftest.py",
-      "line": 71,
+      "line": 72,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_user_tool_confirmation_event",
       "names": [
         "BetaManagedAgentsUserToolConfirmationEvent"
@@ -19135,7 +19124,7 @@
     },
     {
       "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
-      "line": 9,
+      "line": 10,
       "module": "anthropic",
       "names": [
         "NotFoundError"
@@ -19144,7 +19133,7 @@
     },
     {
       "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
-      "line": 181,
+      "line": 182,
       "module": "anthropic.types.beta.session_create_params",
       "names": [
         "Agent"

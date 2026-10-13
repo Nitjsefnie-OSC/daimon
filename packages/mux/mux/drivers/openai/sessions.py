@@ -86,7 +86,7 @@ class OpenAISessions:
             legacy_account_id=scope.account_id,
         )
 
-    async def _decode(self, scope: Scope, raw: Object) -> Session:
+    async def _decode(self, scope: Scope, raw: Object, *, creating: bool = False) -> Session:
         self._c.record(scope, raw)
         binding = self._binding(scope, raw)
         expected_agent = binding.native_refs.get("agent")
@@ -159,7 +159,7 @@ class OpenAISessions:
                     "upstream", retryable=True, native_code="active_root_unavailable"
                 )
         rev = Revision(local=binding.config_revision)
-        return Session.model_validate(
+        session = Session.model_validate(
             {
                 "ref": self._c.ref(scope, "session", text(raw["id"])),
                 "binding": binding,
@@ -170,11 +170,30 @@ class OpenAISessions:
                 ),
                 "requested_revision": rev,
                 "effective_revision": rev,
-                "state": states[status],
+                "state": "provisioning"
+                if creating and self._controls.require_spend_control_echo
+                else states[status],
                 "active_root_turn": active,
                 "required_actions": required_actions(raw),
+                "native": {"spend_control": raw.get("spend_control")}
+                if self._controls.require_spend_control_echo
+                else None,
             }
         )
+        if not creating:
+            self.validate_spend_control(session)
+        return session
+
+    def validate_spend_control(self, session: Session) -> None:
+        """Creation receipts are retained before an untrusted control echo is checked."""
+        if not self._controls.require_spend_control_echo:
+            return
+        control = session.native.get("spend_control") if isinstance(session.native, dict) else None
+        limit = control.get("limit") if isinstance(control, dict) else None
+        if type(limit) is not int or limit != self._controls.spend_limit_usd_cents:
+            raise ContinuityLost(
+                session.binding.id, ("session spend control differs from admission",)
+            )
 
     @owned
     async def create(
@@ -258,7 +277,7 @@ class OpenAISessions:
         if tools is not None:
             body["agent"] = {**object_json(body.get("agent") or {}), "tools": tools}
         return await self._decode(
-            scope, await self._c.call("POST", "/agents/sessions", body=body, key=key)
+            scope, await self._c.call("POST", "/agents/sessions", body=body, key=key), creating=True
         )
 
     @owned

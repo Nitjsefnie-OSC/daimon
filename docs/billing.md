@@ -1110,3 +1110,71 @@ checks and monitoring; the count is not proof of zero spend or final usage.
 Recovery attempts, extra turns and a used turn on an unallocated row stay
 refused in the single-input executor slice. The store's max-turn admission and
 input claim still precede dispatch; financial facts do not authorize replay.
+
+Optional worker request limits are part of the existing canonical intent and
+must narrow the parent's limits. Missing profile support refuses a requested
+limit before resource compilation; an output-token ceiling requires native
+enforcement. Host turn counts and observed model usage do not substitute for
+an enforced limit on internal model requests. Omitted limits preserve the
+existing serialized intent.
+
+An authenticated parent's optional `provider_limits_usd` fences each provider's
+sibling worker exposure within the run. A missing or zero line refuses that
+provider; a funded reservation cannot borrow unused capacity from another line.
+The same financial producer sums whole unknown reservations and measured
+overruns before admission, under its existing lock and exact decimal context.
+These worker sublimits do not reserve root inference or install credential-line
+guards. The caller must separately bind root admission and native request
+controls; a financial snapshot alone never certifies a provider spending cap.
+
+An optional `native_budget_usd` requests a native session spend control, in
+positive exact cents. It is a soft control, separate from the held worker
+budget. Its worker must have one host input and a deadline within 120 seconds;
+the existing input claim counts that input before dispatch and retains the
+count after an uncertain acknowledgement. Additional turn-input mutations are
+refused, while cancellation and archive remain available. A child cannot drop
+or increase a configured native budget. The driver must compile the control;
+missing profile support refuses it. Omission preserves ordinary execution.
+Native internal inference, token overshoot and remote cancellation delay are
+not bounded by that host input count. Requested hard token or model-request
+limits retain their separate unsupported-capability refusal.
+
+
+For an explicitly budgeted worker, the Anthropic session composer sends the
+canonical amount as positive integer USD cents in `budget.max_list_cost.amount`.
+The shared lifecycle codec carries that field through the SDK's extra body for
+both ordinary and repository-backed creation. The owned session's creation
+acknowledgement and fresh readback must retain the same budget before execution.
+The OpenAI preparation edge compiles the amount into the existing
+`spend_control.limit` integer cents and rejects conflicting deployment controls
+or missing, malformed or changed native echoes. Native rejection never retries
+without the control. Unconfigured calls omit these additional request fields;
+soft controls do not make provider-internal inference a hard bounded bill.
+
+
+An explicitly budgeted worker's scoped OpenAI creation acknowledgement is retained as a provisioning receipt
+before its native spend-control echo is validated. The receipt includes the
+native session reference and budget echo; it does not establish a runnable
+binding. A rejected acknowledgement or fresh readback refuses input and uses
+the existing owned, bounded session cleanup path. Cleanup failure retains the
+creation identity and financial hold for reconciliation; restart never allocates
+a replacement for that receipt. Unknown transport acceptance stays unknown.
+
+A configured provider map also requires a positive line for the financial
+parent's provider. This is an admission condition; the worker exposure producer
+does not thereby price or reserve root inference. Root admission, native budget,
+request count, wake lifetime and trusted grant installation remain separate
+caller obligations. Worker lines must fit alongside the reserved root room.
+
+Ordinary OpenAI sessions, including deployment-level spend limits without a
+worker `native_budget_usd`, preserve their prior request and readback behavior.
+Only an explicit worker budget enables strict native echo validation, against
+the exact integer cents sent in that session request. A deployment limit alone
+does not enable provisioning receipts or budget-rejection cleanup.
+
+The worker echo requirement is omitted from serialized controls when false.
+All prior control fields, including null caps and disabled delegation, remain
+verbatim in plan and creation digests. Existing ordinary bindings and retained
+creation receipts therefore recover under the same stable identity. A true
+worker echo requirement remains part of policy identity; no digest fallback or
+replacement key is used.

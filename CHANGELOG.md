@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reserve opt-in fleet root origins and tenant-wide intent ownership before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.
 - Reserve opt-in fleet root origins before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.
 - Resolve opted-in Discord fleet cards from the frozen root and genuine turn intent, preserving the original account while rechecking control-click roles.
+- Preserve ordinary OpenAI plan and creation-receipt identities when worker budget-echo admission is disabled.
+
+- Scope OpenAI budget-echo validation to explicitly budgeted workers, preserving ordinary native host session behavior.
+
+- Retain acknowledged OpenAI session identities before rejecting native budget echoes, then clean up owned rejected allocations without sending input.
+
+- Compile explicitly requested worker session budgets into Anthropic and OpenAI native requests, refusing missing or changed controls before model input.
 
 - Bind opt-in fleet root permissions to the exact admitted source, turn intent, active origin and native session binding through the existing durable operation owner.
 
@@ -25,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Freeze explicit finite fleet root grants against their original admission and scoped source capture through the existing worker attenuation owner.
 - Revalidate frozen worker wakes against their durable original root before normal admission; hosts without a completion decision leave those rows unclaimed.
 - Revalidate frozen worker wakes against their durable original root before normal admission; hosts without a completion decision defer those rows with the existing unavailable backoff.
+- Attenuate optional native worker session budgets with a one-input host claim and a short deadline, preserving separate refusal of unsupported hard limits.
 
 - Reuse verified Gemini worker readback and share native worker publication authority checks.
 - Freeze independent worker batches in the existing wake queue and publish readiness atomically with terminal writes, without reopening legacy unarmed completion writes.
@@ -38,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Native worker session creation retains scoped creation receipts before readback, refuses changed warm-memory grants without provisioning, and archives independently owned rejected sessions.
 
+- Retain optional worker request ceilings in canonical intent, refuse unsupported native output limits, and fence sibling worker reservations by provider.
 - Preserve a tenant-wide clone source identity only under its exact root source/revision grant and authorized account capture.
 - Refuse worker resource preparation if the captured source environment is missing or differs from the requested native environment.
 - Project fully explicit cloud source policies into the existing neutral worker environment while refusing implicit or unrepresented native permissions.

@@ -59,6 +59,7 @@ async def create_session_record(
     metadata: Mapping[str, str] | None,
     resources: Sequence[Resource] | None,
     vault_ids: Sequence[str] | None = None,
+    budget: Mapping[str, JsonValue] | None = None,
 ) -> BetaManagedAgentsSession:
     """None omits a field; explicit empty resources stay explicit for isolation."""
     agent_id = agent if isinstance(agent, str) else agent["id"]
@@ -130,6 +131,8 @@ async def create_session_record(
             config["agent"] = cast(JsonValue, dict(agent))
         if vault_ids is not None:
             config["vault_ids"] = list(vault_ids)
+        if budget is not None:
+            config["budget"] = dict(budget)
         values: dict[str, object] = {
             "agent": resource_ref(backend, "agent", agent_id, scope=scope),
             "agent_revision": Revision(local=0),

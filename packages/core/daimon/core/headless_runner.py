@@ -524,6 +524,7 @@ async def run_worker(
         or request.worker.spec.model.id != worker.model
     ):
         raise FleetConflict("worker dispatch requires its actual admitted pool claim")
+    request.worker.limits.require_native_dispatch(request.now())
     store = deps.state_store
     if not isinstance(store, PostgresStateStore):
         raise FleetConflict("worker input requires its actual PostgreSQL journal owner")
@@ -738,9 +739,16 @@ async def run_worker(
             ) -> bool:
                 if prepared is None:
                     return True
-                primary = f"turn:{prepared.ma_session_id}:{operation}:send:"
+                turn_key = f"turn:{prepared.ma_session_id}:{operation}:"
+                primary = turn_key + "send:"
                 if not key.startswith(primary):
-                    return True
+                    return not (
+                        resolved.limits.native_budget_usd is not None
+                        and key.startswith(turn_key)
+                        and not key[len(turn_key) :].startswith(
+                            ("cancel:", "archive:", "recovery-stop:", "recovery-interrupt:")
+                        )
+                    )
                 if key != primary + "0":
                     raise FleetConflict("worker input retry requires reconciliation")
                 if scope != resolved.permissions.fleet.scope or fence is None or fence.slot != slot:

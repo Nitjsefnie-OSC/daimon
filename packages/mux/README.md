@@ -664,9 +664,10 @@ callback remains None. Anonymous MCP also requires a clean HTTPS destination;
 userinfo, query/fragment carriers and invalid server names refuse at compilation
 and the SDK edge before I/O or logging. See [the driver contract](../../docs/mux.md#gemini-scoped-mcp-authentication)
 for admission, DEBUG redaction, continuation and offline proof limits.
-OpenAI explicit session spend limits use integer USD cents and require the
-configured cap to appear unchanged in native session responses before host
-input. Omitted caps preserve existing behavior. Control failures retain scoped
+OpenAI explicit worker session budgets use integer USD cents and require the
+sent cap to appear unchanged in native session responses before host input.
+Ordinary deployment-level caps preserve existing readback behavior; the
+worker-budget compiler alone enables strict echo validation. Control failures retain scoped
 acknowledged resource references for exact cleanup, without automatic creation
 retry or an exact-spend claim.
 
@@ -990,3 +991,36 @@ the existing agent compiler and durable request template. The budget is native
 best-effort behavior, excluding cached tokens. A budgeted worker permits one
 interaction and retains its exact named-agent model, without fallback; ordinary
 Gemini sessions retain their existing behavior.
+
+Profiles declare `model_request_limit`, `input_token_limit` and
+`output_token_limit` through the existing capability map. Unknown support
+refuses a requested worker ceiling. Output ceilings require native enforcement;
+host request admission can be emulated only where the host controls each actual
+model request. Observing a managed agent's inference events does not establish
+that admission control. Unrequested limits preserve existing serialized intent.
+
+`session_spend_control` declares support for compiling an explicitly requested
+native spend control. It does not promise a hard final bill or imply support
+for model-request or token ceilings. Hosts retain their original input claims,
+deadlines, cancellation and unknown-usage holds around that control.
+
+
+Anthropic and OpenAI declare `session_spend_control` for the existing native
+session creation codecs. Anthropic's closed budget value uses a positive cents
+string and is merged through the SDK `extra_body`; OpenAI uses strict positive
+integer cents in `spend_control.limit`, verifying its native echo. Neither flag
+advertises hard internal model-request or output limits. Missing controls remain
+omitted for unconfigured callers.
+
+
+Explicitly budgeted OpenAI worker creation returns a provisioning acknowledgement with its scoped
+session reference and control echo. The host retains that receipt before using
+the driver's single spend-control validator; retrieval validates independently.
+Execution checks retrieve the session again, so a provisioning receipt does not
+authorize model input. Rejected allocations use owned session deletion through
+the existing bounded cleanup path; OpenAI's unsupported archive port is not
+reported as a successful archive.
+
+Default-off worker echo admission is omitted from serialized controls so
+existing ordinary host plan and creation identities remain unchanged. Enabled
+echo admission is serialized and distinguishes the worker policy.
