@@ -10,6 +10,7 @@ from mux.contracts.ids import ModelRef
 from mux.contracts.resources import Agent
 from mux.drivers.gemini.transport import Object, Transport, object_value, string
 from mux.errors import ProviderError
+from mux.profiles.gemini import WORKER_MODEL
 
 FLASH_PRIMARY = "gemini-3.8-flash"
 FLASH_MODELS = (FLASH_PRIMARY, "gemini-flash-latest", "gemini-3.5-flash-lite")
@@ -48,7 +49,10 @@ class FlashTransport:
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         original = object_value(request["agent_config"])
-        if original.get("model") != FLASH_PRIMARY:
+        required = (
+            self._native_agent.spec.model.id if self._native_agent is not None else FLASH_PRIMARY
+        )
+        if required not in (FLASH_PRIMARY, WORKER_MODEL) or original.get("model") != required:
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
@@ -57,7 +61,7 @@ class FlashTransport:
             if request.get(
                 "agent"
             ) != self._native_agent.ref.id or self._native_agent.spec.model != ModelRef(
-                provider="gemini", id=FLASH_PRIMARY
+                provider="gemini", id=required
             ):
                 raise ProviderError(
                     "invalid_request", retryable=False, native_code="named_agent_model_required"

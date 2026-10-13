@@ -2629,3 +2629,18 @@ An explicitly installed MCP bridge requires the live turn's exact
 `origin_context_id`; stale, foreign or mismatched contexts refuse before the
 root loader runs. Native dispatch, control and frozen-batch wake bindings must
 be installed by the host; an unavailable binding does not authorize work.
+
+Gemini fleet workers use an explicit managed-agent token budget of 4096 per
+interaction. A worker can select the supported cost-oriented
+`gemini-3.5-flash-lite` model only through its canonical spec, backend revision,
+root model grant and independently verified native definition; execution never
+rewrites a retained model identity. The existing journal and input claim permit
+one worker interaction, including after restart; continuation requires another
+interaction and is refused. Non-worker runtime selection keeps its existing
+primary model.
+
+The Gemini managed-agent token budget is best-effort and excludes cached tokens.
+It is not a hard spending ceiling. Worker runtime admission refuses a deadline
+more than 120 seconds away. Worker execution retains its admitted deadline,
+cancellation and financial guard; complete measured usage is required for exact
+settlement.

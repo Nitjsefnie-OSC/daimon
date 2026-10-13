@@ -666,3 +666,91 @@ def test_configured_agent_compiles_only_declared_builtin_custom_and_mcp_tools() 
         {"type": "function", "name": "weather", "description": "", "parameters": {}},
         {"type": "mcp_server", "name": "owned", "url": "https://owned.example/mcp"},
     ]
+
+
+@pytest.mark.parametrize("ceiling", (False, 0, -1, "4096"))
+def test_agent_worker_budget_requires_a_positive_integer(ceiling) -> None:
+    with pytest.raises(UnsupportedCapability):
+        compile_agent(
+            AgentSpec(name="worker", model=ModelRef(provider="gemini", id="gemini-3.5-flash-lite")),
+            max_total_tokens=ceiling,
+        )
+
+
+async def test_agent_worker_budget_is_in_the_owned_template_and_blocks_another_interaction() -> (
+    None
+):
+    from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+
+    transport, storage, state = FakeTransport(), MemoryStorage(), MemoryStateStore()
+    worker = GeminiManagedAgents(
+        transport,
+        storage=storage,
+        state_store=state,
+        account_scope_id="project",
+        max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
+    )
+    agent = await worker.agents.create(
+        SCOPE,
+        AgentSpec(name="worker", model=ModelRef(provider="gemini", id=WORKER_MODEL), system="Kept"),
+        key="agent",
+    )
+    spec = SessionSpec(
+        agent=agent.ref,
+        agent_revision=agent.revision,
+        config_revision=1,
+        extensions={
+            "gemini.session": ExtensionConfig(
+                namespace="gemini.session",
+                version=1,
+                value={
+                    "thread": THREAD.model_dump(mode="json"),
+                    "binding_id": "budget-worker",
+                },
+            )
+        },
+    )
+    session = await worker.sessions.create(SCOPE, spec, key="session")
+    transport.responses.append(native())
+    first = await worker.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input")
+    assert transport.requests[0]["agent_config"] == {
+        "type": "antigravity",
+        "model": "gemini-3.5-flash-lite",
+        "max_total_tokens": 4096,
+    }
+    assert transport.requests[0]["system_instruction"] == "Kept"
+    assert transport.requests[0]["tools"] == []
+    assert await worker.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input") == first
+    restarted = GeminiManagedAgents(
+        transport,
+        storage=storage,
+        state_store=state,
+        account_scope_id="project",
+        max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
+    )
+    assert await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input") == first
+    with pytest.raises(UnsupportedCapability) as refused:
+        await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="second-input")
+    assert "worker_single_interaction" in refused.value.missing
+    assert len(transport.requests) == 1
+    operation = await state.get_operation(SCOPE, "claimed-input")
+    assert operation is not None and operation.operation.status == "accepted"
+
+
+def test_worker_model_permission_preserves_default_selections_and_thread_mode() -> None:
+    from mux.profiles import BackendSelection, backend_selection, runnable_selection
+
+    assert BackendSelection(BackendConfig(), ("per_caller",)).allowed_models is None
+    assert backend_selection("gemini").model == "gemini-3.8-flash"
+    assert backend_selection("openai").model == "gpt-6-luna"
+    assert resolve_default(None).backend == "anthropic"
+    cheap = BackendConfig(
+        backend="gemini", profile="gemini.inline_reuse", model="gemini-3.5-flash-lite"
+    )
+    assert runnable_selection(resolve_default(cheap))
+    assert not runnable_selection(
+        resolve_default(cheap.model_copy(update={"thread_mode": "shared"}))
+    )
+    assert not runnable_selection(
+        resolve_default(cheap.model_copy(update={"model": "gemini-3.5-pro"}))
+    )

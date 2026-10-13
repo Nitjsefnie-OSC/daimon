@@ -121,8 +121,21 @@ def entry(selected: ProviderPreparationRequest, tmp_path: Path) -> dict[str, Jso
 
 
 @pytest.fixture
-def worker_target(tmp_path: Path) -> tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec]:
+def worker_target(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec]:
     root = parent("gemini")
+    if getattr(request, "param", None) == "cheap":
+        model = ModelRef(provider="gemini", id="gemini-3.5-flash-lite")
+        selection = resolve_default(
+            BackendConfig(backend="gemini", profile=PROFILE, model=model.id)
+        )
+        root = replace(
+            root,
+            spec=root.spec.model_copy(update={"model": model}),
+            models=(*root.models, model),
+            backend_grants=(*root.backend_grants, selection),
+        )
     worker = resolve_worker_spec(
         root,
         root.spec.model_copy(
@@ -140,6 +153,7 @@ def worker_target(tmp_path: Path) -> tuple[GeminiPlan, ConfigRevision, ResolvedW
         ),
         policy=POLICY,
         now=NOW,
+        backend=BackendConfig(backend="gemini", profile=PROFILE, model=root.spec.model.id),
     )
     revision = ConfigRevision.create(root.fleet.root.channel, 1, worker.backend)
     plan = GeminiPlan(
@@ -161,6 +175,50 @@ def worker_target(tmp_path: Path) -> tuple[GeminiPlan, ConfigRevision, ResolvedW
         environment=EnvironmentSpec(name="explicit-no-execution"),
     )
     return plan, revision, worker
+
+
+@pytest.mark.parametrize("worker_target", ("cheap",), indirect=True)
+def test_cheap_worker_model_is_canonical_and_admitted_before_compilation(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+) -> None:
+    from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS
+
+    plan, revision, worker = worker_target
+    check_backend(revision)
+    assert worker.backend.model == revision.model == "gemini-3.5-flash-lite"
+    assert worker.spec.model == ModelRef(provider="gemini", id=revision.model)
+    deployment = plan.worker_deployment(worker, revision)
+    assert deployment.agent == worker.spec
+    assert deployment.max_total_tokens == WORKER_MAX_TOTAL_TOKENS == 4096
+    assert compile_agent(deployment.agent, max_total_tokens=deployment.max_total_tokens)[
+        "agent_config"
+    ] == {"type": "antigravity", "model": "gemini-3.5-flash-lite", "max_total_tokens": 4096}
+
+
+@pytest.mark.parametrize("missing", ("backend", "model"))
+def test_cheap_worker_model_still_needs_explicit_root_grants(missing: str) -> None:
+    from daimon.core.neutral_resources import WorkerSpecRefused
+
+    root = parent("gemini")
+    model = ModelRef(provider="gemini", id="gemini-3.5-flash-lite")
+    selection = resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model=model.id))
+    root = replace(
+        root,
+        models=root.models if missing == "model" else (*root.models, model),
+        backend_grants=root.backend_grants
+        if missing == "backend"
+        else (*root.backend_grants, selection),
+    )
+    spec = root.spec.model_copy(update={"model": model})
+    with pytest.raises(WorkerSpecRefused) as refused:
+        resolve_worker_spec(
+            root,
+            spec,
+            backend=BackendConfig(backend="gemini", profile=PROFILE, model=spec.model.id),
+            policy=POLICY,
+            now=NOW,
+        )
+    assert (refused.value.field, refused.value.reason) == ("backend", "not_subset")
 
 
 def test_resolved_drops_compile_remote_without_execution_or_memory(
@@ -1184,6 +1242,11 @@ async def test_worker_materialization_runs_the_real_headless_driver(
     inputs = [call for call in calls if call.method == "POST"]
     assert len(inputs) == 1 and json.loads(inputs[0].content)["agent"] == body["id"]
     assert json.loads(inputs[0].content)["tools"] == []
+    assert json.loads(inputs[0].content)["agent_config"] == {
+        "type": "antigravity",
+        "model": selected.worker.spec.model.id,
+        "max_total_tokens": 4096,
+    }
     operation = f"fleet:{worker.run_id}:spawn:{worker.ordinal}"
     store = selected.deps.state_store
     assert store is not None
@@ -1493,3 +1556,49 @@ async def test_openai_shared_materialization_refuses_before_provider_host_constr
     fault: str,
 ) -> None:
     await _refuse_materialization_before_host(claimed_openai_worker[:6], monkeypatch, fault)
+
+
+async def test_worker_runtime_refuses_a_deadline_beyond_the_cancel_bound_before_key_access(
+    materialization_worker_request: tuple[_ClaimedWorker, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+
+    (selected, _, _, _, owned, calls), _ = materialization_worker_request
+    selected = replace(selected, deadline=selected.now() + timedelta(seconds=121))
+    plan = GeminiPlan.model_validate(json.loads(owned.manifest_path.read_text())[0])
+    getter = os.environ.get
+
+    def key(name: str, default: str | None = None) -> str | None:
+        if name == plan.api_key_env:
+            pytest.fail("unbounded worker read its provider key")
+        return getter(name, default)
+
+    monkeypatch.setattr(os.environ, "get", key)
+    with pytest.raises(AdmissionDenied) as refused:
+        build_gemini_runtime(selected)
+    assert refused.value.reason == "backend_unsupported"
+    assert not owned.wire.requests and not calls
+
+
+async def test_cheap_model_does_not_enable_an_ordinary_channel_runtime(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mux.profiles.gemini import WORKER_MODEL
+
+    revision = selected.admission.backend_revision
+    assert revision is not None and selected.worker is None
+    changed = revision.model_copy(update={"model": WORKER_MODEL})
+    selected = replace(selected, admission=replace(selected.admission, backend_revision=changed))
+    getter = os.environ.get
+
+    def no_manifest(name: str, default: str | None = None) -> str | None:
+        if name == "DAIMON_TURN__PROVIDER_RUNTIME_FILE":
+            pytest.fail("unsupported ordinary model discovered its runtime")
+        return getter(name, default)
+
+    monkeypatch.setattr(os.environ, "get", no_manifest)
+    with pytest.raises(AdmissionDenied) as refused:
+        build_gemini_runtime(selected)
+    assert refused.value.reason == "backend_unsupported"

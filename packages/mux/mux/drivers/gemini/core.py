@@ -106,7 +106,9 @@ class Base:
         *,
         mcp_secrets: MCPSecretResolver | None = None,
         native_agent: Agent | None = None,
+        max_total_tokens: int | None = None,
     ) -> None:
+        self._max_total_tokens = max_total_tokens
         self._native_agent = native_agent
         self._transport, self._storage, self._account = transport, storage, account_scope_id
         self._mcp_secrets = mcp_secrets
@@ -125,7 +127,11 @@ class Base:
             and self._native_agent != agent
         ):
             refuse("named_agent_session_plan")
-        request = compile_agent(agent.spec, authenticated_mcp=self._mcp_secrets is not None)
+        request = compile_agent(
+            agent.spec,
+            authenticated_mcp=self._mcp_secrets is not None,
+            max_total_tokens=self._max_total_tokens,
+        )
         if self._native_agent is not None:
             if agent != self._native_agent:
                 refuse("named_agent_session_plan")
@@ -382,7 +388,9 @@ class GeminiAgents(Base):
         refuse("agent_delete")
 
 
-def compile_agent(spec: AgentSpec, *, authenticated_mcp: bool = False) -> Object:
+def compile_agent(
+    spec: AgentSpec, *, authenticated_mcp: bool = False, max_total_tokens: int | None = None
+) -> Object:
     if spec.model.provider != "gemini" or not spec.model.id or spec.model.options:
         refuse("model")
     if spec.extensions:
@@ -393,6 +401,10 @@ def compile_agent(spec: AgentSpec, *, authenticated_mcp: bool = False) -> Object
         # Omission would enable provider defaults, including billable web tools.
         "tools": [],
     }
+    if max_total_tokens is not None:
+        if type(max_total_tokens) is not int or max_total_tokens <= 0:
+            refuse("agent_token_budget")
+        object_value(result["agent_config"])["max_total_tokens"] = max_total_tokens
     if spec.system is not None:
         result["system_instruction"] = spec.system
     if spec.tools is not None or spec.mcp_servers is not None:
@@ -674,9 +686,15 @@ class GeminiEvents(Base):
         model_for_interaction: Callable[[str], ModelRef | None] | None = None,
         mcp_secrets: MCPSecretResolver | None = None,
         native_agent: Agent | None = None,
+        max_total_tokens: int | None = None,
     ) -> None:
         super().__init__(
-            transport, storage, account_scope_id, mcp_secrets=mcp_secrets, native_agent=native_agent
+            transport,
+            storage,
+            account_scope_id,
+            mcp_secrets=mcp_secrets,
+            native_agent=native_agent,
+            max_total_tokens=max_total_tokens,
         )
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction
@@ -784,6 +802,13 @@ class GeminiEvents(Base):
                 return prior[2]
             if record.unknown_delivery:
                 refuse("unreconciled_delivery")
+            if self._max_total_tokens is not None and (
+                record.current is not None
+                or len(events) != 1
+                or not isinstance(events[0], UserMessage)
+                or events[0].mode != "new_turn"
+            ):
+                refuse("worker_single_interaction")
             if expected_turn is not None and expected_turn != record.session.active_root_turn:
                 raise ProviderError("conflict", retryable=False)
             overrides: Object = {}

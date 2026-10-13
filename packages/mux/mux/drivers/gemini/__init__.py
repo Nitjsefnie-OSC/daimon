@@ -66,6 +66,7 @@ class GeminiManagedAgents:
         resource_catalog_enabled: bool = False,
         resource_catalog_transport: AgentCatalogTransport | None = None,
         native_agent: Agent | None = None,
+        max_total_tokens: int | None = None,
     ) -> None:
         if type(resource_catalog_enabled) is not bool:
             raise ValueError("resource catalog capability must be an explicit bool")
@@ -83,7 +84,12 @@ class GeminiManagedAgents:
         )
         self.environments = GeminiEnvironments(transport, storage, account_scope_id)
         self.sessions = GeminiSessions(
-            transport, storage, account_scope_id, mcp_secrets=mcp_secrets, native_agent=native_agent
+            transport,
+            storage,
+            account_scope_id,
+            mcp_secrets=mcp_secrets,
+            native_agent=native_agent,
+            max_total_tokens=max_total_tokens,
         )
         self.events = GeminiEvents(
             transport,
@@ -93,6 +99,7 @@ class GeminiManagedAgents:
             model_for_interaction=model_for_interaction,
             native_agent=native_agent,
             mcp_secrets=mcp_secrets,
+            max_total_tokens=max_total_tokens,
         )
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)

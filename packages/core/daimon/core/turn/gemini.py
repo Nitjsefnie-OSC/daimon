@@ -49,7 +49,7 @@ from mux.contracts.events import (
     UsageObservedPayload,
     UserMessagePayload,
 )
-from mux.contracts.ids import PageRequest, ResourceRef, Scope
+from mux.contracts.ids import ModelRef, PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
 from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec
@@ -60,6 +60,7 @@ from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAccounting, FlashTransp
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
+from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
 from mux.state.store import StateStore
 from pydantic import JsonValue, TypeAdapter
 
@@ -77,6 +78,7 @@ class GeminiDeployment:
     agent: AgentSpec
     environment: EnvironmentSpec
     native_agent: Agent | None = None
+    max_total_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -99,10 +101,22 @@ class GeminiTransportRuntime:
     catalog_transport: AgentCatalogTransport | None = None
 
 
+def _runtime_model(runtime: TurnRuntime | None) -> str:
+    journal = runtime.journal if runtime is not None else None
+    deployment = journal.deployment if isinstance(journal, GeminiJournal) else None
+    return (
+        deployment.agent.model.id
+        if deployment is not None
+        and deployment.max_total_tokens is not None
+        and deployment.agent.model.id in (FLASH_PRIMARY, WORKER_MODEL)
+        else FLASH_PRIMARY
+    )
+
+
 def compose_gemini_backend(request: TurnBackendRequest) -> TurnBackend:
     # Admission/model/durable dependencies are checked before the private
     # caller-owned transport factory, which might access a credential.
-    if request.profile != PROFILE or request.model != FLASH_PRIMARY:
+    if request.profile != PROFILE or request.model != _runtime_model(request.runtime):
         raise UnsupportedCapability(("gemini_host_flash_primary",), PROFILE)
     session, runtime, config = request.session, request.runtime, request.config
     if session is None or runtime is None or config is None:
@@ -130,7 +144,8 @@ def gemini_backend(
     account_scope_id: str,
 ) -> GeminiManagedAgents:
     """Compose an explicit scoped runtime before a logical session exists."""
-    if config.profile != PROFILE or config.model != FLASH_PRIMARY:
+    required_model = _runtime_model(runtime)
+    if config.profile != PROFILE or config.model != required_model:
         raise UnsupportedCapability(("gemini_host_flash_primary",), PROFILE)
     if config.channel.tenant_id != scope.tenant_id:
         raise ScopeViolation(config.channel.channel_id, "Gemini runtime has a foreign channel")
@@ -144,6 +159,14 @@ def gemini_backend(
         or deployment.config_digest != config.digest
         or deployment.config_revision != config.local
         or deployment.account_scope_id != account_scope_id
+        or (
+            deployment.max_total_tokens is not None
+            and (
+                type(deployment.max_total_tokens) is not int
+                or deployment.max_total_tokens != WORKER_MAX_TOTAL_TOKENS
+            )
+        )
+        or deployment.agent.model != ModelRef(provider="gemini", id=required_model)
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
     supplied = runtime.transport_factory(config, scope)
@@ -161,11 +184,12 @@ def gemini_backend(
         resource_catalog_enabled=supplied.catalog_transport is not None,
         resource_catalog_transport=supplied.catalog_transport,
         native_agent=deployment.native_agent,
+        max_total_tokens=deployment.max_total_tokens,
     )
 
 
 def compose_gemini_codec(request: TurnCodecRequest) -> GeminiTurnIO:
-    if request.config is None or request.model != FLASH_PRIMARY:
+    if request.config is None or request.model != _runtime_model(request.runtime):
         raise UnsupportedCapability(("gemini_host_flash_primary",), PROFILE)
     return GeminiTurnIO(
         request.backend, request.scope, request.session, persistence=request.persistence

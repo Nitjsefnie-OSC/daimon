@@ -1,13 +1,16 @@
 """Host model policy: a create HTTP503 alone permits the next Flash model."""
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 
 import pytest
 from daimon.testing.drivers.gemini.fake import FakeTransport
-from mux.contracts.ids import ModelRef
+from mux.contracts.ids import ModelRef, ResourceRef, Revision
+from mux.contracts.resources import Agent, AgentSpec
 from mux.drivers.gemini.flash import FLASH_MODELS, FlashAttempt, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError
+from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
 from pydantic import JsonValue
 
 
@@ -85,3 +88,36 @@ async def test_unselected_model_refuses_before_accounting_or_provider() -> None:
     with pytest.raises(ProviderError):
         await FlashTransport(source, accounting).create({"agent_config": {"model": "gemini-pro"}})
     assert not source.requests and not accounting.held
+
+
+@pytest.mark.parametrize("overloaded", (False, True))
+async def test_named_cheap_worker_preserves_budget_and_never_falls_back(overloaded: bool) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    agent = Agent(
+        ref=ResourceRef(
+            id="owned-worker", kind="agent", provider="gemini", account_scope_id="project"
+        ),
+        revision=Revision(local=0),
+        spec=AgentSpec(name="worker", model=ModelRef(provider="gemini", id=WORKER_MODEL)),
+        created_at=datetime.now(UTC),
+    )
+    selected: Mapping[str, JsonValue] = {
+        "agent": agent.ref.id,
+        "agent_config": {
+            "type": "antigravity",
+            "model": WORKER_MODEL,
+            "max_total_tokens": WORKER_MAX_TOTAL_TOKENS,
+        },
+        "tools": [],
+    }
+    policy = FlashTransport(source, accounting, native_agent=agent)
+    if overloaded:
+        source.responses.append(ProviderError("overloaded", retryable=True, native_code="503"))
+        with pytest.raises(ProviderError):
+            await policy.create(selected)
+    else:
+        source.responses.append({"id": "owned-interaction", "status": "completed"})
+        await policy.create(selected)
+    assert source.requests == [selected]
+    assert accounting.held == [agent.spec.model]
+    assert len(accounting.receipts) == 1

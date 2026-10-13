@@ -282,3 +282,44 @@ async def test_non_list_tools_are_refused_before_native_io(tools: JsonValue) -> 
         assert error.value.native_code == "explicit_tools_required"
         assert captured == []
         await client.aio.aclose()
+
+
+async def test_sdk_submits_the_cheap_named_worker_with_low_agent_budget() -> None:
+    from contextlib import AsyncExitStack
+
+    from daimon.testing.isolated_sdk import build_gemini_client
+    from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+
+    captured: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"id": "worker", "status": "completed", "steps": []})
+
+    async with AsyncExitStack() as stack:
+        client = build_gemini_client(transport=httpx.MockTransport(handle), api_key="offline")
+        stack.callback(client.close)
+        stack.push_async_callback(client.aio.aclose)
+        await SDKTransport(client).create(
+            {
+                "agent": "owned-cheap-agent",
+                "agent_config": {
+                    "type": "antigravity",
+                    "model": WORKER_MODEL,
+                    "max_total_tokens": WORKER_MAX_TOTAL_TOKENS,
+                },
+                "input": [{"type": "text", "text": "one worker input"}],
+                "tools": [],
+                "background": True,
+                "store": True,
+            }
+        )
+    assert len(captured) == 1
+    body = json.loads(captured[0].content)
+    assert body["agent"] == "owned-cheap-agent"
+    assert body["agent_config"] == {
+        "type": "antigravity",
+        "model": WORKER_MODEL,
+        "max_total_tokens": WORKER_MAX_TOTAL_TOKENS,
+    }
+    assert "model" not in body and "generation_config" not in body and body["tools"] == []
