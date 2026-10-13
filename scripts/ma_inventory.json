@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2648,
+  "files_scanned": 2649,
   "parse_errors": [],
   "calls": [
     {
@@ -17752,6 +17752,15 @@
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_anthropic_worker_preparation.py",
+      "line": 8,
+      "module": "anthropic",
+      "names": [
+        "APIConnectionError"
       ],
       "category": "test"
     },
