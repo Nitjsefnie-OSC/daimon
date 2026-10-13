@@ -12,6 +12,8 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Literal
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
@@ -20,6 +22,7 @@ from daimon.core.channel_rules import as_readers, as_writers, set_channel_rule
 from daimon.core.channel_skills import add_skill_to_channel, may_set_channel_skills
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_CHANNEL_COPY
+from daimon.core.mux_backend import resource_scope
 from daimon.core.neutral_resources import NativeCatalogReadback, NeutralResourceHost
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.skills.add import add_agent_skill, add_host_agent_skill
@@ -28,10 +31,14 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.testing.admin_bindings import AdminBindings, AdminCommand, AdminReceipt
+from mux.contracts._base import Contract
+from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.contracts.receipts import CancelReceipt, Operation, SendReceipt, StopObservation
 from mux.contracts.resources import Agent
-from mux.errors import ScopeViolation
-from pydantic import JsonValue
+from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from pydantic import Field, JsonValue, model_validator
 
 
 @dataclass
@@ -359,3 +366,264 @@ class ResourceAdminBindings:
         if held != (command.operation == "channel_skills_add"):
             raise RuntimeError("channel skill readback differs")
         return binding.receipt(command, {"skill_id": skill_id, "attached": held})
+
+
+class ResourceManifestEntry(Contract):
+    """Safe owner-captured identities, never a cleanup permission or raw SDK body."""
+
+    scope: Scope
+    run_id: uuid.UUID
+    binding_id: str = Field(min_length=1)
+    resource: ResourceRef | None = None
+    creation_key: str | None = None
+    creation: Operation | None = None
+    creation_ack: ResourceRef | None = None
+    actions: tuple[Literal["cancel", "archive", "delete"], ...] = ()
+    input: SendReceipt | None = None
+    agent_id: str | None = None
+    environment_id: str | None = None
+
+    @model_validator(mode="after")
+    def scoped(self) -> ResourceManifestEntry:
+        if (
+            not self.binding_id.strip()
+            or self.scope.is_platform
+            or self.scope.is_legacy_host_authorized
+            or not all(
+                value and value.strip()
+                for value in (
+                    self.scope.tenant_id,
+                    self.scope.account_id,
+                    self.scope.principal_id,
+                    self.scope.authorization_id,
+                )
+            )
+            or len(set(self.actions)) != len(self.actions)
+        ):
+            raise ValueError("manifest scope or actions are invalid")
+        for ref in (
+            self.resource,
+            self.creation_ack,
+            self.creation.resource if self.creation else None,
+        ):
+            if ref is not None and (
+                ref.tenant_id != self.scope.tenant_id
+                or not ref.id
+                or ref.account_id
+                not in (
+                    self.scope.account_id,
+                    resource_scope(tenant_id=self.scope.tenant_id).account_id,
+                )
+            ):
+                raise ValueError("manifest reference is outside its tenant")
+        if self.creation is not None and (
+            self.creation.created_at.utcoffset() is None
+            or self.creation.updated_at.utcoffset() is None
+        ):
+            raise ValueError("creation receipt timestamps must be aware")
+        if (
+            self.creation is not None
+            and self.creation.status in ("accepted", "processed")
+            and (
+                not self.creation_key
+                or self.creation.key != self.creation_key
+                or self.creation.resource not in (None, self.resource)
+                or self.creation_ack != self.resource
+                or self.resource is None
+                or self.resource.account_id != self.scope.account_id
+                or not self.resource.account_scope_id
+            )
+        ):
+            raise ValueError("creation lacks its exact scoped acknowledgement")
+        if (
+            self.creation is not None
+            and self.creation.status not in ("accepted", "processed")
+            and (self.resource is not None or self.creation_ack is not None)
+        ):
+            raise ValueError("unknown creation has no acknowledged native identity")
+        return self
+
+    @property
+    def ownership(self) -> Literal["created", "borrowed", "unknown"]:
+        if self.creation is not None:
+            return "created" if self.creation.status in ("accepted", "processed") else "unknown"
+        return "borrowed" if self.resource is not None else "unknown"
+
+    @property
+    def eligible_actions(self) -> tuple[Literal["cancel", "archive", "delete"], ...]:
+        """Signed ceiling narrowed by observed ownership; not live authorization."""
+        if self.ownership == "unknown":
+            return ()
+        return tuple(
+            action
+            for action in self.actions
+            if (
+                action == "cancel"
+                and self.resource is not None
+                and self.resource.kind == "session"
+                and self.input is not None
+                and self.input.status != "outcome_unknown"
+                and self.input.turn_id is not None
+            )
+            or (action != "cancel" and self.ownership == "created")
+        )
+
+
+def freeze_resource_manifest(
+    entries: tuple[ResourceManifestEntry, ...],
+) -> tuple[ResourceManifestEntry, ...]:
+    """Validate one run without inventing IDs for unknown native allocations."""
+    checked = tuple(ResourceManifestEntry.model_validate(row.model_dump()) for row in entries)
+    if not checked:
+        raise ValueError("manifest is empty")
+    root = checked[0]
+    seen: set[tuple[str, str, str, str]] = set()
+    for row in checked:
+        if (row.run_id, row.scope.tenant_id, row.scope.account_id, row.scope.principal_id) != (
+            root.run_id,
+            root.scope.tenant_id,
+            root.scope.account_id,
+            root.scope.principal_id,
+        ):
+            raise ValueError("manifest entries belong to different runs or principals")
+        ref = row.resource
+        if ref is not None:
+            key = ref.provider, ref.account_scope_id, ref.kind, ref.id
+            if key in seen:
+                raise ValueError("manifest repeats a native resource")
+            seen.add(key)
+    return checked
+
+
+@dataclass(frozen=True)
+class CleanupReadback:
+    status: Literal["verified", "pending", "retained"]
+    reason: str
+    resource: ResourceRef | None
+    stopped: bool | None = None
+    archived: bool | None = None
+    stop: StopObservation | None = None
+    observed_at: datetime | None = None
+    archived_at: datetime | None = None
+
+
+def _cleanup_target(
+    backend: ManagedAgents, entry: ResourceManifestEntry, action: str
+) -> ResourceRef | None:
+    row = freeze_resource_manifest((entry,))[0]
+    if action not in row.actions:
+        raise ScopeViolation("cleanup", "action is outside the pinned manifest")
+    if row.ownership == "unknown":
+        return None
+    if action != "cancel" and row.ownership != "created":
+        return None
+    ref = row.resource
+    if (
+        ref is None
+        or ref.kind != "session"
+        or ref.account_id != row.scope.account_id
+        or ref.provider != backend.capabilities().provider
+    ):
+        raise ScopeViolation("cleanup", "session is outside the pinned account")
+    return ref
+
+
+async def verify_cancel_readback(
+    backend: ManagedAgents,
+    entry: ResourceManifestEntry,
+    receipt: CancelReceipt,
+    *,
+    operation_id: str,
+    deadline: datetime,
+) -> CleanupReadback:
+    """Read the actual owner stop observation; never perform cancellation."""
+    ref = _cleanup_target(backend, entry, "cancel")
+    if ref is None:
+        return CleanupReadback("retained", "creation_unknown", entry.resource)
+    if (
+        receipt.operation_id != operation_id
+        or not operation_id
+        or receipt.session != ref
+        or entry.input is None
+        or entry.input.status == "outcome_unknown"
+        or not entry.input.turn_id
+        or receipt.turn_id != entry.input.turn_id
+        or receipt.requested_at.utcoffset() is None
+        or deadline.utcoffset() is None
+    ):
+        raise ScopeViolation("cleanup", "cancel receipt differs from the admitted input")
+    try:
+        observed = await backend.events.wait_stopped(entry.scope, receipt, deadline=deadline)
+    except (ProviderError, UnsupportedCapability):
+        return CleanupReadback("pending", "stop_readback_unavailable", ref)
+    if (
+        observed.receipt_operation_id != receipt.operation_id
+        or observed.observed_at.utcoffset() is None
+        or observed.observed_at < receipt.requested_at
+    ):
+        raise ScopeViolation("cleanup", "stop observation differs from the cancel operation")
+    if not observed.stopped or observed.outcome is None:
+        return CleanupReadback(
+            "pending", "native_stop_unobserved", ref, stopped=False, stop=observed
+        )
+    return CleanupReadback("verified", "native_stop_observed", ref, stopped=True, stop=observed)
+
+
+async def verify_archive_readback(
+    backend: ManagedAgents,
+    entry: ResourceManifestEntry,
+    receipt: Operation,
+    *,
+    operation_id: str,
+) -> CleanupReadback:
+    """Read independently archived state; never infer native stop or billing finality."""
+    ref = _cleanup_target(backend, entry, "archive")
+    if ref is None:
+        return CleanupReadback("retained", entry.ownership + "_resource", entry.resource)
+    if (
+        not operation_id
+        or receipt.id != operation_id
+        or receipt.key != operation_id
+        or receipt.resource != ref
+    ):
+        raise ScopeViolation("cleanup", "archive receipt differs from the pinned resource")
+    if receipt.status not in ("accepted", "processed"):
+        return CleanupReadback("pending", "archive_ack_unknown", ref)
+    try:
+        reader = backend.extension(SessionReads, namespace="anthropic.session_reads", version=1)
+    except UnsupportedCapability:
+        return CleanupReadback("retained", "archive_readback_unsupported", ref)
+    try:
+        native = await reader.read_native(entry.scope, ref)
+    except ProviderError:
+        return CleanupReadback("pending", "archive_readback_unavailable", ref)
+    metadata, agent = native.get("metadata"), native.get("agent")
+    if (
+        native.get("id") != ref.id
+        or not isinstance(metadata, dict)
+        or metadata.get("daimon_tenant") != entry.scope.tenant_id
+        or metadata.get("daimon_account") != entry.scope.account_id
+        or not entry.agent_id
+        or not entry.environment_id
+        or not isinstance(agent, dict)
+        or agent.get("id") != entry.agent_id
+        or native.get("environment_id") != entry.environment_id
+    ):
+        raise ScopeViolation("cleanup", "session readback differs from pinned ownership")
+    archived = native.get("archived_at")
+    try:
+        at = datetime.fromisoformat(archived) if isinstance(archived, str) else None
+    except ValueError:
+        at = None
+    if at is None or at.utcoffset() is None:
+        return CleanupReadback("pending", "archive_unobserved", ref, archived=False)
+    if entry.creation is None or at < entry.creation.created_at:
+        return CleanupReadback("pending", "archive_timestamp_stale", ref, archived=False)
+    return CleanupReadback(
+        "verified",
+        "archive_observed",
+        ref,
+        archived=True,
+        observed_at=datetime.now(UTC),
+        archived_at=at,
+    )

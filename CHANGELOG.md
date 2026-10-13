@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Bind Discord fleet completion wakes to the original session through normal admission, with a fresh root fence before input and no recovery to another session.
+- Add read-only QA resource manifests and independent cleanup readback checks without performing cleanup mutations.
 
 - Keep all adversarial redaction growth checks stable under load by measuring capturing-thread CPU time.
 - Reserve opt-in fleet root origins and tenant-wide intent ownership before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.
