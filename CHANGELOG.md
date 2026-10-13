@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep all adversarial redaction growth checks stable under load by measuring capturing-thread CPU time.
+
 - Preserve recorded OpenAI message IDs across recovery and assign new item IDs during normalization; reuse the fenced session-creation guard for fleet workers.
 - Apply low managed-agent token budgets to Gemini workers and support explicitly granted Flash-Lite worker definitions.
 - Retain staging cash reservations when callbacks provide only token estimates without complete measured spend.
