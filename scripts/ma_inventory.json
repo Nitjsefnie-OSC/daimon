@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2652,
+  "files_scanned": 2653,
   "parse_errors": [],
   "calls": [
     {
@@ -19187,7 +19187,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/admin_resources.py",
-      "line": 16,
+      "line": 18,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
