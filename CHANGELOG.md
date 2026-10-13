@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 - Cover refusal of a foreign model provider before pinned counterpart native readback.
 
 - Share skill and MCP compatibility requirements across backend previews and worker derivation while preserving native SDK vault requirements.

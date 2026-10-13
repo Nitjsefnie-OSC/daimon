@@ -15,6 +15,8 @@ Fixture setup obtains mapped metadata through the public `daimon.testing.effect_
 
 UUID defaults on the nine additive tables from `0077_neutral_state` use a separate deterministic sequence starting at UUID integer `(1 << 120) + 1`, reset for each scenario. Host-table defaults and application UUIDs keep their original sequence, so optional lease/journal persistence cannot shift later turn controls or continuation owners. Existing tenant references and explicitly supplied binding/operation/journal keys retain their supplied values. Regression probes insert zero, one and three lease rows between host allocations against real Postgres; canonical golden files stay unchanged.
 
+Ordinary pytest collection sends each UUID probe through the existing child replay runner. The child loads the oracle plugin and executes the same assertions under its deterministic UUID hooks; the parent suite keeps its own clock and UUID behavior.
+
 ```bash
 uv run pytest -n 2 -q tests/parity/test_ma_goldens.py tests/parity/test_ma_call_ratchet.py
 uv run python tests/golden/runner.py plain_discord approval_card
