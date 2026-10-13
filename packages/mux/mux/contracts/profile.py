@@ -108,6 +108,24 @@ class Profile(Contract):
     def support_for(self, capability: Capability) -> Support:
         return self.support.get(capability, "unknown")
 
+    @property
+    def execution_tools(self) -> frozenset[str]:
+        """Builtin workspace actions removed when no sandbox is delegated."""
+        return frozenset(
+            (
+                self.execution_tool,
+                "bash",
+                "code_execution",
+                "computer",
+                "apply_patch",
+                "edit",
+                "read",
+                "write",
+                "glob",
+                "grep",
+            )
+        )
+
     def missing_core(self) -> tuple[Capability, ...]:
         """Core capabilities this profile does not support, sorted."""
         return tuple(sorted(c for c in CORE_CAPABILITIES if self.support_for(c) not in SUPPORTED))

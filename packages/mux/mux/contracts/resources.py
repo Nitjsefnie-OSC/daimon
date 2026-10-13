@@ -26,6 +26,18 @@ from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, SkillRe
 Lifecycle = Literal["active", "archived", "deleted"]
 
 
+def _unique_declared_drops(values: tuple[str, ...]) -> tuple[str, ...]:
+    if len(values) != len(set(values)):
+        raise ValueError("declared drops must be unique")
+    return tuple(sorted(values))
+
+
+_DeclaredDrops = Annotated[
+    tuple[Literal["memory", "sandbox", "skills", "mcp", "tools", "files", "repository"], ...],
+    AfterValidator(_unique_declared_drops),
+]
+
+
 class ToolSpec(Contract):
     """A tool the agent may call. `kind` names a provider toolset or a custom tool."""
 
@@ -78,6 +90,8 @@ class AgentSpec(Contract):
     skills: tuple[SkillRef, ...] | None = None
     extensions: tuple[ExtensionConfig, ...] | None = None
     metadata: FrozenMap[str, str] | None = None
+    declared_drops: _DeclaredDrops = Field(default=(), exclude_if=lambda value: not value)
+    """Explicit worker-only reductions; omission preserves existing source requirements."""
 
 
 class AgentPatch(Contract):
@@ -90,6 +104,9 @@ class AgentPatch(Contract):
     skills: tuple[SkillRef, ...] | None = None
     metadata: FrozenMap[str, str | None] | None = None
     extensions: ExtensionsByNamespace = None
+    declared_drops: _DeclaredDrops | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class Agent(Contract):
