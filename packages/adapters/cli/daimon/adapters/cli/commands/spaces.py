@@ -48,6 +48,11 @@ _LOOSEN = typer.Option(
     "--loosen-rules",
     help="Let a channel kept to its own agents, or taking no replies, take the looser Space rule.",
 )
+_KEEP = typer.Option(
+    "--keep-agents",
+    help="Let an agent of the Space naming one channel stay that channel's own agent, "
+    "with what it read across the Space in its memory.",
+)
 _UNSEEN = (
     "Daimon can't see who reads a channel, only who it has answered there. A Space "
     "shares every channel's history and its agents' memory with all the others, so "
@@ -256,8 +261,22 @@ async def spaces_add(
         console.print(f"{', '.join(change.agents)} now also run in {channel_id}.")
 
 
+def _print_kept(console: Console, kept: Sequence[str]) -> None:
+    if kept:
+        console.print(
+            f"[yellow]{', '.join(kept)} stay their channel's own agents and still remember "
+            "what they read across the Space.[/yellow]"
+        )
+
+
 @spaces_app.command("remove")
-def spaces_remove_command(platform: str, workspace_id: str, name: str, channel_id: str) -> None:
+def spaces_remove_command(
+    platform: str,
+    workspace_id: str,
+    name: str,
+    channel_id: str,
+    keep_agents: Annotated[bool, _KEEP] = False,
+) -> None:
     """Take a channel out of a Space; it keeps the Space's rule, on its own."""
     console = Console(highlight=False)
 
@@ -270,6 +289,7 @@ def spaces_remove_command(platform: str, workspace_id: str, name: str, channel_i
                 workspace_id=workspace_id,
                 name=name,
                 channel_id=channel_id,
+                keep_agents=keep_agents,
             )
 
     run_cli(_run(), console=console)
@@ -283,14 +303,21 @@ async def spaces_remove(
     workspace_id: str,
     name: str,
     channel_id: str,
+    keep_agents: bool = False,
 ) -> None:
     tenant_id = await _tenant_id(rt, platform=platform, workspace_id=workspace_id)
     change = await remove_space_channel(
-        rt.sessionmaker, tenant_id=tenant_id, name=name, channel_id=channel_id, subject=_OPERATOR
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        name=name,
+        channel_id=channel_id,
+        subject=_OPERATOR,
+        keep_agents=keep_agents,
     )
     _print_change(console, change, "now")
     if change.agents:
         console.print(f"{', '.join(change.agents)} no longer run in {channel_id}.")
+    _print_kept(console, change.kept)
     console.print(
         f"{channel_id} keeps the Space's rule. What its agents already remember stays in "
         "their memory."
@@ -298,24 +325,39 @@ async def spaces_remove(
 
 
 @spaces_app.command("delete")
-def spaces_delete_command(platform: str, workspace_id: str, name: str) -> None:
+def spaces_delete_command(
+    platform: str, workspace_id: str, name: str, keep_agents: Annotated[bool, _KEEP] = False
+) -> None:
     """Delete a Space; its channels keep its rule, each on its own."""
     console = Console(highlight=False)
 
     async def _run() -> None:
         async with build_runtime(load_settings()) as rt:
             await spaces_delete(
-                rt=rt, console=console, platform=platform, workspace_id=workspace_id, name=name
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                name=name,
+                keep_agents=keep_agents,
             )
 
     run_cli(_run(), console=console)
 
 
 async def spaces_delete(
-    *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, name: str
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    name: str,
+    keep_agents: bool = False,
 ) -> None:
     tenant_id = await _tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    change = await delete_space(rt.sessionmaker, tenant_id=tenant_id, name=name, subject=_OPERATOR)
+    change = await delete_space(
+        rt.sessionmaker, tenant_id=tenant_id, name=name, subject=_OPERATOR, keep_agents=keep_agents
+    )
     console.print(
         f"Space {name} deleted; {', '.join(change.channel_ids) or 'no channels'} keep its rule."
     )
@@ -324,6 +366,7 @@ async def spaces_delete(
             f"[yellow]{', '.join(change.agents)} name several of its channels, so they now run "
             "nowhere until their rule names one.[/yellow]"
         )
+    _print_kept(console, change.kept)
 
 
 @spaces_app.command("list")

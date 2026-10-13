@@ -9,7 +9,12 @@ from anthropic import AsyncAnthropic
 from daimon.core.access_policy import AgentRule, ChannelRule, SpaceRule, TenantAccessPolicy
 from daimon.core.authz import Subject
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.permissions import agent_permissions, channel_rule, with_channel_rule
+from daimon.core.permissions import (
+    agent_permissions,
+    channel_rule,
+    with_agent_rule,
+    with_channel_rule,
+)
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.space_rules import (
     SpaceChange,
@@ -234,3 +239,38 @@ async def test_join_runs_the_own_agent_checks_on_agents_it_makes_own(
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert agent_permissions(policy, ("builtin",)).home is None, "nothing changed"
     assert agent_permissions(policy, ("roamer",)).home is None, "nor here"
+
+
+async def test_remove_and_delete_ask_before_leaving_an_agent_one_channels_own(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """z names only c1 but read across the Space; it would stay c1's own with that memory."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_rules={"z": AgentRule(runs_in=("c1",))}),
+    )
+    await db_session.commit()
+    await _create(db_session_factory, tenant.id, ["c1", "c2", "c3"])
+    args = {"tenant_id": tenant.id, "name": "s", "subject": ADMIN}
+
+    with pytest.raises(SpaceRefused, match="z would stay c1's own agent"):
+        await remove_space_channel(db_session_factory, channel_id="c1", **args)
+    removed = await remove_space_channel(
+        db_session_factory, channel_id="c1", keep_agents=True, **args
+    )
+    assert removed.kept == ("z",), "z is reported kept"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert agent_permissions(policy, ("z",)).home == "c1", "z is c1's own agent now"
+
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=with_agent_rule(policy, "z", AgentRule(runs_in=("c2",))),
+    )
+    await db_session.commit()
+    with pytest.raises(SpaceRefused, match="z would stay its channel's own agent"):
+        await delete_space(db_session_factory, **args)
+    deleted = await delete_space(db_session_factory, keep_agents=True, **args)
+    assert deleted.kept == ("z",) and deleted.agents == (), "kept, not stranded"

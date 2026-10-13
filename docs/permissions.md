@@ -135,7 +135,12 @@ Daimon cannot see who reads a channel, so joining two channels needs
 `--confirm`; first it shows how many external accounts it has answered in
 each. `add --extend-agents` lets the Space's own agents answer in the new
 channel. A channel that leaves, or whose Space is deleted, keeps the rule on
-its own; the Space's agents drop it from their rule. The rule is also stored
+its own. On `remove`, the Space's agents naming other members too drop the
+channel from their rule; on `delete`, those naming several members run
+nowhere until their rule changes. An agent naming one channel alone would
+stay that channel's own agent with what it read across the Space in its
+memory, so `remove` and `delete` refuse unless `--keep-agents` is given.
+Daimon does not archive that memory. The rule is also stored
 on each member, so a process on a build without Spaces keeps every member
 contained. Channel admins administer channels, not Spaces: an agent whose
 home is a Space needs a server or workspace admin to change its setup.

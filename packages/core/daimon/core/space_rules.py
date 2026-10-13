@@ -12,7 +12,7 @@ caller's to confirm; daimon cannot see who reads a channel.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 import structlog
@@ -56,6 +56,8 @@ class SpaceChange:
     """Agents whose rule the change extended to, or dropped, the channel."""
     rules_before: tuple[tuple[str, ChannelRule], ...] = ()
     """Each channel that joined, with its rule before it took the Space's."""
+    kept: tuple[str, ...] = ()
+    """Agents left one channel's own, still remembering what they read across the Space."""
 
 
 def _space_rule(space: SpaceRow, channel_ids: Sequence[str]) -> SpaceRule:
@@ -313,6 +315,25 @@ async def add_space_channel(
     return SpaceChange(space, tuple(members), extended, before)
 
 
+def _keeping(
+    policy: TenantAccessPolicy, own: Sequence[str], channel_ids: Collection[str]
+) -> tuple[str, ...]:
+    """Of `own`, the agents whose rule names a single channel, one of `channel_ids`."""
+    return tuple(
+        a
+        for a in own
+        if len(runs := set(policy.agent_rules[a].runs_in or ())) == 1 and runs <= set(channel_ids)
+    )
+
+
+def _require_keeping(kept: Sequence[str], keep_agents: bool, what: str) -> None:
+    if kept and not keep_agents:
+        raise SpaceRefused(
+            f"{', '.join(kept)} would stay {what}'s own agent, still remembering what it read "
+            "across the Space; ask to keep them (--keep-agents) or change their rule first"
+        )
+
+
 async def remove_space_channel(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -320,12 +341,14 @@ async def remove_space_channel(
     name: str,
     channel_id: str,
     subject: Subject,
+    keep_agents: bool = False,
 ) -> SpaceChange:
     """Take `channel_id` out of Space `name`.
 
     The channel keeps the Space's rule, so it stays contained. The Space's own
-    agents drop it from their rule, keeping the Space as their home; nothing
-    is kept to the channel until its rule or an agent's is set again.
+    agents naming other members too drop it from their rule, keeping the Space
+    as their home. One naming only this channel stays its own agent, with what
+    it read across the Space in its memory, so that needs `keep_agents`.
     """
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         policy = await _locked(session, tenant_id=tenant_id, subject=subject)
@@ -335,6 +358,8 @@ async def remove_space_channel(
             raise SpaceRefused(f"{channel_id} is not in Space {name}")
         before = _space_rule(space, members)
         own = _own_agents(policy, before)
+        kept = _keeping(policy, own, {channel_id})
+        _require_keeping(kept, keep_agents, channel_id)
         await store.remove_space_channel(
             session, space_id=space.id, tenant_id=tenant_id, channel_id=channel_id
         )
@@ -349,7 +374,7 @@ async def remove_space_channel(
                 dropped.append(agent)
         await set_access_policy(session, tenant_id=tenant_id, policy=updated)
     _log.info("space.channel_removed", tenant_id=str(tenant_id), space_id=str(space.id))
-    return SpaceChange(space, tuple(members), tuple(dropped))
+    return SpaceChange(space, tuple(members), tuple(dropped), kept=kept)
 
 
 async def delete_space(
@@ -358,18 +383,23 @@ async def delete_space(
     tenant_id: uuid.UUID,
     name: str,
     subject: Subject,
+    keep_agents: bool = False,
 ) -> SpaceChange:
     """Delete Space `name`. Its channels keep its rule, each on its own; an agent
-    whose rule names several of them has no home left and runs nowhere."""
+    whose rule names several of them has no home left and runs nowhere. One
+    naming a single member stays its own agent, with what it read across the
+    Space in its memory, so that needs `keep_agents`."""
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         policy = await _locked(session, tenant_id=tenant_id, subject=subject)
         space = await _space(session, tenant_id=tenant_id, name=name)
         members = await _members(session, space)
         own = _own_agents(policy, _space_rule(space, members))
-        stranded = tuple(a for a in own if len(policy.agent_rules[a].runs_in or ()) > 1)
+        kept = _keeping(policy, own, members)
+        _require_keeping(kept, keep_agents, "its channel")
+        stranded = tuple(a for a in own if a not in kept)
         await store.delete_space(session, space_id=space.id)
     _log.info("space.deleted", tenant_id=str(tenant_id), space_id=str(space.id))
-    return SpaceChange(space, tuple(members), stranded)
+    return SpaceChange(space, tuple(members), stranded, kept=kept)
 
 
 __all__ = [
