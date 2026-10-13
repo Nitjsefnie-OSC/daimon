@@ -14,6 +14,7 @@ from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 
 __all__ = [
+    "TEAMS_BILLING_COMMAND",
     "RefusalNouns",
     "TerminationNotice",
     "admission_refusal_text",
@@ -53,6 +54,9 @@ _RETRY = "@mention Daimon to try again."
 _CARRY = "@mention Daimon to carry on."
 # Names who can top up and where: `{billing}` is the platform's billing command.
 _TOP_UP = "An admin can top up with {billing}."
+#: How a person reaches the billing card in Teams, for the top-up line.
+TEAMS_BILLING_COMMAND = "`billing` in a 1:1 chat with me"
+
 _COPY: dict[TerminationReason, _Copy] = {
     TerminationReason.INTERRUPTED: _Copy(
         "Stopped. Changes already made stay made.", _CARRY, "Send a message to carry on."
@@ -160,11 +164,9 @@ class RefusalNouns:
 
 
 _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
-    "balance_depleted": _Copy("Your team's Daimon credit has run out.", _TOP_UP),
-    "cap_exceeded": _Copy(
-        "You've used your monthly limit.", "Ask the team running Daimon to raise it."
-    ),
-    "channel_budget_exceeded": _Copy("This channel's budget is used up.", "An admin can raise it."),
+    "balance_depleted": _COPY[TerminationReason.ADMISSION_BALANCE_DEPLETED],
+    "cap_exceeded": _COPY[TerminationReason.ADMISSION_CAP_EXCEEDED],
+    "channel_budget_exceeded": _COPY[TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED],
     "invoker_not_allowed": _Copy(
         "Daimon can't accept your request here.", "Ask an admin to add you."
     ),

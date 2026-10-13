@@ -518,6 +518,15 @@ async def queue_failure_notice(
     return result.rowcount == 1
 
 
+async def routine_platform(session: AsyncSession, routine_id: _uuid.UUID) -> str | None:
+    """The platform of the routine's tenant, or None for an unknown routine."""
+    return await session.scalar(
+        select(Tenant.platform)
+        .join(Routine, Routine.tenant_id == Tenant.id)
+        .where(Routine.id == routine_id)
+    )
+
+
 def _check_destination(kind: str | None, destination_id: str | None) -> None:
     if (kind is None) != (destination_id is None):
         raise StoreError("destination_kind and destination_id are set together")
