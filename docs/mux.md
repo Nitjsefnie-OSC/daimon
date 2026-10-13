@@ -2350,6 +2350,15 @@ A missing or erased actor cannot authorize launch. Existing turn paths do not
 call the resolver and remain unchanged.
 ### Worker completion wakes
 
+Queue readers filter reasons against their own closed reason vocabulary in SQL,
+before selecting a thread batch or decoding rows. Unknown reasons cannot hide
+known timers or acquire a lease through an older compatible reader. The same
+filter covers direct reads, mutations and expired-claim cleanup; known rows
+retain strict validation of every other field. These readers retain the existing
+readable worker-completion groundwork while completion publication stays closed.
+Operators must establish this compatible reader release as the deployed and
+permitted rollback floor before installing any producer activation.
+
 Worker-completion production is closed during the rolling release.
 `enqueue_worker_finished` retains its host signature but returns `False`
 before querying or changing a fleet run. The caller's terminal worker update
