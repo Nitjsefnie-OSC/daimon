@@ -150,16 +150,9 @@ def _turn_port_kwargs(
 ) -> _TurnPortKwargs:
     """Derive a real tenant scope from the existing admitted operation."""
     selected = deps.turn_path or load_turn_settings().path
-    scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id)
-    if provider_scope is not None:
-        if (
-            provider_scope.is_platform
-            or provider_scope.is_legacy_host_authorized
-            or (provider_scope.tenant_id, provider_scope.account_id)
-            != (scope.tenant_id, scope.account_id)
-        ):
-            raise ScopeViolation(session_id, "prepared scope differs from admitted identity")
-        scope = provider_scope
+    scope = admitted_session_scope(
+        admission, tenant_id=tenant_id, session_id=session_id, prepared=provider_scope
+    )
     profile = (
         admission.backend_revision.profile
         if admission.backend_revision is not None

@@ -1382,224 +1382,50 @@ def test_no_replacement_notice_without_a_replacement_or_a_transfer() -> None:
 
 
 @pytest.mark.parametrize(
-    "mismatch",
-    [
-        "tenant_id",
-        "account_id",
-        "principal_id",
-        "authorization_id",
-        "source_scope",
-        "source_native_identity",
-        "source_tenant",
-        "missing_source",
-        "missing_callback",
-        "missing_context",
-    ],
+    "field", ["tenant_id", "account_id", "platform_reason", "legacy_call_site"]
 )
-async def test_worker_session_preparation_refuses_foreign_context_before_reads_or_effects(
-    db_preflight, db_nullpool_engine, monkeypatch, mismatch
-):
-    from daimon.core.fleet import spawn_operation_key
-    from daimon.core.turn.persistence import TurnPersistence
-    from mux.contracts.ids import ThreadRef
+async def test_prepared_scope_is_refused_by_all_existing_owners_before_io(field):
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.turn.binding import prepared_persistence
+    from daimon.core.turn.run import _turn_port_kwargs
     from mux.errors import ScopeViolation
-    from mux.state.lease import Slot
-    from mux.state.memory import MemoryStateStore
 
-    from ..test_sessions import worker_source_context
-
-    sessions, tenant, account, original, environment, worker, source = await worker_source_context(
-        db_nullpool_engine
+    tenant, account = uuid.uuid4(), uuid.uuid4()
+    admission = _admission(
+        account_id=account,
+        agent=ma_agent(tenant_id=str(tenant)),
+        env=ma_environment(tenant_id=str(tenant)),
     )
-    scope = worker.permissions.fleet.scope
-    if mismatch in {"tenant_id", "account_id", "principal_id", "authorization_id"}:
-        scope = scope.model_copy(update={mismatch: str(uuid.uuid4())})
-    elif mismatch == "source_scope":
-        source = source.model_copy(
-            update={"resource_scope": scope.model_copy(update={"principal_id": "foreign"})}
-        )
-    elif mismatch == "source_native_identity":
-        source = source.model_copy(
-            update={
-                "source": source.source.model_copy(
-                    update={"native": {**source.source.native, "id": "foreign-source"}}
-                )
-            }
-        )
-    elif mismatch == "source_tenant":
-        source = source.model_copy(update={"tenant_id": uuid.uuid4()})
-    elif mismatch == "missing_source":
-        source = None
-    store = MemoryStateStore()
-    slot = Slot(
-        thread=ThreadRef(
-            channel=worker.permissions.fleet.root.channel.model_copy(
-                update={"tenant_id": scope.tenant_id}
-            ),
-            thread_id="foreign-allocation",
-        ),
-        account_id=scope.account_id,
+    scope = resource_scope(
+        tenant_id=str(tenant), account_id=str(account), authorization_id="worker-owned"
     )
-    key = spawn_operation_key(worker.permissions.fleet.run_id, 0)
-    persistence = TurnPersistence(store, None, scope, slot=slot, operation_key=key)
-    reads = []
-
-    async def forbidden(*args, **kwargs):
-        reads.append(True)
-        raise AssertionError("a scope refusal must precede source/secret/native reads")
-
-    for name in ("reauthorize", "get_agent_mode", "_env_bytes_sha256", "create_session"):
-        monkeypatch.setattr(prepare_mod, name, forbidden)
-    native_calls = []
-
-    def no_native(request, match):
-        native_calls.append(request)
-        raise AssertionError("a scope refusal must precede native requests")
-
-    router = MARouter()
-    for method in ("GET", "POST", "DELETE"):
-        router.add(method, r"/v1/.*", no_native)
-    deps = _deps(sessionmaker=sessions, router=router)
-    admitted = _admission(account_id=account, agent=original, env=environment)
-
-    async def guard():
-        raise AssertionError("the local scope guard must precede the fresh callback")
-
-    async def attempt():
-        expected = (
-            ScopeViolation
-            if mismatch in {"source_native_identity", "source_tenant"}
-            else prepare_mod.AdmissionDenied
+    assert (
+        prepare_mod.admitted_session_scope(
+            admission, tenant_id=tenant, session_id="session", prepared=scope
         )
-        with pytest.raises(expected) as refused:
-            await prepare_mod.create_ma_session(
+        is scope
+    )
+    foreign = scope.model_copy(update={field: "foreign"})
+    # An unbound factory cannot connect; every refusal must occur before its use.
+    deps = _deps(sessionmaker=async_sessionmaker(), router=MARouter())
+    async with deps.anthropic:
+        with pytest.raises(ScopeViolation, match="prepared scope differs from admitted identity"):
+            prepare_mod.admitted_session_scope(
+                admission, tenant_id=tenant, session_id="session", prepared=foreign
+            )
+        with pytest.raises(ScopeViolation, match="prepared scope differs from admitted identity"):
+            _turn_port_kwargs(deps, admission, "session", tenant_id=tenant, provider_scope=foreign)
+        with pytest.raises(ScopeViolation, match="prepared scope differs from admitted identity"):
+            await prepared_persistence(
                 deps,
-                admitted,
+                admission,
                 tenant_id=tenant,
-                resource_source=source,
-                worker=worker,
-                before_native=None if mismatch == "missing_callback" else guard,
+                platform="discord",
+                thread_id="worker",
+                session_id="session",
+                mapping_id=None,
+                scope=foreign,
             )
-        if expected is prepare_mod.AdmissionDenied:
-            assert refused.value.reason == "backend_unsupported"
-
-    async with deps.anthropic:
-        if mismatch == "missing_context":
-            await attempt()
-        else:
-            with persistence.activate():
-                await persistence.run(attempt)
-    assert reads == [] and native_calls == []
-    assert not store.data.operations and not store.data.bindings
-
-
-@pytest.mark.parametrize("outcome", ["ack", "lost_ack", "refused", "model_drift"])
-async def test_worker_session_preparation_uses_one_owned_claim_and_original_source(
-    db_preflight, db_nullpool_engine, outcome
-):
-    from daimon.core.fleet import spawn_operation_key
-    from daimon.core.stores.mux_state import PostgresStateStore
-    from daimon.core.turn.persistence import TurnPersistence, UncertainSend
-    from daimon.testing.ma import FakeMemoryStoreState, combine_handlers
-    from mux.contracts.ids import ThreadRef
-    from mux.state.lease import Slot
-
-    from ..test_sessions import _session_create_handler, worker_source_context
-
-    sessions, tenant, account, original, environment, worker, source = await worker_source_context(
-        db_nullpool_engine
-    )
-    executing = ma_agent(
-        id="prepared-worker",
-        tenant_id=str(tenant),
-        name=worker.spec.name,
-        model=worker.spec.model.id,
-        system=worker.spec.system,
-    )
-    calls = []
-    memory = FakeMemoryStoreState()
-    handler = combine_handlers(make_fake_memory_store_handler(memory), _session_create_handler())
-
-    def native(request, match):
-        calls.append(request)
-        if request.url.path == "/v1/sessions/sess_new/archive":
-            return httpx.Response(200, json={"id": "sess_new", "type": "session", "archived": True})
-        if outcome == "lost_ack" and request.url.path == "/v1/sessions":
-            raise httpx.ReadError("lost acknowledgement", request=request)
-        response = handler(request)
-        if request.url.path == "/v1/sessions":
-            payload = response.json()
-            payload["agent"]["model"]["id"] = (
-                "different-model" if outcome == "model_drift" else worker.spec.model.id
-            )
-            payload["agent"]["id"] = executing.id
-            return httpx.Response(200, json=payload)
-        return response
-
-    router = MARouter()
-    for method in ("GET", "POST", "DELETE"):
-        router.add(method, r"/v1/.*", native)
-    deps = _deps(sessionmaker=sessions, router=router)
-    deps.anthropic.max_retries = 8
-    admitted = dataclasses.replace(
-        _admission(account_id=account, agent=executing, env=environment), memory_read_only=True
-    )
-    slot = Slot(
-        thread=ThreadRef(channel=worker.permissions.fleet.root.channel, thread_id="private-worker"),
-        account_id=str(account),
-    )
-    store = PostgresStateStore(sessions)
-    key = spawn_operation_key(worker.permissions.fleet.run_id, 0)
-    fences = []
-
-    async def guard():
-        fences.append(True)
-        if outcome == "refused":
-            raise prepare_mod.AdmissionDenied(reason="backend_unsupported")
-
-    async def prepare():
-        return await prepare_mod.create_ma_session(
-            deps,
-            admitted,
-            tenant_id=tenant,
-            resource_source=source,
-            worker=worker,
-            before_native=guard,
-        )
-
-    async def attempt():
-        persistence = TurnPersistence(
-            store, None, worker.permissions.fleet.scope, slot=slot, operation_key=key
-        )
-        with persistence.activate():
-            return await persistence.run(prepare)
-
-    async with deps.anthropic:
-        if outcome == "ack":
-            created = await attempt()
-            replayed = await attempt()
-            assert created.ma_session_id == replayed.ma_session_id == "sess_new"
-            assert created.snapshot.model_id == worker.spec.model.id
-        elif outcome == "lost_ack":
-            from anthropic import APIConnectionError
-
-            with pytest.raises(APIConnectionError):
-                await attempt()
-            with pytest.raises(UncertainSend):
-                await attempt()
-        else:
-            with pytest.raises(prepare_mod.AdmissionDenied):
-                await attempt()
-        assert deps.anthropic.max_retries == 8
-    posts = [r for r in calls if r.method == "POST" and r.url.path == "/v1/sessions"]
-    assert len(posts) == (outcome != "refused")
-    if posts:
-        assert json.loads(posts[0].content)["agent"] == executing.id
-    else:
-        assert calls == []
-    if outcome == "model_drift":
-        assert len([r for r in calls if r.url.path.endswith("/archive")]) == 1
-    assert fences
 
 
 @pytest.mark.parametrize("outcome", ["ack", "lost_agent_ack", "drops"])
@@ -1677,9 +1503,6 @@ async def test_unproved_native_worker_refuses_before_agent_and_resource_creation
     )
     store = PostgresStateStore(sessions)
 
-    async def guard():
-        return None
-
     async def prepare():
         return await prepare_mod.bind_session_impl(
             deps,
@@ -1691,7 +1514,6 @@ async def test_unproved_native_worker_refuses_before_agent_and_resource_creation
             session_account_id=account,
             reuse_existing=True,
             worker=worker,
-            before_native=guard,
             now=lambda: _NOW,
         )
 

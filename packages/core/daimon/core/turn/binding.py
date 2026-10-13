@@ -37,16 +37,9 @@ async def prepared_persistence(
     accepting a session/thread from a driver parameter. Shared bindings are
     the account=None slot, with their pinned configuration and stable id.
     """
-    admitted_scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id)
-    if scope is None:
-        scope = admitted_scope
-    elif (
-        scope.is_platform
-        or scope.is_legacy_host_authorized
-        or (scope.tenant_id, scope.account_id)
-        != (admitted_scope.tenant_id, admitted_scope.account_id)
-    ):
-        raise ScopeViolation(session_id, "prepared scope differs from admitted identity")
+    scope = admitted_session_scope(
+        admission, tenant_id=tenant_id, session_id=session_id, prepared=scope
+    )
     observation = current_outcome.get()
     key = operation_key or str(observation.id if observation is not None else uuid.uuid4())
     store = deps.state_store or mux_state.PostgresStateStore(deps.sessionmaker)

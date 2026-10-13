@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import anthropic as anthropic_pkg
 import structlog
-from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
 )
@@ -44,7 +43,7 @@ from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
-from daimon.core.mux_compat import legacy_call, sdk_agent
+from daimon.core.mux_compat import legacy_call
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
@@ -58,10 +57,7 @@ from daimon.core.session_snapshot import (
     session_skills,
     snapshot_from_created_session,
 )
-from daimon.core.sessions import (
-    _check_resource_source,  # pyright: ignore[reportPrivateUsage]
-    create_session,
-)
+from daimon.core.sessions import create_session
 from daimon.core.shared_threads import (
     SharedThread,
     may_have_shared_binding,
@@ -86,7 +82,6 @@ from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.runtimes import ensure_channel_runtime, scope_channel_runtimes
 from daimon.core.turn_origin import SessionState
@@ -96,7 +91,6 @@ from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import SessionSpec
 from mux.drivers.anthropic.sessions_lifecycle import SessionReads
-from mux.drivers.anthropic.transport import single_attempt_mutation
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -307,9 +301,6 @@ async def create_ma_session(
     tenant_id: uuid.UUID,
     extra_resources: tuple[Resource, ...] = (),
     predecessor_session_id: str | None = None,
-    resource_source: BackendAgent | None = None,
-    worker: ResolvedWorkerSpec | None = None,
-    before_native: Callable[[], Awaitable[None]] | None = None,
 ) -> CreatedSession:
     """Create a brand-new MA session and snapshot the configuration it froze.
 
@@ -330,27 +321,6 @@ async def create_ma_session(
     turn before any session exists, and a seal added since is stamped on the
     session and mounts memory read-only.
     """
-    persistence = current_persistence.get()
-    if worker is not None:
-        if (
-            persistence is None
-            or before_native is None
-            or resource_source is None
-            or resource_source.source is None
-            or resource_source.source.native is None
-            or persistence.scope != worker.permissions.fleet.scope
-            or resource_source.resource_scope != worker.permissions.fleet.scope
-        ):
-            raise AdmissionDenied(reason="backend_unsupported")
-        _check_resource_source(
-            resource_source,
-            sdk_agent(resource_source.source),
-            admission.environment,
-            tenant_id,
-            resource_source.agent_id,
-            admission.account_id,
-            persistence.scope,
-        )
     if _admitted_profile(admission) != "anthropic.managed_agents":
         raise AdmissionDenied(reason="backend_unsupported")
     admission = await reauthorize(deps, admission)
@@ -384,8 +354,6 @@ async def create_ma_session(
         # before `sessions.create`; decide once more immediately before it.
         # A pin raises `AdmissionDenied`; a seal the session was not built
         # with makes the turn wait and be prepared again read-only.
-        if before_native is not None:
-            await before_native()
         current = await reauthorize(deps, built)
         final_seal = set(seal)
         if predecessor_session_id is not None:
@@ -407,95 +375,42 @@ async def create_ma_session(
                 retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
             )
 
-    agent_uuid = (
-        resource_source.agent_id
-        if resource_source is not None
-        else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
-    )
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     async with deps.sessionmaker() as session:
         github_mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
-
-    create_native = (
-        functools.partial(create_session, resource_source=resource_source, worker=worker)
-        if worker is not None
-        else create_session
+    ma_session = await create_session(
+        deps.anthropic,
+        agent=admission.agent,
+        environment=admission.environment,
+        mcp_settings=deps.mcp,
+        # A shared thread's session carries no caller's credentials.
+        account_id=None if admission.shared_owner is not None else admission.account_id,
+        # Leaves off every server somebody connected through their own OAuth.
+        hide_personal_for=admission.shared_owner,
+        tenant_id=tenant_id,
+        agent_uuid=agent_uuid,
+        session_factory=deps.sessionmaker,
+        fernet=deps.fernet,
+        github_fallback_pat=deps.github_fallback_pat,
+        github_app_id=deps.github_app_id,
+        github_app_private_key=deps.github_app_private_key,
+        agent_github_app=deps.agent_github_app,
+        is_external=admission.is_external,
+        extra_resources=extra_resources,
+        memory_read_only=admission.memory_read_only,
+        tool_safety=deps.tool_safety,
+        asks_before_publishing=admission.asks_before_publishing,
+        confirmed_tools=backend_switch_tools_for_turn(deps),
+        slack_turn_context_id=admission.slack_turn_context_id,
+        private_dm_id=admission.private_dm_id,
+        budget_channel_id=admission.budget_channel_id,
+        origin_channel_id=admission.origin_channel_id,
+        origin_thread_id=admission.origin_thread_id,
+        origin_seal_ids=frozenset(seal),
+        before_create=fence,
+        channel_skills=admission.channel_skills,
     )
-
-    async def create() -> BetaManagedAgentsSession:
-        return await create_native(
-            deps.anthropic,
-            agent=admission.agent,
-            environment=admission.environment,
-            mcp_settings=deps.mcp,
-            # A shared thread's session carries no caller's credentials.
-            account_id=None if admission.shared_owner is not None else admission.account_id,
-            # Leaves off every server somebody connected through their own OAuth.
-            hide_personal_for=admission.shared_owner,
-            tenant_id=tenant_id,
-            agent_uuid=agent_uuid,
-            session_factory=deps.sessionmaker,
-            fernet=deps.fernet,
-            github_fallback_pat=deps.github_fallback_pat,
-            github_app_id=deps.github_app_id,
-            github_app_private_key=deps.github_app_private_key,
-            agent_github_app=deps.agent_github_app,
-            is_external=admission.is_external,
-            extra_resources=extra_resources,
-            memory_read_only=admission.memory_read_only,
-            tool_safety=deps.tool_safety,
-            asks_before_publishing=admission.asks_before_publishing,
-            confirmed_tools=backend_switch_tools_for_turn(deps),
-            slack_turn_context_id=admission.slack_turn_context_id,
-            private_dm_id=admission.private_dm_id,
-            budget_channel_id=admission.budget_channel_id,
-            origin_channel_id=admission.origin_channel_id,
-            origin_thread_id=admission.origin_thread_id,
-            origin_seal_ids=frozenset(seal),
-            before_create=fence,
-            channel_skills=admission.channel_skills,
-        )
-
-    if worker is None:
-        ma_session = await create()
-    elif persistence is None or before_native is None or resource_source is None:
-        raise AdmissionDenied(reason="backend_unsupported")
-    else:
-        ma_session = await persistence.mutate(
-            None,
-            "session_create",
-            {
-                "worker": worker.digest,
-                "source": str(resource_source.agent_id),
-                "source_config": resource_source.configuration_digest,
-                "resource_generations": [
-                    [name, updated.isoformat()]
-                    for name, updated in resource_source.resource_generations
-                ],
-                "agent": admission.agent.id,
-                "environment": admission.environment.id,
-            },
-            lambda _: create(),
-            BetaManagedAgentsSession,
-            lambda _: "processed",
-            guard=before_native,
-            retry_failed=False,
-        )
-
-    if worker is not None and (
-        ma_session.agent.id != admission.agent.id
-        or ma_session.agent.model.id != worker.spec.model.id
-        or ma_session.environment_id != admission.environment.id
-    ):
-        from daimon.core.turn.run import (
-            _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        with single_attempt_mutation():
-            await _archive_orphaned_session(
-                deps.anthropic, session_id=ma_session.id, scope=worker.permissions.fleet.scope
-            )
-        raise AdmissionDenied(reason="backend_unsupported")
 
     has_repo = any(
         isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
@@ -617,9 +532,6 @@ async def create_fresh_session(
     predecessor_id: uuid.UUID | None = None,
     transfer_file_id: str | None = None,
     transfer_kind: TransferKind | None = None,
-    resource_source: BackendAgent | None = None,
-    worker: ResolvedWorkerSpec | None = None,
-    before_native: Callable[[], Awaitable[None]] | None = None,
 ) -> FreshSession:
     """Create a brand-new MA session and commit its `thread_sessions` row.
 
@@ -641,17 +553,7 @@ async def create_fresh_session(
         predecessor_session_id = (
             predecessor.ma_session_id if predecessor is not None else "unknown-predecessor"
         )
-    create_ma = (
-        functools.partial(
-            create_ma_session,
-            resource_source=resource_source,
-            worker=worker,
-            before_native=before_native,
-        )
-        if worker is not None
-        else create_ma_session
-    )
-    created = await create_ma(
+    created = await create_ma_session(
         deps,
         admission,
         tenant_id=tenant_id,
@@ -901,15 +803,26 @@ async def _decide_reuse_again(
     return replace(prepared, admission=current)
 
 
-def admitted_session_scope(admission: Admission, *, tenant_id: uuid.UUID, session_id: str) -> Scope:
+def admitted_session_scope(
+    admission: Admission, *, tenant_id: uuid.UUID, session_id: str, prepared: Scope | None = None
+) -> Scope:
     """Use the admitted tenant and account without another ownership lookup."""
     if admission.grant is not None and admission.grant.tenant_id != tenant_id:
         raise ScopeViolation(session_id, "the prepared turn belongs to another tenant")
-    return resource_scope(
+    scope = resource_scope(
         tenant_id=str(tenant_id),
         account_id=str(admission.account_id),
         authorization_id="admitted-turn",
     )
+    if prepared is not None:
+        if (
+            prepared.is_platform
+            or prepared.is_legacy_host_authorized
+            or (prepared.tenant_id, prepared.account_id) != (scope.tenant_id, scope.account_id)
+        ):
+            raise ScopeViolation(session_id, "prepared scope differs from admitted identity")
+        return prepared
+    return scope
 
 
 async def _stamp_reused_seal(
@@ -1017,7 +930,6 @@ async def bind_session_impl(
     _on_prepared: Callable[[PreparedTurn], Awaitable[None]] | None = None,
     _on_orphan: Callable[[PreparedTurn], Awaitable[None]] | None = None,
     worker: ResolvedWorkerSpec | None = None,
-    before_native: Callable[[], Awaitable[None]] | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
 
@@ -1110,13 +1022,12 @@ async def bind_session_impl(
             raise AdmissionDenied(reason="backend_unsupported")
         scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
         if worker is not None:
-            worker_scope = worker.permissions.fleet.scope
-            if (worker_scope.tenant_id, worker_scope.account_id) != (
-                scope.tenant_id,
-                scope.account_id,
-            ):
-                raise AdmissionDenied(reason="backend_unsupported")
-            scope = worker_scope
+            scope = admitted_session_scope(
+                admission,
+                tenant_id=tenant_id,
+                session_id="preparation",
+                prepared=worker.permissions.fleet.scope,
+            )
         request = ProviderPreparationRequest(
             deps,
             admission,

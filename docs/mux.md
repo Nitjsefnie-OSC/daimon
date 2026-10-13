@@ -2506,17 +2506,7 @@ and obligations. Worker preparation carries its derived scope through the real
 binding and turn codec. Expiry after preparation or its binding callback invokes
 the existing orphan cleanup before refusing the handoff.
 
-The native session allocation primitive restores actual acknowledged session
-receipts. Ambiguous or explicitly refused allocation does not create another
-resource. The original source identity selects memory, credentials, repositories
-and environment snapshots; the actual acknowledged worker agent selects
-execution. A session acknowledgement with a different agent, model or environment
-refuses and invokes bounded cleanup. Allocation still requires the caller's fresh
-source-preservation and financial authority; preparation alone is not an
-execution certificate. Anthropic worker execution remains refused until its
-complete source-preservation and independent native readback proof is installed.
-
-Worker allocation requires the complete captured source, fresh callback and active
-persistence context to share the same canonical worker scope, including principal
-and authorization. The existing source identity validator runs before source or
-credential reads; a foreign context cannot own another worker's acknowledgement.
+Prepared native scope is checked by the existing admitted-session scope owner.
+Binding publication, turn I/O and worker handoff use that single identity rule.
+The worker allocation prototype is deferred with its actual caller and complete
+source/native preservation proof; it is not an exported preparation path.
