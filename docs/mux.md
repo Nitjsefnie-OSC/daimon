@@ -2619,10 +2619,12 @@ private resources and approval requirements refuse; tools remain explicit.
 The worker input and authoritative result reference the acknowledged native
 agent, and an unknown creation outcome is retained without another allocation.
 
-
 Fleet host composition uses the existing store and budget admission owners and
 reads full results from each worker's actual private binding and journal. Card
 excerpts cannot substitute for result contracts or mandatory review evidence.
+Text/JSON contracts are checked before funding. A retry dispatches a committed
+worker while it is pending; the existing pool claim prevents another execution.
+Refused admissions remain typed refusals when replayed.
 An explicitly installed MCP bridge requires the live turn's exact
 `origin_context_id`; stale, foreign or mismatched contexts refuse before the
 root loader runs. Native dispatch, control and frozen-batch wake bindings must

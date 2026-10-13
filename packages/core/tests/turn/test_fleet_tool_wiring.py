@@ -1,10 +1,12 @@
 """Concrete fleet result/contract reads over real SDK worker journals."""
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import httpx
 import pytest
 from daimon.core._models import FleetWorker as WorkerRow
 from daimon.core.fleet import result_digest
@@ -12,12 +14,18 @@ from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused, Hos
 from daimon.core.headless_runner import run_worker
 from daimon.core.neutral_resources import resolve_worker_spec
 from daimon.core.stores import access_policy, fleet
+from daimon.core.turn.runtime_manifest import capture_preparation_source
+from daimon.testing.isolated_sdk import build_async_openai
+from mux.contracts.config import BackendConfig
 from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance, TextPart
-from mux.errors import OperationConflict
+from mux.contracts.resources import AgentPatch, AgentSpec
+from mux.drivers.openai import deployment as native_transport
+from mux.drivers.openai.transport import SDKTransport
 from sqlalchemy import update
 
 from ..test_fleet_budget import POLICY, setup, tariffs
 from ..test_fleet_budget import sm as sm
+from . import test_openai_host as native_host
 from .test_openai_worker_plan import application as application
 from .test_openai_worker_plan import claimed_openai_worker as claimed_openai_worker
 from .test_openai_worker_plan import db_preflight as db_preflight
@@ -89,6 +97,14 @@ async def test_real_worker_journal_collect_refuses_absent_required_review(
         )
     with pytest.raises(FleetRefused, match="foreign_run"):
         await ports.read_run(root.fleet.scope.model_copy(update={"account_id": "foreign"}), run.id)
+    async with request.deps.sessionmaker.begin() as db:
+        await db.execute(
+            update(WorkerRow).where(WorkerRow.id == worker.id).values(binding_id="foreign-binding")
+        )
+    run, workers = await ports.read_run(root.fleet.scope, worker.run_id)
+    with pytest.raises(FleetRefused) as refused:
+        await ports.read_result(root, policy, run, workers[0])
+    assert str(refused.value) == "fleet: result_evidence_invalid"
 
 
 @pytest.mark.parametrize(
@@ -112,17 +128,25 @@ def test_contract_validator_refuses_noncanonical_json(format_, text):
         ports.validate_contract({"format": format_}, event)
 
 
-async def test_funded_admission_reuses_the_durable_operation_without_redispatch(sm):
+@pytest.mark.parametrize("interrupted", (False, True))
+async def test_pending_admission_replay_dispatches_until_the_worker_is_claimed(sm, interrupted):
     parent, run = await setup(sm, provider="openai", funds="10", cap="2")
     async with sm.begin() as db:
         await access_policy.set_access_policy(db, tenant_id=run.tenant_id, policy=POLICY)
     delivered = []
+    attempts = 0
 
     async def dispatch(parent, worker, resolved, reviewed):
         # Observe actual committed admission, without asserting native execution.
+        nonlocal attempts
+        attempts += 1
         current_run, workers = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
         assert workers == (worker,)
         assert current_run.reserved_usd >= worker.budget_usd
+        if interrupted and attempts == 1:
+            raise RuntimeError("dispatch interrupted after commit")
+        claimed = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=1)
+        assert claimed is not None and claimed.id == worker.id
         delivered.append(worker.id)
 
     ports = HostFleetPorts(sm, prices=tariffs(parent), markup=Decimal(1), dispatch=dispatch)
@@ -142,13 +166,28 @@ async def test_funded_admission_reuses_the_durable_operation_without_redispatch(
         reviewer_of=None,
         reviewed_result=None,
     )
+    if interrupted:
+        with pytest.raises(RuntimeError, match="dispatch interrupted"):
+            await ports.admit(parent, resolved, **arguments)
+        _, pending = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+        assert pending[0].status == "pending"
     first = await ports.admit(parent, resolved, **arguments)
     second = await ports.admit(parent, resolved, **arguments)
-    assert first[1] == second[1]
-    assert delivered == [first[1].id]
-    with pytest.raises(OperationConflict):
+    assert first[1].id == second[1].id and second[1].status == "starting"
+    assert delivered == [first[1].id] and attempts == 1 + int(interrupted)
+    with pytest.raises(FleetRefused) as refused:
         await ports.admit(parent, resolved, **(arguments | {"role": "changed input"}))
+    assert str(refused.value) == "fleet: operation_conflict"
     assert delivered == [first[1].id]
+    foreign = replace(
+        resolved,
+        permissions=replace(
+            resolved.permissions, fleet=replace(resolved.permissions.fleet, depth=0)
+        ),
+    )
+    with pytest.raises(FleetRefused) as refused:
+        await ports.admit(parent, foreign, **(arguments | {"operation_key": "foreign"}))
+    assert str(refused.value) == "fleet: admission_evidence_invalid"
 
 
 async def test_refused_funding_commits_the_refusal_and_never_dispatches(sm):
@@ -167,17 +206,240 @@ async def test_refused_funding_commits_the_refusal_and_never_dispatches(sm):
         now=datetime.now(UTC),
         limits=parent.limits.model_copy(update={"budget_usd": Decimal(1)}),
     )
-    with pytest.raises(FleetRefused, match="financial_admission_refused"):
-        await ports.admit(
-            parent,
-            resolved,
-            run_id=run.id,
-            operation_key="refused",
-            role="worker",
-            session=None,
-            result_contract=None,
-            reviewer_of=None,
-            reviewed_result=None,
-        )
+    for _ in range(2):
+        with pytest.raises(FleetRefused, match="financial_admission_refused"):
+            await ports.admit(
+                parent,
+                resolved,
+                run_id=run.id,
+                operation_key="refused",
+                role="worker",
+                session=None,
+                result_contract=None,
+                reviewer_of=None,
+                reviewed_result=None,
+            )
     _, workers = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
     assert len(workers) == 1 and workers[0].status == "cancelled"
+
+
+@pytest.mark.parametrize("contract", ({"format": "xml"}, {"schema": "remote"}, {"format": []}))
+async def test_unsupported_contract_refuses_spawn_before_funding(sm, contract):
+    parent, run = await setup(sm, provider="openai", funds="10", cap="2")
+    async with sm.begin() as db:
+        await access_policy.set_access_policy(db, tenant_id=run.tenant_id, policy=POLICY)
+
+    async def forbidden(*args):
+        pytest.fail("unsupported contract reached dispatch")
+
+    ports = HostFleetPorts(sm, prices=tariffs(parent), markup=Decimal(1), dispatch=forbidden)
+    with pytest.raises(FleetRefused, match="result_contract_unsupported"):
+        await FleetOrchestrator(ports).spawn(
+            parent,
+            POLICY,
+            now=datetime.now(UTC),
+            operation_key="invalid-contract",
+            role="worker",
+            backend=parent.backend_grants[0],
+            limits=parent.limits.model_copy(update={"budget_usd": Decimal(1)}),
+            agent=parent.spec,
+            result_contract=contract,
+        )
+    retained, workers = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert workers == () and retained.reserved_usd == 0
+
+
+@pytest.mark.parametrize("verdict", ("approved", "wrong_digest", "refused", "wrong_contract"))
+async def test_required_review_gate_uses_real_spawn_dispatch_and_full_journal(
+    claimed_openai_worker, monkeypatch, verdict
+):
+    request, root, worker, prices, owned, calls, primary_wire = claimed_openai_worker
+    root = replace(
+        root, subject=replace(root.subject, platform_user_id=root.fleet.scope.principal_id)
+    )
+    request = replace(
+        request,
+        admission=replace(
+            request.admission, grant=replace(request.admission.grant, subject=root.subject)
+        ),
+    )
+    source = await capture_preparation_source(
+        replace(request, scope=root.fleet.scope, worker=None, source=None)
+    )
+    assert source.source is not None
+    definition = AgentSpec.model_validate(worker.spec)
+    clone = request.worker.source_agent is not None
+    resolved_primary = resolve_worker_spec(
+        root,
+        source.source if clone else definition,
+        overrides=AgentPatch.model_validate(worker.spec) if clone else None,
+        policy=POLICY,
+        now=request.now(),
+        backend=request.worker.backend,
+        limits=root.limits.model_copy(update={"budget_usd": Decimal("0.25")}),
+        captured_source=source,
+    )
+    request = replace(
+        request, worker=resolved_primary, scope=resolved_primary.permissions.fleet.scope
+    )
+    contract = {"format": "text", "review_required": True}
+    async with request.deps.sessionmaker.begin() as db:
+        await db.execute(
+            update(WorkerRow)
+            .where(WorkerRow.id == worker.id)
+            .values(
+                result_contract=contract,
+                budget_usd=Decimal("0.25"),
+                spec=resolved_primary.spec.model_dump(mode="json"),
+                spec_digest=resolved_primary.digest,
+            )
+        )
+    worker = replace(
+        worker,
+        result_contract=contract,
+        budget_usd=Decimal("0.25"),
+        spec=resolved_primary.spec.model_dump(mode="json"),
+        spec_digest=resolved_primary.digest,
+    )
+    primary = await run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Produce the full result",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert primary.status == "succeeded" and primary.result is not None
+    primary_text = primary_wire.items[-1]["content"][0]["text"]
+    review_text = json.dumps(
+        {
+            "verdict": "refused" if verdict == "refused" else "approved",
+            "reviewed_digest": "wrong" if verdict == "wrong_digest" else primary.result.digest,
+        }
+    )
+    # A second native session and agent, supplied by transport only. Both workers
+    # use real financial admission, pool claims, preparation and result publication.
+    monkeypatch.setattr(native_host, "SESSION_ID", "native-review-session")
+    wire = native_host.Wire()
+    wire.expected_spend_limit = None
+    agents = {owned.retained.agent.ref.id: owned.wire.agent}
+    session = wire.session
+    monkeypatch.setattr(
+        wire,
+        "session",
+        lambda: {**session(), "agent": {**session()["agent"], "id": "review-agent"}},
+    )
+
+    def native(call):
+        calls.append(call)
+        path = call.url.path
+        if path == "/v1/agents" and call.method == "POST":
+            agents["review-agent"] = {
+                **json.loads(call.content),
+                "id": "review-agent",
+                "created_at": 1791792000,
+            }
+            return httpx.Response(200, json=agents["review-agent"])
+        if path in {"/v1/agents/" + key for key in agents}:
+            return httpx.Response(200, json=agents[path.rsplit("/", 1)[1]])
+        if path == "/v1/agents/environments/templates/owned-environment":
+            return httpx.Response(
+                200,
+                json={
+                    **owned.wire.environment,
+                    "network": {"access": "enabled"},
+                    "packages": {"system": [], "python": [], "npm": []},
+                },
+            )
+        if path == "/v1/agents/sessions" and call.method == "POST":
+            assert json.loads(call.content)["agent_id"] == "review-agent"
+            return httpx.Response(200, json=wire.session())
+        response = wire.handle(call)
+        for turn in wire.turns:
+            turn["agent_id"] = "review-agent"
+        if call.method == "POST" and path.endswith("/events"):
+            wire.items[-1]["content"][0]["text"] = review_text
+        return response
+
+    dispatched = []
+
+    async def dispatch(parent, committed, resolved, reviewed):
+        assert reviewed is not None and reviewed.session_id == primary.result.session_id
+        assert reviewed.payload["content"][0]["text"] == primary_text
+        assert result_digest(dict(reviewed.payload)) == primary.result.digest
+        assert committed.result_contract == {
+            "format": "review",
+            "reviewed_digest": primary.result.digest,
+        }
+        claimed = await fleet.claim_worker(
+            request.deps.sessionmaker, tenant_id=committed.tenant_id, run_id=committed.run_id, cap=2
+        )
+        assert claimed is not None and claimed.id == committed.id
+        selected = replace(request, worker=resolved, scope=resolved.permissions.fleet.scope)
+        result = await run_worker(
+            selected,
+            parent=parent,
+            worker=claimed,
+            trigger_message="Review this full result: " + json.dumps(dict(reviewed.payload)),
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+        assert result.status == "succeeded" and result.result is not None
+        assert result.result.session_id != primary.result.session_id
+        dispatched.append(result)
+
+    ports = HostFleetPorts(
+        request.deps.sessionmaker, prices=prices, markup=Decimal("0.25"), dispatch=dispatch
+    )
+    orchestrator = FleetOrchestrator(ports)
+    async with request.deps.sessionmaker() as db:
+        policy = await access_policy.load_access_policy(db, tenant_id=request.tenant_id)
+    async with build_async_openai(
+        transport=httpx.MockTransport(native),
+        api_key="offline",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        monkeypatch.setattr(
+            native_transport, "configured_transport", lambda **kwargs: SDKTransport(sdk)
+        )
+        reply = await orchestrator.spawn(
+            root,
+            policy,
+            now=request.now(),
+            operation_key="review-primary",
+            role="review the full journal",
+            backend=BackendConfig.model_validate(
+                request.admission.backend_revision.model_dump(
+                    include=set(BackendConfig.model_fields)
+                )
+            ),
+            limits=root.limits.model_copy(update={"budget_usd": Decimal("0.25")}),
+            agent=root.spec.model_copy(update={"name": "reviewer", "declared_drops": ("memory",)}),
+            reviewer_of=primary.id,
+            captured_source=source,
+        )
+    assert len(dispatched) == 1 and reply["worker_id"] == str(dispatched[0].id)
+    if verdict == "wrong_contract":
+        # Persisted contract tampering must not certify the actual review journal.
+        async with request.deps.sessionmaker.begin() as db:
+            await db.execute(
+                update(WorkerRow)
+                .where(WorkerRow.id == dispatched[0].id)
+                .values(result_contract={"format": "review", "reviewed_digest": "wrong"})
+            )
+        with pytest.raises(FleetRefused, match="review_digest_mismatch"):
+            await orchestrator.collect(root, policy, run_id=primary.run_id)
+    else:
+        result = await orchestrator.collect(root, policy, run_id=primary.run_id)
+        if verdict == "approved":
+            assert result == {
+                "run_id": str(primary.run_id),
+                "status": "ready",
+                "results": [{"worker_id": str(primary.id), "result": primary_text}],
+            }
+        else:
+            assert result == {
+                "run_id": str(primary.run_id),
+                "status": "blocked",
+                "reason": "review_refused",
+            }

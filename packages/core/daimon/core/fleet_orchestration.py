@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from daimon.core.fleet import FleetRun, FleetWorker
     from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerLimits, WorkerPermissions
     from daimon.core.pricing import ModelRates, ProviderPrice
+    from daimon.core.stores.domain import BackendAgent
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -54,6 +55,15 @@ def _review_required(contract: Mapping[str, JsonValue] | None) -> bool:
     if type(required) is not bool:
         raise FleetRefused("review_policy_invalid")
     return required
+
+
+def _result_format(contract: Mapping[str, JsonValue] | None) -> Literal["text", "json"]:
+    contract = contract or {}
+    format_ = contract.get("format", "text")
+    if set(contract) - {"format", "review_required"} or format_ not in ("text", "json"):
+        raise FleetRefused("result_contract_unsupported")
+    _review_required(contract)
+    return "json" if format_ == "json" else "text"
 
 
 class FleetPorts(Protocol):
@@ -254,6 +264,7 @@ class FleetOrchestrator:
         session: SessionSpec | None = None,
         result_contract: Mapping[str, JsonValue] | None = None,
         reviewer_of: uuid.UUID | None = None,
+        captured_source: BackendAgent | None = None,
     ) -> Mapping[str, JsonValue]:
         """Resolve once, then hand admission to the atomic owner operation.
 
@@ -278,7 +289,7 @@ class FleetOrchestrator:
             # resolved grant; arbitrary native refs are never request authority.
             raise FleetRefused("session_resources_unavailable")
         if reviewer_of is None:
-            _review_required(result_contract)
+            _result_format(result_contract)
         source: AgentSpec | Agent
         if clone is not None:
             if clone.kind != "agent" or clone_revision is None:
@@ -302,6 +313,7 @@ class FleetOrchestrator:
             backend=backend,
             overrides=overrides,
             limits=limits,
+            captured_source=captured_source,
         )
         reviewed: Event | None = None
         if reviewer_of is not None:
@@ -660,7 +672,9 @@ class HostFleetPorts:
         reviewed_result: Event | None,
     ) -> tuple[FleetRun, FleetWorker]:
         from daimon.core.channel_budget import admit_fleet_worker
+        from daimon.core.fleet import FleetConflict
         from daimon.core.stores import access_policy, fleet, mux_state
+        from mux.errors import OperationConflict
         from mux.state.operations import request_digest
 
         if self._dispatch is None or session is not None or run_id != parent.fleet.run_id:
@@ -668,6 +682,7 @@ class HostFleetPorts:
         if (reviewer_of is None) != (reviewed_result is None):
             raise FleetRefused("review_evidence_invalid")
         scope = parent.fleet.scope
+        tenant_id = uuid.UUID(scope.tenant_id)
         key = f"fleet:{run_id}:admit:{operation_key}"
         digest = request_digest(
             {
@@ -680,71 +695,79 @@ class HostFleetPorts:
                 else None,
             }
         )
-        async with self.sessions.begin() as db:
-            policy = await access_policy.load_access_policy(
-                db, tenant_id=uuid.UUID(scope.tenant_id)
-            )
-            _authorize(parent, policy)
-            await fleet.lock_budget(
-                db,
-                tenant_id=uuid.UUID(scope.tenant_id),
-                actor_id=parent.fleet.account_id,
-                run_id=run_id,
-            )
-            run, workers = await fleet.run_status(
-                db, tenant_id=uuid.UUID(scope.tenant_id), run_id=run_id
-            )
-            _scope(parent, run)
-            begun = await mux_state.begin_operation(
-                db,
-                scope,
-                key=key,
-                request_digest=digest,
-                operation_id=key,
-                now=await mux_state.database_clock(db),
-            )
-            if not begun.fresh:
-                worker = next(
-                    (row for row in workers if str(row.id) == begun.record.result.get("worker_id")),
-                    None,
+        try:
+            async with self.sessions.begin() as db:
+                policy = await access_policy.load_access_policy(db, tenant_id=tenant_id)
+                _authorize(parent, policy)
+                # Lock before the ordinal read; admission reuses this same transaction lock.
+                await fleet.lock_budget(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_id=parent.fleet.account_id,
+                    run_id=run_id,
                 )
-                if begun.record.operation.status != "processed" or worker is None:
-                    raise FleetRefused("admission_evidence_unavailable")
-                return run, worker
-            usage = await admit_fleet_worker(
-                db,
-                parent=parent,
-                policy=policy,
-                resolved=resolved,
-                ordinal=len(workers),
-                role=role,
-                prices=self.prices,
-                markup=self.markup,
-                reviewer_of=reviewer_of,
-                result_contract=result_contract,
-            )
-            await mux_state.claim_send(
-                db,
-                scope,
-                key,
-                now=await mux_state.database_clock(db),
-                clock=mux_state.database_clock,
-                fence=None,
-            )
-            await mux_state.advance_operation(
-                db,
-                scope,
-                key,
-                "processed",
-                now=await mux_state.database_clock(db),
-                clock=mux_state.database_clock,
-                fence=None,
-                result={"worker_id": str(usage.worker.id)},
-            )
-        if not usage.admitted:
-            raise FleetRefused("financial_admission_refused")
-        await self._dispatch(parent, usage.worker, resolved, reviewed_result)
-        return usage.run, usage.worker
+                run, workers = await fleet.run_status(db, tenant_id=tenant_id, run_id=run_id)
+                _scope(parent, run)
+                begun = await mux_state.begin_operation(
+                    db,
+                    scope,
+                    key=key,
+                    request_digest=digest,
+                    operation_id=key,
+                    now=await mux_state.database_clock(db),
+                )
+                if not begun.fresh:
+                    worker = next(
+                        (
+                            row
+                            for row in workers
+                            if str(row.id) == begun.record.result.get("worker_id")
+                        ),
+                        None,
+                    )
+                    if begun.record.operation.status != "processed" or worker is None:
+                        raise FleetRefused("admission_evidence_unavailable")
+                else:
+                    usage = await admit_fleet_worker(
+                        db,
+                        parent=parent,
+                        policy=policy,
+                        resolved=resolved,
+                        ordinal=len(workers),
+                        role=role,
+                        prices=self.prices,
+                        markup=self.markup,
+                        reviewer_of=reviewer_of,
+                        result_contract=result_contract,
+                    )
+                    await mux_state.claim_send(
+                        db,
+                        scope,
+                        key,
+                        now=await mux_state.database_clock(db),
+                        clock=mux_state.database_clock,
+                        fence=None,
+                    )
+                    await mux_state.advance_operation(
+                        db,
+                        scope,
+                        key,
+                        "processed",
+                        now=await mux_state.database_clock(db),
+                        clock=mux_state.database_clock,
+                        fence=None,
+                        result={"worker_id": str(usage.worker.id)},
+                    )
+                    run, worker = usage.run, usage.worker
+            if worker.status == "cancelled" and worker.error_code is not None:
+                raise FleetRefused("financial_admission_refused")
+            if worker.status == "pending":
+                await self._dispatch(parent, worker, resolved, reviewed_result)
+            return run, worker
+        except OperationConflict:
+            raise FleetRefused("operation_conflict") from None
+        except FleetConflict:
+            raise FleetRefused("admission_evidence_invalid") from None
 
     async def read_result(
         self,
@@ -753,7 +776,7 @@ class HostFleetPorts:
         run: FleetRun,
         worker: FleetWorker,
     ) -> Event:
-        from daimon.core.fleet import check_result, worker_slot
+        from daimon.core.fleet import FleetConflict, check_result, worker_slot
         from daimon.core.stores import access_policy, fleet, mux_state
 
         _scope(parent, run)
@@ -776,18 +799,17 @@ class HostFleetPorts:
                 db, actual.result.session_id, after=actual.result.sequence - 1, limit=1
             )
             result = records[0] if records else None
-            check_result(actual_run, actual, binding, result, actual.result)
+            try:
+                check_result(actual_run, actual, binding, result, actual.result)
+            except FleetConflict:
+                raise FleetRefused("result_evidence_invalid") from None
             assert result is not None
             return result
 
     def validate_contract(
         self, contract: Mapping[str, JsonValue] | None, result: Event
     ) -> JsonValue:
-        contract = contract or {}
-        format_ = contract.get("format", "text")
-        if set(contract) - {"format", "review_required"} or format_ not in ("text", "json"):
-            raise FleetRefused("result_contract_unsupported")
-        _review_required(contract)
+        format_ = _result_format(contract)
         message = AgentMessagePayload.model_validate(result.payload)
         if (
             not message.complete
