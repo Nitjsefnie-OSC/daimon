@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import re
 import uuid
@@ -13,9 +14,10 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core._models import Base, TaskContinuation
 from daimon.core.stores import task_continuations as queue
+from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import Connection, inspect, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _LEGACY_REASONS = ("task_handoff", "private_input_applied", "timer", "github_access_ready")
@@ -212,3 +214,36 @@ async def test_downgrade_requires_retirement_and_fences_stale_claim(db_session, 
     assert not await queue.settle_wake_row(
         db_session, idempotency_key=worker, owner="dispatcher", status="delivered", now=NOW
     )
+
+
+@pytest.mark.fresh_schema
+async def test_downgrade_takes_bounded_exclusive_lock_before_retirement(db_session):
+    module = _migration()
+    connection = await db_session.connection()
+    engine = connection.engine
+    require_owned_sessionmaker(engine)
+    # The migration must override this longer timeout with its own bound.
+    await connection.execute(text("SET LOCAL lock_timeout = '1min'"))
+    async with engine.connect() as writer, writer.begin():
+        await writer.execute(text("LOCK TABLE task_continuations IN ROW EXCLUSIVE MODE"))
+
+        def blocked(sync):
+            with (
+                Operations.context(MigrationContext.configure(sync)),
+                pytest.raises(DBAPIError) as failure,
+                sync.begin_nested(),
+            ):
+                module.downgrade()
+            return failure.value
+
+        failure = await asyncio.wait_for(connection.run_sync(blocked), timeout=30)
+        assert failure.orig.sqlstate == "55P03"
+        assert failure.statement == "LOCK TABLE task_continuations IN ACCESS EXCLUSIVE MODE"
+        # Refusal leaves the reason check intact and the session usable.
+        assert "worker_finished" in await connection.scalar(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = 'task_continuations'::regclass "
+                "AND conname = 'ck_task_continuations_reason'"
+            )
+        )
