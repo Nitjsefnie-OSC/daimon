@@ -1,6 +1,9 @@
 import io
+import uuid
 
-from daimon.adapters.discord.tables import render_discord_tables
+import pytest
+from daimon.adapters.discord import tables
+from daimon.adapters.discord.tables import render_discord_tables, tables_enabled
 from PIL import Image
 
 
@@ -48,3 +51,26 @@ async def test_unsupported_header_preserves_table_but_supported_neighbor_renders
     text, files = await render_discord_tables(raw + "\n" + supported, enabled=True)
     assert raw in text
     assert len(files) == 1
+
+
+def test_tables_render_by_default_and_explicit_false_opts_out():
+    tenant = uuid.uuid4()
+    assert tables_enabled({}, tenant) is True
+    assert tables_enabled({tenant: True}, tenant) is True
+    assert tables_enabled({tenant: False}, tenant) is False
+
+
+@pytest.mark.parametrize("cell", ["short", "x" * 2000])
+async def test_attachment_description_is_raw_table_truncated_to_discord_limit(cell):
+    table = f"| Value |\n| --- |\n| {cell} |\n"
+    _, files = await render_discord_tables(table, enabled=True)
+    assert files[0].description == table[:1024]
+
+
+async def test_render_failure_keeps_raw_table_text(monkeypatch):
+    def fail(_table):
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(tables, "table_png", fail)
+    table = "| A | B |\n| --- | --- |\n| a | b |\n"
+    assert await render_discord_tables(table, enabled=True) == (table, [])

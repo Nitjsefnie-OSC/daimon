@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import io
+import uuid
+from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
 from typing import cast
@@ -15,6 +17,12 @@ from PIL import Image, ImageDraw, ImageFont
 import discord
 
 _FONTS = Path(__file__).with_name("fonts")
+_DESCRIPTION_LIMIT = 1024  # Discord's attachment description (alt text) limit
+
+
+def tables_enabled(table_rendering: Mapping[uuid.UUID, bool], tenant_id: uuid.UUID) -> bool:
+    """Discord renders tables unless the tenant explicitly opts out with false."""
+    return table_rendering.get(tenant_id) is not False
 
 
 @cache
@@ -93,8 +101,8 @@ def table_png(table: MarkdownTable) -> bytes:
 async def render_discord_tables(
     text: str, *, enabled: bool = False
 ) -> tuple[str, list[discord.File]]:
-    async def hook(table: MarkdownTable) -> bytes:
-        return await asyncio.to_thread(table_png, table)
+    async def hook(table: MarkdownTable) -> tuple[bytes, str]:
+        return await asyncio.to_thread(table_png, table), table.raw
 
     parts = await render_tables(text, hook=hook if enabled else None)
     rendered: list[str] = []
@@ -103,7 +111,10 @@ async def render_discord_tables(
         if isinstance(part, str):
             rendered.append(part)
         else:
+            png, raw = part
             name = f"table-{len(files) + 1}.png"
-            files.append(discord.File(io.BytesIO(part), filename=name))
+            files.append(
+                discord.File(io.BytesIO(png), filename=name, description=raw[:_DESCRIPTION_LIMIT])
+            )
             rendered.append(f"[Table attached: {name}]\n")
     return "".join(rendered), files

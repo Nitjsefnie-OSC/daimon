@@ -59,6 +59,7 @@ from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
+from daimon.adapters.discord.tables import tables_enabled
 from daimon.adapters.discord.thread_gone import (
     ThreadStops,
     TurnThreadWatch,
@@ -3476,7 +3477,7 @@ class DaimonBot(commands.Bot):
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
-                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -3605,7 +3606,7 @@ class DaimonBot(commands.Bot):
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
-                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
                 send=recorder.sender(
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
                 ),
@@ -4210,7 +4211,7 @@ class DaimonBot(commands.Bot):
                 is True,
                 trigger_message=message,
                 acknowledgment_managed=True,
-                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -4725,7 +4726,7 @@ class DaimonBot(commands.Bot):
                 is True,
                 trigger_message=message,
                 acknowledgment_managed=True,
-                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
                 send=turn_send,
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
