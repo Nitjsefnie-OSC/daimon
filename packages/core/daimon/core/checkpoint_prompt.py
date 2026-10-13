@@ -107,10 +107,6 @@ _EXCLUDE_LIST_PATH = "/tmp/daimon-handoff-excludes.txt"
 #: pushed an otherwise empty archive over the 20 MiB cap.
 CHECKPOINT_SCRATCH_DIR = "/tmp/work"
 
-#: The files a task wrote in the shell's starting directory, ``/``, as tar and
-#: find arguments relative to it. Evaluated by the sandbox shell.
-_CWD_FILES = "$(find / -maxdepth 1 -type f ! -name '.*' -printf '%P\\n')"
-
 _SHA1_LINE = re.compile(r"^\s*([0-9a-f]{40})\s*$", re.MULTILINE)
 
 _TOO_LARGE_LINE = re.compile(rf"^\s*{HANDOFF_TOO_LARGE_MARKER}\s+(\d+)\s*$", re.MULTILINE)
@@ -169,12 +165,13 @@ def build_checkpoint_prompt(
     home_root = _relative_to_root(home_dir)
     outputs_root = _relative_to_root(CHECKPOINT_OUTPUTS_DIR)
     scratch_root = _relative_to_root(CHECKPOINT_SCRATCH_DIR)
-    roots = [home_root, outputs_root, scratch_root, _CWD_FILES]
+    roots = [home_root, outputs_root, scratch_root]
     if repo_mount_path is not None and not leave_unsaved:
         roots.append(_relative_to_root(repo_mount_path))
     roots_argument = " ".join(roots)
 
-    excludes = [f"--exclude-from={_EXCLUDE_LIST_PATH}"]
+    # The oversize list holds file names, not patterns: a name like `[e]tc` must not match.
+    excludes = [f"--no-wildcards --exclude-from={_EXCLUDE_LIST_PATH} --wildcards"]
     # Every dot entry directly under $HOME: .ssh, and the ~100 MB of toolchain
     # caches the base image ships (.bun/.cargo/.rustup/.gradle/.npm/.local/
     # .config). `*` matches `/` in a tar exclude pattern, so the subtree goes
@@ -192,9 +189,15 @@ def build_checkpoint_prompt(
     excludes += [f"--exclude='*/{glob}'" for glob in CHECKPOINT_EXCLUDED_GLOBS]
     excludes.append("--exclude='*.env'")
     tar_command = "\n".join(
-        [f"  tar czf {archive_path} \\"]
+        # The loose files in /, where the shell starts, NUL-separated into tar's file list:
+        # never re-read by the shell, `./`-prefixed so no name is an option, and the
+        # oversize ones left out by find itself.
+        [
+            f"  find / -maxdepth 1 -type f ! -name '.*' ! -size +{max_bundle_mib}M "
+            f"-printf './%P\\0' | tar czf {archive_path} \\"
+        ]
         + [f"    {exclude} \\" for exclude in excludes]
-        + [f"    -C / {roots_argument}"]
+        + [f"    -C / {roots_argument} --null -T -"]
     )
 
     steps: list[str] = []
