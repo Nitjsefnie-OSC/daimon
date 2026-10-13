@@ -98,10 +98,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             != ("gemini", "agent", request.scope.tenant_id, request.scope.account_id, plan.project)
         ):
             raise AdmissionDenied(reason="backend_unsupported")
-        if plan.worker_materialization and (
-            runtime.read_agent_counterpart is None
-            or await runtime.read_agent_counterpart(request) != checked
-        ):
+        if plan.worker_materialization and request.verified_counterpart != checked:
             raise AdmissionDenied(reason="backend_unsupported")
         deployment = replace(deployment, native_agent=request.counterpart.agent)
         journal = replace(journal, deployment=deployment)

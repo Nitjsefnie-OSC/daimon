@@ -200,6 +200,9 @@ class ProviderPreparationRequest:
     deadline: dt.datetime
     now: Callable[[], dt.datetime]
     counterpart: AgentRevision | None = field(default=None, kw_only=True)
+    verified_counterpart: AgentRevision | None = field(
+        default=None, kw_only=True, compare=False, repr=False
+    )
     source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
     worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
     before_native: Callable[[], Awaitable[None]] | None = field(

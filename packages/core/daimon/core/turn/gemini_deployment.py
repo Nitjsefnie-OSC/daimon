@@ -29,12 +29,13 @@ from daimon.core.turn.gemini import (
 from daimon.core.turn.gemini_prepare import prepare_gemini_turn
 from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiStorage
 from daimon.core.turn.io import register_turn_codec
-from daimon.core.turn.persistence import current_persistence
+from daimon.core.turn.persistence import TurnPersistence, current_persistence
 from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_preparation
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
     fixed_plan_origin_allowed,
+    materialize_counterpart,
     read_counterpart,
     select_runtime_manifest,
     validate_counterpart_pins,
@@ -317,34 +318,12 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         )
 
     async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
-        validate_counterpart_request(plan, preparation, worker_materialization=True)
-        persistence = current_persistence.get()
-        worker, source, guard = preparation.worker, preparation.source, preparation.before_native
-        if (
-            not plan.worker_materialization
-            or worker is None
-            or worker != request.worker
-            or source is None
-            or source.source is None
-            or guard is None
-            or persistence is None
-            or persistence.scope != preparation.scope
-            or persistence.store is not preparation.deps.state_store
-            or preparation.deps.state_store is not request.deps.state_store
-            or plan.worker_deployment(worker, revision) != deployment
-        ):
-            raise AdmissionDenied(reason="backend_unsupported")
-        catalog_id = persistence.operation_key + ":agent"
-        return await resources(preparation).publish(
-            catalog_id,
-            worker.spec,
-            expected_revision=0,
-            key=catalog_id,
-            persistence=persistence,
-            guard=guard,
-            worker=worker,
-            source=source.source,
-        )
+        async def host(_: TurnPersistence, worker: ResolvedWorkerSpec) -> NeutralResourceHost:
+            if plan.worker_deployment(worker, revision) != deployment:
+                raise AdmissionDenied(reason="backend_unsupported")
+            return resources(preparation)
+
+        return await materialize_counterpart(plan, preparation, request, resources=host)
 
     runtime = TurnRuntime(
         transport_factory=transport,

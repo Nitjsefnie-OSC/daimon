@@ -21,12 +21,13 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_codec import PROFILE
 from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
-from daimon.core.turn.persistence import current_persistence
+from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
     fixed_plan_origin_allowed,
+    materialize_counterpart,
     read_counterpart,
     select_runtime_manifest,
     validate_counterpart_pins,
@@ -387,51 +388,23 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
 
     async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal allocating, worker_agent
-        validate_counterpart_request(
-            deployment, preparation, worker_materialization=deployment.worker_materialization
-        )
-        worker, source, active = (
-            preparation.worker,
-            preparation.source,
-            current_persistence.get(),
-        )
-        if (
-            not deployment.worker_materialization
-            or preparation.scope != scope
-            or preparation.admission.backend_revision != revision
-            or worker != request.worker
-            or worker is None
-            or source is None
-            or source.source is None
-            or active is None
-            or active.scope != scope
-            or active.store is not preparation.deps.state_store
-            or preparation.before_native is None
-        ):
-            raise AdmissionDenied(reason="backend_unsupported")
-        active.check_session(scope, None)
-        expected = deployment.worker_environment(preparation, worker)
-        await preparation.before_native()
-        resources = NeutralResourceHost(
-            driver(runtime, revision, scope),
-            preparation.deps.sessionmaker,
-            scope=scope,
-            account_scope_id=deployment.project,
-            operation_key=active.operation_key,
-        )
-        await deployment.verify_environment(preparation, resources=resources, expected=expected)
-        allocating = True
-        try:
-            row = await resources.publish(
-                active.operation_key + ":agent",
-                worker.spec,
-                expected_revision=0,
-                key=active.operation_key + ":agent",
-                persistence=active,
-                guard=preparation.before_native,
-                worker=worker,
-                source=source.source,
+
+        async def host(active: TurnPersistence, worker: ResolvedWorkerSpec) -> NeutralResourceHost:
+            nonlocal allocating
+            expected = deployment.worker_environment(preparation, worker)
+            resources = NeutralResourceHost(
+                driver(runtime, revision, scope),
+                preparation.deps.sessionmaker,
+                scope=scope,
+                account_scope_id=deployment.project,
+                operation_key=active.operation_key,
             )
+            await deployment.verify_environment(preparation, resources=resources, expected=expected)
+            allocating = True
+            return resources
+
+        try:
+            row = await materialize_counterpart(deployment, preparation, request, resources=host)
         finally:
             allocating = False
         worker_agent = row.agent.ref

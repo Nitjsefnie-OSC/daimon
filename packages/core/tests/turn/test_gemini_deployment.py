@@ -75,6 +75,7 @@ from .test_native_counterpart import clean_sdk_environment as clean_sdk_environm
 from .test_native_counterpart import owned as owned
 from .test_openai_deployment import application as application
 from .test_openai_deployment import manifest
+from .test_openai_worker_plan import claimed_openai_worker as claimed_openai_worker
 
 
 @pytest.fixture
@@ -345,8 +346,8 @@ def test_worker_target_refuses_undeclared_or_unrepresentable_native_intent(
 
 
 @pytest.fixture
-def provider() -> Literal["gemini"]:
-    return "gemini"
+def provider(request: pytest.FixtureRequest) -> Literal["openai", "gemini"]:
+    return cast(Literal["openai", "gemini"], getattr(request, "param", "gemini"))
 
 
 @pytest.mark.parametrize(
@@ -1173,6 +1174,7 @@ async def test_worker_materialization_runs_the_real_headless_driver(
     assert result.result is not None and result.result.excerpt == "verified-worker-result"
     creations = [call for call in owned.wire.requests if call.method == "POST"]
     assert len(creations) == 1
+    assert len([call for call in owned.wire.requests if call.method == "GET"]) == 2
     body = json.loads(creations[0].content)
     assert body["id"] == owned.wire.native_id and body["id"] != before
     assert body["agent_config"] == {"type": "antigravity", "model": FLASH_PRIMARY}
@@ -1341,3 +1343,153 @@ async def test_dynamic_worker_callbacks_require_a_lease_before_key_or_native_acc
         with pytest.raises((AdmissionDenied, ScopeViolation)):
             await runtime.read_agent_counterpart(selected)
     assert not owned.wire.requests and not calls
+
+
+@pytest.mark.parametrize("fault", ("missing", "different"))
+async def test_dynamic_preparation_requires_the_prefix_verified_counterpart(
+    materialization_worker_request: tuple[_ClaimedWorker, str],
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn import runtime_manifest
+
+    (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
+    read = runtime_manifest.read_preparation_counterpart
+
+    async def substitute(request: ProviderPreparationRequest) -> ProviderPreparationRequest:
+        verified = await read(request)
+        assert verified.counterpart is not None
+        marker = (
+            None
+            if fault == "missing"
+            else replace(verified.counterpart, catalog_id="different-catalog")
+        )
+        return replace(verified, verified_counterpart=marker)
+
+    monkeypatch.setattr(runtime_manifest, "read_preparation_counterpart", substitute)
+    with pytest.raises(AdmissionDenied) as refused:
+        await run_worker(
+            selected,
+            parent=root,
+            worker=worker,
+            trigger_message="Complete the assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert refused.value.reason == "backend_unsupported"
+    assert not any(call.method == "POST" for call in calls)
+    assert [call.method for call in owned.wire.requests] == ["POST", "GET", "GET"]
+
+
+async def _refuse_materialization_before_host(
+    claimed_worker_request: _ClaimedWorker,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    from contextlib import nullcontext
+
+    from daimon.core.turn.persistence import TurnPersistence
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+    from daimon.core.turn.runtimes import build_channel_runtime
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+    from mux.state.memory import MemoryStateStore
+
+    selected, _, worker, _, owned, calls = claimed_worker_request
+    values = json.loads(owned.manifest_path.read_text())[0]
+    values.update(
+        worker_materialization=True,
+        agent_id=None,
+        counterpart_catalog_id=None,
+        counterpart_catalog_revision=None,
+    )
+    plan = type(owned.plan).model_validate(values)
+    owned.manifest_path.write_text(json.dumps([plan.model_dump(mode="json")]))
+
+    async def guard() -> None:
+        pytest.fail("refused authority reached the fresh financial guard")
+
+    selected = replace(
+        selected,
+        source=await capture_preparation_source(selected),
+        before_native=guard,
+        deps=replace(selected.deps, turn_runtimes={}),
+    )
+    runtime = build_channel_runtime(selected)
+    assert runtime.materialize_worker is not None
+    owned.wire.requests.clear()
+    calls.clear()
+    changed = selected
+    if fault == "scope":
+        changed = replace(
+            selected, scope=selected.scope.model_copy(update={"authorization_id": "foreign"})
+        )
+    elif fault == "store":
+        changed = replace(selected, deps=replace(selected.deps, state_store=MemoryStateStore()))
+    elif fault == "worker":
+        changed = replace(selected, worker=None)
+    elif fault == "source":
+        changed = replace(selected, source=None)
+    elif fault == "guard":
+        changed = replace(selected, before_native=None)
+    assert selected.deps.state_store is not None and selected.admission.backend_revision is not None
+    persistence = TurnPersistence(
+        selected.deps.state_store,
+        None,
+        selected.scope,
+        slot=Slot(
+            thread=ThreadRef(
+                channel=selected.admission.backend_revision.channel, thread_id=selected.thread_id
+            ),
+            account_id=selected.scope.account_id,
+        ),
+        operation_key=f"fleet:{worker.run_id}:spawn:{worker.ordinal}",
+        now=selected.now,
+    )
+    getter = os.environ.get
+
+    def key(name: str, default: str | None = None) -> str | None:
+        if name == plan.api_key_env:
+            pytest.fail("refused authority read the provider key")
+        return getter(name, default)
+
+    monkeypatch.setattr(os.environ, "get", key)
+
+    async def materialize() -> None:
+        assert runtime.materialize_worker is not None
+        await runtime.materialize_worker(changed)
+
+    with (
+        persistence.activate() if fault != "context" else nullcontext(),
+        pytest.raises((AdmissionDenied, ScopeViolation)),
+    ):
+        if fault in ("context", "lease"):
+            await materialize()
+        else:
+            await persistence.run(materialize)
+    assert not owned.wire.requests and not calls
+
+
+@pytest.mark.parametrize(
+    "fault", ("context", "lease", "scope", "store", "worker", "source", "guard")
+)
+async def test_gemini_shared_materialization_refuses_before_provider_host_construction(
+    claimed_worker_request: _ClaimedWorker,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    await _refuse_materialization_before_host(claimed_worker_request, monkeypatch, fault)
+
+
+@pytest.mark.parametrize("provider", ("openai",), indirect=True)
+@pytest.mark.parametrize("claimed_openai_worker", (False,), indirect=True)
+@pytest.mark.parametrize(
+    "fault", ("context", "lease", "scope", "store", "worker", "source", "guard")
+)
+async def test_openai_shared_materialization_refuses_before_provider_host_construction(
+    claimed_openai_worker: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    await _refuse_materialization_before_host(claimed_openai_worker[:6], monkeypatch, fault)
