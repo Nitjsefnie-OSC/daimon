@@ -561,7 +561,7 @@ class SlackApp:
             )
 
     def start_delivery_poller(self) -> asyncio.Task[None]:
-        """Post routine results to their destinations (FEAT-085) until draining."""
+        """Post routine results to their destinations until draining."""
         return self._spawn(
             run_delivery_poller(
                 self.runtime.sessionmaker,
@@ -1116,7 +1116,7 @@ class SlackApp:
                 if _sup.proceed:
                     self._spawn(run_support_submission(self.runtime, _sup))
             else:
-                # Unknown view_submission callback_id — log and ack empty (T-82-20).
+                # Unknown view_submission callback_id — log and ack empty.
                 log.info("slack.on_request.unknown_view_submission_callback", callback_id=cb_id)
                 await client.send_socket_mode_response(
                     SocketModeResponse(envelope_id=req.envelope_id)
@@ -1268,7 +1268,7 @@ class SlackApp:
                     self._spawn(handle_hand_over_click(self.runtime, payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
-            # confirmed or corrected from staging logs (T-82-20).
+            # confirmed or corrected from staging logs.
             log.debug("slack.on_request.unrecognised_envelope_type", req_type=req.type)
 
     @staticmethod
@@ -1416,7 +1416,7 @@ class SlackApp:
             # Mentions that arrive during the drain window are acked by on_request
             # (ack-first is unconditional) but dropped here before the dedup insert.
             # Slack considers them delivered; they will not be redelivered to the
-            # replacement instance — this is inherent to ack-first + drain (IN-02).
+            # replacement instance — this is inherent to ack-first + drain.
             return
 
         await self._wait_for_orphan_recovery()
@@ -1694,7 +1694,7 @@ class SlackApp:
         # (1) Per-thread queue check — queued mentions don't consume a slot.
         if thread_key in self._processing:
             # Append before awaiting reactions_add so a Slack API error on the
-            # reaction call does not drop the enqueued event (WR-05).
+            # reaction call does not drop the enqueued event.
             self._pending.setdefault(thread_key, []).append(event)
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
                 await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
@@ -2042,7 +2042,7 @@ class SlackApp:
         is_admin = admin_status
 
         # --- Stage one: admission (identity, config cascade, missing-config
-        # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
+        # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
         try:
             admission = await admit(
                 self.runtime.turn_deps,
@@ -2315,7 +2315,7 @@ class SlackApp:
                 return
 
             # One shared ceiling deadline for THIS turn, computed once the clock
-            # starts (D-03/D-04): right after admission passes, not before --
+            # starts: right after admission passes, not before --
             # admit() itself is deliberately outside the ceiling. Passed as the
             # SAME value to both bind_session and run_prepared_turn below rather
             # than letting each default its own `deadline=None` window -- the
@@ -2338,7 +2338,7 @@ class SlackApp:
             turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
             # --- Stage two: bind_session (find-or-create, mapping write,
-            # recorder binding) -- D-01 bind_session(). As on Discord,
+            # recorder binding) -- bind_session(). As on Discord,
             # session_account_id is the admitted caller's account, and threads
             # always pre-exist. ---
             try:
@@ -2638,7 +2638,7 @@ class SlackApp:
                         ),
                     )
 
-            # --- Run the turn (D-08/D-09/D-10: run_prepared_turn owns the driver
+            # --- Run the turn (run_prepared_turn owns the driver
             # call and the one-shot dead-session recovery cycle). lifecycle and
             # lifecycle_holder were constructed above, before bind_session. ---
             log.info(
@@ -2853,7 +2853,7 @@ class SlackApp:
 
             # --- Watermark --- Preserves Slack's original gate exactly (unconditional
             # on final_ts, no state.error branch) -- Discord's inline sequence had an
-            # error-vs-success split here, but that is NOT one of SPEC Req 7's four
+            # error-vs-success split here, but that is NOT one of the spec's four
             # named behaviour changes, so it is not introduced for Slack either.
             if mapping_id is not None and final_lifecycle.final_ts is not None:
                 async with self.runtime.sessionmaker() as s:

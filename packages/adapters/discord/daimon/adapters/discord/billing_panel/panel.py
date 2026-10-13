@@ -498,7 +498,7 @@ class _DoneButton(discord.ui.Button["BillingPanelView"]):
     async def callback(self, interaction: discord.Interaction) -> None:
         if self.view is None:
             return
-        # Re-render a controls-less container instead of view=None (B8: never view=None).
+        # Re-render a controls-less container instead of view=None (never view=None).
         controls_less = layout.static_view(
             build_billing_container(
                 self.view.state, now=self.view.panel_now, since=self.view.panel_since
@@ -519,13 +519,13 @@ async def _create_checkout(
     """POST to the MCP /billing/checkout route via an authenticated account token.
 
     Discord cannot import stripe directly (adapter independence). This helper
-    sends a bearer-authed HTTP POST to the MCP route built in Plan 03. The URL
+    sends a bearer-authed HTTP POST to the MCP billing route. The URL
     returned is the ephemeral Stripe Checkout Session URL.
 
     The bearer is a plain non-admin account token (mint_jwt): the checkout route
     only authenticates the account and uses the verifier-derived tenant — it never
     checks admin. Minting an is_admin+internal token here would hand an arbitrary
-    platform account a non-revocable admin bearer at the MCP gate (#162 / CR-01).
+    platform account a non-revocable admin bearer at the MCP gate.
     """
     settings = view.runtime.settings
     # The /billing/checkout route is add_route'd at the app root, not under the

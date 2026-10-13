@@ -27,13 +27,13 @@ Every other point-in-time column (``created_at``, ``expires_at``,
 
 ``archive_path`` is the publish route's own record of where it persisted the
 report's most recently pushed archive under ``settings.data_dir / slug``. It
-is never derived from caller input by this module (T-21-12-H): the publish
+is never derived from caller input by this module: the publish
 route composes it and hands it to ``save_bundle_reference`` as one unit with
 the bundle handle/sha256/expiry it describes, because a handle recorded
 without the archive that produced it is a re-push that cannot happen.
 
 Per-report seam tokens (``seam_token``) sit in this database at the same
-trust level as the admin bearer (T-21-12-F): the host's data volume is not
+trust level as the admin bearer: the host's data volume is not
 shared with any other service, and revocation-on-delete is the real control,
 landing with the publishing routes.
 """
@@ -500,7 +500,7 @@ def prune_expired_recipients(conn: sqlite3.Connection, *, now: datetime) -> int:
     """Delete every recipient row past its expiry, revoked or not.
 
     Belt and braces against the reader route's own ``load_recipient`` expiry
-    check (T-21-18-E): a second, independent control, and it keeps the table
+    check: a second, independent control, and it keeps the table
     from growing forever. Returns how many rows were removed.
     """
     with conn:
@@ -563,7 +563,7 @@ def consume_upload_token(conn: sqlite3.Connection, *, token: str) -> UploadToken
     One `DELETE ... RETURNING`, no preceding read: the row's presence IS its
     unused state, so deleting it and returning what was deleted is the
     single-use check and the burn in one statement — two concurrent uses of
-    the same token cannot both see it as present (T-21-17-B).
+    the same token cannot both see it as present.
     """
     with conn:
         cur = conn.execute(

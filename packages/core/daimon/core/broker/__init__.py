@@ -6,7 +6,7 @@ classes hold no per-instance config (settings + sessionmaker come in via
 ``mint_token`` kwargs — prefer pure functions and dependency injection).
 
 Audit logs deliberately carry only metadata — service, account UUID, agent
-UUID, outcome — never the token plaintext (T-19-03-01).
+UUID, outcome — never the token plaintext.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 logger = structlog.get_logger()
 
 # Stateless protocol implementers — module-level dict is acceptable
-# (no I/O, no settings cached). See research § Pattern 2 + Assumption A3.
+# (no I/O, no settings cached).
 _REGISTRY: dict[str, TokenProvider] = {
     GitHubTokenProvider.service: GitHubTokenProvider(),
     GcloudTokenProvider.service: GcloudTokenProvider(),

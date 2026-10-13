@@ -11,7 +11,7 @@ subscriptable`` because its poll task died while the seam turn kept running.
 These four sweeps are the host's cleanup: re-attach to what survived a
 restart, cancel what timed out while the host was down, archive what has
 sat idle too long, and prune what has expired — one bad row must never abort
-a whole pass (T-21-18-G), so every loop below catches per item, logs, and
+a whole pass, so every loop below catches per item, logs, and
 continues.
 """
 
@@ -56,8 +56,8 @@ async def resume_running_threads(
     and end the turn; never schedule anything for it. A thread with a
     handle is a turn the seam is still running server-side: schedule
     ``run_turn(..., message=None)`` so the poller resumes exactly where it
-    left off, distinguishing "lost" from "still running" (T-21-18-A,
-    T-21-18-C). Returns how many re-attaches were scheduled.
+    left off, distinguishing "lost" from "still running".
+    Returns how many re-attaches were scheduled.
     """
     resumed = 0
     for thread in threads_store.list_running_threads(conn):
@@ -101,7 +101,7 @@ async def cancel_expired_turns(
     """Cancel a running turn whose deadline passed while the host was down.
 
     Left unwatched, such a turn would run to completion with no poller
-    watching it settle (T-21-18-A — this is the after-a-restart case; a live
+    watching it settle (this is the after-a-restart case; a live
     host's own ``run_turn`` already cancels at its deadline itself). Calls
     ``cancel_turn`` once and stores the billing-disclosure message, then
     leaves the thread ``running`` — the poller (re-attached by
@@ -142,7 +142,7 @@ async def archive_idle_threads(
 ) -> int:
     """Archive, upstream then locally, every thread idle past the configured window.
 
-    The seam call must succeed before the local archive happens (T-21-18-B):
+    The seam call must succeed before the local archive happens:
     a local-only archive would hide a session that is still live upstream
     and never reclaimed by the seam's own usage sweep. A seam failure on one
     thread must not stop the others. A thread that never bound a handle
@@ -172,7 +172,7 @@ def prune_expired_recipients(*, conn: sqlite3.Connection, now: Callable[[], date
     Belt and braces: expiry is already enforced at the reader route
     (``reports_store.load_recipient``'s own ``expires_at`` check), but
     pruning keeps the table from growing forever and keeps a link dead even
-    if that route-level check were ever relaxed (T-21-18-E). Returns how
+    if that route-level check were ever relaxed. Returns how
     many rows were removed.
     """
     return reports_store.prune_expired_recipients(conn, now=now())

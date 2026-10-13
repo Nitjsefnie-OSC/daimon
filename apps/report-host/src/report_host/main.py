@@ -68,7 +68,7 @@ def create_app(settings: Settings) -> FastAPI:
     # sweep alike — reads the exact same flag through `_run_turn` below. This
     # is what makes a turn interrupted by shutdown leave its thread `running`
     # (so the next boot's resume re-attaches to it) rather than being told,
-    # incorrectly, that the answer was lost (T-21-18-A).
+    # incorrectly, that the answer was lost.
     shutting_down = False
 
     def is_shutting_down() -> bool:
@@ -143,7 +143,7 @@ async def _sweep_loop(
     """Background task: every ``_SWEEP_INTERVAL_SECONDS``, cancel expired
     turns, archive idle threads, and prune expired recipients.
 
-    One sweep failing must not stop the next tick (T-21-18-G) — the
+    One sweep failing must not stop the next tick — the
     individual sweep functions already guard per item; this loop's own
     ``except Exception`` is the outer belt for a failure in the loop
     plumbing itself (e.g. a database file gone missing).

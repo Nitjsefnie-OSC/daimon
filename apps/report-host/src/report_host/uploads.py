@@ -4,14 +4,14 @@ Two separate `PUT` routes, one credential and one body format each — this is
 what the prototype (`spikes/report-host/host/app.py`) got wrong, running
 both through one handler with two token formats and two body formats. A
 single handler that branches on what it received is the exact design this
-replaces (T-21-17-F).
+replaces.
 
 `PUT /publish/{capability_token}` (`application/gzip`) is the highest-risk
 route in this module: it is authorised by a capability token signed with the
 same secret set as the admin bearer, extracts one report PDF from an
 untrusted archive without ever calling `TarFile.extract()`/`extractall()`,
 persists the whole archive on the host's own volume (so the one re-push
-after the seam's copy expires — SPEC D-03 — has something to send), and only
+after the seam's copy expires has something to send), and only
 then hands it to the seam under the report's own token.
 
 `PUT /upload/{turn_token}` (`application/pdf`) is the much smaller sibling:
@@ -19,7 +19,7 @@ a per-turn, single-use token minted by `routes.ask` authorises exactly one
 revised-PDF upload for the thread that requested it.
 
 Both tokens are burnt BEFORE the request body is read — a client that
-disconnects mid-upload must not leave a token still usable (T-21-17-B). The
+disconnects mid-upload must not leave a token still usable. The
 capability token's `jti` is burnt durably via `consumed_store` (mirroring
 `notebook_host.consumed_store`, so a burn survives a host restart); the
 per-turn upload token's burn is `reports_store.consume_upload_token`, an
@@ -51,7 +51,7 @@ from report_host.mcp_client import SeamClient, SeamError, SeamUnauthorizedError
 # One message per route, covering every failure reason that route has —
 # unknown, tampered, expired, wrong-operation, already-used, and (for the
 # publish route) a slug with no report all collapse into the same 404. A
-# caller learns nothing about which reason applied (T-21-17-H).
+# caller learns nothing about which reason applied.
 _PUBLISH_INVALID_MESSAGE = "this publish link is invalid, expired, or already used"
 _UPLOAD_INVALID_MESSAGE = "this upload link is invalid, expired, or already used"
 _REPORT_UNAUTHORIZED_MESSAGE = (
@@ -91,7 +91,7 @@ async def _spool_body(
 
     Never buffers the whole body before checking size — the running total is
     checked on every chunk, so an oversize upload is refused as soon as it
-    crosses the cap rather than after it has all arrived (T-21-17-E).
+    crosses the cap rather than after it has all arrived.
     """
     # Not a `with` block: the caller owns this file's lifetime past this
     # function's return (it is read, rewound, and eventually `.close()`d by
@@ -137,7 +137,7 @@ def _is_hostile_member(member: tarfile.TarInfo) -> bool:
     own extraction filter (``tarfile.data_filter``, applied afterwards as a
     second layer) strips a leading ``/`` before deciding whether a name is
     absolute, so a raw absolute-path member survives it; these explicit
-    checks are the real guard (T-21-17-C).
+    checks are the real guard.
     """
     if member.name.startswith("/") or os.path.isabs(member.name):
         return True
@@ -229,7 +229,7 @@ def _persist_archive_for_publish(*, spool: IO[bytes], archive_path: Path) -> Non
     ``bundle_ttl_days`` and ``recipient_link_ttl_days`` are both 90, so the
     seam's copy of a bundle expiring while a recipient link is still live is
     the normal case, not a rare one — this file is what the turn driver
-    re-pushes when that happens (SPEC D-03). A crash mid-write must never
+    re-pushes when that happens. A crash mid-write must never
     leave a truncated archive standing at ``archive_path``: the write goes
     to a temp name in the same directory, is fsynced, and only then replaces
     the final name. Do not "clean this up" into a direct write — the fsync
@@ -274,7 +274,7 @@ def _report_dir(*, data_dir: Path, slug: str) -> Path:
 
     Composed only from ``data_dir`` and the slug the signed capability
     named — never from anything in the request path or the archive's own
-    member names (T-21-17-I).
+    member names.
     """
     data_dir_resolved = data_dir.resolve()
     candidate = (data_dir_resolved / slug).resolve()
@@ -312,11 +312,11 @@ def build_uploads_router(
             # `verify_token` outcome (`None`) except wrong-operation, which
             # this explicit check catches for defence-in-depth even though
             # `CapabilityClaims.op`'s own type already excludes it — one 404
-            # either way (T-21-17-A).
+            # either way.
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_PUBLISH_INVALID_MESSAGE)
 
         # Burn before reading the body: a client that disconnects mid-upload
-        # must not leave the capability still usable (T-21-17-B).
+        # must not leave the capability still usable.
         burned = burn_jti(
             consumed_file,
             claims.jti,
@@ -330,8 +330,7 @@ def build_uploads_router(
         if report is None:
             # The publisher's admin PUT always runs first, so a missing
             # report here is a genuine error, not a race — but the response
-            # is identical to every other invalid-capability case
-            # (T-21-17-H).
+            # is identical to every other invalid-capability case.
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_PUBLISH_INVALID_MESSAGE)
 
         ceiling = min(claims.max_bytes, settings.max_bundle_bytes)

@@ -121,7 +121,7 @@ async def sweep_removed_skills(
 
     present_names carries canonical (tenant-prefixed) display titles — the caller
     must map bare skill names through tenant_scoped_display_title before passing them
-    here. The root cause of #129 was passing bare names, causing a mismatch against
+    here. Passing bare names was a past bug, causing a mismatch against
     the prefixed titles on MA.
 
     Candidate filter (in order — all must pass):
@@ -151,7 +151,7 @@ async def sweep_removed_skills(
     # Skills carry no daimon_managed marker (MA skills have no metadata field),
     # so — unlike the agent/env sweeps — we cannot tell a defaults-created skill
     # from a user-synced one. Spare any skill an agent still pins so the sweep
-    # never deletes a live agent's skill out from under it (smoke-matrix #19).
+    # never deletes a live agent's skill out from under it.
     referenced_skill_ids = await list_referenced_skill_ids(client)
     outcomes: list[ResourceOutcome] = []
     for sk in all_skills:

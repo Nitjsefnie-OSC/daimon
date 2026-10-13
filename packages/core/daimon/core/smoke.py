@@ -60,21 +60,21 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SMOKE_PLATFORM: Platform = "cli"
-"""D-05's dedicated smoke identity: never routed through discover_tenant()."""
+"""Dedicated smoke identity: never routed through discover_tenant()."""
 
 SMOKE_WORKSPACE_ID = "smoke"
 
 SMOKE_PROMPT = "Reply with the single word: done"
-"""SPEC req 4: a fixed, trivial, no-tools message bounding per-run spend."""
+"""A fixed, trivial, no-tools message bounding per-run spend."""
 
 SMOKE_MODEL = "claude-haiku-5-5"
 """Keep the deployment smoke turn inexpensive without changing seeded agents."""
 
 SMOKE_TOPUP_USD = Decimal("5.00")
-"""D-07's small top-up credit, applied only when the ledger balance is <= 0."""
+"""Small top-up credit, applied only when the ledger balance is <= 0."""
 
 SMOKE_TIMEOUT_S = 180.0
-"""D-04's in-command bound; well under the scheduler's 600s dispatch_timeout_s
+"""In-command bound; well under the scheduler's 600s dispatch_timeout_s
 reference, since a no-tool turn is far cheaper."""
 
 

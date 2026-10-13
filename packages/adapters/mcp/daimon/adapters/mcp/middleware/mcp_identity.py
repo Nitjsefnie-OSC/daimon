@@ -103,7 +103,7 @@ async def production_internal_resolver(context: MiddlewareContext) -> str | None
     A Discord vault token minted by ``mint_jwt`` never carries this claim. The admin gate
     keys on ``(role == ADMIN) OR (is_admin_claim AND internal_claim)`` so a stale pre-sweep
     Discord vault credential with ``is_admin=True`` and ``role=user`` is denied admin
-    elevation, closing the #162 escalation independent of the 88-06 sweep.
+    elevation, closing the admin escalation independent of the credential sweep.
     """
     del context
     token = get_access_token()
@@ -313,12 +313,12 @@ class IdentityMiddleware(Middleware):
             try:
                 agent_id = uuid.UUID(raw_agent_id)
             except (ValueError, TypeError):
-                # Malformed claim is treated as absent (T-19-04-07).
+                # Malformed claim is treated as absent.
                 # Fail-closed downstream at the gcloud provider via NoBindingError.
                 agent_id = None
         is_admin_claim = (await self._is_admin_resolver(context)) == "true"
         internal_claim = (await self._internal_resolver(context)) == "true"
-        # Admin gate (#162 / ADMIN-02): a Discord vault token's baked is_admin claim alone
+        # Admin gate: a Discord vault token's baked is_admin claim alone
         # MUST NOT elevate a non-admin caller. The internal discriminator distinguishes
         # trusted internal tokens (CLI/scheduler/headless, minted by mint_internal_mcp_token)
         # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).

@@ -6,7 +6,7 @@ router, gated by the admin bearer — mirroring
 the caller is daimon, not which tenant's report is being touched: every
 report row carries its own ``tenant_id``, and the publish and delete routes
 both refuse a caller-supplied tenant that does not match the existing row
-(T-21-16-B, slug squatting). The publish-upload route
+(slug squatting). The publish-upload route
 (``PUT /publish/{capability_token}``) is authorised by a capability token
 instead and lives in a separate module — the two authorisation mechanisms
 never mix in one place.
@@ -30,11 +30,11 @@ from report_host.config import Settings
 
 # Lowercase alphanumerics and hyphens only, no leading/trailing hyphen, bounded
 # length. The slug becomes both a directory name and a URL segment, so a
-# separator or a ".." is a filesystem bug waiting to happen (T-21-16-D).
+# separator or a ".." is a filesystem bug waiting to happen.
 _SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SLUG_MAX_LEN = 64
 
-# Deliberately silent about which tenant already owns the slug (T-21-16-C).
+# Deliberately silent about which tenant already owns the slug.
 _TENANT_MISMATCH_MESSAGE = "this slug belongs to a different tenant"
 
 
@@ -53,7 +53,7 @@ def _bearer_dep(settings: Settings) -> Callable[[str | None], None]:
     def require(authorization: str | None = Header(default=None)) -> None:
         provided = authorization or ""
         # No short-circuit: comparing every entry avoids a timing leak of
-        # which secret, if any, matched (T-21-16-A).
+        # which secret, if any, matched.
         matched = False
         for secret in settings.admin_secrets:
             expected = f"Bearer {secret.get_secret_value()}"
@@ -86,7 +86,7 @@ class RecipientLink(BaseModel):
 
 class PublishResponse(BaseModel):
     # No seam_token here — it must never be echoed back into a response or a
-    # log (T-21-16-F).
+    # log.
     slug: str
     links: list[RecipientLink]
 
@@ -132,7 +132,7 @@ def build_admin_router(
         Refuses 403 when an existing row belongs to a different tenant —
         one tenant must not take over another tenant's slug by publishing
         over it. Otherwise ``save_report`` preserves spend, the served PDF
-        and the bundle reference (T-21-16-E); every previously issued
+        and the bundle reference; every previously issued
         recipient link is revoked and a fresh one minted per submitted
         recipient, since a re-publish replaces the recipient set outright
         rather than diffing old against new.
@@ -186,7 +186,7 @@ def build_admin_router(
 
         Reports ``deleted`` rather than an unconditional success — a caller
         that cannot tell "I removed it" from "there was nothing by that
-        name" reports a typo'd slug as a real deletion (T-21-16-G). Refuses
+        name" reports a typo'd slug as a real deletion. Refuses
         403 on a tenant mismatch, leaving the row and its directory
         untouched.
         """
@@ -200,7 +200,7 @@ def build_admin_router(
             # A validated slug can never escape data_dir, but this is the
             # one place that removes a directory tree, so it re-asserts the
             # containment it depends on rather than trusting validation
-            # alone (T-21-16-D).
+            # alone.
             if report_dir.parent == settings.data_dir:
                 shutil.rmtree(report_dir, ignore_errors=True)
         return DeleteResponse(deleted=deleted)
