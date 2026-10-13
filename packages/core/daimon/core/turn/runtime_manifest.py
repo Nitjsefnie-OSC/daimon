@@ -399,13 +399,13 @@ async def read_preparation_counterpart(
             if (
                 worker is None
                 or persistence is None
-                or persistence.scope != selected.scope
                 or persistence.store is not selected.deps.state_store
                 or persistence.slot.thread.channel != revision.channel
                 or persistence.slot.thread.thread_id != selected.thread_id
                 or persistence.slot.account_id != selected.scope.account_id
             ):
                 raise UnsupportedCapability(("worker_materialization",), revision.profile)
+            persistence.check_session(selected.scope, None)
             timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
             await asyncio.wait_for(selected.before_native(), timeout=timeout)
             timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
@@ -603,7 +603,6 @@ async def read_counterpart(
     acknowledged = request.counterpart if worker_materialization else None
     if worker_materialization and (
         persistence is None
-        or persistence.scope != scope
         or persistence.store is not request.deps.state_store
         or acknowledged is None
         or source.source is None
@@ -616,6 +615,8 @@ async def read_counterpart(
         or acknowledged.catalog_id != persistence.operation_key + ":agent"
     ):
         raise AdmissionDenied(reason="backend_unsupported")
+    if persistence is not None:
+        persistence.check_session(scope, None)
     catalog_id = acknowledged.catalog_id if acknowledged else cast(str, plan.counterpart_catalog_id)
     if (
         source.tenant_id != request.tenant_id

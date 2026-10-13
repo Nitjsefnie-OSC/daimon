@@ -2011,7 +2011,9 @@ async def test_claimed_worker_supplies_its_fresh_guard_to_registered_materializa
 
 
 @pytest.mark.parametrize("provider", ["gemini"], indirect=True)
-@pytest.mark.parametrize("fault", ["missing_context", "scope", "store", "thread", "account"])
+@pytest.mark.parametrize(
+    "fault", ["missing_context", "unleased", "scope", "store", "thread", "account"]
+)
 async def test_materialization_requires_the_exact_active_preparation_owner(
     explicit_worker_request,
     fault,
