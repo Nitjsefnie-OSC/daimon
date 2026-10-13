@@ -2588,3 +2588,13 @@ root must explicitly grant that exact source and revision, and the owner capture
 must bind the complete source snapshot to the root's authorized account scope.
 An arbitrary foreign or unbound account reference cannot use this path; the
 source identity is never relabeled as the worker's account.
+
+An OpenAI deployment can explicitly enable `worker_materialization` (default
+`false`) with exact source identity/revision pins and finite configuration bounds.
+Dynamic plans omit fixed native agent and catalog target pins. The actual worker
+uses the existing scoped publisher and session mutation owner with one attempt;
+unknown acknowledgments retain their operation for reconciliation. The verified
+native target is consumed directly without changing the deployment manifest.
+Complete message journal identities match the stable accepted provider item ID;
+the true native stream event ID remains in provenance. Unconfigured and fixed
+deployments retain their existing behavior.

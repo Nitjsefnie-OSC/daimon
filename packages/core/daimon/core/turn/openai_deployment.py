@@ -21,6 +21,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_codec import PROFILE
 from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
+from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
@@ -67,11 +68,14 @@ class OpenAIDeployment(BaseModel):
     config_digest: Nonblank | None = None
     configuration_grant: ConfigurationGrant | None = None
     project: Nonblank
-    agent_id: Nonblank
+    agent_id: Nonblank | None = None
     environment_id: Nonblank
     api_key_env: ApiKeyEnvironment
     spend_limit_usd_cents: Annotated[int, Field(gt=0, strict=True)] | None = None
     skill_ids: tuple[Nonblank, ...] = ()
+    worker_materialization: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: not value
+    )
     source_agent_id: UUID | None = None
     source_agent_version: Annotated[int, Field(gt=0, strict=True)] | None = None
     counterpart_catalog_id: Nonblank | None = None
@@ -81,7 +85,9 @@ class OpenAIDeployment(BaseModel):
     def _configuration_authorization(self) -> OpenAIDeployment:
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
-        validate_counterpart_pins(self)
+        validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
+        if not self.worker_materialization and self.agent_id is None:
+            raise ValueError("a fixed deployment requires a native agent identity")
         return self
 
     async def read_counterpart(
@@ -112,26 +118,49 @@ class OpenAIDeployment(BaseModel):
                 }
                 if metadata != dict(worker.spec.metadata or {}):
                     raise AdmissionDenied(reason="backend_unsupported")
-            scope = request.scope
-            environment = await resources.backend.environments.retrieve(
-                scope,
-                ResourceRef(
-                    id=self.environment_id,
-                    kind="environment",
-                    provider="openai",
-                    account_scope_id=self.project,
-                    tenant_id=scope.tenant_id,
-                    account_id=scope.account_id,
-                ),
-            )
-            if environment.lifecycle != "active" or environment.spec.execution != "hosted":
-                raise AdmissionDenied(reason="backend_unsupported")
-            if worker is not None and environment.spec != expected:
-                raise AdmissionDenied(reason="backend_unsupported")
+            await self.verify_environment(request, resources=resources, expected=expected)
 
         return await read_counterpart(
-            self, request, source=source, resources=resources, verify_native=verify_native
+            self,
+            request,
+            source=source,
+            resources=resources,
+            verify_native=verify_native,
+            worker_materialization=self.worker_materialization,
         )
+
+    async def verify_environment(
+        self,
+        request: ProviderPreparationRequest,
+        *,
+        resources: NeutralResourceHost,
+        expected: EnvironmentSpec | None,
+    ) -> None:
+        scope = request.scope
+        environment = await resources.backend.environments.retrieve(
+            scope,
+            ResourceRef(
+                id=self.environment_id,
+                kind="environment",
+                provider="openai",
+                account_scope_id=self.project,
+                tenant_id=scope.tenant_id,
+                account_id=scope.account_id,
+            ),
+        )
+        if expected is not None:
+            expected = expected.model_copy(
+                update={
+                    "description": None if expected.description == "" else expected.description,
+                    "metadata": None if expected.metadata == {} else expected.metadata,
+                }
+            )
+        if (
+            environment.lifecycle != "active"
+            or environment.spec.execution != "hosted"
+            or (expected is not None and environment.spec != expected)
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
 
     def worker_environment(
         self, request: ProviderPreparationRequest, worker: ResolvedWorkerSpec
@@ -152,7 +181,7 @@ class OpenAIDeployment(BaseModel):
             or worker.resources
             or environment is None
             or environment.execution != "hosted"
-            or environment.description is not None
+            or environment.description not in (None, "")
             or environment.scope is not None
             or environment.metadata
             or environment.native_config is not None
@@ -192,7 +221,9 @@ def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
     if origin != "agent" or not request.deps.agent_backends:
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = _manifest_deployment(request)
-    validate_counterpart_request(deployment, request)
+    validate_counterpart_request(
+        deployment, request, worker_materialization=deployment.worker_materialization
+    )
     return deployment
 
 
@@ -235,7 +266,11 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     if revision is None or revision.model != "gpt-6-luna":
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = load_deployment(request)
+    if deployment.worker_materialization and request.worker is None:
+        raise AdmissionDenied(reason="backend_unsupported")
     scope = request.scope
+    worker_agent: ResourceRef | None = None
+    allocating = False
 
     def check(config: ConfigRevision, authorized: Scope) -> None:
         if config != revision or authorized != scope:
@@ -255,19 +290,30 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 account_id=scope.account_id,
             )
 
-        agent = ref(deployment.agent_id, "agent")
+        agent = worker_agent
+        if not deployment.worker_materialization:
+            if deployment.agent_id is None:
+                raise AdmissionDenied(reason="backend_unsupported")
+            agent = ref(deployment.agent_id, "agent")
+        if agent is None:
+            raise AdmissionDenied(reason="backend_unsupported")
         if preparation.admission.backend_revision_origin == "agent":
             checked = preparation.counterpart
             if not preparation.deps.agent_backends or checked is None:
                 raise AdmissionDenied(reason="backend_unsupported")
-            validate_counterpart_request(deployment, preparation)
-            if (
+            validate_counterpart_request(
+                deployment, preparation, worker_materialization=deployment.worker_materialization
+            )
+            worker = preparation.worker
+            if deployment.worker_materialization and worker is not None:
+                if worker_agent is None or checked.agent.ref != worker_agent:
+                    raise AdmissionDenied(reason="backend_unsupported")
+            elif (
                 checked.catalog_id != deployment.counterpart_catalog_id
                 or checked.local_revision != deployment.counterpart_catalog_revision
                 or checked.agent.ref != agent
             ):
                 raise AdmissionDenied(reason="backend_unsupported")
-            worker = preparation.worker
             if worker is not None:
                 deployment.worker_environment(preparation, worker)
                 if checked.agent.spec != worker.spec:
@@ -287,6 +333,11 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             # The host driver obtains existing sessions from its persisted scoped
             # binding; creation publishes the acknowledged native identity there.
             return True
+        if kind == "agent" and deployment.worker_materialization:
+            if allocating and id_ is None:
+                return True
+            if worker_agent is not None and id_ == worker_agent.id:
+                return True
         return id_ is not None and (kind, id_) in {
             ("agent", deployment.agent_id),
             ("environment", deployment.environment_id),
@@ -305,20 +356,26 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         return configured_transport(api_key=secret, project=deployment.project)
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
-        validate_counterpart_request(deployment, preparation)
+        validate_counterpart_request(
+            deployment, preparation, worker_materialization=deployment.worker_materialization
+        )
         worker = preparation.worker
         if worker is not None:
             deployment.worker_environment(preparation, worker)
-        source = await load_backend_agent(
-            preparation.deps.anthropic,
-            preparation.deps.sessionmaker,
-            tenant_id=preparation.tenant_id,
-            agent_name=(preparation.admission.agent.metadata or {}).get(
-                MA_METADATA_KEY_NAME, preparation.admission.config.agent_name
+        source = preparation.source
+        if source is None:
+            if worker is not None and deployment.worker_materialization:
+                raise AdmissionDenied(reason="backend_unsupported")
+            source = await load_backend_agent(
+                preparation.deps.anthropic,
+                preparation.deps.sessionmaker,
+                tenant_id=preparation.tenant_id,
+                agent_name=(preparation.admission.agent.metadata or {}).get(
+                    MA_METADATA_KEY_NAME, preparation.admission.config.agent_name
+                )
+                or "",
+                actual_agent=preparation.admission.agent,
             )
-            or "",
-            actual_agent=preparation.admission.agent,
-        )
         resources = NeutralResourceHost(
             driver(runtime, revision, scope),
             preparation.deps.sessionmaker,
@@ -328,9 +385,62 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         )
         return await deployment.read_counterpart(preparation, source=source, resources=resources)
 
+    async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
+        nonlocal allocating, worker_agent
+        validate_counterpart_request(
+            deployment, preparation, worker_materialization=deployment.worker_materialization
+        )
+        worker, source, active = (
+            preparation.worker,
+            preparation.source,
+            current_persistence.get(),
+        )
+        if (
+            not deployment.worker_materialization
+            or preparation.scope != scope
+            or preparation.admission.backend_revision != revision
+            or worker != request.worker
+            or worker is None
+            or source is None
+            or source.source is None
+            or active is None
+            or active.scope != scope
+            or active.store is not preparation.deps.state_store
+            or preparation.before_native is None
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        active.check_session(scope, None)
+        expected = deployment.worker_environment(preparation, worker)
+        await preparation.before_native()
+        resources = NeutralResourceHost(
+            driver(runtime, revision, scope),
+            preparation.deps.sessionmaker,
+            scope=scope,
+            account_scope_id=deployment.project,
+            operation_key=active.operation_key,
+        )
+        await deployment.verify_environment(preparation, resources=resources, expected=expected)
+        allocating = True
+        try:
+            row = await resources.publish(
+                active.operation_key + ":agent",
+                worker.spec,
+                expected_revision=0,
+                key=active.operation_key + ":agent",
+                persistence=active,
+                guard=preparation.before_native,
+                worker=worker,
+                source=source.source,
+            )
+        finally:
+            allocating = False
+        worker_agent = row.agent.ref
+        return row
+
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
+        materialize_worker=materialize if deployment.worker_materialization else None,
         journal=OpenAIRecoveryJournal(),
         usage_store=OpenAIUsageRevisions(),
         account_scope_id=deployment.project,

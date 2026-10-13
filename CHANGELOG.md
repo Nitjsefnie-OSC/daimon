@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare worker-completion decoding and dispatch on the existing leased continuation ladder, while refusing new completion writes until a compatible-reader release protects legacy timer scans. Missing host decisions defer without a provider fallback.
 - Preserve worker dispatch failures when provider cleanup cannot archive; reuse the verified preparation ports and existing bounded cleanup.
 - Retain authorized source lineage when normalizing a fleet worker clone; refuse stale or ungranted sources before allocation.
+- Opt-in OpenAI worker materialization uses the existing fenced publisher and session mutation owner; retain real native provenance and authoritative result identity.
 - Carry the headless worker’s fresh financial guard through registered materialization and verify its acknowledged catalog component before preparation; read-only proofs keep their existing behavior.
 
 - Cap restricted worker preparation at the earlier of caller and canonical worker deadlines; refuse expired readback or preparation before a successful handoff.
