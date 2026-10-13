@@ -1102,3 +1102,78 @@ async def test_host_runtime_allows_omitted_optional_spend_control(composed):
     assert "spend_control" not in body
     assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}
     assert body["environment"]["container_size"] == "small"
+
+
+@pytest.mark.parametrize("recorded_id", ["native-answer-event", "openai:item:retained-answer"])
+async def test_recovery_after_upgrade_keeps_recorded_message_identity(composed, recorded_id):
+    from daimon.core.turn.openai_host import driver
+    from daimon.core.turn.openai_io import OpenAITurnIO
+    from mux.drivers.openai.normalize import EventNormalizer
+
+    request, wire, store, _, runtime = composed
+    prepared = await prepare_openai(request)
+    binding = await store.get_binding(
+        Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+            account_id=SCOPE.account_id,
+        )
+    )
+    wire.items = [
+        {
+            "id": "retained-answer",
+            "turn_id": "retained-root",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "retained answer"}],
+        }
+    ]
+    message = EventNormalizer(SESSION_ID).saved_item(wire.items[0])
+    assert message is not None
+    # A previous release journaled the stream identity as both id and source.
+    retained = message.model_copy(
+        update={
+            "id": recorded_id,
+            "native": message.native.model_copy(update={"event_id": "native-answer-event"}),
+        }
+    )
+    backend = driver(runtime, REVISION, SCOPE, binding)
+
+    async def recover(active):
+        io = OpenAITurnIO(
+            backend,
+            SCOPE,
+            prepared.session_ref,
+            persistence=active,
+            root_turn_id="retained-root",
+        )
+        frames = await io.replay()
+        assert [frame.id for frame in frames if frame.type == "agent.message"] == [
+            "openai:item:retained-answer"
+        ]
+        page = await backend.events.list(
+            SCOPE, prepared.session_ref, page=PageRequest(cursor=recorded_id, order="asc")
+        )
+        assert all(event.id != recorded_id for event in page.data)
+
+    for invocation in ("before-upgrade", "first-recovery", "second-recovery"):
+        active = TurnPersistence(store, binding, SCOPE, operation_key=invocation)
+        with active.activate():
+            if invocation == "before-upgrade":
+                source = (
+                    recorded_id if recorded_id.startswith("openai:item:") else "native-answer-event"
+                )
+                await active.run(
+                    lambda active=active, source=source: active.record(
+                        prepared.session_ref, retained, source_key=source
+                    )
+                )
+            else:
+                await active.run(lambda active=active: recover(active))
+        saved = [
+            event for event in await store.read_events(SESSION_ID) if event.type == "agent.message"
+        ]
+        assert len(saved) == 1
+        assert saved[0].id == retained.id
+        assert saved[0].native == retained.native
+        assert saved[0].payload == retained.payload

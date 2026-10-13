@@ -396,7 +396,9 @@ class EventNormalizer:
             authority = "preview"
         self._seen.add(id_)
         result = Event(
-            id=id_,
+            id="openai:item:" + text(item_id)
+            if event_type == "agent.message" and authority != "preview"
+            else id_,
             session_id=self.session_id,
             sequence=self.sequence,
             type=event_type,

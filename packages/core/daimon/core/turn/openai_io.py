@@ -323,7 +323,6 @@ class OpenAITurnIO:
         self._validate(event)
         if event.authority == "preview":
             return []
-        event = event.model_copy(update={"id": journal_source(event)})
         self._check_terminal(event)
         await self._persistence.record(self._session, event, source_key=journal_source(event))
         self._remember(event)
@@ -402,10 +401,7 @@ class OpenAITurnIO:
             snapshot = await _edge(self._backend.events.reconcile(self._scope, self._session))
             if snapshot.session != self._session:
                 raise ScopeViolation(self._session.id, "foreign OpenAI recovery")
-            values = [
-                event.model_copy(update={"id": journal_source(event)})
-                for event in await self._history()
-            ]
+            values = await self._history()
             candidates = {
                 value.turn_id
                 for value in values

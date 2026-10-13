@@ -200,7 +200,6 @@ async def _create(
         ):
             raise AdmissionDenied(reason="backend_unsupported")
         active.check_session(request.scope, None)
-        await request.before_native()
 
         async def create(native_key: str) -> Session:
             return await backend.sessions.create(request.scope, spec, key=native_key)

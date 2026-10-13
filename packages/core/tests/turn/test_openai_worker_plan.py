@@ -864,3 +864,93 @@ async def test_openai_worker_lost_agent_ack_is_retained_without_reallocation(
     claim = await request.deps.state_store.get_operation(request.scope, key + ":agent_create:0")
     assert claim is not None and claim.operation.status == "outcome_unknown"
     assert await owned.resources.catalog.get_agent(request.scope, key + ":agent") is None
+
+
+async def test_worker_native_mutations_reuse_the_owned_guard(claimed_openai_worker, monkeypatch):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn import openai_host
+
+    request, root, worker, prices, _, _, _ = claimed_openai_worker
+    build = request.deps.turn_runtime_factory
+    assert build is not None
+    create = openai_host._create
+    checks = {"agent": 0, "session": 0}
+
+    def instrument_build(request):
+        runtime = build(request)
+        materialize = runtime.materialize_worker
+        assert materialize is not None
+
+        async def instrument_materialize(preparation):
+            guard = preparation.before_native
+            assert guard is not None
+
+            async def counted():
+                checks["agent"] += 1
+                await guard()
+
+            return await materialize(replace(preparation, before_native=counted))
+
+        return replace(runtime, materialize_worker=instrument_materialize)
+
+    async def instrument_create(request, *args):
+        guard = request.before_native
+        assert guard is not None
+
+        async def counted():
+            checks["session"] += 1
+            await guard()
+
+        return await create(replace(request, before_native=counted), *args)
+
+    request = replace(request, deps=replace(request.deps, turn_runtime_factory=instrument_build))
+    monkeypatch.setattr(openai_host, "_create", instrument_create)
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    # Publication checks authority before catalog work and before native claim;
+    # session mutation checks it once at its native claim boundary.
+    assert checks == {"agent": 2, "session": 1}
+
+
+@pytest.mark.parametrize("boundary", ["agent", "session"])
+async def test_worker_mutation_guard_refuses_cancellation_after_readback(
+    claimed_openai_worker, monkeypatch, boundary
+):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn import openai_host
+
+    request, root, worker, prices, _, calls, _ = claimed_openai_worker
+    cancel = asyncio.Event()
+    verify = OpenAIDeployment.verify_environment
+    create = openai_host._create
+
+    async def verify_then_cancel(self, *args, **kwargs):
+        await verify(self, *args, **kwargs)
+        cancel.set()
+
+    async def create_after_cancel(*args, **kwargs):
+        cancel.set()
+        return await create(*args, **kwargs)
+
+    if boundary == "agent":
+        monkeypatch.setattr(OpenAIDeployment, "verify_environment", verify_then_cancel)
+    else:
+        monkeypatch.setattr(openai_host, "_create", create_after_cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Refused task",
+            prices=prices,
+            cancel=cancel,
+        )
+    posts = [call.url.path for call in calls if call.method == "POST"]
+    assert posts == ([] if boundary == "agent" else ["/v1/agents"])
