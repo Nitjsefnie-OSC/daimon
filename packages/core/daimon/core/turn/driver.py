@@ -32,7 +32,7 @@ awaits `lifecycle.on_sse_event(event)` synchronously, so per the hook
 contract in `turn/lifecycle.py` that hook must stay a cheap local tap — no
 network I/O. Exactly ONE piece of I/O is permitted inline in the consume
 loop itself, ahead of that hook call: the per-event billing `record()`
-call (D-06). Unlike chat-API flush I/O, billing is a local Postgres write,
+call. Unlike chat-API flush I/O, billing is a local Postgres write,
 it is correctness rather than delivery (an unmetered
 `span.model_request_end` is revenue lost, and the recorder is fail-closed
 by design — exceptions propagate), and it carries no retry-after-style
@@ -374,8 +374,8 @@ _CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError)
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
 # `lifecycle.on_render(state)` and advances the render anchor. Finalizers
-# use this (not the raw `lifecycle.on_render`) to honor design §6's
-# "exactly one render after the terminal event folds" under the race
+# use this (not the raw `lifecycle.on_render`) to keep "exactly one
+# render after the terminal event folds" under the race
 # where the render tick already rendered the terminal state.
 RenderOnce = Callable[[TurnState], Awaitable[None]]
 
@@ -541,7 +541,7 @@ async def run_turn(
     `run_prepared_turn`, whose `None` is fail-safe (`turn_deadline(now=now())`
     is computed for them). The reason: `run_prepared_turn` already wraps this
     whole call in `asyncio.wait_for`, and its own `TimeoutError` handler is
-    what performs D-09's `mark_dead` on the thread-session mapping, logs
+    what performs the `mark_dead` on the thread-session mapping, logs
     `turn.ceiling_exceeded` with the mapping id, and calls the caller's
     `on_terminal_failure` directly. A driver-level bound that ever won that
     race would silently bypass all of it — so the driver defers to the
@@ -775,7 +775,7 @@ async def _pump(
     # Per-turn dedup for AutoApprove: lives here (not in
     # `_consume_with_reconnect`) so it survives a reconnect -- a
     # re-delivered `requires_action` idle after an eventless-cycle
-    # reconnect must not be double-confirmed (T-19-08-B).
+    # reconnect must not be double-confirmed.
     confirmed_tool_use_ids: set[str] = set()
     # The confirmed ids MA has taken: their `user.tool_confirmation` came
     # back on the stream or in a replay. A `requires_action` idle naming a
@@ -1545,7 +1545,7 @@ async def _consume_with_reconnect(
                             continue
                         # MA took our confirmations and asked again for the
                         # same ids -- stop instead of spinning until the
-                        # ceiling (T-19-08-C).
+                        # ceiling.
                         log.info("turn.tool_confirmation.exhausted", session_id=session_id)
                         return
                     case RequireApproval():
@@ -1607,7 +1607,7 @@ async def _finalize_success_or_error(
         )
         state_cell[0] = final_state
     if final_state.error is None:
-        # #79: an MCP failure the reducer kept out of `error` degrades a turn
+        # An MCP failure the reducer kept out of `error` degrades a turn
         # that still answered. A turn that answered with nothing is dead
         # (MA's `exhausted` means exactly that), so name the server here
         # instead of surfacing a blank success. A `retrying` error that was
@@ -1816,7 +1816,7 @@ async def _handle_interrupt_in_consume(
     log.info("turn.interrupt.sent", session_id=session_id)
     await lifecycle.on_interrupt_sent("cancel_event")
     log.info("turn.interrupt.acked", session_id=session_id)
-    # Ack arrived -- partial state is "clean" (refinements §5).
+    # Ack arrived -- partial state is "clean".
     state_cell[0] = dataclasses.replace(state_cell[0], termination=TerminationReason.INTERRUPTED)
     await render_once(state_cell[0])
     log.info(
@@ -1838,7 +1838,7 @@ def _suppress_task_exc():
     """Swallow any exception (including CancelledError) raised while
     awaiting a cancelled task. Used only to drain the render task.
 
-    Per design §12.6 this is the sole permitted drain point for
+    This is the sole permitted drain point for
     `BaseException` in the driver.
     """
     with contextlib.suppress(BaseException):
