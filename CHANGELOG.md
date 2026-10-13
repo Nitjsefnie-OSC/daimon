@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+- Make preparation lock and redaction work budgets independent of host scheduling.
 - Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 
 - Preserve authorized source resource identity while executing canonical Anthropic workers, refusing unavailable retained resources and unsupported native drops.

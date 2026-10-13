@@ -250,12 +250,12 @@ def test_redaction_is_linear_on_adversarial_text(name: str) -> None:
     from daimon.core.observability import _redact_secret_text  # pyright: ignore[reportPrivateUsage]
 
     text = _ADVERSARIAL[name]
-    started = time.perf_counter()
+    started = time.thread_time()
     _redact_secret_text(text)
-    elapsed = time.perf_counter() - started
+    elapsed = time.thread_time() - started
 
-    # Each case takes <=50 ms locally, but shared CI runners can pause the
-    # process mid-scan. The previous nonlinear scan took >60 s.
+    # Keep the capturing thread's work below the same one-second budget.
+    # CPU time excludes host descheduling; the nonlinear scan took >60 s of work.
     assert elapsed < 1.0, f"{name}: {elapsed:.3f}s"
 
 
