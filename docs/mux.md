@@ -2556,6 +2556,10 @@ input. A count returned inside the claim transaction is never adopted as durable
 worker state; terminal updates reread the worker through the budget lock owner.
 The existing `TurnRuntime` can expose an optional `materialize_worker(request)`
 callback returning the existing `AgentRevision` acknowledgement. It is absent by
-default and is never invoked by read-only counterpart proof. The interface alone
-grants no native allocation authority; financially admitted, source-proven worker
-preparation must supply the existing owned operation/lease before any invocation.
+default. Read-only counterpart proof does not invoke it. The headless worker
+passes its existing fresh financial guard as `before_native`; preparation checks
+the full scope, shared store and private slot before invoking materialization.
+The existing publisher owns the lease, single-attempt mutation and acknowledgment.
+Counterpart readback verifies that actual publication through the catalog owner,
+then preparation recaptures the source and checks the worker deadline before
+handoff. Missing authority, unknown outcomes and mismatched readback refuse.

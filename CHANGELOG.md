@@ -49,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Synchronize Discord gateway-lease tests with completed PostgreSQL backend shutdown before a successor attempts the released advisory lock.
 - Prepare worker-completion decoding and dispatch on the existing leased continuation ladder, while refusing new completion writes until a compatible-reader release protects legacy timer scans. Missing host decisions defer without a provider fallback.
-- Add an optional, cold worker-materialization callback to the existing turn runtime interface; read-only source proof still never invokes it.
+- Carry the headless worker’s fresh financial guard through registered materialization and verify its acknowledged catalog component before preparation; read-only proofs keep their existing behavior.
 
 - Cap restricted worker preparation at the earlier of caller and canonical worker deadlines; refuse expired readback or preparation before a successful handoff.
 - Verify explicitly restricted worker source intent and native counterparts through the existing preparation seam; retain refusal for undeclared, private or unrepresentable obligations.

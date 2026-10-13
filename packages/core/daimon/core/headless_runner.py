@@ -766,6 +766,7 @@ async def run_worker(
                                 deadline=bound,
                                 now=request.now,
                                 worker=resolved,
+                                before_native=guard,
                                 _on_prepared=bound_session,
                                 _on_orphan=orphan,
                             )

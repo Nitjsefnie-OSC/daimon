@@ -392,10 +392,33 @@ async def read_preparation_counterpart(
         runtime = selected.deps.turn_runtimes.get(revision.profile)
         if runtime is None or runtime.read_agent_counterpart is None:
             raise UnsupportedCapability(("native_counterpart",), revision.profile)
+        if runtime.materialize_worker is not None and selected.before_native is not None:
+            from daimon.core.turn.persistence import current_persistence
+
+            persistence = current_persistence.get()
+            if (
+                worker is None
+                or persistence is None
+                or persistence.scope != selected.scope
+                or persistence.store is not selected.deps.state_store
+                or persistence.slot.thread.channel != revision.channel
+                or persistence.slot.thread.thread_id != selected.thread_id
+                or persistence.slot.account_id != selected.scope.account_id
+            ):
+                raise UnsupportedCapability(("worker_materialization",), revision.profile)
+            timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+            await asyncio.wait_for(selected.before_native(), timeout=timeout)
+            timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+            allocated = await asyncio.wait_for(
+                runtime.materialize_worker(selected), timeout=timeout
+            )
+            selected = replace(selected, counterpart=allocated)
         timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         counterpart = await asyncio.wait_for(
             runtime.read_agent_counterpart(selected), timeout=timeout
         )
+        if selected.counterpart is not None and counterpart != selected.counterpart:
+            raise UnsupportedCapability(("worker_acknowledgement",), revision.profile)
         timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         current_source = await asyncio.wait_for(
             capture_preparation_source(request), timeout=timeout
@@ -441,8 +464,22 @@ class CounterpartPlan(Protocol):
     def model_validate(cls, obj: object) -> Self: ...
 
 
-def validate_counterpart_pins(plan: CounterpartPlan) -> None:
+def validate_counterpart_pins(
+    plan: CounterpartPlan, *, worker_materialization: bool = False
+) -> None:
     """Legacy rows have no counterpart; partial source/catalog pins never authorize one."""
+    if worker_materialization:
+        if (
+            plan.source_agent_id is None
+            or plan.source_agent_version is None
+            or plan.counterpart_catalog_id is not None
+            or plan.counterpart_catalog_revision is not None
+            or plan.agent_id is not None
+        ):
+            raise ValueError(
+                "worker materialization requires source pins without fixed target pins"
+            )
+        return
     pins = (
         plan.source_agent_id,
         plan.source_agent_version,
@@ -492,14 +529,20 @@ def select_runtime_manifest[Plan: CounterpartPlan](
 def validate_counterpart_request(
     plan: CounterpartPlan,
     request: ProviderPreparationRequest,
+    *,
+    worker_materialization: bool = False,
 ) -> ConfigRevision:
     """Validate the same immutable source/configuration pins before native allocation."""
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.turn.errors import AdmissionDenied
 
+    try:
+        validate_counterpart_pins(plan, worker_materialization=worker_materialization)
+    except ValueError:
+        raise AdmissionDenied(reason="backend_unsupported") from None
     revision, scope = request.admission.backend_revision, request.scope
     if (
-        getattr(request.admission, "backend_revision_origin", None) != "agent"
+        request.admission.backend_revision_origin != "agent"
         or revision is None
         or not request.deps.channel_backends
         or request.deps.turn_path != "mux"
@@ -514,9 +557,15 @@ def validate_counterpart_request(
         or plan.source_agent_id
         != derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
         or plan.source_agent_version != request.admission.agent.version
-        or plan.counterpart_catalog_id is None
-        or plan.counterpart_catalog_revision is None
-        or plan.agent_id is None
+        or (worker_materialization and (request.worker is None or request.before_native is None))
+        or (
+            not worker_materialization
+            and (
+                plan.counterpart_catalog_id is None
+                or plan.counterpart_catalog_revision is None
+                or plan.agent_id is None
+            )
+        )
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     if select_runtime_manifest(request, type(plan)) != plan:
@@ -531,6 +580,7 @@ async def read_counterpart(
     source: BackendAgent,
     resources: NeutralResourceHost,
     verify_native: Callable[[AgentRevision], Awaitable[None]],
+    worker_materialization: bool = False,
 ) -> AgentRevision:
     """Verify an installed native catalog component, without authorizing execution.
 
@@ -543,9 +593,30 @@ async def read_counterpart(
     from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
     from mux.profiles import get_profile
 
-    revision = validate_counterpart_request(plan, request)
+    revision = validate_counterpart_request(
+        plan, request, worker_materialization=worker_materialization
+    )
     scope = request.scope
-    catalog_id = cast(str, plan.counterpart_catalog_id)
+    from daimon.core.turn.persistence import current_persistence
+
+    persistence = current_persistence.get() if worker_materialization else None
+    acknowledged = request.counterpart if worker_materialization else None
+    if worker_materialization and (
+        persistence is None
+        or persistence.scope != scope
+        or persistence.store is not request.deps.state_store
+        or acknowledged is None
+        or source.source is None
+        or source.resource_scope != scope
+        or request.worker is None
+        or request.worker.permissions.fleet.scope != scope
+        or persistence.slot.thread.channel != revision.channel
+        or persistence.slot.thread.thread_id != request.thread_id
+        or persistence.slot.account_id != scope.account_id
+        or acknowledged.catalog_id != persistence.operation_key + ":agent"
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
+    catalog_id = acknowledged.catalog_id if acknowledged else cast(str, plan.counterpart_catalog_id)
     if (
         source.tenant_id != request.tenant_id
         or source.agent_id != plan.source_agent_id
@@ -557,8 +628,14 @@ async def read_counterpart(
     try:
         row = await resources.entry(catalog_id)
         if (
-            row.local_revision != plan.counterpart_catalog_revision
-            or row.agent.ref.id != plan.agent_id
+            (acknowledged is not None and row != acknowledged)
+            or (
+                not worker_materialization
+                and (
+                    row.local_revision != plan.counterpart_catalog_revision
+                    or row.agent.ref.id != plan.agent_id
+                )
+            )
             or row.agent.spec.model.id != revision.model
             or (
                 request.admission.backend_counterpart is not None
@@ -568,7 +645,17 @@ async def read_counterpart(
             or tuple(pin.id for pin in row.agent.spec.skills or ()) != plan.skill_ids
         ):
             raise AdmissionDenied(reason="backend_unsupported")
-        checked = await resources.read(catalog_id)
+        checked = (
+            await resources.read(
+                catalog_id,
+                store=persistence.store,
+                key=persistence.operation_key + ":agent_create:0",
+                worker=request.worker,
+                source=source.source,
+            )
+            if persistence is not None
+            else await resources.read(catalog_id)
+        )
         await verify_native(checked)
         if (
             checked != row
