@@ -856,7 +856,8 @@ class PostgresStateStore:
     async def claim_send(
         self, scope: Scope, key: str, *, now: datetime, fence: Lease | None
     ) -> OperationRecord:
-        check = self._active_check.get() or self._before_claim
+        active = self._active_check.get()
+        check = active if active is not None else self._before_claim
         async with self._tx() as session:
             if check is None or await check(session, scope, key, fence):
                 return await claim_send(

@@ -464,3 +464,39 @@ async def test_the_constructor_check_is_the_default_around_an_activation(
         raise RuntimeError("the worker failed")  # an exit by exception still resets
     await store.claim_send(scope, "k3", now=NOW, fence=lease)
     assert seen == ["default:k1", "activated:k2", "default:k3"]
+
+
+class _Falsy:
+    """A check whose truth value is False: only its presence may select it."""
+
+    def __init__(self, check: mux_state.BeforeClaim) -> None:
+        self._check = check
+
+    def __bool__(self) -> bool:
+        return False
+
+    async def __call__(
+        self, session: AsyncSession, scope: Scope, key: str, fence: Lease | None
+    ) -> bool:
+        return await self._check(session, scope, key, fence)
+
+
+@pytest.mark.parametrize("default", [None, "allow"])
+async def test_an_activated_falsy_check_still_refuses_the_claim(
+    factory: async_sessionmaker[AsyncSession], default: str | None
+) -> None:
+    seen: list[str] = []
+    store = PostgresStateStore(
+        factory,
+        trust_caller_clock=True,
+        before_claim=_evidence("default", True, seen) if default else None,
+    )
+    scope, lease = await _claimable(store, "a1", "k")
+    with (
+        store.checking_claims(_Falsy(_evidence("refuse", False, seen))),
+        pytest.raises(ScopeViolation, match="refused before its claim"),
+    ):
+        await store.claim_send(scope, "k", now=NOW, fence=lease)
+    assert seen == ["refuse:k"]  # the activated check ran; the default did not
+    assert await _status(store, scope, "k") == "pending"  # not claimed
+    assert await _status(store, scope, "refuse:k:1") == "pending"  # evidence committed
