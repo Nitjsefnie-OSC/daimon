@@ -13644,7 +13644,7 @@
     },
     {
       "file": "packages/core/daimon/core/headless_runner.py",
-      "line": 56,
+      "line": 59,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -13653,7 +13653,7 @@
     },
     {
       "file": "packages/core/daimon/core/headless_runner.py",
-      "line": 57,
+      "line": 60,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsSession"
@@ -13662,7 +13662,7 @@
     },
     {
       "file": "packages/core/daimon/core/headless_runner.py",
-      "line": 58,
+      "line": 61,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
