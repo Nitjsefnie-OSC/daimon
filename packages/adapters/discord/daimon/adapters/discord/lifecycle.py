@@ -940,7 +940,7 @@ class DiscordTurnLifecycle:
         ``summary_on_card=False`` is for an answer posted as a fresh message:
         that message carries the summary, so the card shows "Done." without it.
         The card is deleted only after the answer is up, best effort, so a card
-        with the summary would show it twice until then, or for good (#787).
+        with the summary would show it twice until then, or for good if the delete fails.
         """
         if self._sessionmaker is not None and self._tenant_id is not None:
             try:

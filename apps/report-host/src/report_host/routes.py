@@ -183,7 +183,7 @@ def build_reader_router(
             return await resolve_recipient(slug, request)
         except HTTPException as exc:
             if (
-                (settings.html_link_errors or _browser_navigation(request.headers.get("accept")))
+                _browser_navigation(request.headers.get("accept"))
                 and exc.status_code == status.HTTP_403_FORBIDDEN
                 and exc.detail == _RECIPIENT_INVALID_MESSAGE
             ):

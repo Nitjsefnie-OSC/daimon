@@ -4090,20 +4090,18 @@ class DaimonBot(commands.Bot):
                         return existing
                 # Name before creation to avoid a Discord rename system message.
                 # The fallback title quotes the message, never the agent's
-                # internal name (a slug like "qa-haiku-canary" means nothing
-                # to the reader).
+                # internal name (a slug means nothing to the reader).
                 naming = self.runtime.settings.thread_naming
                 message_text = strip_mentions(message.content)
                 attachment_names = [a.filename for a in message.attachments]
                 opening_text = naming_text(message_text, attachment_names)
-                bot_name = _resolve_bot_display_name(self.runtime.settings)
                 # Line breaks kept: the fallback takes only the first line,
                 # while the naming model reads the whole collapsed message.
                 thread_name = fallback_thread_name(
                     "\n".join(strip_mentions(line) for line in message.content.splitlines()),
                     default=attachment_names[0][:THREAD_NAME_MAX_CHARS]
                     if attachment_names
-                    else f"Chat with {bot_name}",
+                    else _resolve_bot_display_name(self.runtime.settings),
                 )
                 try:
                     if naming.enabled and opening_text:
