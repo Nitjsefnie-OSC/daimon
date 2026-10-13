@@ -51,7 +51,7 @@ def parent(provider="anthropic"):
             scope=Scope(
                 tenant_id=str(TENANT),
                 account_id=str(ACCOUNT),
-                principal_id="123",
+                principal_id="daimon",
                 authorization_id="fixture-root-grant",
             ),
             root=ThreadRef(
@@ -163,6 +163,9 @@ def buttons(view):
 
 def setup(provider="anthropic"):
     owner = create_autospec(FleetPorts, instance=True)
+    owner.controller_account.side_effect = lambda current: (
+        ACCOUNT if current.subject.platform_user_id == "123" else None
+    )
     owner.read_run.return_value = (run(), (worker(provider),))
     owner.retained_control.return_value = None
 
@@ -1312,8 +1315,9 @@ async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkey
         yield value
 
 
+@pytest.mark.parametrize("actor", ["owner", "admin", "foreign_account", "unbound"])
 async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projection(
-    discord_frozen_root, db_nullpool_engine, db_schema, monkeypatch
+    discord_frozen_root, db_nullpool_engine, db_schema, monkeypatch, actor
 ):
     from pathlib import Path
 
@@ -1321,14 +1325,22 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
     from daimon.adapters.discord.turn_posts import TurnPostRecorder
     from daimon.core.config import Settings
     from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores import fleet, tenants
     from daimon.core.stores.agent_posts import get_post
     from daimon.core.turn.runtime_manifest import read_frozen_root
     from daimon.testing.db import build_test_engine
+    from daimon.testing.factories import make_platform_principal
     from daimon.testing.ma import build_stub_anthropic
 
     deps, prepared, _, intent, _, scope, _, _ = discord_frozen_root
     original, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
-    shared = FleetOrchestrator(HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal("1")))
+    ports = HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal("1"), deps=deps)
+    shared = FleetOrchestrator(ports)
+    if actor == "foreign_account":
+        async with deps.sessionmaker.begin() as db:
+            tenant = await tenants.get_tenant(db, TENANT)
+            assert tenant is not None
+            await make_platform_principal(db, tenant=tenant, platform="discord", external_id="456")
     settings = Settings.model_validate(
         {
             "database": {
@@ -1387,32 +1399,54 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
         )
         assert preserved.fleet.scope == original.fleet.scope
 
-        # Restart recovery uses the actual bot + stored post. Current admin
-        # identity differs from the original requester and never replaces its scope.
+        # Restart recovery uses the actual bot + stored post, with current actor
+        # authorization owned by the shared ports and original scope preserved.
         from .harness import make_bot
 
         bot = make_bot(runtime)
-        click = interaction(456)
+        actor_id = 123 if actor == "owner" else 456
+        click = interaction(actor_id)
         click.client, click.channel, click.message = bot, thread, accepted
         accepted.webhook_id = None
         accepted.author = MagicMock(spec=discord.User)
         accepted.author.name = "root"
         click.user = MagicMock(spec=discord.Member)
-        click.user.id = 456
+        click.user.id = actor_id
         click.user.roles = []
         click.user.guild.owner_id = 999
-        click.user.guild_permissions.administrator = True
+        click.user.guild_permissions.administrator = actor == "admin"
         click.user.guild_permissions.manage_guild = False
         recovered = await bot.recover_fleet_card(click, run_id=original.fleet.run_id)
         assert recovered is not None
         control = AsyncMock(wraps=shared.control)
         monkeypatch.setattr(shared, "control", control)
-        assert not await recovered.control(click, worker_id=None, action="kill", expected_version=0)
+        before, _ = await fleet.run_status(
+            deps.sessionmaker, tenant_id=TENANT, run_id=original.fleet.run_id
+        )
+        authorized = actor in ("owner", "admin")
+        assert (
+            await recovered.control(
+                click, worker_id=None, action="kill", expected_version=before.version
+            )
+            is authorized
+        )
+        control.assert_awaited_once()
         current = control.await_args.args[0]
-        assert current.subject.platform_user_id == "456" and current.subject.is_admin
+        assert current.subject.platform_user_id == str(actor_id)
+        assert current.subject.is_admin is (actor == "admin")
         assert current.fleet.scope == original.fleet.scope
         assert current.fleet.account_id == original.fleet.account_id
-        click.response.send_message.assert_awaited_once()
+        after, _ = await fleet.run_status(
+            deps.sessionmaker, tenant_id=TENANT, run_id=original.fleet.run_id
+        )
+        assert after.status == ("cancelled" if authorized else before.status)
+        assert after.version == before.version + int(authorized)
+        if authorized:
+            click.response.defer.assert_awaited_once()
+            click.response.send_message.assert_not_awaited()
+        else:
+            click.response.send_message.assert_awaited_once()
+            click.response.defer.assert_not_awaited()
 
 
 @pytest.mark.parametrize("fault", ["intent", "run", "requester", "origin", "thread", "guild"])
