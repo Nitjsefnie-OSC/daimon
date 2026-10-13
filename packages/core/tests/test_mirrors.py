@@ -167,5 +167,19 @@ def test_render_redacts_clips_and_names_the_asker_without_their_id() -> None:
     assert secret not in post.question, "secrets are redacted"
     assert "*Ada (external)*" in post.question, "an external asker is labelled"
     assert "9001" not in post.question + post.answer, "the platform id is never posted"
-    assert post.answer.endswith("… (50 more characters)"), post.answer
+    assert post.answer.endswith("> … (50 more characters)"), post.answer
+
+
+def test_render_quotes_every_line_and_closes_a_clipped_fence() -> None:
+    event = _event(question="# Title\n@everyone", answer="```py\n" + "x\n" * 200)
+
+    post = render_qa(event, agent_name="helper", max_chars=100)
+
+    body = post.question.split("\n")[1:]
+    assert body == ["> # Title", "> @everyone"], "the asker's text is quoted, not rendered"
+    lines = post.answer.split("\n")[1:]
+    assert all(line.startswith("> ") for line in lines), lines
+    assert [line for line in lines if "```" in line] == ["> ```py", "> ```"], (
+        "a fence cut by the clip is closed"
+    )
     assert post.thread_name == "helper · abc123", "one thread per session, named by its tail"

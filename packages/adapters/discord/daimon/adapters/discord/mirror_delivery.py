@@ -65,7 +65,7 @@ async def _session_thread(
 async def _send(target: discord.TextChannel | discord.Thread, texts: tuple[str, ...]) -> None:
     for text in texts:
         for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
-            await target.send(content=chunk, allowed_mentions=_NO_MENTIONS)
+            await target.send(content=chunk, allowed_mentions=_NO_MENTIONS, suppress_embeds=True)
 
 
 def make_discord_mirror_poster(
@@ -130,7 +130,9 @@ def make_discord_mirror_poster(
                         return MirrorOutcome(status="delivered", dest_thread_id=str(thread.id))
                     except discord.Forbidden:
                         log.info("mirror.session_thread_closed", mirror_id=str(mirror.id))
-                header = await channel.send(content=post.header, allowed_mentions=_NO_MENTIONS)
+                header = await channel.send(
+                    content=post.header, allowed_mentions=_NO_MENTIONS, suppress_embeds=True
+                )
                 target = await header.create_thread(name=post.thread_name)
             await _send(target, texts)
         except discord.Forbidden:

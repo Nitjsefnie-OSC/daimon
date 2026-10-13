@@ -10,10 +10,10 @@ unless `DAIMON_MIRRORS__ENABLED=true`
 
 Every answered `ask` to the mirrored agent, through an agent key or the hub
 (see [mcp-tools.md](mcp-tools.md#agent_chat)): the question and the final
-answer, with secrets redacted and long text cut at `max_answer_chars`. Tool
+answer, quoted, with secrets redacted and long text cut at `max_answer_chars`. Tool
 calls, their output, files and chart links are never copied. The asker is named by display
 name, never by platform id, and marked "(external)" when they are from
-another organisation. Posts carry no mentions, and nothing said in a mirror's
+another organisation. Posts carry no mentions or link previews, and nothing said in a mirror's
 thread starts a turn, even where Daimon follows threads on its own.
 
 In a channel, each conversation gets one thread, opened on a short header and

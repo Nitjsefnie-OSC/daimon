@@ -118,17 +118,20 @@ class MirrorPost:
     answer: str
 
 
-def _clipped(text: str, limit: int) -> str:
+def _quoted(text: str, limit: int) -> str:
+    """Redacted, clipped without leaving a code fence open, and blockquoted."""
     text = redact_text(text.strip())
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit].rstrip()}… ({len(text) - limit} more characters)"
+    if len(text) > limit:
+        cut = text[:limit].rstrip()
+        fence = "\n```" if cut.count("```") % 2 else ""
+        text = f"{cut}{fence}\n… ({len(text) - limit} more characters)"
+    return "\n".join(f"> {line}" for line in text.splitlines()) or ">"
 
 
 def render_qa(event: ConversationEventV1, *, agent_name: str, max_chars: int) -> MirrorPost:
     """The posts for one question and answer.
 
-    Only the question and the final answer are copied, with secrets redacted:
+    Only the question and the final answer are copied, redacted and quoted:
     never tool calls or their output. The asker is named by display name,
     never by platform id, and marked when they are from another organisation.
     """
@@ -139,8 +142,8 @@ def render_qa(event: ConversationEventV1, *, agent_name: str, max_chars: int) ->
     return MirrorPost(
         thread_name=f"{agent_name} · {session}"[:_THREAD_NAME_MAX],
         header=f"Questions to **{agent_name}** · session `{session}`",
-        question=f"**Q** · *{asker}*\n{_clipped(event.question, max_chars)}",
-        answer=f"**A** · *{agent_name}*\n{_clipped(event.answer, max_chars)}",
+        question=f"**Q** · *{asker}*\n{_quoted(event.question, max_chars)}",
+        answer=f"**A** · *{agent_name}*\n{_quoted(event.answer, max_chars)}",
     )
 
 

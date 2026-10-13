@@ -131,13 +131,14 @@ async def test_a_session_opens_one_thread_and_posts_without_mentions(
     channel.send.return_value.create_thread.assert_awaited_once_with(name="helper · abc123")
     sent = channel.thread.send.await_args_list
     assert [call.kwargs["content"].split("\n")[1] for call in sent] == [
-        "Ping @everyone?",
-        "Pong.",
+        "> Ping @everyone?",
+        "> Pong.",
     ] * 2, sent
     every_call = [*sent, *channel.send.await_args_list]
     assert all(call.kwargs["allowed_mentions"].to_dict() == {"parse": []} for call in every_call), (
         "a mirror never pings anyone"
     )
+    assert all(call.kwargs["suppress_embeds"] for call in every_call), "nor unfurls links"
 
 
 async def test_a_channel_of_another_server_pauses_the_mirror(
