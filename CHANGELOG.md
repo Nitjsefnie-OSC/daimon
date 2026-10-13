@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Share backend preview capability checks with worker derivation, preserve root stamps through metadata patches, and return typed refusals for invalid worker backend selections.
 
 - Add root-bound fleet worker authorization and a single spec attenuation resolver, with scoped transactional audit and explicit refusal of unproven native controls. Fleet execution remains unavailable until its host admission and driver bindings are installed.
+- Add default-off native agent backend execution after scoped counterpart readback, verifying immutable candidate revisions before publication and retaining the verified native agent through provider preparation and accounted dispatch.
+- Retain default-off native counterpart readback groundwork while refusing agent-origin execution before revision publication and native preparation until complete source and resource preservation is proven.
 
 - Restrict scripted usage catch-up to main #824's exact query so caller-owned transcript and idle routes retain their replies; refresh the live recipe metadata for the main-attributed golden updates.
 

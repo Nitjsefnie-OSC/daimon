@@ -19,9 +19,10 @@ anything else is refused visibly as
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -622,7 +623,11 @@ async def resolve_turn_backend(
     *,
     enabled: bool,
     retained_revision: int | None = None,
-    validate_origin: Callable[[ResolvedBackend, Literal["channel", "agent"]], None] | None = None,
+    validate_origin: Callable[
+        [ResolvedBackend, Literal["channel", "agent"], ConfigRevision | None],
+        Awaitable[None] | None,
+    ]
+    | None = None,
 ) -> tuple[ConfigRevision | None, bool, Literal["channel", "agent", "default"]]:
     """Resolve and retain through the existing immutable channel revision namespace."""
     if not enabled or retained_revision == 0:
@@ -654,17 +659,27 @@ async def resolve_turn_backend(
         raise AgentBackendRefused("backend_not_allowed")
     selection = backend_selection(setting.backend)
     if validate_origin is not None:
-        validate_origin(selection, "agent")
+        checking = validate_origin(selection, "agent", None)
+        if inspect.isawaitable(checking):
+            await checking
     check_backend(ConfigRevision.create(channel, 1, selection))
     for _ in range(3):
         effective = await mux_state.effective_revision(
             session, channel, selection.content_digest(), "agent"
         )
         if effective is not None:
+            if validate_origin is not None:
+                checking = validate_origin(selection, "agent", effective)
+                if inspect.isawaitable(checking):
+                    await checking
             return effective, ever_shared, "agent"
         effective = ConfigRevision.create(
             channel, await mux_state.next_config_local(session, channel), selection
         )
+        if validate_origin is not None:
+            checking = validate_origin(selection, "agent", effective)
+            if inspect.isawaitable(checking):
+                await checking
         try:
             await mux_state.put_config_revision(session, effective, origin="agent")
         except ConfigRevisionConflict:

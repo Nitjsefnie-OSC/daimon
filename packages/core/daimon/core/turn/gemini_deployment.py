@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
+from daimon.core.channel_backend import load_backend_agent
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores.domain import BackendAgent
@@ -22,6 +24,7 @@ from daimon.core.turn.gemini import (
     GeminiUsageRuntime,
     compose_gemini_backend,
     compose_gemini_codec,
+    gemini_backend,
 )
 from daimon.core.turn.gemini_prepare import prepare_gemini_turn
 from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiStorage
@@ -34,6 +37,7 @@ from daimon.core.turn.runtime_manifest import (
     read_counterpart,
     select_runtime_manifest,
     validate_counterpart_pins,
+    validate_counterpart_request,
 )
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Scope
@@ -124,11 +128,17 @@ class GeminiPlan(BaseModel):
 
 def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
     revision = request.admission.backend_revision
-    if not fixed_plan_origin_allowed(getattr(request.admission, "backend_revision_origin", None)):
+    origin = request.admission.backend_revision_origin
+    if not fixed_plan_origin_allowed(origin) and (
+        origin != "agent" or not request.deps.agent_backends
+    ):
         raise AdmissionDenied(reason="backend_unsupported")
     if revision is None or revision.profile != PROFILE:
         raise AdmissionDenied(reason="backend_unsupported")
-    return select_runtime_manifest(request, GeminiPlan)
+    plan = select_runtime_manifest(request, GeminiPlan)
+    if origin == "agent":
+        validate_counterpart_request(plan, request)
+    return plan
 
 
 def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
@@ -154,12 +164,42 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         secret = os.environ.get(plan.api_key_env)
         if secret is None or not secret.strip():
             raise AdmissionDenied(reason="backend_unsupported")
-        from mux.drivers.gemini.deployment import configured_transport
+        from mux.drivers.gemini.deployment import configured_catalog_transport, configured_transport
 
-        return GeminiTransportRuntime(configured_transport(api_key=secret))
+        return GeminiTransportRuntime(
+            configured_transport(api_key=secret),
+            configured_catalog_transport(api_key=secret)
+            if request.admission.backend_revision_origin == "agent"
+            else None,
+        )
 
-    return TurnRuntime(
+    async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
+        validate_counterpart_request(plan, preparation)
+        source = await load_backend_agent(
+            preparation.deps.anthropic,
+            preparation.deps.sessionmaker,
+            tenant_id=preparation.tenant_id,
+            agent_name=(preparation.admission.agent.metadata or {}).get(
+                MA_METADATA_KEY_NAME, preparation.admission.config.agent_name
+            )
+            or "",
+            actual_agent=preparation.admission.agent,
+        )
+        backend = gemini_backend(revision, scope, runtime, plan.project)
+        resources = NeutralResourceHost(
+            backend,
+            preparation.deps.sessionmaker,
+            scope=scope,
+            account_scope_id=plan.project,
+            operation_key="counterpart-read",
+            resource_catalog_enabled=True,
+            catalog_adapter=backend.catalog_adapter,
+        )
+        return await plan.read_counterpart(preparation, source=source, resources=resources)
+
+    runtime = TurnRuntime(
         transport_factory=transport,
+        read_agent_counterpart=read,
         journal=GeminiJournal(
             SQLiteGeminiStorage(plan.records_path, namespace=namespace),
             request.deps.state_store,
@@ -174,6 +214,8 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             {},
         ),
     )
+
+    return runtime
 
 
 def register_runtime() -> None:

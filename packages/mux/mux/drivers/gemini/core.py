@@ -105,7 +105,9 @@ class Base:
         account_scope_id: str,
         *,
         mcp_secrets: MCPSecretResolver | None = None,
+        native_agent: Agent | None = None,
     ) -> None:
+        self._native_agent = native_agent
         self._transport, self._storage, self._account = transport, storage, account_scope_id
         self._mcp_secrets = mcp_secrets
 
@@ -120,11 +122,14 @@ class Base:
         if (
             isinstance(agent.native, dict)
             and agent.native.get("resource_mode") == "gemini.named_agent_catalog@1"
+            and self._native_agent != agent
         ):
-            # This default-off admin slice verifies native definitions, not a
-            # live named-agent session plan. Never substitute an inline clone.
             refuse("named_agent_session_plan")
         request = compile_agent(agent.spec, authenticated_mcp=self._mcp_secrets is not None)
+        if self._native_agent is not None:
+            if agent != self._native_agent:
+                refuse("named_agent_session_plan")
+            request["agent"] = agent.ref.id
         environment: JsonValue = {"type": "remote"}
         if spec.environment is not None:
             self._check(scope, spec.environment, "environment")
@@ -668,8 +673,11 @@ class GeminiEvents(Base):
         state_store: StateStore,
         model_for_interaction: Callable[[str], ModelRef | None] | None = None,
         mcp_secrets: MCPSecretResolver | None = None,
+        native_agent: Agent | None = None,
     ) -> None:
-        super().__init__(transport, storage, account_scope_id, mcp_secrets=mcp_secrets)
+        super().__init__(
+            transport, storage, account_scope_id, mcp_secrets=mcp_secrets, native_agent=native_agent
+        )
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction
 

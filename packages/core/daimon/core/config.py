@@ -1262,6 +1262,15 @@ class TurnSettings(BaseModel):
         ),
     )
 
+    agent_backends: bool = Field(
+        default=False,
+        description=(
+            "Run an agent-selected native backend only after its operator-installed "
+            "counterpart passes scoped source, manifest, catalog and native readback. "
+            "Requires mux and channel_backends; off by default."
+        ),
+    )
+
     @field_validator("path", mode="before")
     @classmethod
     def _empty_path_is_legacy(cls, value: object) -> object:

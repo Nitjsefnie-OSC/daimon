@@ -1187,6 +1187,14 @@ configuration is read and every turn runs as before. On: a channel with no backe
 configuration is unchanged; a configured one is checked against its profile and refused
 (backend_unsupported) if the profile cannot meet it or this release cannot run it yet.
 
+### `DAIMON_TURN__AGENT_BACKENDS`
+
+`bool` · optional · default `False`
+
+Run an agent-selected native backend only after its operator-installed counterpart
+passes scoped source, manifest, catalog and native readback. Requires mux and
+channel_backends; off by default.
+
 ## Thread Naming
 
 Read from `daimon.core.config.ThreadNamingSettings`. Prefix `DAIMON_THREAD_NAMING__`.

@@ -52,9 +52,10 @@ from mux.contracts.events import (
 from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
-from mux.contracts.resources import AgentSpec, EnvironmentSpec
+from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import GeminiManagedAgents
+from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAccounting, FlashTransport
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
@@ -75,6 +76,7 @@ class GeminiDeployment:
     account_scope_id: str
     agent: AgentSpec
     environment: EnvironmentSpec
+    native_agent: Agent | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,7 @@ class GeminiUsageRuntime:
 @dataclass(frozen=True)
 class GeminiTransportRuntime:
     transport: Transport
+    catalog_transport: AgentCatalogTransport | None = None
 
 
 def compose_gemini_backend(request: TurnBackendRequest) -> TurnBackend:
@@ -146,13 +149,18 @@ def gemini_backend(
     supplied = runtime.transport_factory(config, scope)
     if not isinstance(supplied, GeminiTransportRuntime):
         raise UnsupportedCapability(("gemini_private_transport",), PROFILE)
-    transport = FlashTransport(supplied.transport, runtime.usage_store.accounting)
+    transport = FlashTransport(
+        supplied.transport, runtime.usage_store.accounting, native_agent=deployment.native_agent
+    )
     return GeminiManagedAgents(
         transport,
         storage=runtime.journal.storage,
         state_store=runtime.journal.state_store,
         account_scope_id=account_scope_id,
         model_for_interaction=transport.model_for_interaction,
+        resource_catalog_enabled=supplied.catalog_transport is not None,
+        resource_catalog_transport=supplied.catalog_transport,
+        native_agent=deployment.native_agent,
     )
 
 

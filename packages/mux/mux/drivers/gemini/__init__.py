@@ -7,6 +7,7 @@ from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Scope
 from mux.contracts.ports import Models
 from mux.contracts.profile import Profile
+from mux.contracts.resources import Agent
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
@@ -64,6 +65,7 @@ class GeminiManagedAgents:
         skill_bundle_publisher: SkillBundlePublisher | None = None,
         resource_catalog_enabled: bool = False,
         resource_catalog_transport: AgentCatalogTransport | None = None,
+        native_agent: Agent | None = None,
     ) -> None:
         if type(resource_catalog_enabled) is not bool:
             raise ValueError("resource catalog capability must be an explicit bool")
@@ -81,7 +83,7 @@ class GeminiManagedAgents:
         )
         self.environments = GeminiEnvironments(transport, storage, account_scope_id)
         self.sessions = GeminiSessions(
-            transport, storage, account_scope_id, mcp_secrets=mcp_secrets
+            transport, storage, account_scope_id, mcp_secrets=mcp_secrets, native_agent=native_agent
         )
         self.events = GeminiEvents(
             transport,
@@ -89,6 +91,7 @@ class GeminiManagedAgents:
             account_scope_id,
             state_store=state_store,
             model_for_interaction=model_for_interaction,
+            native_agent=native_agent,
             mcp_secrets=mcp_secrets,
         )
         self.usage = GeminiUsage(transport, storage, account_scope_id)

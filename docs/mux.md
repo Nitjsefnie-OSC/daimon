@@ -2112,12 +2112,26 @@ resources refuse. A final catalog read detects
 changes during native readback; it does not claim an atomic provider revision
 pin. This component returns the existing retained catalog revision.
 
-Agent-origin execution remains refused. Matching a retained native agent does
-not prove preservation of source files, credentials, repositories, memory,
-vaults, channel skills, or tool and approval policy. Complete authorized source
-context and checked preparation are required before a native session can run.
-Channel-origin deployments and the default Anthropic path retain their existing
-behavior.
+Agent-origin native execution remains refused, including when
+`DAIMON_TURN__AGENT_BACKENDS=true`. The flag is default off and retains the
+readback groundwork; it does not turn a catalog component into complete source
+preservation authority. The existing admission and preparation origin guards
+refuse before publishing an agent-origin effective revision, constructing a
+native session, or dispatching native input.
+
+An installed counterpart may have valid source identity, version, configuration
+and catalog pins while omitting the source's instructions, tool-approval policy,
+skills, MCP attachments, credentials, files, repository, memory or environment.
+Complete preservation must include implicit resources added by the existing
+session preparation owner, including persistent agent memory. Empty attachment
+tables do not prove those obligations are absent.
+
+Scoped catalog and native drift readback remains available as a component check.
+Gemini's named-agent and OpenAI's provisioned-agent plans remain groundwork;
+readback does not provide a native CAS guarantee or permit dropping source
+obligations. Channel-origin deployments and the default Anthropic path retain
+their existing behavior.
+
 ### Agent backend selection surfaces
 
 With `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
@@ -2208,9 +2222,9 @@ staging write, live provider call or a provider unsupported on the selected
 surface.
 
 The settings, preview, selection and revert proofs establish their own
-behavior; they do not prove an agent-origin native turn can run. Both default
-runtime loaders and injected native runtimes retain the shared origin refusal
-until a provider-owned counterpart proof is available. New preferences also
+behavior; they do not prove an agent-origin native turn can run. With agent execution disabled,
+runtime loaders and injected native runtimes retain the shared origin refusal.
+Enabling the reserved execution flag does not bypass the source-preservation refusal above. New preferences also
 resolve preferences by the UUID of the already authorized source agent before
 session assembly. Matching names across catalogs cannot establish identity,
 and a recreated namesake does not inherit the old preference. Channel clear
