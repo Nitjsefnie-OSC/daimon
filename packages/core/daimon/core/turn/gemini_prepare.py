@@ -86,11 +86,21 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             deployment is None
             or replace(deployment, native_agent=None) != expected
             or checked.agent.spec != expected.agent
-            or checked.catalog_id != plan.counterpart_catalog_id
-            or checked.local_revision != plan.counterpart_catalog_revision
-            or ref.id != plan.agent_id
+            or (
+                not plan.worker_materialization
+                and (
+                    checked.catalog_id != plan.counterpart_catalog_id
+                    or checked.local_revision != plan.counterpart_catalog_revision
+                    or ref.id != plan.agent_id
+                )
+            )
             or (ref.provider, ref.kind, ref.tenant_id, ref.account_id, ref.account_scope_id)
             != ("gemini", "agent", request.scope.tenant_id, request.scope.account_id, plan.project)
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        if plan.worker_materialization and (
+            runtime.read_agent_counterpart is None
+            or await runtime.read_agent_counterpart(request) != checked
         ):
             raise AdmissionDenied(reason="backend_unsupported")
         deployment = replace(deployment, native_agent=request.counterpart.agent)

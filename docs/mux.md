@@ -2598,3 +2598,11 @@ native target is consumed directly without changing the deployment manifest.
 Complete message journal identities match the stable accepted provider item ID;
 the true native stream event ID remains in provenance. Unconfigured and fixed
 deployments retain their existing behavior.
+
+A Gemini deployment can explicitly enable `worker_materialization` (default
+`false`) under its existing finite source/configuration/tool bounds. Fresh and
+cloned targets use the same scoped publisher, owned creation acknowledgment and
+independent catalog readback before preparation. Unsupported retained memory,
+private resources and approval requirements refuse; tools remain explicit.
+The worker input and authoritative result reference the acknowledged native
+agent, and an unknown creation outcome is retained without another allocation.

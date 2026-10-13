@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -16,7 +17,14 @@ from uuid import UUID
 import httpx
 import pytest
 from daimon.core.channel_backend import check_backend
-from daimon.core.neutral_resources import ResolvedWorkerSpec, resolve_worker_spec
+from daimon.core.fleet import FleetWorker
+from daimon.core.neutral_resources import (
+    NeutralResourceHost,
+    ResolvedWorkerSpec,
+    WorkerPermissions,
+    resolve_worker_spec,
+)
+from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import (
@@ -39,6 +47,8 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import TextPart
 from mux.contracts.ids import ModelRef, ResourceRef, Scope
 from mux.contracts.resources import (
+    Agent,
+    AgentPatch,
     Artifact,
     EnvironmentSpec,
     MCPConnection,
@@ -56,6 +66,9 @@ from mux.errors import ScopeViolation
 from pydantic import JsonValue
 
 from ..test_fleet_permissions import NOW, POLICY, parent
+from .test_agent_native_runtime import claimed_worker_request as claimed_worker_request
+from .test_agent_native_runtime import clone_source as clone_source
+from .test_agent_native_runtime import explicit_worker_request as explicit_worker_request
 from .test_gemini_codec import TrackedTransport, interaction
 from .test_native_counterpart import Owned
 from .test_native_counterpart import clean_sdk_environment as clean_sdk_environment
@@ -165,6 +178,68 @@ def test_resolved_drops_compile_remote_without_execution_or_memory(
     assert worker.spec.system.startswith(worker.permissions.base_system + "\n\n")
     assert "no persistent memory" in worker.spec.system
     assert "no sandbox execution" in worker.spec.system
+
+
+def test_worker_materialization_compiles_the_canonical_spec_under_operator_ceiling(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+) -> None:
+    plan, revision, worker = worker_target
+    template = plan.model_copy(
+        update={"agent_name": "template-only", "system": "Template defaults"}
+    )
+    assert plan.worker_materialization is False
+    assert "worker_materialization" not in plan.model_dump(mode="json")
+    with pytest.raises(AdmissionDenied):
+        template.worker_deployment(worker, revision)
+    enabled = template.model_copy(update={"worker_materialization": True})
+    deployment = enabled.worker_deployment(worker, revision)
+    assert deployment.agent == worker.spec
+    assert deployment.agent.name != enabled.agent_name
+    assert deployment.agent.system != enabled.system
+    assert deployment.agent.system == worker.permissions.spec.system
+    assert compile_agent(deployment.agent)["tools"] == []
+
+
+def test_worker_materialization_cannot_add_an_unreviewed_non_execution_tool(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+) -> None:
+    plan, revision, worker = worker_target
+    requested = replace(
+        worker,
+        spec=worker.spec.model_copy(
+            update={
+                "tools": (ToolSpec(name="google_search", kind="builtin"),),
+                "declared_drops": tuple(drop for drop in worker.declared_drops if drop != "tools"),
+            }
+        ),
+    )
+    with pytest.raises(AdmissionDenied):
+        plan.model_copy(update={"worker_materialization": True}).worker_deployment(
+            requested, revision
+        )
+
+
+def test_sealed_worker_readback_stays_available_but_materialization_refuses(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+) -> None:
+    plan, revision, worker = worker_target
+    sealed = replace(
+        worker, permissions=replace(worker.permissions, seal_ids=frozenset({"root-seal"}))
+    )
+    assert plan.worker_deployment(sealed, revision).agent == worker.spec
+    with pytest.raises(AdmissionDenied):
+        plan.model_copy(update={"worker_materialization": True}).worker_deployment(sealed, revision)
+
+
+@pytest.mark.parametrize("flag", (None, 0, 1, "true", "false", []))
+def test_worker_materialization_is_an_explicit_strict_operator_capability(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec], flag: object
+) -> None:
+    from pydantic import ValidationError
+
+    plan, _, _ = worker_target
+    with pytest.raises(ValidationError):
+        GeminiPlan.model_validate({**plan.model_dump(), "worker_materialization": flag})
 
 
 @pytest.mark.parametrize(
@@ -517,6 +592,137 @@ async def test_worker_native_readback_checks_stripped_tools_mounts_and_protected
         assert transport.requests[0]["environment"] == {"type": "remote", "sources": []}
         async with storage.transaction() as records:
             assert records.sessions[prepared.session_ref.id].spec.resources == ()
+
+
+async def test_worker_materialization_does_not_weaken_ordinary_read_only_plan(owned: Owned) -> None:
+    assert isinstance(owned.plan, GeminiPlan) and owned.request.worker is None
+    plan = owned.plan.model_copy(
+        update={"worker_materialization": True, "system": "Different operator instruction"}
+    )
+    owned.manifest_path.write_text(json.dumps([plan.model_dump(mode="json")]))
+    with pytest.raises(AdmissionDenied):
+        await plan.read_counterpart(owned.request, source=owned.source, resources=owned.resources)
+    assert all(request.method == "GET" for request in owned.wire.requests)
+
+
+@pytest.mark.parametrize("origin", ("fresh", "clone"))
+@pytest.mark.parametrize("outcome", ("acknowledged", "lost_ack", "drift"))
+async def test_worker_catalog_materializes_exact_spec_with_one_durable_creation(
+    owned: Owned,
+    tmp_path: Path,
+    origin: str,
+    outcome: str,
+) -> None:
+    from mux.drivers.gemini import GeminiManagedAgents
+    from mux.drivers.gemini.transport import SDKTransport
+    from mux.errors import ProviderError
+
+    source = await owned.resources.read(owned.retained.catalog_id)
+    config = owned.request.admission.backend_revision
+    assert config is not None
+    root = parent("gemini")
+    root = replace(
+        root,
+        fleet=replace(
+            root.fleet,
+            scope=owned.request.scope,
+            root=root.fleet.root.model_copy(update={"channel": config.channel}),
+            account_id=UUID(owned.request.scope.account_id),
+        ),
+        spec=source.agent.spec,
+        base_system=source.agent.spec.system or "",
+        source_agents=(source.agent.ref,),
+        source_revisions=((source.agent.ref, source.agent.revision),),
+    )
+    drops = ("memory", "sandbox", "skills", "mcp", "tools", "files", "repository")
+    patch = AgentPatch(name=f"{origin}-worker", declared_drops=drops)
+    worker = resolve_worker_spec(
+        root,
+        source.agent
+        if origin == "clone"
+        else root.spec.model_copy(update={"name": patch.name, "declared_drops": drops}),
+        overrides=patch if origin == "clone" else None,
+        policy=POLICY,
+        now=NOW,
+    )
+    assert worker.source_agent == (
+        (source.agent.ref, source.agent.revision) if origin == "clone" else None
+    )
+    assert worker.spec != source.agent.spec and worker.spec.tools == ()
+    key = f"fleet:{root.fleet.run_id}:spawn:0:agent"
+    catalog_id = f"fleet:{root.fleet.run_id}:0"
+    record_path = tmp_path / "materialization.sqlite"
+    state_store = owned.request.deps.state_store
+    assert state_store is not None
+    posts = 0
+
+    def native(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        response = owned.wire.handle(request)
+        if request.method == "POST":
+            posts += 1
+            if outcome == "lost_ack":
+                raise httpx.ReadError("offline accepted creation with lost acknowledgement")
+        elif outcome == "drift":
+            return httpx.Response(
+                200, json={**owned.wire.agent, "tools": [{"type": "code_execution"}]}
+            )
+        return response
+
+    async with AsyncExitStack() as stack:
+        sdk = build_gemini_client(
+            transport=httpx.MockTransport(native),
+            api_key="offline",
+            base_url="https://gemini.invalid",
+        )
+        stack.callback(sdk.close)
+        stack.push_async_callback(sdk.aio.aclose)
+
+        def host() -> NeutralResourceHost:
+            backend = GeminiManagedAgents(
+                SDKTransport(sdk),
+                storage=SQLiteGeminiStorage(record_path, namespace="worker-materialization"),
+                state_store=state_store,
+                account_scope_id=owned.resources.workspace,
+                resource_catalog_enabled=True,
+                resource_catalog_transport=SDKAgentCatalogTransport(sdk),
+            )
+            return NeutralResourceHost(
+                backend,
+                owned.request.deps.sessionmaker,
+                scope=worker.permissions.fleet.scope,
+                account_scope_id=owned.resources.workspace,
+                operation_key=key,
+                resource_catalog_enabled=True,
+                catalog_adapter=backend.catalog_adapter,
+            )
+
+        resources = host()
+        owned.wire.requests.clear()
+        if outcome != "acknowledged":
+            with pytest.raises(ProviderError):
+                await resources.publish(catalog_id, worker.spec, expected_revision=0, key=key)
+            assert await resources.catalog.get_agent(resources.scope, catalog_id) is None
+            # A new owner instance reconciles the durable creation by GET only.
+            resources = host()
+            if outcome == "drift":
+                with pytest.raises(ProviderError):
+                    await resources.publish(catalog_id, worker.spec, expected_revision=0, key=key)
+                assert posts == 1
+                assert await resources.catalog.get_agent(resources.scope, catalog_id) is None
+                return
+        row = await resources.publish(catalog_id, worker.spec, expected_revision=0, key=key)
+        assert posts == 1 and row.local_revision == 1
+        assert row.agent.spec == worker.spec
+        assert row.agent.ref != source.agent.ref
+        assert await resources.read(catalog_id) == row
+        assert owned.wire.agent["tools"] == []
+        assert owned.wire.agent["base_environment"] == {"type": "remote", "sources": []}
+        assert owned.wire.agent["system_instruction"] == worker.spec.system
+        assert owned.wire.agent["agent_config"] == {"type": "antigravity", "model": FLASH_PRIMARY}
+        assert [request.method for request in owned.wire.requests] == ["POST", "GET", "GET"]
+        # Catalog publication does not mutate the retained source row or revision.
+        assert await owned.resources.entry(source.catalog_id) == source
 
 
 @pytest.mark.parametrize(
@@ -907,3 +1113,231 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
             await db.scalar(text("SELECT count(*) FROM accounting_outbox WHERE applied_at IS NULL"))
             == 2
         )
+
+
+type _ClaimedWorker = tuple[
+    ProviderPreparationRequest,
+    WorkerPermissions,
+    FleetWorker,
+    Mapping[tuple[str, str], ModelRates | ProviderPrice],
+    Owned,
+    list[httpx.Request],
+]
+
+
+@pytest.fixture
+def materialization_worker_request(
+    claimed_worker_request: _ClaimedWorker, monkeypatch: pytest.MonkeyPatch
+) -> tuple[_ClaimedWorker, str]:
+    from daimon.core.turn import gemini_deployment
+
+    selected, root, worker, prices, owned, calls = claimed_worker_request
+    values = json.loads(owned.manifest_path.read_text())[0]
+    values.update(
+        worker_materialization=True,
+        agent_id=None,
+        counterpart_catalog_id=None,
+        counterpart_catalog_revision=None,
+    )
+    plan = GeminiPlan.model_validate(values)
+    owned.manifest_path.write_text(json.dumps([plan.model_dump(mode="json")]))
+    before = owned.wire.native_id
+    owned.wire.requests.clear()
+    monkeypatch.setattr(gemini_deployment, "SQLiteGeminiStorage", SQLiteGeminiStorage)
+    selected = replace(selected, deps=replace(selected.deps, turn_runtimes={}))
+    return (selected, root, worker, prices, owned, calls), before
+
+
+@pytest.mark.parametrize("clone_source", (False, True), indirect=True)
+async def test_worker_materialization_runs_the_real_headless_driver(
+    materialization_worker_request: tuple[_ClaimedWorker, str],
+    clone_source: bool,
+) -> None:
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import fleet, mux_state
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    (selected, root, worker, prices, owned, calls), before = materialization_worker_request
+    assert selected.worker is not None and selected.admission.backend_revision is not None
+    assert (selected.worker.source_agent is not None) is clone_source
+    result = await run_worker(
+        selected,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the assigned task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.id == worker.id and result.status == "succeeded" and result.turns_used == 1
+    assert result.result is not None and result.result.excerpt == "verified-worker-result"
+    creations = [call for call in owned.wire.requests if call.method == "POST"]
+    assert len(creations) == 1
+    body = json.loads(creations[0].content)
+    assert body["id"] == owned.wire.native_id and body["id"] != before
+    assert body["agent_config"] == {"type": "antigravity", "model": FLASH_PRIMARY}
+    assert body["tools"] == [] and body["base_environment"] == {"type": "remote", "sources": []}
+    assert selected.worker is not None
+    assert body["system_instruction"] == selected.worker.spec.system
+    inputs = [call for call in calls if call.method == "POST"]
+    assert len(inputs) == 1 and json.loads(inputs[0].content)["agent"] == body["id"]
+    assert json.loads(inputs[0].content)["tools"] == []
+    operation = f"fleet:{worker.run_id}:spawn:{worker.ordinal}"
+    store = selected.deps.state_store
+    assert store is not None
+    record = await store.get_operation(selected.scope, operation + ":agent_create:0")
+    assert record is not None and record.operation.status == "processed"
+    assert Agent.model_validate(dict(record.result)).ref.id == body["id"]
+    async with selected.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet.lock_budget(
+            db, tenant_id=selected.tenant_id, actor_id=root.fleet.account_id, run_id=worker.run_id
+        )
+        actual = next(row for _, rows in graph for row in rows if row.id == worker.id)
+        assert actual == result
+        entries = await mux_state.read_events(
+            db, result.result.session_id, after=result.result.sequence - 1, limit=1
+        )
+    assert len(entries) == 1 and entries[0].id == f"fleet:{worker.id}:result"
+    assert entries[0].type == "agent.message"
+    await drain_outcomes()
+    async with selected.deps.sessionmaker() as db:
+        outcomes = await list_for_tenant(db, selected.tenant_id)
+    assert any(row.origin == "worker" and row.reason.value == "completed" for row in outcomes)
+
+
+@pytest.mark.parametrize("fault", ("disabled", "undeclared_memory", "lost_ack", "native_drift"))
+async def test_real_worker_materialization_refuses_without_input_or_recreation(
+    materialization_worker_request: tuple[_ClaimedWorker, str],
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from daimon.core.stores import fleet
+    from mux.drivers.gemini import deployment as sdk_deployment
+
+    (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
+    if fault == "disabled":
+        values = json.loads(owned.manifest_path.read_text())[0]
+        values["worker_materialization"] = False
+        owned.manifest_path.write_text(json.dumps([values]))
+    elif fault == "undeclared_memory":
+        spec = dict(worker.spec)
+        assert selected.worker is not None
+        spec["declared_drops"] = [
+            drop for drop in selected.worker.declared_drops if drop != "memory"
+        ]
+        worker = replace(worker, spec=spec)
+
+    def native(call: httpx.Request) -> httpx.Response:
+        response = owned.wire.handle(call)
+        if fault == "lost_ack" and call.method == "POST":
+            raise httpx.ReadError("offline accepted native creation with lost acknowledgement")
+        if fault == "native_drift" and call.method == "GET":
+            return httpx.Response(200, json={**owned.wire.agent, "system_instruction": "stripped"})
+        return response
+
+    async with AsyncExitStack() as stack:
+        sdk = build_gemini_client(transport=httpx.MockTransport(native), api_key="offline")
+        stack.callback(sdk.close)
+        stack.push_async_callback(sdk.aio.aclose)
+        catalog = SDKAgentCatalogTransport(sdk)
+
+        def transport(*, api_key: str) -> AgentCatalogTransport:
+            assert api_key == "offline"
+            return catalog
+
+        monkeypatch.setattr(sdk_deployment, "configured_catalog_transport", transport)
+        for _attempt in range(2 if fault == "lost_ack" else 1):
+            with pytest.raises((AdmissionDenied, WorkerSpecRefused, FleetConflict)) as refused:
+                await run_worker(
+                    selected,
+                    parent=root,
+                    worker=worker,
+                    trigger_message="Complete the assigned task",
+                    prices=prices,
+                    cancel=asyncio.Event(),
+                )
+            if fault == "undeclared_memory":
+                assert (
+                    isinstance(refused.value, WorkerSpecRefused) and refused.value.field == "memory"
+                )
+            assert not calls
+            posts = [call for call in owned.wire.requests if call.method == "POST"]
+            assert len(posts) == (1 if fault in {"lost_ack", "native_drift"} else 0)
+            async with selected.deps.sessionmaker.begin() as db:
+                graph, _ = await fleet.lock_budget(
+                    db,
+                    tenant_id=selected.tenant_id,
+                    actor_id=root.fleet.account_id,
+                    run_id=worker.run_id,
+                )
+            actual = next(row for _, rows in graph for row in rows if row.id == worker.id)
+            assert actual.turns_used == 0 and actual.binding_id is None and actual.result is None
+            if fault == "lost_ack":
+                assert actual.reserved_usd > 0
+                store = selected.deps.state_store
+                assert store is not None
+                key = f"fleet:{worker.run_id}:spawn:{worker.ordinal}:agent_create:0"
+                record = await store.get_operation(selected.scope, key)
+                assert record is not None and record.operation.status == "outcome_unknown"
+                assert not record.result
+
+
+@pytest.mark.parametrize("activated", (False, True))
+async def test_dynamic_worker_callbacks_require_a_lease_before_key_or_native_access(
+    materialization_worker_request: tuple[_ClaimedWorker, str],
+    monkeypatch: pytest.MonkeyPatch,
+    activated: bool,
+) -> None:
+    from contextlib import nullcontext
+
+    from daimon.core.turn.persistence import TurnPersistence
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    (selected, _, worker, _, owned, calls), _ = materialization_worker_request
+    assert selected.admission.backend_revision is not None
+    source = await capture_preparation_source(selected)
+
+    async def forbidden() -> None:
+        raise AssertionError("unleased caller invoked its financial guard")
+
+    selected = replace(selected, source=source, before_native=forbidden)
+    revision = selected.admission.backend_revision
+    assert revision is not None
+    runtime = build_gemini_runtime(selected)
+    assert runtime.materialize_worker is not None and runtime.read_agent_counterpart is not None
+    plan = GeminiPlan.model_validate(json.loads(owned.manifest_path.read_text())[0])
+    getter = os.environ.get
+
+    def key(name: str, default: str | None = None) -> str | None:
+        if name == plan.api_key_env:
+            raise AssertionError("unleased caller read the selected provider key")
+        return getter(name, default)
+
+    monkeypatch.setattr(os.environ, "get", key)
+    store = selected.deps.state_store
+    assert store is not None
+    persistence = TurnPersistence(
+        store,
+        None,
+        selected.scope,
+        slot=Slot(
+            thread=ThreadRef(
+                channel=revision.channel,
+                thread_id=f"fleet/{worker.run_id}/{worker.ordinal}",
+            ),
+            account_id=selected.scope.account_id,
+        ),
+        operation_key=f"fleet:{worker.run_id}:spawn:{worker.ordinal}",
+        now=selected.now,
+    )
+    with persistence.activate() if activated else nullcontext():
+        with pytest.raises((AdmissionDenied, ScopeViolation)):
+            await runtime.materialize_worker(selected)
+        with pytest.raises((AdmissionDenied, ScopeViolation)):
+            await runtime.read_agent_counterpart(selected)
+    assert not owned.wire.requests and not calls
