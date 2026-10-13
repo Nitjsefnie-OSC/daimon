@@ -158,6 +158,9 @@ def worker(result: Event | None = None, **changes: Any) -> FleetWorker:
 
 def ports(*rows: FleetWorker, fleet: FleetRun | None = None) -> Mock:
     owner = create_autospec(FleetPorts, instance=True)
+    owner.controller_account.side_effect = lambda parent: (
+        ACCOUNT if parent.subject.platform_user_id == "person" else None
+    )
     owner.read_run.return_value = (fleet or run(), rows or (worker(),))
 
     async def admitted(parent: WorkerPermissions, resolved: ResolvedWorkerSpec, **kwargs: Any):

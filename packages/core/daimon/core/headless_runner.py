@@ -66,7 +66,8 @@ from daimon.core.channel_backend import resolve_turn_backend
 from daimon.core.channel_budget import admit_fleet_worker, require_fleet_worker_admission
 from daimon.core.config import GithubAppSettings, McpSettings, load_turn_settings
 from daimon.core.context_prompt import TurnContext, context_prompt
-from daimon.core.fleet import FleetConflict, FleetWorker, spawn_operation_key, worker_slot
+from daimon.core.continuity.wakes import enqueue_worker_finished
+from daimon.core.fleet import TERMINAL, FleetConflict, FleetWorker, spawn_operation_key, worker_slot
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
@@ -76,7 +77,7 @@ from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import fleet as fleet_store
-from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.stores.mux_state import PostgresStateStore, database_clock
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
 from daimon.core.turn.approvals import headless_tool_confirmation
 from daimon.core.turn.binding import prepared_persistence
@@ -676,7 +677,15 @@ async def run_worker(
                         for row in rows
                         if row.id == worker.id
                     )
-                    return await action(db, latest)
+                    updated = await action(db, latest)
+                    if updated.status in TERMINAL:
+                        await enqueue_worker_finished(
+                            db,
+                            tenant_id=run.tenant_id,
+                            run_id=run.id,
+                            now=await database_clock(db),
+                        )
+                    return updated
 
             async def bound_session(result: PreparedTurn) -> None:
                 nonlocal current, prepared, binding

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated, Protocol
@@ -28,6 +29,7 @@ from pydantic import Field, JsonValue
 
 if TYPE_CHECKING:
     from daimon.core.neutral_resources import WorkerPermissions
+    from daimon.core.turn.deps import TurnDeps
 
 PositiveMoney = Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
 PositiveCount = Annotated[int, Field(gt=0, strict=True)]
@@ -132,10 +134,12 @@ class HostFleetToolService:
         parent_loader: FleetParentLoader | None = None,
         *,
         runtime: McpRuntime | None = None,
+        deps: TurnDeps | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._parent_loader = parent_loader
         self._runtime = runtime
+        self._deps = deps
 
     async def _parent(
         self,
@@ -144,7 +148,7 @@ class HostFleetToolService:
         origin_context_id: uuid.UUID | None = None,
         run_id: uuid.UUID | None = None,
     ) -> tuple[WorkerPermissions, TenantAccessPolicy]:
-        if self._parent_loader is None:
+        if self._parent_loader is None and self._deps is None:
             raise ToolError("Fleet orchestration is unavailable: current root is not bound.")
         origin = None
         if self._runtime is not None:
@@ -155,13 +159,35 @@ class HostFleetToolService:
             )
             if origin is None or origin.is_external or origin.is_setup:
                 raise ToolError("Fleet orchestration refused: active_origin_required.")
-        parent, policy = (
-            await self._parent_loader(caller)
-            if origin_context_id is None
-            else await self._parent_loader(
-                caller, origin_context_id=origin_context_id, run_id=run_id
+        if self._parent_loader is None:
+            from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+            from daimon.core.mux_backend import resource_scope
+            from daimon.core.neutral_resources import WorkerSpecRefused
+            from daimon.core.turn.runtime_manifest import read_frozen_root
+            from mux.errors import ScopeViolation
+
+            if origin is None or self._deps is None:
+                raise ToolError("Fleet orchestration refused: active_origin_required.")
+            scope = resource_scope(
+                tenant_id=str(caller.tenant_id),
+                account_id=str(caller.account_id),
+                authorization_id="fleet-origin:" + str(origin.id),
             )
-        )
+            try:
+                parent, policy = await read_frozen_root(
+                    self._deps, scope, origin_id=origin.id, run_id=run_id, now=datetime.now(UTC)
+                )
+            except (WorkerSpecRefused, ScopeViolation):
+                raise ToolError("Fleet orchestration refused: root_unavailable.") from None
+            parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_admin))
+        else:
+            parent, policy = (
+                await self._parent_loader(caller)
+                if origin_context_id is None
+                else await self._parent_loader(
+                    caller, origin_context_id=origin_context_id, run_id=run_id
+                )
+            )
         facts = parent.fleet
         if origin is not None and (
             facts.origin_id != origin.id
