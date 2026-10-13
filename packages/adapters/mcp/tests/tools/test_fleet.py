@@ -794,8 +794,13 @@ async def test_installed_bridge_requires_the_exact_active_origin(
         )
 
 
-async def test_default_bridge_collects_the_original_run_from_a_real_completion_frame(root_turn):
-    from daimon.core.stores import turn_origins
+@pytest.mark.parametrize(
+    "later_status", ["running", "collecting", "cancelled", "failed", "completed"]
+)
+async def test_default_bridge_collects_the_original_run_from_a_real_completion_frame(
+    root_turn, later_status
+):
+    from daimon.core.stores import fleet, turn_origins
     from daimon.core.turn.runtime_manifest import read_frozen_root
     from daimon.core.turn_origin import turn_origin
 
@@ -843,6 +848,37 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
     async with wake_frame(value) as (intent, current):
         await run_root_input(value, intent_id=intent.id, completion=row)
         assert current.id != original.fleet.origin_id
+        run, _ = await fleet.run_status(
+            deps.sessionmaker, tenant_id=origin.tenant_id, run_id=original.fleet.run_id
+        )
+        if later_status == "completed":
+            run = await fleet.set_run_status(
+                deps.sessionmaker,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                expected_version=run.version,
+                status="collecting",
+            )
+        if later_status != "running":
+            await fleet.set_run_status(
+                deps.sessionmaker,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                expected_version=run.version,
+                status=later_status,
+            )
+        if later_status in ("cancelled", "failed", "completed"):
+            requests = tuple(transport.requests)
+            for execution in (origin, current):
+                for tool in (bridge.status, bridge.collect):
+                    with pytest.raises(ToolError, match="root_unavailable"):
+                        await tool(
+                            caller,
+                            run_id=original.fleet.run_id,
+                            origin_context_id=execution.id,
+                        )
+            assert tuple(transport.requests) == requests
+            return
         reply = await bridge.collect(
             caller,
             run_id=original.fleet.run_id,

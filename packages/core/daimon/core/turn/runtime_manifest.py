@@ -456,7 +456,8 @@ async def read_frozen_root(
         deps.sessionmaker, tenant_id=UUID(scope.tenant_id), run_id=selected
     )
     if (
-        run.orchestrator_session_id != binding.native_refs.get("session")
+        run.status not in ("running", "collecting")
+        or run.orchestrator_session_id != binding.native_refs.get("session")
         or run.orchestrator_binding_id != binding.id
         or run.orchestrator_account_id != parent.fleet.account_id
         or run.platform != binding.thread.channel.platform

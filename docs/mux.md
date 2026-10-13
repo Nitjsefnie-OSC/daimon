@@ -2752,8 +2752,12 @@ live origin; cards use their genuine current intent. Both resolve the same
 one-hop association and recheck original scope, source, native binding, account,
 policy and finite deadline. Unknown receipts and conflicting claims refuse.
 
-Opted-in original root origins and mapped card intents remain available only
-while their exact run is active and unexpired. Original origin expiry is capped
-to its existing expiry and the original deadline. Wake origins keep their normal
-execution lifetime. Terminal or expired runs do not retain these contexts.
-Ordinary turns and disabled lifecycle calls retain their existing behavior.
+Opted-in original root origins and mapped card intents are retained at exit
+only while their exact run is active and unexpired. Original origin expiry is
+capped to its existing expiry and the original deadline. Wake origins keep their
+normal execution lifetime. The frozen-root reader rechecks durable run state on
+every resolution: only running or collecting runs retain execution authority.
+Completing, failing or cancelling a run after its original turn exits invalidates
+both original and completion-locator readers even if bounded origin/card records
+remain. Removing those audit records at run end is a separate lifecycle owner
+unit. Ordinary turns and disabled lifecycle calls retain their existing behavior.

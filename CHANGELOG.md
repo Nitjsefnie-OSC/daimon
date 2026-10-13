@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Refuse retained fleet-root authority after its original run completes, fails or is cancelled, including completion-turn and authenticated tool readers.
+
 - Resume opted-in fleet completion turns through their exact original frozen run, preserving grants and finite origin/card lifetimes across idle frames.
 
 - Bind Discord fleet completion wakes to the original session through normal admission, with a fresh root fence before input and no recovery to another session.
