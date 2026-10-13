@@ -50,7 +50,6 @@ from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.skills.attachments import delete_skill_unless_attached, still_attached_message
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
-from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.stores.agent_repo_binding import get_bindings_for_repo
 from daimon.core.stores.agent_skill_repo_credentials import (
     list_skill_repo_credentials_for_repo,
@@ -311,8 +310,8 @@ async def _attach_synced_skills(
         )
         if collision is not None:
             raise ToolError(f"Cannot attach: {collision}")
-        return await guarded_agent_update(
-            runtime.client, runtime.session_factory, fresh, skills=merged
+        return await runtime.client.beta.agents.update(
+            fresh.id, version=fresh.version, skills=merged
         )
 
     try:

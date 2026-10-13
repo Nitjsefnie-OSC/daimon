@@ -34,12 +34,6 @@ from daimon.core.defaults.spec_merge import (
     merge_tools_with_ma,
 )
 from daimon.core.ma import update_agent_with_version_retry
-from daimon.core.skills.reference_lock import (
-    ReferenceScope,
-    added_custom_skill_ids,
-    guarded_agent_update,
-    skill_attach_guard,
-)
 from daimon.core.specs import AgentSpec, dump_agent_spec
 
 _log = structlog.get_logger(__name__)
@@ -55,14 +49,11 @@ async def reconcile_agent(
     public_url: str | None = None,
     managed: bool = True,
     skills_view: list[SkillListResponse] | None = None,
-    references: ReferenceScope | None,
+    references: object = None,
 ) -> ResourceOutcome:
     """Reconcile a single agent against MA.
 
-    `references` is where the write takes the shared skill reference lock
-    (`reference_lock`) for every skill it adds, so a concurrent delete can't
-    leave this agent pinning a deleted skill. Required so no writer forgets
-    it; None only where there is no database (unit tests).
+    `references` is ignored; it is still accepted because some callers pass it.
 
     `managed=True` (default) stamps `daimon_managed=true` in the agent's
     metadata so the sweep (defaults apply) can find and archive resources
@@ -207,10 +198,9 @@ async def reconcile_agent(
                     update={"mcp_servers": merged_servers, "tools": merged_tools}
                 )
             merged_skills = merge_skills_with_ma(resolved_skills, fresh)
-            return await guarded_agent_update(
-                client,
-                references,
-                fresh,
+            return await client.beta.agents.update(
+                fresh.id,
+                version=fresh.version,
                 **dump_agent_spec(local_spec),
                 skills=merged_skills,
                 metadata=cast("dict[str, str | None]", metadata),
@@ -223,14 +213,11 @@ async def reconcile_agent(
 
     if dry_run:
         return ResourceOutcome(kind="agent", name=spec.name, action=Action.CREATED)
-    async with skill_attach_guard(
-        references, client, added_custom_skill_ids(before=(), after=resolved_skills)
-    ):
-        created = await client.beta.agents.create(
-            **dump_agent_spec(spec),
-            skills=resolved_skills,
-            metadata=metadata,
-        )
+    created = await client.beta.agents.create(
+        **dump_agent_spec(spec),
+        skills=resolved_skills,
+        metadata=metadata,
+    )
     return ResourceOutcome(
         kind="agent", name=spec.name, action=Action.CREATED, anthropic_id=created.id
     )

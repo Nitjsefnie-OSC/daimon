@@ -1,17 +1,12 @@
-"""Every path that writes or retires a skill reference honours the reference lock.
+"""Every path that retires a skill checks for references first, and what the race leaves.
 
-Ported from the PR #857 re-review probes (reviews/evidence-857-97036d2), which
-reproduced each path stranding an agent or a channel on a deleted skill. Here
-the same interleavings assert the safe outcome. Real Postgres for the locks
-(separate connections where one side must wait), fake Managed Agents for the
-provider.
+Real Postgres for the channel rules, fake Managed Agents for the provider.
 """
 
 from __future__ import annotations
 
 import asyncio
 import re
-import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -19,19 +14,16 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.core import reader_agent
 from daimon.core.channel_skills import add_skill_to_channel
 from daimon.core.defaults import reconcile_agents
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.reconcile_skills import reconcile_skill
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.reader_agent import ensure_reader_variant
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.orchestrator import sync_agent_skills
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills import attachments
 from daimon.core.skills.attachments import delete_skill_unless_attached
-from daimon.core.skills.reference_lock import SkillDeletedWhileAttaching
 from daimon.core.specs import AgentSpec, SkillRef, SkillRepo
 from daimon.core.stores.channel_skills import add_channel_skill, list_skill_channel_rules
 from daimon.core.stores.domain import TenantRow
@@ -62,6 +54,7 @@ class _Workspace:
     def __init__(self, tenant: TenantRow, *, agent_name: str | None = None) -> None:
         self.tenant = tenant
         self.state = FakeMAState()
+        self.deleted: set[str] = set()
         self.deletes: list[str] = []
         self.title = tenant_scoped_display_title(
             tenant_id=tenant.id, name="existing", agent_name=agent_name
@@ -80,13 +73,13 @@ class _Workspace:
         def extra(request: httpx.Request) -> httpx.Response:
             path = request.url.path
             if request.method == "GET" and path == "/v1/skills":
-                gone = SKILL in self.state.deleted_skills
+                gone = SKILL in self.deleted
                 return list_response([] if gone else [skill_response(SKILL, self.title)])
             if request.method == "GET" and re.fullmatch(r"/v1/skills/[^/]+/versions", path):
                 return list_response([])
             if request.method == "DELETE" and re.fullmatch(r"/v1/skills/[^/]+", path):
                 skill_id = path.rsplit("/", 1)[1]
-                self.state.deleted_skills.add(skill_id)
+                self.deleted.add(skill_id)
                 self.deletes.append(skill_id)
                 return httpx.Response(200, json={"id": skill_id, "type": "skill_deleted"})
             raise NotHandled
@@ -118,63 +111,16 @@ def _spec() -> AgentSpec:
     )
 
 
-async def _still_blocked(task: asyncio.Task[Any]) -> bool:
-    await asyncio.sleep(0.3)
-    return not task.done()
-
-
-@pytest.mark.parametrize("existing_agent", [False, True])
-async def test_reconcile_waits_for_a_delete_holding_the_lock_and_then_refuses(
-    sm: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    existing_agent: bool,
+async def test_an_attach_after_the_final_check_is_left_pinning_the_deleted_skill(
+    sm: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Delete first: reconcile resolved the skill, then a delete ran; no pin is written."""
+    """The residual race: attaches take no lock, so a pin written after the delete's
+    last look survives it. The next session there fails with `SkillUnavailable`
+    naming the skill (`test_create_session_names_a_deleted_agent_skill`).
+    """
     tenant = await _tenant(sm)
     workspace = _Workspace(tenant)
-    if existing_agent:
-        workspace.add_agent("target", [])
-    client = workspace.client()
-    resolved, resume = asyncio.Event(), asyncio.Event()
-    real_resolve = reconcile_agents.resolve_refs
-
-    async def pause_after_resolution(*args: Any, **kwargs: Any) -> Any:
-        skills = await real_resolve(*args, **kwargs)
-        resolved.set()
-        await resume.wait()
-        return skills
-
-    monkeypatch.setattr(reconcile_agents, "resolve_refs", pause_after_resolution)
-    attaching = asyncio.create_task(
-        reconcile_agents.reconcile_agent(
-            client, _spec(), tenant_id=tenant.id, dry_run=False, managed=False, references=sm
-        )
-    )
-    await asyncio.wait_for(resolved.wait(), 5)
-    async with sm() as deleting, deleting.begin():
-        assert (
-            await delete_skill_unless_attached(client, deleting, skill_id=SKILL, detach=False)
-        ).deleted
-        resume.set()
-        assert await _still_blocked(attaching), "the attach waits for the delete's lock"
-
-    with pytest.raises(SkillDeletedWhileAttaching):
-        await attaching
-    for agent_id in workspace.state.agents:
-        assert SKILL not in workspace.pins(agent_id)
-
-
-@pytest.mark.parametrize("existing_agent", [False, True])
-async def test_a_delete_after_its_final_check_holds_off_reconcile(
-    sm: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    existing_agent: bool,
-) -> None:
-    """The review's probe: reconcile pins the live skill after the delete's last look."""
-    tenant = await _tenant(sm)
-    workspace = _Workspace(tenant)
-    if existing_agent:
-        workspace.add_agent("target", [])
+    workspace.add_agent("target", [])
     client = workspace.client()
     checked, resume = asyncio.Event(), asyncio.Event()
     real_find = attachments.find_skill_attachments
@@ -197,74 +143,14 @@ async def test_a_delete_after_its_final_check_holds_off_reconcile(
 
     deleting = asyncio.create_task(delete())
     await asyncio.wait_for(checked.wait(), 5)
-    attaching = asyncio.create_task(
-        reconcile_agents.reconcile_agent(
-            client, _spec(), tenant_id=tenant.id, dry_run=False, managed=False, references=sm
-        )
+    await reconcile_agents.reconcile_agent(
+        client, _spec(), tenant_id=tenant.id, dry_run=False, managed=False
     )
-    assert await _still_blocked(attaching)
     resume.set()
+
     assert await deleting
-    with pytest.raises(SkillDeletedWhileAttaching):
-        await attaching
-    for agent_id in workspace.state.agents:
-        assert SKILL not in workspace.pins(agent_id)
-
-
-async def test_a_reader_copied_before_a_force_delete_is_rebuilt_without_the_skill(
-    sm: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The review's probe: the reader's source snapshot names a skill a force delete removes."""
-    tenant = await _tenant(sm)
-    workspace = _Workspace(tenant)
-    workspace.add_agent("source", [SKILL])
-    client = workspace.client()
-    snapshot, resume = asyncio.Event(), asyncio.Event()
-
-    async def reader_ref(*args: Any, **kwargs: Any) -> list[Any]:
-        snapshot.set()  # the source's skills are already copied
-        await resume.wait()
-        return []  # leave out the report-reader skill: only the copied pin matters
-
-    monkeypatch.setattr(reader_agent, "resolve_refs", reader_ref)
-    attaching = asyncio.create_task(
-        ensure_reader_variant(
-            client,
-            tenant_id=tenant.id,
-            account_id=uuid.uuid4(),
-            source_name="source",
-            references=sm,
-        )
-    )
-    await asyncio.wait_for(snapshot.wait(), 5)
-    before_provider_delete, finish_delete = asyncio.Event(), asyncio.Event()
-    real_provider_delete = attachments.delete_skill_and_versions
-
-    async def pause_before_provider_delete(*args: Any, **kwargs: Any) -> None:
-        before_provider_delete.set()
-        await finish_delete.wait()
-        await real_provider_delete(*args, **kwargs)
-
-    monkeypatch.setattr(attachments, "delete_skill_and_versions", pause_before_provider_delete)
-
-    async def delete() -> bool:
-        async with sm() as session, session.begin():
-            outcome = await delete_skill_unless_attached(
-                client, session, skill_id=SKILL, detach=True
-            )
-            return outcome.deleted
-
-    deleting = asyncio.create_task(delete())
-    await asyncio.wait_for(before_provider_delete.wait(), 5)
-    resume.set()
-    assert await _still_blocked(attaching), "the reader waits for the delete's lock"
-    finish_delete.set()
-    assert await deleting
-    reader = await asyncio.wait_for(attaching, 5)
-
-    assert SKILL in workspace.state.deleted_skills
-    assert all(skill.skill_id != SKILL for skill in reader.skills), "no stale copied pin"
-    assert workspace.pins("agent_source") == []
+    assert SKILL in workspace.deleted
+    assert workspace.pins("agent_target") == [SKILL]
 
 
 async def test_sync_keeps_an_orphan_a_channel_still_adds(
@@ -458,102 +344,3 @@ async def test_defaults_dedup_keeps_a_referenced_duplicate(
     if referenced_by == "channel":
         async with db_session_factory() as session:
             assert len(await list_skill_channel_rules(session, skill_id=SKILL)) == 1
-
-
-async def test_defaults_dedup_waits_for_a_concurrent_channel_attach(
-    sm: async_sessionmaker[AsyncSession], tmp_path: Path
-) -> None:
-    """A channel rule being added to the older duplicate as dedup runs keeps it."""
-    from daimon.core.skills.reference_lock import lock_skills_for_attach
-
-    tenant = await _tenant(sm)
-    skill_dir = tmp_path / "existing"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("---\nname: existing\ndescription: d\n---\nbody\n")
-    title = tenant_scoped_display_title(tenant_id=tenant.id, name="existing")
-    older = skill_response(SKILL, title)
-    older["created_at"] = "2026-09-01T00:00:00Z"
-    newer = skill_response("skill_newer", title)
-    newer["created_at"] = "2026-10-01T00:00:00Z"
-    deleted: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if request.method == "GET" and path == "/v1/skills":
-            return list_response([older, newer])
-        if request.method == "GET" and path == "/v1/agents":
-            return list_response([])
-        if request.method == "GET" and re.fullmatch(r"/v1/skills/[^/]+", path):
-            return httpx.Response(200, json=skill_response(path.rsplit("/", 1)[1]))
-        if request.method == "GET" and re.fullmatch(r"/v1/skills/[^/]+/versions", path):
-            return list_response([])
-        if request.method == "DELETE":
-            deleted.append(path.rsplit("/", 1)[1])
-            return httpx.Response(200, json={"id": deleted[-1], "type": "skill_deleted"})
-        if request.method == "POST" and path.endswith("/versions"):
-            return httpx.Response(500)
-        raise AssertionError(f"unexpected {request.method} {path}")
-
-    client = build_fake_anthropic(handler)
-    async with sm() as attach, attach.begin():
-        await lock_skills_for_attach(attach, client, [SKILL])
-        await add_channel_skill(
-            attach,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id="chan",
-            skill_id=SKILL,
-            version="1",
-            name="existing",
-            owner_agent_name=None,
-            actor_account_id=None,
-        )
-        dedup = asyncio.create_task(
-            reconcile_skill(client, sm, skill_dir, tenant_id=tenant.id, dry_run=False)
-        )
-        assert await _still_blocked(dedup), "dedup waits for the attach to commit"
-    await asyncio.gather(dedup, return_exceptions=True)
-
-    assert SKILL not in deleted
-    async with sm() as session:
-        assert len(await list_skill_channel_rules(session, skill_id=SKILL)) == 1
-
-
-async def test_backfill_does_not_repin_to_a_skill_deleted_before_the_repin(
-    sm: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The review's probe: the new skill is deleted between its creation and the re-pin."""
-    from io import StringIO
-
-    from daimon.adapters.cli.commands import skills_backfill as backfill
-    from rich.console import Console
-
-    tenant = await _tenant(sm)
-    workspace = _Workspace(tenant)
-    workspace.add_agent("target", ["legacy_skill"])
-    client = workspace.client()
-
-    async def create_then_operator_deletes(**_kwargs: Any) -> str:
-        async with sm() as session, session.begin():
-            outcome = await delete_skill_unless_attached(
-                client, session, skill_id=SKILL, detach=False
-            )
-            assert outcome.deleted
-        return SKILL
-
-    monkeypatch.setattr(backfill, "_create_new_skill", create_then_operator_deletes)
-    row = backfill._BackfillRow(  # pyright: ignore[reportPrivateUsage]
-        tenant_id=str(tenant.id),
-        agent_names="target",
-        skill_id="legacy_skill",
-        display_title="cli-auth",
-        classification="RECREATE_SEEDED",
-        new_title=workspace.title,
-        new_skill_id="",
-    )
-    await backfill._apply_phase(  # pyright: ignore[reportPrivateUsage]
-        client, sm, rows=[row], http_client=httpx.AsyncClient(), console=Console(file=StringIO())
-    )
-
-    assert SKILL not in workspace.pins("agent_target")
-    assert workspace.pins("agent_target") == ["legacy_skill"], "the legacy pin is left in place"

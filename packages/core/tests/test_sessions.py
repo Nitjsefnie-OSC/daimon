@@ -185,8 +185,7 @@ async def test_create_session_names_a_deleted_agent_skill() -> None:
 
     message = str(refused.value)
     assert isinstance(refused.value, UserFacingError), "every adapter shows this copy as written"
-    assert refused.value.attached_to == "agent"
-    assert '"skill_01PBRj"' in message and "qa-fork" in message
+    assert '"skill_01PBRj"' in message and "qa-fork uses" in message
     assert "remove_skill" in message
     assert "couldn't accept the request" not in message
 
@@ -225,7 +224,7 @@ async def test_create_session_names_a_deleted_channel_skill_from_its_rule(
             ),
         )
 
-    assert refused.value.attached_to == "channel"
+    assert "this channel adds" in str(refused.value)
     assert '"qa-haiku-canary" (skill_chan)' in str(refused.value)
     assert "remove_channel_skill" in str(refused.value)
 

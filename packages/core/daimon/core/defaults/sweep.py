@@ -139,9 +139,9 @@ async def sweep_removed_skills(
         there)
 
     The agent and channel sets above are snapshots, a cheap first filter. A real
-    delete is then decided again on `session` (required unless dry_run) under
-    the skill's exclusive reference lock (`delete_skill_unless_attached`), so
-    an agent or channel attached since the snapshot keeps its skill.
+    delete is then decided again on `session` (required unless dry_run) just
+    before it runs (`delete_skill_unless_attached`), so an agent or channel
+    attached since the snapshot keeps its skill.
 
     A full skills.list page raises SkillsListTruncatedError BEFORE any delete
     decision; _run_sweep's existing except (APIError, DaimonError) boundary converts

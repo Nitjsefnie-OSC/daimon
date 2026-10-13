@@ -36,13 +36,6 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.skills import resolve_refs
 from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
-from daimon.core.skills.reference_lock import (
-    ReferenceScope,
-    SkillDeletedWhileAttaching,
-    added_custom_skill_ids,
-    guarded_agent_update,
-    skill_attach_guard,
-)
 from daimon.core.specs import AgentSpec, SkillRef, dump_agent_spec
 
 # Skill seeded from the defaults tree (its SKILL.md lands in a later plan)
@@ -117,45 +110,8 @@ async def ensure_reader_variant(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     source_name: str,
-    references: ReferenceScope | None,
 ) -> BetaManagedAgentsAgent:
-    """Find, create or update the reader variant of `source_name`.
-
-    The variant copies the source's skills, so its write takes the shared
-    skill reference lock (`references`, see `reference_lock`) for every
-    skill it adds and checks each still exists. A copy taken before a
-    concurrent delete detached and deleted a skill is refused there; the
-    variant is then rebuilt once from the source as it is now.
-    """
-    try:
-        return await _ensure_reader_variant(
-            anthropic,
-            tenant_id=tenant_id,
-            account_id=account_id,
-            source_name=source_name,
-            references=references,
-        )
-    except SkillDeletedWhileAttaching:
-        return await _ensure_reader_variant(
-            anthropic,
-            tenant_id=tenant_id,
-            account_id=account_id,
-            source_name=source_name,
-            references=references,
-        )
-
-
-async def _ensure_reader_variant(
-    anthropic: AsyncAnthropic,
-    *,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    source_name: str,
-    references: ReferenceScope | None,
-) -> BetaManagedAgentsAgent:
-    """Find, create or update the reader variant of `source_name`.
-
-    Every step but the reference lock is a Managed Agents call.
+    """Find, create or update the reader variant of `source_name`, on MA only.
 
     Reuse is keyed on `daimon_reader_of`, a fingerprint of the *source's*
     shape: `daimon_spec_hash` off the source's own metadata when it carries
@@ -247,14 +203,11 @@ async def _ensure_reader_variant(
 
     if match is None:
         # No `queue_agent_face`: a reader answers a published report and never posts in chat.
-        async with skill_attach_guard(
-            references, anthropic, added_custom_skill_ids(before=(), after=resolved_skills)
-        ):
-            return await anthropic.beta.agents.create(
-                **dump_agent_spec(reader_spec),
-                skills=resolved_skills,
-                metadata=metadata,
-            )
+        return await anthropic.beta.agents.create(
+            **dump_agent_spec(reader_spec),
+            skills=resolved_skills,
+            metadata=metadata,
+        )
 
     if (
         match.metadata.get(MA_METADATA_KEY_READER_OF) == reader_of
@@ -267,10 +220,9 @@ async def _ensure_reader_variant(
         return match
 
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
-        return await guarded_agent_update(
-            anthropic,
-            references,
-            fresh,
+        return await anthropic.beta.agents.update(
+            fresh.id,
+            version=fresh.version,
             **dump_agent_spec(reader_spec),
             skills=resolved_skills,
             metadata=cast("dict[str, str | None]", metadata),
