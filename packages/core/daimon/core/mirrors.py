@@ -30,6 +30,7 @@ from daimon.core.permissions import (
     agent_permissions,
     channel_permissions,
     crosses_home,
+    session_homes,
     session_readable_from,
 )
 from daimon.core.stores.domain import MirrorRow
@@ -81,6 +82,7 @@ def mirror_refusal(
         return "writers_none"
     if dest.home_unknown:
         return "own_agents_only"
+    agent = agent_permissions(policy, agent_names)
     origin = None
     if source is not None:
         if not session_readable_from(
@@ -94,7 +96,13 @@ def mirror_refusal(
             return "not_a_reader"
         if source.channel_id is not None:
             origin = channel_permissions(policy, channel_id=source.channel_id)
-    if crosses_home(agent_permissions(policy, agent_names), dest, origin):
+        # Every home the session lay in when it ran, as `authz` reads a session.
+        lies_in = session_homes(
+            policy, channel=source.channel_id, thread=None, seal_ids=source.seal_ids
+        )
+        if any(home != dest.home or home != agent.home for home in lies_in):
+            return "own_agents_only"
+    if crosses_home(agent, dest, origin):
         return "own_agents_only"
     return None
 

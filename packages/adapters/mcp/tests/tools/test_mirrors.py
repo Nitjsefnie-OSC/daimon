@@ -4,25 +4,33 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import daimon.adapters.mcp.tools.mirrors as tools
+import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.hosted_artifacts import HostedChartDelivery
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools.agent_chat import _ask_impl  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.agent_chat import (
+    AskResult,
+    _ask_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import MirrorsSettings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mirrors as mirrors_store
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import Role, TenantRow
+from daimon.core.stores.domain import MirrorDeliveryRow, Role, TenantRow
 from daimon.core.stores.security_audit import list_events
-from daimon.testing import ma_agent, ma_model_config
+from daimon.testing import ma_agent, ma_model_config, ma_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
@@ -35,7 +43,11 @@ _NOW = dt.datetime(2026, 10, 1, 12, tzinfo=dt.UTC)
 
 
 def _runtime(
-    sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, enabled: bool = True
+    sm: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    *,
+    enabled: bool = True,
+    router: MARouter | None = None,
 ) -> McpRuntime:
     agent = ma_agent(
         id="ag_helper",
@@ -43,12 +55,14 @@ def _runtime(
         model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "helper"},
     )
-    router = MARouter()
+    router = router or MARouter()
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent.model_dump(mode="json")]))
     client: AsyncAnthropic = build_fake_anthropic(router.dispatch)
     settings = MagicMock()
     settings.mirrors = MirrorsSettings(enabled=enabled)
     settings.artifacts = None
+    settings.mcp.public_url = None
+    settings.mcp.jwt_secret = None
     return McpRuntime(
         session_factory=sm,
         client=client,
@@ -138,26 +152,94 @@ async def test_create_records_attested_consent_in_the_audit_trail_and_lists_it(
     assert await _list(runtime, auth) == [], "removed"
 
 
-async def _ask(runtime: McpRuntime, auth: AuthIdentity):
-    idle = MagicMock(status="idle")
-    events = MagicMock(
-        items=[MagicMock(type="agent.message", content=[{"type": "text", "text": "Answer"}])],
-        next_page=None,
+_SESSION = "sesn_1"
+
+
+def _ma_routes(session_metadata: dict[str, str], status: str) -> MARouter:
+    """A session of `helper` that answers "Answer" to whatever is sent."""
+    router = MARouter()
+    session = ma_session(
+        id=_SESSION, agent_id="ag_helper", status=status, metadata=session_metadata
+    ).model_dump(mode="json")
+    message = {"type": "user.message", "content": [{"type": "text", "text": "Question"}]}
+    answer = {"type": "agent.message", "content": [{"type": "text", "text": "Answer"}]}
+    router.add("GET", r"/v1/sessions/([^/?]+)$", lambda _r, _m: httpx.Response(200, json=session))
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/?]+)/events",
+        lambda _r, _m: list_response([{"id": "sevt_sent", **message, "processed_at": None}]),
     )
-    started = {"handle": "sesn_1", "turn_event_id": "e0", "turn_started_at": _NOW.isoformat()}
-    module = "daimon.adapters.mcp.tools.agent_chat"
-    with (
-        patch(f"{module}._start_turn_impl", new=AsyncMock(return_value=started)),
-        patch(f"{module}._get_session_impl", new=AsyncMock(return_value=idle)),
-        patch(f"{module}._list_events_impl", new=AsyncMock(return_value=events)),
-        patch(
-            f"{module}.deliver_hosted_charts",
-            new=AsyncMock(return_value=HostedChartDelivery(message="Answer")),
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/?]+)/events",
+        lambda _r, _m: list_response(
+            [{"id": "sevt_answer", **answer, "processed_at": "2026-10-01T12:00:01Z"}]
         ),
-    ):
-        return await _ask_impl(
-            runtime, auth, "Question", sleep=AsyncMock(), clock=lambda: 0.0, now=lambda: _NOW
-        )
+    )
+    return router
+
+
+async def _ask(
+    runtime: McpRuntime, auth: AuthIdentity, *, timeout_seconds: float = 5.0, **kw: Any
+) -> AskResult:
+    """Continue `_SESSION` through the faked Managed Agents API."""
+    return await _ask_impl(
+        runtime,
+        auth,
+        "Question",
+        handle=_SESSION,
+        timeout_seconds=timeout_seconds,
+        sleep=AsyncMock(),
+        now=lambda: _NOW,
+        **kw,
+    )
+
+
+async def _consented_mirror(session: AsyncSession, tenant: TenantRow, dest: str = "300") -> None:
+    await mirrors_store.upsert_mirror(
+        session,
+        tenant_id=tenant.id,
+        name="qa",
+        source_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_helper"),
+        source_agent_name="helper",
+        source_agent_names=("helper",),
+        dest_platform="discord",
+        dest_kind="channel",
+        dest_id=dest,
+        consent_note="the askers agreed",
+        max_answer_chars=None,
+        account_id=None,
+        now=_NOW,
+    )
+    await session.commit()
+
+
+async def _caller(
+    session: AsyncSession, tenant: TenantRow, *, bound_channel_id: str | None = None
+) -> tuple[AuthIdentity, dict[str, str]]:
+    """An agent key of `helper`, and the stamps of the session it opened."""
+    account = await make_account(session, tenant=tenant)
+    await session.commit()
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_helper"),
+        bound_channel_id=bound_channel_id,
+    )
+    return auth, {MA_METADATA_KEY_ACCOUNT: str(account.id)}
+
+
+async def _queued(session: AsyncSession) -> list[MirrorDeliveryRow]:
+    return await mirrors_store.claim_mirror_deliveries(
+        session,
+        platform="discord",
+        owner="t",
+        now=_NOW,
+        lease=dt.timedelta(minutes=1),
+        max_pending_age=dt.timedelta(minutes=30),
+    )
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -165,28 +247,31 @@ async def test_ask_queues_the_answer_for_a_mirror_and_says_where(
     sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession, enabled: bool
 ) -> None:
     tenant = await make_tenant(db_session)
-    runtime = _runtime(sessionmaker, tenant.id)
-    await _create_in(runtime, await _auth(db_session, tenant), "300", consent="agreed")
-    runtime.settings.mirrors = MirrorsSettings(enabled=enabled)
-    caller = AuthIdentity(
-        account_id=(await make_account(db_session, tenant=tenant)).id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_helper"),
-    )
+    await _consented_mirror(db_session, tenant)
+    caller, stamps = await _caller(db_session, tenant)
+    router = _ma_routes(stamps, "idle")
 
-    result = await _ask(runtime, caller)
+    result = await _ask(_runtime(sessionmaker, tenant.id, enabled=enabled, router=router), caller)
 
-    claimed = await mirrors_store.claim_mirror_deliveries(
-        db_session,
-        platform="discord",
-        owner="t",
-        now=_NOW,
-        lease=dt.timedelta(minutes=1),
-        max_pending_age=dt.timedelta(minutes=30),
-    )
+    queued = await _queued(db_session)
+    assert result.message == "Answer", result
     if enabled:
         assert result.shared_to == ("discord channel 300",), result
-        assert claimed[0].payload is not None and claimed[0].payload.answer == "Answer"
+        assert queued[0].payload is not None and queued[0].payload.answer == "Answer", queued
     else:
-        assert (result.shared_to, claimed) == ((), []), "a disabled deployment queues nothing"
+        assert (result.shared_to, queued) == ((), []), "a disabled deployment queues nothing"
+
+
+async def test_a_session_sealed_when_it_ran_keeps_its_seal_after_the_channel_reopens(
+    sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _consented_mirror(db_session, tenant)
+    caller, stamps = await _caller(db_session, tenant, bound_channel_id="200")
+    router = _ma_routes({**stamps, "daimon_channel": "200", "daimon_sealed": "200"}, "idle")
+
+    await _ask(_runtime(sessionmaker, tenant.id, router=router), caller)
+
+    queued = await _queued(db_session)
+    assert queued[0].payload is not None, queued
+    assert queued[0].payload.source.seal_ids == ("200",), "the session's stamped seal is kept"

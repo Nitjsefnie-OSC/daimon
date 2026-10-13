@@ -1114,9 +1114,20 @@ async def _ask_impl(
     turn_event_id = started["turn_event_id"]
     turn_started_at = dt.datetime.fromisoformat(started["turn_started_at"])
     deadline = clock() + timeout_seconds
+    stamped: frozenset[str] = frozenset()
+
+    async def read(session: BetaManagedAgentsSession) -> None:
+        nonlocal stamped
+        stamped = seal_ids(session.metadata)
+        if on_read is not None:
+            await on_read(session)
+
+    async def source_seal() -> frozenset[str]:
+        # A session stays under every seal it ran under, even once reopened.
+        return stamped | await _bound_seal(runtime, auth)
 
     while True:
-        current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
+        current = await _get_session_impl(runtime, auth, handle, on_read=read)
         # Only terminated is treated as terminal: the status value set is
         # upstream-controlled (see SessionInfo.status), so an unmodeled
         # transient status keeps polling until the deadline instead of
@@ -1174,7 +1185,7 @@ async def _ask_impl(
                     question=message,
                     answer=final_text,
                     personal=personal_memory,
-                    read_seal=lambda: _bound_seal(runtime, auth),
+                    read_seal=source_seal,
                     now=now(),
                 )
                 return AskResult(

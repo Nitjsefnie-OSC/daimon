@@ -127,6 +127,33 @@ def test_a_sealed_session_may_be_mirrored_inside_its_channel() -> None:
     )
 
 
+def test_a_session_stays_under_its_stamped_seal_once_its_channel_reopens() -> None:
+    """The source carries the session's stamped seal, not only the channel's seal now."""
+    reopened = TenantAccessPolicy()
+    dest = channel_permissions(reopened, channel_id=_OPEN)
+
+    def refusal(source: SourceRef) -> MirrorRefusal | None:
+        return mirror_refusal(reopened, agent_names=("helper",), dest=dest, source=source)
+
+    assert refusal(SourceRef(channel_id="X", seal_ids=(), session_key="s")) is None, (
+        "without its stamp the session would read as open"
+    )
+    assert refusal(SourceRef(channel_id="X", seal_ids=("X",), session_key="s")) == (
+        "not_a_reader"
+    ), "a session sealed when it ran stays sealed"
+
+
+def test_a_session_stamped_inside_a_home_stays_there() -> None:
+    event = _event(channel_id="900", seal_ids=(_HOME,))
+
+    assert _refusal(_HOME, event=event) == "own_agents_only", (
+        "only the home's own agents carry what was said in it"
+    )
+    assert _refusal(_HOME, names=("home-bot",), event=event) is None, (
+        "the home's own agent may mirror it into the home"
+    )
+
+
 def test_render_redacts_clips_and_names_the_asker_without_their_id() -> None:
     secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
     event = _event(

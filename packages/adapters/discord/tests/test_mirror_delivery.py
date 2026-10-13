@@ -63,7 +63,11 @@ async def _setup(db_session: AsyncSession, policy: TenantAccessPolicy | None = N
 
 
 async def _ask_and_poll(
-    sm: async_sessionmaker[AsyncSession], mirror: MirrorRow, channel: MagicMock
+    sm: async_sessionmaker[AsyncSession],
+    mirror: MirrorRow,
+    channel: MagicMock,
+    *,
+    seal_ids: tuple[str, ...] = (),
 ) -> None:
     event = ConversationEventV1(
         id=uuid.uuid4(),
@@ -71,7 +75,7 @@ async def _ask_and_poll(
         occurred_at=_NOW,
         tenant_id=mirror.tenant_id,
         agent_id=_AGENT,
-        source=SourceRef(channel_id="300", session_key="sesn_abc123"),
+        source=SourceRef(channel_id="300", seal_ids=seal_ids, session_key="sesn_abc123"),
         actor=ActorRef(display_name="Ada"),
         question="Ping @everyone?",
         answer="Pong.",
@@ -134,3 +138,16 @@ async def test_a_rule_letting_nobody_post_pauses_the_mirror(
     channel.send.assert_not_awaited()
     paused = await store.get_mirror(db_session, mirror.id)
     assert paused is not None and paused.paused_reason == "writers_none", paused
+
+
+async def test_a_sealed_session_is_skipped_and_the_mirror_goes_on(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    mirror = await _setup(db_session)
+    channel = _channel()
+
+    await _ask_and_poll(db_session_factory, mirror, channel, seal_ids=("300",))
+
+    channel.send.assert_not_awaited()
+    after = await store.get_mirror(db_session, mirror.id)
+    assert after is not None and after.status == "active", "one session's refusal pauses nothing"

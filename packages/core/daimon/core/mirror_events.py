@@ -21,7 +21,8 @@ EventSurface = Literal["agent_chat", "hub"]
 
 class SourceRef(BaseModel):
     """Where the conversation lives: the channel an agent key was minted in
-    (None for a person's own unbound session), the ids that sealed it, and the
+    (None for a person's own unbound session), the ids that sealed it (its
+    stamp and its channel's seal now), and the
     managed-agent session the answer came from."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")

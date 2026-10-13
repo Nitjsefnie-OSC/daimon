@@ -92,12 +92,15 @@ def make_discord_mirror_poster(
             parent_channel_id=parent_channel_id,
             category_id=category_id,
         )
-        refusal = mirror_refusal(
-            job.policy, agent_names=mirror.source_agent_names, dest=dest, source=job.event.source
-        )
-        if refusal is not None:
+        names = mirror.source_agent_names
+        if (refusal := mirror_refusal(job.policy, agent_names=names, dest=dest)) is not None:
             log.info("mirror.delivery_refused", mirror_id=str(mirror.id), reason=refusal)
             return MirrorOutcome(status="skipped", note=f"refused:{refusal}", pause_reason=refusal)
+        # A refusal of this session alone skips it; the mirror goes on.
+        refusal = mirror_refusal(job.policy, agent_names=names, dest=dest, source=job.event.source)
+        if refusal is not None:
+            log.info("mirror.delivery_refused", mirror_id=str(mirror.id), reason=refusal)
+            return MirrorOutcome(status="skipped", note=f"refused:{refusal}")
         post = render_qa(
             job.event,
             agent_name=mirror.source_agent_name,
