@@ -2781,3 +2781,16 @@ through its existing locked transition owner, retaining reservations and
 publishing eligible frozen completion wakes. Cleanup allows a concurrent stop
 intent and refuses changed attempts, bindings or native phases. Once allocation
 starts, native-unknown outcomes stay with the existing reconciliation owner.
+The rollback reader floor is the completion-aware queue reader with closed SQL
+reason predicates and callback-unavailable deferral, together with the fair
+wake dispatcher. It recognizes `worker_finished`; it does not ignore that
+reason. Without an installed completion callback, dispatch releases the row
+without provider input, history fallback or a notice, refunds the claim attempt
+and advances availability. That backoff lets later threads reach the next
+bounded poll batch. Readers that decode unsupported reasons before selection
+are below this floor; no legacy-vocabulary backport is implied.
+
+Before removing completion-wake schema support, stop fleet publication and
+dispatch, drain native work, and retire pending/claimed scheduling through the
+existing owners. Removing queue rows is not cancellation of native work or a
+refund of usage; those confirmations remain independent requirements.
