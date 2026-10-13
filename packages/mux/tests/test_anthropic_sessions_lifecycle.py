@@ -300,3 +300,51 @@ async def test_list_filters_foreign_tags_and_ungranted_untagged_sessions() -> No
         page = await port.list(SCOPE, filters=SessionFilter(), page=PageRequest())
     transport.assert_consumed()
     assert [session.ref.id for session in page.data] == ["allowed"]
+
+
+@pytest.mark.parametrize("credential", [False, True])
+async def test_claimed_session_create_lost_ack_posts_once_with_production_retries(
+    credential: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from mux.drivers.anthropic.transport import single_attempt_mutation
+
+    transport = ScriptedTransport()
+    material = "offline-repository-credential-marker"
+    transport.queue(ScriptedReply("POST", "/v1/sessions", httpx.ReadError(material)))
+    mounts = (
+        (
+            ResourceBinding(
+                id="repository",
+                kind="repository",
+                native=ExtensionConfig(
+                    namespace="anthropic.session_resource_create",
+                    version=1,
+                    value={
+                        "resource": {
+                            "type": "github_repository",
+                            "url": "https://github.com/example/repo",
+                            "authorization_token_ref": "repository-credential",
+                        }
+                    },
+                ),
+            ),
+        )
+        if credential
+        else ()
+    )
+    async with transport.client(max_retries=8) as client:
+        port = AnthropicSessions(
+            client,
+            "org",
+            ResourceAuthorization(SCOPE, frozenset({("agent", "ag_1"), ("environment", "env_1")})),
+            secrets=lambda scope, reference: material,
+        )
+        with single_attempt_mutation(), pytest.raises(ProviderError) as caught:
+            await port.create(SCOPE, spec(resources=mounts), key="allocation")
+        assert client.max_retries == 8
+    transport.assert_consumed()
+    assert len(transport.requests) == 1
+    if credential:
+        assert transport.requests[0].json()["resources"][0]["authorization_token"] == material
+        assert material not in str(caught.value) + repr(caught.value.__cause__) + caplog.text

@@ -970,3 +970,7 @@ resource effects and again before session creation. Worker memory or Copilot
 failures propagate; ordinary degradation remains unchanged. Native worker resource
 drops are refused until this composer can prove them. Claimed memory/vault/file
 creation and credential mirroring use the same single-attempt SDK selector.
+
+Session creation also uses the existing context-aware single-attempt client for
+claimed mutations, including repository credential resolution. Ordinary session
+calls retain their request and retry policy.

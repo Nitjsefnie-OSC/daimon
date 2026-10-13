@@ -146,10 +146,13 @@ def _turn_port_kwargs(
     provider_backend: ManagedAgents | None = None,
     provider_session: ResourceRef | None = None,
     provider_runtime: TurnRuntime | None = None,
+    provider_scope: Scope | None = None,
 ) -> _TurnPortKwargs:
     """Derive a real tenant scope from the existing admitted operation."""
     selected = deps.turn_path or load_turn_settings().path
-    scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id)
+    scope = admitted_session_scope(
+        admission, tenant_id=tenant_id, session_id=session_id, prepared=provider_scope
+    )
     profile = (
         admission.backend_revision.profile
         if admission.backend_revision is not None
@@ -782,6 +785,7 @@ async def run_prepared_turn(
     attended: bool | None = None,
     operation_key: str | None = None,
     active_turn_message_id: str | None = None,
+    before_send: Callable[[], Awaitable[None]] | None = None,
 ) -> RunOutcome:
     observation = (
         prepared.admission.observation
@@ -822,6 +826,7 @@ async def run_prepared_turn(
                 attended=attended,
                 operation_key=operation_key,
                 active_turn_message_id=active_turn_message_id,
+                before_send=before_send,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -854,6 +859,7 @@ async def run_prepared_turn_impl(
     attended: bool | None = None,
     operation_key: str | None = None,
     active_turn_message_id: str | None = None,
+    before_send: Callable[[], Awaitable[None]] | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -970,9 +976,15 @@ async def run_prepared_turn_impl(
             mapping_id=mapping_id,
             operation_key=operation_key,
             session_ref=session_ref,
+            scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
         )
         with persistence.activate():
             yield
+
+    async def checked_send() -> None:
+        await decide_before_send(deps, prepared.admission)()
+        if before_send is not None:
+            await before_send()
 
     async def _run() -> RunOutcome:
         ma_session_id = prepared.ma_session_id
@@ -1004,6 +1016,7 @@ async def run_prepared_turn_impl(
                     provider_backend=prepared.backend,
                     provider_session=prepared.session_ref,
                     provider_runtime=prepared.runtime,
+                    provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
                 ),
                 anthropic=deps.anthropic,
                 session_id=ma_session_id,
@@ -1016,12 +1029,15 @@ async def run_prepared_turn_impl(
                 **action_kwargs,
                 image_blocks=image_blocks,
                 system_blocks=prepared.continuity.system_blocks,
-                before_send=decide_before_send(deps, prepared.admission),
+                before_send=checked_send
+                if before_send is not None
+                else decide_before_send(deps, prepared.admission),
                 send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
             )
 
         if not (
             _is_dead_session(state)
+            and before_send is None
             and mapping_id is not None
             and (
                 prepared.admission.backend_revision is None

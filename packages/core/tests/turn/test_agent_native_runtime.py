@@ -1193,7 +1193,7 @@ async def test_hanging_final_source_capture_is_bounded_and_cancelled(
 @pytest.mark.parametrize("provider", ["gemini"], indirect=True)
 @pytest.mark.parametrize("stage", ["capture", "preparation", "callback"])
 async def test_expiry_is_rechecked_before_successful_worker_handoff(
-    explicit_worker_request, monkeypatch, stage
+    explicit_worker_request, monkeypatch, stage, capsys
 ):
     from datetime import timedelta
 
@@ -1246,4 +1246,115 @@ async def test_expiry_is_rechecked_before_successful_worker_handoff(
     assert len(preparation_calls) == (stage != "capture")
     assert len(callbacks) == (stage == "callback")
     assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_proven_worker_scope_survives_the_real_host_binding_and_codec(
+    explicit_worker_request,
+):
+    from daimon.core.turn.binding import prepared_persistence
+    from daimon.core.turn.run import _turn_port_kwargs
+
+    request, _, _, _ = explicit_worker_request
+    prepared = await _bind_worker(request)
+    assert prepared._scope == request.worker.permissions.fleet.scope
+    port = _turn_port_kwargs(
+        request.deps,
+        prepared.admission,
+        prepared.ma_session_id,
+        tenant_id=request.tenant_id,
+        provider_backend=prepared.backend,
+        provider_session=prepared.session_ref,
+        provider_runtime=prepared.runtime,
+        provider_scope=prepared._scope,
+    )
+    assert port["scope"] == request.worker.permissions.fleet.scope
+    assert port["backend_request"].scope == port["scope"]
+    persistence = await prepared_persistence(
+        request.deps,
+        prepared.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        thread_id=request.thread_id,
+        session_id=prepared.ma_session_id,
+        mapping_id=prepared.mapping_id,
+        session_ref=prepared.session_ref,
+        scope=prepared._scope,
+    )
+    assert persistence.scope == port["scope"]
+    assert persistence.binding.native_refs["session"] == prepared.ma_session_id
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("stage", ["preparation", "callback"])
+async def test_worker_expiry_attempts_cleanup_of_the_actual_prepared_session_once(
+    explicit_worker_request, monkeypatch, stage, capsys
+):
+    from datetime import timedelta
+
+    from daimon.core.errors import TurnError
+    from daimon.core.mux_backend import TurnBackendRequest
+    from daimon.core.turn import prepare as preparation
+    from daimon.core.turn.io import turn_io
+    from daimon.core.turn.run import _archive_orphaned_session
+
+    request, _, _, transport = explicit_worker_request
+    clock = [request.now()]
+    request = replace(request, now=lambda: clock[0])
+    bound = request.worker.limits.deadline
+    profile = request.admission.backend_revision.profile
+    assert preparation.ensure_channel_runtime(
+        profile, ready=lambda: profile in preparation._PROVIDER_PREPARATIONS
+    )
+    prepare = preparation._PROVIDER_PREPARATIONS[profile]
+    archived = []
+    prepared_callbacks = []
+
+    async def timed_prepare(selected):
+        result = await prepare(selected)
+        if stage == "preparation":
+            clock[0] = bound + timedelta(seconds=1)
+        return result
+
+    async def on_prepared(result):
+        prepared_callbacks.append(result)
+        clock[0] = bound + timedelta(seconds=1)
+
+    async def orphan(result):
+        assert result._scope == request.worker.permissions.fleet.scope
+        io = turn_io(
+            request.deps.anthropic,
+            result.ma_session_id,
+            path="mux",
+            backend=result.backend,
+            scope=result._scope,
+            session_ref=result.session_ref,
+            profile=profile,
+            backend_request=TurnBackendRequest(
+                profile,
+                request.deps.anthropic,
+                result._scope,
+                result.ma_session_id,
+                deps=request.deps,
+                config=request.admission.backend_revision,
+                session=result.session_ref,
+                runtime=result.runtime,
+            ),
+        )
+        await _archive_orphaned_session(
+            request.deps.anthropic, session_id=result.ma_session_id, io=io
+        )
+        archived.append(result)
+
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, timed_prepare)
+    with pytest.raises(TurnError) as refused:
+        await _bind_worker(request, _on_prepared=on_prepared, _on_orphan=orphan)
+    assert refused.value.kind == "ceiling"
+    assert len(archived) == 1 and len(prepared_callbacks) == (stage == "callback")
+    session = await archived[0].backend.sessions.retrieve(
+        archived[0]._scope, archived[0].session_ref
+    )
+    assert session.state == "idle"
+    assert "session_archive" in capsys.readouterr().out
     assert not transport.requests

@@ -1254,3 +1254,370 @@ async def test_run_watch_timeout_still_cancels_every_registered_worker_and_retai
     assert all(event.is_set() for event in cancelled.values())
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
     assert (await read(sm, parent, b)).worker_exposure_usd == 1
+
+
+async def bound_worker(sm, parent, run, *, funded=True, running=True, session_ref=True):
+    worker = await add(sm, parent)
+    if funded:
+        assert (await reserve(sm, parent, worker)).admitted
+    binding = ProviderBinding(
+        id=f"worker-{worker.id}",
+        thread=worker_slot(run, worker).thread,
+        legacy_account_id=str(parent.fleet.account_id),
+        provider=worker.backend,
+        profile=worker.profile,
+        generation=1,
+        config_revision=0,
+        native_refs={"session": f"native-{worker.id}", "agent": f"agent-{worker.id}"}
+        if session_ref
+        else {},
+    )
+    async with sm.begin() as db:
+        claimed = await fleet.claim_worker(db, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+        assert claimed is not None and claimed.id == worker.id
+        await mux_state.put_binding(db, binding, expected_generation=0)
+        if running:
+            await fleet.mark_running(
+                db,
+                tenant_id=run.tenant_id,
+                worker_id=worker.id,
+                expected_version=claimed.version,
+                binding_id=binding.id,
+            )
+    return worker, binding
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+async def test_bound_input_guard_accepts_current_funded_identity_without_extra_money(sm, provider):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm, provider=provider)
+    worker, binding = await bound_worker(sm, parent, run)
+    snapshots = []
+    for _ in range(2):
+        async with sm.begin() as db:
+            snapshots.append(
+                await require_fleet_worker_admission(
+                    db,
+                    parent=parent,
+                    policy=POLICY,
+                    worker_id=worker.id,
+                    prices=tariffs(parent),
+                    markup=Decimal(1),
+                    binding=binding,
+                )
+            )
+    assert all(s.admitted and s.worker.status == "running" for s in snapshots)
+    assert all(s.worker_exposure_usd == s.run_exposure_usd == 1 for s in snapshots)
+    assert all(s.worker_floor_usd == 0 and s.prepaid_available_usd == 9 for s in snapshots)
+    async with sm() as db:
+        assert len(await security_audit.list_events(db, tenant_id=run.tenant_id)) == 1
+        ledger = await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)
+    assert [(r.reason, r.delta_usd) for r in ledger] == [("trial_credit", Decimal(10))]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "id",
+        "generation",
+        "config",
+        "session",
+        "agent",
+        "empty_session",
+        "thread",
+        "tenant",
+        "account",
+        "provider",
+        "profile",
+    ],
+)
+async def test_bound_input_guard_refuses_changed_caller_binding_and_keeps_hold(sm, fault):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, binding = await bound_worker(sm, parent, run)
+    changes = {
+        "id": {"id": "foreign"},
+        "generation": {"generation": 0},
+        "config": {"config_revision": 1},
+        "session": {"native_refs": {**binding.native_refs, "session": "other"}},
+        "agent": {"native_refs": {**binding.native_refs, "agent": "other"}},
+        "empty_session": {"native_refs": {}},
+        "thread": {"thread": binding.thread.model_copy(update={"thread_id": "other"})},
+        "tenant": {
+            "thread": binding.thread.model_copy(
+                update={
+                    "channel": binding.thread.channel.model_copy(update={"tenant_id": str(uuid4())})
+                }
+            )
+        },
+        "account": {"legacy_account_id": str(uuid4())},
+        "provider": {"provider": "openai"},
+        "profile": {"profile": "foreign"},
+    }
+    async with sm.begin() as db:
+        refused = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            binding=binding.model_copy(update=changes[fault]),
+        )
+    assert not refused.admitted and refused.reason == "not_current_worker_binding"
+    assert refused.worker_exposure_usd == 1
+
+
+@pytest.mark.parametrize("fault", ["unfunded", "starting", "no_session", "no_binding_argument"])
+async def test_bound_input_guard_requires_funding_running_row_and_native_session(sm, fault):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, binding = await bound_worker(
+        sm,
+        parent,
+        run,
+        funded=fault != "unfunded",
+        running=fault != "starting",
+        session_ref=fault != "no_session",
+    )
+    async with sm.begin() as db:
+        refused = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            binding=None if fault == "no_binding_argument" else binding,
+        )
+    assert not refused.admitted
+    assert refused.worker_exposure_usd == (0 if fault == "unfunded" else 1)
+
+
+@pytest.mark.parametrize("price_state", ["missing", "unverified", "future", "valid"])
+async def test_bound_input_guard_rechecks_tariff_and_retains_unknown_bound(sm, price_state):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, binding = await bound_worker(sm, parent, run)
+    prices = tariffs(parent)
+    key = (worker.backend, worker.model)
+    if price_state == "missing":
+        prices = {}
+    elif price_state == "unverified":
+        prices[key] = replace(prices[key], verified=False)
+    elif price_state == "future":
+        prices[key] = replace(prices[key], checked_on=datetime.now(UTC).date() + timedelta(days=1))
+    async with sm.begin() as db:
+        current = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=prices,
+            markup=Decimal(1),
+            binding=binding,
+        )
+    assert current.admitted is (price_state == "valid")
+    assert current.reason == (None if price_state == "valid" else "pricing_unavailable")
+    assert current.worker_exposure_usd == 1
+
+
+async def test_bound_input_guard_rejects_actual_binding_successor_with_stale_snapshot(sm):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, binding = await bound_worker(sm, parent, run)
+    successor = ProviderBinding.model_validate(
+        {
+            **binding.model_dump(mode="json"),
+            "generation": 2,
+            "native_refs": {**binding.native_refs, "session": "replacement-session"},
+        }
+    )
+    async with sm.begin() as db:
+        await mux_state.put_binding(db, successor, expected_generation=1)
+    async with sm.begin() as db:
+        refused = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            binding=binding,
+        )
+    assert not refused.admitted and refused.reason == "not_current_worker_binding"
+    assert refused.worker_exposure_usd == 1
+
+
+async def test_bound_input_guard_persists_real_usage_overrun_before_refusing_input(sm):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, binding = await bound_worker(sm, parent, run)
+    await usage(sm, parent, run, worker, inputs=600_000, outputs=None, revision=2)
+    async with sm.begin() as db:
+        refused = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            binding=binding,
+        )
+    assert not refused.admitted and refused.reason == "worker_budget_exceeded"
+    assert refused.worker_exposure_usd == refused.worker_floor_usd == Decimal("1.2")
+    assert (await read(sm, parent, worker)).worker_exposure_usd == Decimal("1.2")
+
+
+async def test_bound_input_guard_rechecks_ordinary_debit_against_funded_snapshot(sm):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm, funds="3")
+    worker, binding = await bound_worker(sm, parent, run)
+    async with sm.begin() as db:
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=run.tenant_id,
+            delta_usd=Decimal("-2.5"),
+            reason="turn_debit",
+            idempotency_key=f"ordinary:{uuid4()}",
+        )
+    async with sm.begin() as db:
+        refused = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            binding=binding,
+        )
+    assert not refused.admitted and refused.reason == "tenant_budget_exceeded"
+    assert refused.prepaid_available_usd == Decimal("-.5")
+    assert refused.worker_exposure_usd == 1
+
+
+@pytest.mark.parametrize("turns,attempts,allowed", [(1, 0, True), (2, 0, False), (1, 1, False)])
+async def test_financial_recapture_accepts_counted_first_input_without_recount_or_release(
+    sm, turns, attempts, allowed
+):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, binding = await bound_worker(sm, parent, run)
+    # Controlled persisted facts. The once-only count transition is store-owned.
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET turns_used=:turns, attempts=:attempts, version=version+1 "
+                "WHERE id=:worker_id AND tenant_id=:tenant_id"
+            ),
+            {
+                "turns": turns,
+                "attempts": attempts,
+                "worker_id": worker.id,
+                "tenant_id": run.tenant_id,
+            },
+        )
+    for _ in range(2):
+        async with sm.begin() as db:
+            current = await require_fleet_worker_admission(
+                db,
+                parent=parent,
+                policy=POLICY,
+                worker_id=worker.id,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                binding=binding,
+            )
+        assert current.admitted is allowed
+        assert current.worker.turns_used == turns and current.worker.attempts == attempts
+        assert current.worker_exposure_usd == 1
+        assert current.reason == (None if allowed else "accepted_attempt_inventory_unavailable")
+    async with sm() as db:
+        assert len(await security_audit.list_events(db, tenant_id=run.tenant_id)) == 1
+        assert len(await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)) == 1
+
+
+async def test_financial_recapture_refuses_used_unallocated_claim(sm):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, _ = await bound_worker(sm, parent, run, running=False)
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET turns_used=1, version=version+1 "
+                "WHERE id=:worker_id AND tenant_id=:tenant_id"
+            ),
+            {"worker_id": worker.id, "tenant_id": run.tenant_id},
+        )
+    async with sm.begin() as db:
+        refused = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+        )
+    assert not refused.admitted
+    assert refused.reason == "accepted_attempt_inventory_unavailable"
+    assert refused.worker_exposure_usd == 1
+
+
+async def test_run_watch_keeps_counted_first_input_live_until_owner_finished(sm, monkeypatch):
+    from daimon.core import channel_budget
+
+    parent = root()
+    parent = replace(parent, limits=parent.limits.model_copy(update={"max_turns": 1}))
+    parent, run = await setup(sm, parent=parent)
+    worker, _ = await bound_worker(sm, parent, run)
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET turns_used=1, version=version+1 "
+                "WHERE id=:worker_id AND tenant_id=:tenant_id"
+            ),
+            {"worker_id": worker.id, "tenant_id": run.tenant_id},
+        )
+    finished, cancelled, polled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = channel_budget.produce_fleet_budget
+    passes = 0
+
+    async def observed(*args, **kwargs):
+        nonlocal passes
+        result = await original(*args, **kwargs)
+        assert result[worker.id].admitted
+        passes += 1
+        if passes >= 2:
+            polled.set()
+        return result
+
+    monkeypatch.setattr(channel_budget, "produce_fleet_budget", observed)
+    task = asyncio.create_task(
+        watch_fleet_budget(
+            sessionmaker=sm,
+            parent=parent,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            cancelled={worker.id: cancelled},
+            finished=finished,
+            poll_interval=0.01,
+            read_timeout=3,
+        )
+    )
+    try:
+        await asyncio.wait_for(polled.wait(), 3)
+        assert not cancelled.is_set() and not task.done()
+        finished.set()
+        assert await asyncio.wait_for(task, 3) == "finished"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

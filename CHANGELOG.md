@@ -8,13 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Make preparation lock and redaction work budgets independent of host scheduling.
+- Refuse a worker allocation under a foreign persistence scope before source or credential reads.
+- Validate prepared scope through one admitted-session identity rule; defer worker allocation until its complete proof and caller land.
+- Keep the accepted first worker input financially monitored after its once-only turn count is recorded.
+- Recheck funded fleet workers against their current persisted binding and financial limits before model input.
 - Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 
 - Preserve authorized source resource identity while executing canonical Anthropic workers, refusing unavailable retained resources and unsupported native drops.
 
 - Verify worker resource publication against its existing native mutation receipt, captured source and scoped catalog before native readback.
 
+- Reuse captured source facts and scoped worker handoff through the existing preparation owner.
+
+- Reuse the fenced turn mutation owner for unbound private worker slots and publish accepted worker results from their durable journal.
 - Resolve canonical workers through the current backend policy and preserve their full specs through scoped, single-attempt agent creation.
+- Recheck funded fleet workers against their current persisted binding and financial limits before model input.
+- Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 
 - Allow fleet worker specs to declare closed resource drops, narrow their grants, remove sandbox execution tools, and record the declarations in existing scoped audits.
 

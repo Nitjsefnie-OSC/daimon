@@ -2498,3 +2498,15 @@ financial guard and set `retry_failed=False`. An acknowledged native resource is
 restored from its real receipt; an unknown or refused attempt never creates again.
 The result seam selects only complete, authoritative journal messages accepted by
 the worker driver and calls the existing fleet result writer under that lease.
+
+Source facts are captured through the same preparation request for preservation
+proof and worker resource composition. Capture does not grant execution or
+allocation; the existing proof and materializer validate the captured identity
+and obligations. Worker preparation carries its derived scope through the real
+binding and turn codec. Expiry after preparation or its binding callback invokes
+the existing orphan cleanup before refusing the handoff.
+
+Prepared native scope is checked by the existing admitted-session scope owner.
+Binding publication, turn I/O and worker handoff use that single identity rule.
+The worker allocation prototype is deferred with its actual caller and complete
+source/native preservation proof; it is not an exported preparation path.

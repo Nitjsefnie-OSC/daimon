@@ -181,6 +181,7 @@ class PreparedTurn:
     session_ref: ResourceRef | None = None
     runtime: TurnRuntime | None = None
     native_footer_cost: NativeFooterCostContext | None = None
+    _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -802,15 +803,26 @@ async def _decide_reuse_again(
     return replace(prepared, admission=current)
 
 
-def admitted_session_scope(admission: Admission, *, tenant_id: uuid.UUID, session_id: str) -> Scope:
+def admitted_session_scope(
+    admission: Admission, *, tenant_id: uuid.UUID, session_id: str, prepared: Scope | None = None
+) -> Scope:
     """Use the admitted tenant and account without another ownership lookup."""
     if admission.grant is not None and admission.grant.tenant_id != tenant_id:
         raise ScopeViolation(session_id, "the prepared turn belongs to another tenant")
-    return resource_scope(
+    scope = resource_scope(
         tenant_id=str(tenant_id),
         account_id=str(admission.account_id),
         authorization_id="admitted-turn",
     )
+    if prepared is not None:
+        if (
+            prepared.is_platform
+            or prepared.is_legacy_host_authorized
+            or (prepared.tenant_id, prepared.account_id) != (scope.tenant_id, scope.account_id)
+        ):
+            raise ScopeViolation(session_id, "prepared scope differs from admitted identity")
+        return prepared
+    return scope
 
 
 async def _stamp_reused_seal(
@@ -916,6 +928,7 @@ async def bind_session_impl(
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     _on_prepared: Callable[[PreparedTurn], Awaitable[None]] | None = None,
+    _on_orphan: Callable[[PreparedTurn], Awaitable[None]] | None = None,
     worker: ResolvedWorkerSpec | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
@@ -972,13 +985,18 @@ async def bind_session_impl(
 
     async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
         result = await preparing
-        if worker is not None:
-            remaining_s(effective_deadline, now=now(), refuse_expired=True)
-        if _on_prepared is not None:
-            await _on_prepared(result)
-        if worker is not None:
-            remaining_s(effective_deadline, now=now(), refuse_expired=True)
-        return result
+        try:
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+            if _on_prepared is not None:
+                await _on_prepared(result)
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+            return result
+        except BaseException:
+            if worker is not None and _on_orphan is not None:
+                await _on_orphan(result)
+            raise
 
     profile = _admitted_profile(admission)
     if worker is not None and admission.backend_revision_origin != "agent":
@@ -1004,13 +1022,12 @@ async def bind_session_impl(
             raise AdmissionDenied(reason="backend_unsupported")
         scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
         if worker is not None:
-            worker_scope = worker.permissions.fleet.scope
-            if (worker_scope.tenant_id, worker_scope.account_id) != (
-                scope.tenant_id,
-                scope.account_id,
-            ):
-                raise AdmissionDenied(reason="backend_unsupported")
-            scope = worker_scope
+            scope = admitted_session_scope(
+                admission,
+                tenant_id=tenant_id,
+                session_id="preparation",
+                prepared=worker.permissions.fleet.scope,
+            )
         request = ProviderPreparationRequest(
             deps,
             admission,
@@ -1056,6 +1073,8 @@ async def bind_session_impl(
                 raise ScopeViolation("preparation", "provider returned a foreign prepared session")
             if runtimes is not None:
                 result = replace(result, runtime=result.runtime or runtimes.resolved)
+            if worker is not None:
+                result = replace(result, _scope=scope)
             return result
 
         try:
