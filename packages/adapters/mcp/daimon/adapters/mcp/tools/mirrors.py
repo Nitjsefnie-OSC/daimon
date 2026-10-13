@@ -266,7 +266,8 @@ def register_mirror_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Every answered ``ask`` to ``agent_name`` (an agent key or the hub) is
         posted by Daimon: in a channel, one thread per conversation; in a
-        thread, straight in. Only the question and the final answer are
+        thread, straight in. Turns run with ``start_turn``/``continue_turn``
+        are not copied. Only the question and the final answer are
         copied, never tool calls. Conversations of an agent key minted in a
         channel follow that channel's rules. A person's own conversations are
         copied only with ``consent_note``: the admin's record of the askers'

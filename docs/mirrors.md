@@ -9,7 +9,8 @@ unless `DAIMON_MIRRORS__ENABLED=true`
 ## What is copied
 
 Every answered `ask` to the mirrored agent, through an agent key or the hub
-(see [mcp-tools.md](mcp-tools.md#agent_chat)): the question and the final
+(see [mcp-tools.md](mcp-tools.md#agent_chat)). Turns run with `start_turn` or
+`continue_turn` and read back with `get_session` are not copied yet. Copied: the question and the final
 answer, quoted, with secrets redacted and long text cut at `max_answer_chars`. Tool
 calls, their output, files and chart links are never copied. The asker is named by display
 name, never by platform id, and marked "(external)" when they are from
