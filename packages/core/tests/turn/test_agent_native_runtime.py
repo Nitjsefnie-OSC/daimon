@@ -1934,3 +1934,30 @@ async def test_worker_lost_native_ack_never_reposts_or_counts_a_second_input(
         persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
     assert persisted.turns_used == 1 and persisted.result is None
     assert persisted.status == "running" and persisted.reserved_usd > 0
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_readonly_worker_proof_never_invokes_optional_materialization(
+    explicit_worker_request,
+):
+    request, runtime, owned, transport = explicit_worker_request
+    assert runtime.materialize_worker is None
+
+    async def forbidden(selected):
+        raise AssertionError("read-only proof attempted native materialization")
+
+    request = replace(
+        request,
+        deps=replace(
+            request.deps,
+            turn_runtimes={
+                request.admission.backend_revision.profile: replace(
+                    runtime, materialize_worker=forbidden
+                )
+            },
+        ),
+    )
+    selected = await read_preparation_counterpart(request)
+    assert selected.counterpart is not None
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests

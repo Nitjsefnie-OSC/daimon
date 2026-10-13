@@ -2554,3 +2554,8 @@ or release the caller's pool slot. The caller releases its slot in `finally` and
 uses the existing journal operation readback before classifying a possibly-sent
 input. A count returned inside the claim transaction is never adopted as durable
 worker state; terminal updates reread the worker through the budget lock owner.
+The existing `TurnRuntime` can expose an optional `materialize_worker(request)`
+callback returning the existing `AgentRevision` acknowledgement. It is absent by
+default and is never invoked by read-only counterpart proof. The interface alone
+grants no native allocation authority; financially admitted, source-proven worker
+preparation must supply the existing owned operation/lease before any invocation.
