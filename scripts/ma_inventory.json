@@ -11055,7 +11055,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 2778,
+      "line": 2784,
       "module": "anthropic",
       "names": [
         "APIStatusError"
