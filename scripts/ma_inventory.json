@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2642,
+  "files_scanned": 2643,
   "parse_errors": [],
   "calls": [
     {
@@ -6112,6 +6112,28 @@
       "category": "test",
       "resource": "sessions.archive",
       "call": "unchanged_client.beta.sessions.archive(SESSION.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 1007,
+      "end": 1009,
+      "scope": "create",
+      "category": "test",
+      "resource": "agents.create",
+      "call": "mutation_client(client).beta.agents.create(name='restricted-worker', model='claude-haiku-5-5', system='Protected')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 1098,
+      "end": 1100,
+      "scope": "create",
+      "category": "test",
+      "resource": "agents.create",
+      "call": "mutation_client(client).beta.agents.create(name='worker', model='claude-haiku-5-5')",
       "request_keys": [],
       "response_access": []
     },
@@ -17966,7 +17988,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_persistence.py",
-      "line": 12,
+      "line": 13,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsEventParams"
@@ -17975,7 +17997,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_persistence.py",
-      "line": 561,
+      "line": 562,
       "module": "anthropic",
       "names": [
         "BadRequestError"
@@ -17984,10 +18006,55 @@
     },
     {
       "file": "packages/core/tests/turn/test_persistence.py",
-      "line": 710,
+      "line": 711,
       "module": "anthropic",
       "names": [
         "APIConnectionError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 989,
+      "module": "anthropic",
+      "names": [
+        "APIConnectionError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 990,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 1041,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 1075,
+      "module": "anthropic",
+      "names": [
+        "BadRequestError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 1076,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
       ],
       "category": "test"
     },

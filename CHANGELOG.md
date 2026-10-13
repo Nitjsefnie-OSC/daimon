@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run UUID instrumentation probes under their oracle hooks and use public binding preparation in the catalog harness.
 
 - Allow fleet worker specs to declare closed resource drops, narrow their grants, remove sandbox execution tools, and record the declarations in existing scoped audits.
+
+- Reuse the fenced turn mutation owner for unbound private worker slots and publish accepted worker results from their durable journal.
 - Cover refusal of a foreign model provider before pinned counterpart native readback.
 
 - Share skill and MCP compatibility requirements across backend previews and worker derivation while preserving native SDK vault requirements.
