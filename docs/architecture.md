@@ -1583,9 +1583,13 @@ admission before any of this runs.
   `github_connect`, `remove_repo` and `set_working_repo`, with the same grant
   stores and live manager checks.
   Connect links appear as buttons where the person asked. Discord slash
-  commands answer ephemerally; a conversational mention posts a requester-bound
-  button in the thread and mints the single-use invitation only when that
-  requester clicks it. The click reveals the URL ephemerally. Slack slash
+  commands answer ephemerally; a conversational mention posts a Connect GitHub
+  button in the thread for the requester's invitation. Anyone in the thread may
+  click it: the first click mints the single-use invitation, every click reveals
+  the URL ephemerally to the person who clicked, and the requester must still
+  manage the agent at each click. What the clicker can grant is capped by their
+  own GitHub permission; the invitation stays the requester's, and the flow
+  never links the clicker's GitHub account to any Daimon account. Slack slash
   commands and mentions use `chat.postEphemeral` in the originating channel or
   thread. Neither platform sends a GitHub setup DM. After confirmation,
   `requested_work` resumes the calling agent's task in its original thread.
