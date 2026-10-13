@@ -7,9 +7,12 @@ reservations and audit. Missing owner ports leave the service unavailable.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager, nullcontext, suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -27,7 +30,9 @@ if TYPE_CHECKING:
     from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerLimits, WorkerPermissions
     from daimon.core.pricing import ModelRates, ProviderPrice
     from daimon.core.stores.domain import BackendAgent
+    from daimon.core.stores.fleet import WorkerPool
     from daimon.core.turn.deps import TurnDeps
+    from daimon.core.turn.prepare import ProviderPreparationRequest
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -83,6 +88,8 @@ class FleetPorts(Protocol):
     ) -> tuple[FleetRun, tuple[FleetWorker, ...]]: ...
 
     async def controller_account(self, parent: WorkerPermissions) -> uuid.UUID | None: ...
+
+    async def capture_source(self, parent: WorkerPermissions) -> BackendAgent | None: ...
 
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision
@@ -300,9 +307,9 @@ class FleetOrchestrator:
         if clone is not None:
             if clone.kind != "agent" or clone_revision is None:
                 raise FleetRefused("pinned_clone_required")
-            if (clone.tenant_id, clone.account_id) != (
-                parent.fleet.scope.tenant_id,
-                parent.fleet.scope.account_id,
+            if clone.tenant_id != parent.fleet.scope.tenant_id or (
+                clone.account_id != parent.fleet.scope.account_id
+                and (clone, clone_revision) not in parent.source_revisions
             ):
                 raise FleetRefused("foreign_clone")
             source = await owner.read_clone(parent, clone, clone_revision)
@@ -311,6 +318,8 @@ class FleetOrchestrator:
         else:
             assert agent is not None
             source = agent
+        if captured_source is None:
+            captured_source = await self._owner().capture_source(parent)
         resolved = resolve_worker_spec(
             parent,
             source,
@@ -649,10 +658,195 @@ class HostFleetPorts:
         deps: TurnDeps | None = None,
         wait: Callable[[WorkerPermissions, FleetRun, tuple[FleetWorker, ...]], Awaitable[None]]
         | None = None,
+        preparation: Callable[[WorkerPermissions], Awaitable[ProviderPreparationRequest]]
+        | None = None,
+        pool: WorkerPool | None = None,
     ) -> None:
         self.sessions, self.prices, self.markup = sessions, prices, markup
-        self._dispatch, self._clone_reader, self._wait = dispatch, clone_reader, wait
+        self._preparation, self._pool = preparation, pool
+        self._dispatch = dispatch
+        if dispatch is None and preparation is not None and pool is not None:
+            self._dispatch = self._dispatch_worker
+        self._clone_reader, self._wait = clone_reader, wait
+        self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+        self._watches: dict[
+            uuid.UUID, tuple[dict[uuid.UUID, asyncio.Event], asyncio.Event, asyncio.Task[None]]
+        ] = {}
         self._deps = deps
+
+    async def _dispatch_worker(
+        self,
+        parent: WorkerPermissions,
+        worker: FleetWorker,
+        resolved: ResolvedWorkerSpec,
+        reviewed_result: Event | None,
+    ) -> None:
+        from daimon.core.channel_budget import watch_fleet_budget
+        from daimon.core.fleet import FleetConflict, result_digest
+        from daimon.core.headless_runner import commit_worker_transition, run_worker
+        from daimon.core.stores import fleet
+        from daimon.core.turn.ceiling import remaining_s
+
+        async with self._load_preparation(parent, deadline=worker.deadline_at) as request:
+            pool = self._pool
+            if pool is None or request.deps.running_turns.shutting_down:
+                raise FleetRefused("prerequisites_unavailable")
+            active = self._tasks.get(worker.id)
+            if active is not None and not active.done():
+                return
+            watch = self._watches.get(worker.run_id)
+            if watch is None or watch[2].done():
+                cancellations: dict[uuid.UUID, asyncio.Event] = {}
+                finished = asyncio.Event()
+
+                async def monitor() -> None:
+                    try:
+                        with request.deps.running_turns.track():
+                            async with asyncio.timeout(
+                                remaining_s(
+                                    parent.limits.deadline, now=request.now(), refuse_expired=True
+                                )
+                            ):
+                                await watch_fleet_budget(
+                                    sessionmaker=self.sessions,
+                                    parent=parent,
+                                    prices=self.prices,
+                                    markup=self.markup,
+                                    cancelled=cancellations,
+                                    finished=finished,
+                                )
+                    finally:
+                        for event in cancellations.values():
+                            event.set()
+
+                watch = cancellations, finished, asyncio.create_task(monitor())
+                self._watches[worker.run_id] = watch
+
+                def ended(done: asyncio.Task[None]) -> None:
+                    retained = self._watches.get(worker.run_id)
+                    if retained is not None and retained[2] is done:
+                        self._watches.pop(worker.run_id)
+                    if not done.cancelled():
+                        done.exception()
+
+                watch[2].add_done_callback(ended)
+            cancel = watch[0].setdefault(worker.id, asyncio.Event())
+            trigger = "Complete the task in your instructions."
+            if reviewed_result is not None:
+                trigger = json.dumps(
+                    {
+                        "instruction": (
+                            "Return JSON verdict approved or refused and reviewed_digest."
+                        ),
+                        "reviewed_digest": result_digest(dict(reviewed_result.payload)),
+                        "result": dict(reviewed_result.payload),
+                    }
+                )
+
+            async def execute() -> None:
+                with request.deps.running_turns.track():
+                    if request.deps.running_turns.shutting_down:
+                        cancel.set()
+                    bound = min(request.deadline, worker.deadline_at)
+                    async with asyncio.timeout(
+                        remaining_s(bound, now=request.now(), refuse_expired=True)
+                    ):
+                        while not cancel.is_set():
+                            claimed = await pool.claim(
+                                self.sessions,
+                                tenant_id=worker.tenant_id,
+                                run_id=worker.run_id,
+                                worker_id=worker.id,
+                            )
+                            if claimed is not None:
+                                try:
+                                    try:
+                                        prepared = await request.for_worker(parent, resolved)
+                                    except BaseException:
+                                        with suppress(FleetConflict):
+                                            await asyncio.shield(
+                                                commit_worker_transition(request, parent, claimed)
+                                            )
+                                        raise
+                                    await run_worker(
+                                        prepared,
+                                        parent=parent,
+                                        worker=claimed,
+                                        trigger_message=trigger,
+                                        prices=self.prices,
+                                        cancel=cancel,
+                                    )
+                                finally:
+                                    pool.release()
+                                return
+                            _, rows = await fleet.run_status(
+                                self.sessions, tenant_id=worker.tenant_id, run_id=worker.run_id
+                            )
+                            actual = next((row for row in rows if row.id == worker.id), None)
+                            if actual is None or actual.status != "pending":
+                                return
+                            await asyncio.sleep(0.25)
+
+            task = asyncio.create_task(execute())
+            self._tasks[worker.id] = task
+
+            def completed(done: asyncio.Task[None]) -> None:
+                if self._tasks.get(worker.id) is done:
+                    self._tasks.pop(worker.id)
+                if not done.cancelled():
+                    done.exception()
+
+            task.add_done_callback(completed)
+
+    async def close(self) -> None:
+        for events, finished, _ in self._watches.values():
+            for event in events.values():
+                event.set()
+            finished.set()
+        tasks = (*self._tasks.values(), *(watch[2] for watch in self._watches.values()))
+        if tasks:
+            try:
+                async with asyncio.timeout(5):
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            except TimeoutError:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    @asynccontextmanager
+    async def _load_preparation(
+        self, parent: WorkerPermissions, *, deadline: datetime | None = None
+    ) -> AsyncIterator[ProviderPreparationRequest]:
+        from daimon.core.errors import TurnError
+        from daimon.core.turn.ceiling import remaining_s
+
+        if self._preparation is None:
+            raise FleetRefused("prerequisites_unavailable")
+        bound = min(
+            parent.limits.deadline, deadline if deadline is not None else parent.limits.deadline
+        )
+        try:
+            with self._deps.running_turns.track() if self._deps is not None else nullcontext():
+                async with asyncio.timeout(
+                    remaining_s(bound, now=datetime.now(UTC), refuse_expired=True)
+                ):
+                    request = await self._preparation(parent)
+                    bound = min(bound, request.deadline)
+                    remaining_s(bound, now=request.now(), refuse_expired=True)
+                    yield replace(request, deadline=bound)
+                    remaining_s(bound, now=datetime.now(UTC), refuse_expired=True)
+        except TimeoutError:
+            raise FleetRefused("preparation_deadline_exceeded") from None
+        except TurnError as error:
+            if error.kind != "ceiling":
+                raise
+            raise FleetRefused("preparation_deadline_exceeded") from None
+
+    async def capture_source(self, parent: WorkerPermissions) -> BackendAgent | None:
+        if self._preparation is None:
+            return None
+        async with self._load_preparation(parent) as request:
+            return (await request.capture_root(parent)).source
 
     async def controller_account(self, parent: WorkerPermissions) -> uuid.UUID | None:
         from daimon.core.stores.identity import find_platform_principal
@@ -685,9 +879,16 @@ class HostFleetPorts:
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision
     ) -> Agent:
-        if self._clone_reader is None:
-            raise FleetRefused("prerequisites_unavailable")
-        return await self._clone_reader(parent, ref, revision)
+        if self._clone_reader is not None:
+            return await self._clone_reader(parent, ref, revision)
+        captured = await self.capture_source(parent)
+        if (
+            captured is None
+            or captured.source is None
+            or (captured.source.ref, captured.source.revision) != (ref, revision)
+        ):
+            raise FleetRefused("clone_evidence_unavailable")
+        return captured.source
 
     async def admit(
         self,

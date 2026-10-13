@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compile explicitly requested worker session budgets into Anthropic and OpenAI native requests, refusing missing or changed controls before model input.
 
 - Bind opt-in fleet root permissions to the exact admitted source, turn intent, active origin and native session binding through the existing durable operation owner.
+- Connect explicit fleet preparation owners to exact worker-pool claims and the existing headless driver; stop intents refuse new claims and cancel through the budget watch without releasing native outcome reservations. Bound preparation loading and end known preparation/pre-allocation refusals through the shared worker transition and completion-wake owner, retaining reservations across concurrent stop intents.
 
 - Bind opted-in fleet controls and completion waits to verified prepared roots, retaining stop intent without certifying native termination.
 - Preserve recorded OpenAI message IDs across recovery and assign new item IDs during normalization; reuse the fenced session-creation guard for fleet workers.

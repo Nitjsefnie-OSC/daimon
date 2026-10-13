@@ -848,6 +848,17 @@ async def test_openai_worker_refuses_unsupported_or_revoked_authority_before_nat
             cancel=cancel,
         )
     assert calls == []
+    if fault == "cancelled":
+        from daimon.core.stores import fleet
+
+        _, rows = await fleet.run_status(
+            request.deps.sessionmaker,
+            tenant_id=worker.tenant_id,
+            run_id=worker.run_id,
+        )
+        ended = next(row for row in rows if row.id == worker.id)
+        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        assert ended.reserved_usd > 0 and ended.binding_id is None and ended.turns_used == 0
 
 
 async def test_openai_worker_lost_agent_ack_is_retained_without_reallocation(

@@ -42,7 +42,7 @@ from daimon.core.fleet import (
 )
 from daimon.core.stores import mux_state, task_continuations, tenant_ledger
 from pydantic import JsonValue
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -298,6 +298,7 @@ async def claim_worker(
     tenant_id: uuid.UUID,
     run_id: uuid.UUID,
     cap: int,
+    worker_id: uuid.UUID | None = None,
 ) -> FleetWorker | None:
     """The run's lowest pending worker, now `starting`, if the tenant has room.
 
@@ -337,6 +338,11 @@ async def claim_worker(
                         FleetWorkerRow.tenant_id == tenant_id,
                         FleetWorkerRow.run_id == run_id,
                         FleetWorkerRow.status == "pending",
+                        or_(
+                            FleetWorkerRow.error_code.is_(None),
+                            FleetWorkerRow.error_code != "stop_requested",
+                        ),
+                        *([FleetWorkerRow.id == worker_id] if worker_id is not None else []),
                         FleetWorkerRow.deadline_at > func.now(),
                         FleetRunRow.status == "running",
                         FleetRunRow.deadline_at > func.now(),
@@ -719,6 +725,7 @@ class WorkerPool:
         *,
         tenant_id: uuid.UUID,
         run_id: uuid.UUID,
+        worker_id: uuid.UUID | None = None,
     ) -> FleetWorker | None:
         """The run's next pending worker, now `starting`, or None if no room."""
         if self._slots.locked():
@@ -726,7 +733,11 @@ class WorkerPool:
         await self._slots.acquire()
         try:
             worker = await claim_worker(
-                sessionmaker, tenant_id=tenant_id, run_id=run_id, cap=self._tenant_cap
+                sessionmaker,
+                tenant_id=tenant_id,
+                run_id=run_id,
+                cap=self._tenant_cap,
+                worker_id=worker_id,
             )
         except BaseException:
             self._slots.release()

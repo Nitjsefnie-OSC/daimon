@@ -2761,3 +2761,23 @@ Completing, failing or cancelling a run after its original turn exits invalidate
 both original and completion-locator readers even if bounded origin/card records
 remain. Removing those audit records at run end is a separate lifecycle owner
 unit. Ordinary turns and disabled lifecycle calls retain their existing behavior.
+
+Fleet dispatch obtains each original preparation request through a trusted owner
+callable keyed by the verified root. The request's existing source capture and
+worker derivation validate the original subject, place, scope, pinned source and
+bounded deadline before resolving a worker revision. The shared ports use the
+process worker pool to claim the exact admitted worker, then call the existing
+headless worker driver. Native cancellation events are monitored by the existing
+budget watch, shared across review cohorts, and tasks join the turn shutdown
+registry. Unknown outcomes retain their existing reservations. The store refuses to claim
+pending workers with a retained stop intent, and the same budget producer
+withdraws admission so the existing watch cancels bound workers. Neither action
+releases native outcome reservations. Dispatch remains unavailable without its
+explicit owner dependencies.
+Preparation-owner loading shares the original root/worker deadline and shutdown
+registry. Known refusals during preparation derivation or the headless driver's
+initial policy, funding and backend checks end only the same pre-native claim
+through its existing locked transition owner, retaining reservations and
+publishing eligible frozen completion wakes. Cleanup allows a concurrent stop
+intent and refuses changed attempts, bindings or native phases. Once allocation
+starts, native-unknown outcomes stay with the existing reconciliation owner.

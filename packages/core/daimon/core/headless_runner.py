@@ -490,6 +490,49 @@ async def run_turn_impl(
                 log.exception("headless.github_app_session_close.failed", session_id=session.id)
 
 
+async def commit_worker_transition(
+    request: ProviderPreparationRequest,
+    parent: WorkerPermissions,
+    worker: FleetWorker,
+    action: Callable[[AsyncSession, FleetWorker], Awaitable[FleetWorker]] | None = None,
+) -> FleetWorker:
+    async with request.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet_store.lock_budget(
+            db,
+            tenant_id=request.tenant_id,
+            actor_id=parent.fleet.account_id,
+            run_id=worker.run_id,
+        )
+        latest = {row.id: row for _, rows in graph for row in rows}.get(worker.id)
+        if latest is None or latest.run_id != worker.run_id:
+            raise FleetConflict("worker transition claim missing")
+        if action is None:
+            if (
+                (worker.status, worker.binding_id, worker.turns_used) != ("starting", None, 0)
+                or latest.error_code not in (None, "stop_requested")
+                or replace(latest, version=worker.version, error_code=worker.error_code) != worker
+            ):
+                raise FleetConflict("worker preparation claim changed")
+            updated = await fleet_store.finish(
+                db,
+                tenant_id=worker.tenant_id,
+                worker_id=worker.id,
+                expected_version=latest.version,
+                status="failed",
+                error_code="preparation_refused",
+            )
+        else:
+            updated = await action(db, latest)
+        if updated.status in TERMINAL:
+            await enqueue_worker_finished(
+                db,
+                tenant_id=request.tenant_id,
+                run_id=worker.run_id,
+                now=await database_clock(db),
+            )
+        return updated
+
+
 async def run_worker(
     request: ProviderPreparationRequest,
     *,
@@ -500,8 +543,7 @@ async def run_worker(
     cancel: asyncio.Event,
 ) -> FleetWorker:
     """Drain a pool claim through canonical admission, the fenced turn and its result."""
-    deps, admission = request.deps, request.admission
-    revision = admission.backend_revision
+    deps, admission, revision = request.deps, request.admission, request.admission.backend_revision
     if (
         not parent.fleet.enabled
         or parent.fleet.depth != 0
@@ -528,10 +570,12 @@ async def run_worker(
     store = deps.state_store
     if not isinstance(store, PostgresStateStore):
         raise FleetConflict("worker input requires its actual PostgreSQL journal owner")
-    bound = turn_deadline(
-        now=request.now(), deadline=request.deadline, authority_deadline=worker.deadline_at
-    )
+    commit_transition = functools.partial(commit_worker_transition, request, parent, worker)
+    claim, native_started = worker, False
     try:
+        bound = turn_deadline(
+            now=request.now(), deadline=request.deadline, authority_deadline=worker.deadline_at
+        )
         async with asyncio.timeout(remaining_s(bound, now=request.now(), refuse_expired=True)):
             async with deps.sessionmaker() as db:
                 policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
@@ -585,6 +629,7 @@ async def run_worker(
             if not usage.admitted or usage.worker.id != worker.id:
                 raise FleetConflict("worker financial admission refused")
             run, current = usage.run, usage.worker
+            claim = replace(worker, reserved_usd=current.reserved_usd)
             slot = worker_slot(run, current)
             if slot.thread.channel != revision.channel:
                 raise FleetConflict("worker private slot differs from its admitted channel")
@@ -660,33 +705,6 @@ async def run_worker(
                 await _archive_orphaned_session(
                     deps.anthropic, session_id=result.ma_session_id, io=io, archive=archive
                 )
-
-            async def commit_transition(
-                action: Callable[[AsyncSession, FleetWorker], Awaitable[FleetWorker]],
-            ) -> FleetWorker:
-                async with deps.sessionmaker.begin() as db:
-                    graph, _ = await fleet_store.lock_budget(
-                        db,
-                        tenant_id=request.tenant_id,
-                        actor_id=parent.fleet.account_id,
-                        run_id=run.id,
-                    )
-                    latest = next(
-                        row
-                        for item, rows in graph
-                        if item.id == run.id
-                        for row in rows
-                        if row.id == worker.id
-                    )
-                    updated = await action(db, latest)
-                    if updated.status in TERMINAL:
-                        await enqueue_worker_finished(
-                            db,
-                            tenant_id=run.tenant_id,
-                            run_id=run.id,
-                            now=await database_clock(db),
-                        )
-                    return updated
 
             async def bound_session(result: PreparedTurn) -> None:
                 nonlocal current, prepared, binding
@@ -797,6 +815,7 @@ async def run_worker(
                         operation_key=operation,
                         now=request.now,
                     )
+                    native_started = True
                     with allocation.activate():
                         prepared = await allocation.run(
                             lambda: bind_session_impl(
@@ -846,5 +865,10 @@ async def run_worker(
                 finally:
                     if prepared is not None:
                         await orphan(prepared)
-    except TimeoutError as error:
-        raise ceiling_error() from error
+    except BaseException as error:
+        if not native_started:
+            with contextlib.suppress(FleetConflict):
+                await asyncio.shield(commit_worker_transition(request, parent, claim))
+        if isinstance(error, TimeoutError):
+            raise ceiling_error() from error
+        raise

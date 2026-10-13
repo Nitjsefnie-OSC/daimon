@@ -413,6 +413,7 @@ def host_parent() -> WorkerPermissions:
 
 def host_owner() -> Mock:
     owner = create_autospec(FleetPorts, instance=True)
+    owner.capture_source.return_value = None
     owner.controller_account.return_value = AUTH.account_id
     owner.read_run.return_value = (
         FleetRun(
