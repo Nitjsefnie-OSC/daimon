@@ -32,7 +32,7 @@ from daimon.core.stores.domain import (
     TaskContinuationRow,
     UnattendedRequester,
 )
-from sqlalchemy import and_, case, exists, func, or_, select, text, true, update
+from sqlalchemy import and_, exists, func, or_, select, text, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -418,15 +418,11 @@ async def retire_worker_finished_rows(session: AsyncSession, *, run: FleetRun) -
             TaskContinuation.thread_id == run.thread_id,
             TaskContinuation.requester_account_id == run.orchestrator_account_id,
             TaskContinuation.requested_work.startswith(f'{{"run_id":"{run.id}",'),
-            or_(
-                active,
-                TaskContinuation.lease_owner.is_not(None),
-                TaskContinuation.lease_expires_at.is_not(None),
-            ),
+            active,
         )
         .values(
-            status=case((active, "cancelled"), else_=TaskContinuation.status),
-            skip_reason=case((active, "run_ended"), else_=TaskContinuation.skip_reason),
+            status="cancelled",
+            skip_reason="run_ended",
             lease_owner=None,
             lease_expires_at=None,
         )

@@ -2740,7 +2740,7 @@ budgets. The native model response limit is distinct from the managed-agent
 ceiling. No input-token or final-cost bound is implied.
 
 A terminal fleet run transition retires its addressed completion wakes in the
-same transaction. Pending/claimed rows become cancelled; delivered/skipped
-records keep their audit fields. Lease metadata is cleared and stale claim
-writes cannot revive scheduling. This does not interrupt native work or release
+same transaction. Pending/claimed rows become cancelled and their lease metadata
+is cleared; delivered/skipped records remain unchanged. Stale claim writes
+cannot revive scheduling. This does not interrupt native work or release
 money. Other runs, roots and wake reasons retain their scheduling.

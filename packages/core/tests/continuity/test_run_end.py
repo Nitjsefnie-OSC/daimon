@@ -76,12 +76,14 @@ async def test_run_end_retires_initial_review_unready_and_claimed_waits(pooled, 
     )
     for old in before:
         row = await _read(pooled, old.idempotency_key)
-        active = old.status in {"pending", "claimed"}
-        assert row.status == ("cancelled" if active else old.status)
-        assert row.skip_reason == ("run_ended" if active else old.skip_reason)
-        assert row.lease_owner is None and row.lease_expires_at is None
-        excluded = {"status", "skip_reason", "lease_owner", "lease_expires_at"}
-        assert row.model_dump(exclude=excluded) == old.model_dump(exclude=excluded)
+        if old.status in {"pending", "claimed"}:
+            assert row.status == "cancelled" and row.skip_reason == "run_ended"
+            assert row.lease_owner is None and row.lease_expires_at is None
+            excluded = {"status", "skip_reason", "lease_owner", "lease_expires_at"}
+            assert row.model_dump(exclude=excluded) == old.model_dump(exclude=excluded)
+        else:
+            assert old.lease_owner is not None
+            assert row == old
         assert await claim_wake(pooled, idempotency_key=row.idempotency_key, now=_NOW) is None
     for claim in claims:
         assert not await start_wake(pooled, claim, now=_NOW)
