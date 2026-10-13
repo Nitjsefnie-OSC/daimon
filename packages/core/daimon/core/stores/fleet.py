@@ -412,6 +412,57 @@ async def mark_running(
     )
 
 
+async def use_turn(
+    sessionmaker: Source,
+    *,
+    tenant_id: uuid.UUID,
+    worker_id: uuid.UUID,
+    expected_version: int,
+) -> FleetWorker:
+    """Count one model input of a running worker, refusing it past `max_turns`.
+
+    Call it in the transaction that wins that input's `claim_send` (the state
+    store's one `pending -> sent` compare-and-swap for the input's operation
+    key). A retry or a re-run guard loses that claim and rolls this back with
+    it, so each input counts exactly once, with no second record of inputs.
+    """
+    async with _transaction(sessionmaker) as session:
+        row = (
+            await session.execute(
+                update(FleetWorkerRow)
+                .where(
+                    FleetWorkerRow.tenant_id == tenant_id,
+                    FleetWorkerRow.id == worker_id,
+                    FleetWorkerRow.version == expected_version,
+                    FleetWorkerRow.status == "running",
+                    FleetWorkerRow.turns_used < FleetWorkerRow.max_turns,
+                )
+                .values(
+                    turns_used=FleetWorkerRow.turns_used + 1,
+                    version=FleetWorkerRow.version + 1,
+                    updated_at=func.now(),
+                )
+                .returning(FleetWorkerRow)
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            return _worker(row)
+        current = (
+            await session.execute(
+                select(FleetWorkerRow).where(
+                    FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.id == worker_id
+                )
+            )
+        ).scalar_one_or_none()
+    if (
+        current is not None
+        and current.version == expected_version
+        and current.turns_used >= current.max_turns
+    ):
+        raise FleetConflict(f"worker {worker_id} has used its {current.max_turns} turns")
+    raise FleetConflict(f"worker {worker_id} cannot use a turn at version {expected_version}")
+
+
 async def record_result(
     sessionmaker: Source,
     *,

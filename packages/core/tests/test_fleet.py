@@ -1325,3 +1325,97 @@ async def test_a_full_fleet_pool_never_takes_the_tenants_chat_slots(
     )
     tickets = [chat.try_claim(run.tenant_id, cap=3) for _ in range(3)]  # tenant chat cap 3
     assert all(tickets) and chat.in_flight(run.tenant_id) == 3
+
+
+async def _running_worker(
+    sm: async_sessionmaker[AsyncSession], store: PostgresStateStore
+) -> tuple[FleetRun, FleetWorker, Any]:
+    run = await _run(sm)
+    await _worker(sm, run, 0)
+    claimed = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+    assert claimed is not None
+    _, _, lease, binding_id = await _bind(store, run, claimed)
+    running = await fleet.mark_running(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=claimed.id,
+        expected_version=claimed.version,
+        binding_id=binding_id,
+    )
+    return run, running, lease
+
+
+async def _count_input(
+    sm: async_sessionmaker[AsyncSession],
+    store: PostgresStateStore,
+    run: FleetRun,
+    worker: FleetWorker,
+    lease: Any,
+    key: str,
+) -> FleetWorker:
+    """One model input: its operation's winning send and the turn count, one commit."""
+    scope = _driver_scope(run)
+    await store.begin_operation(
+        scope, key=key, request_digest="input", operation_id=key, now=NOW, slot=lease.slot
+    )
+    async with sm.begin() as transaction:
+        await mux_state.claim_send(
+            transaction, scope, key, now=NOW, clock=mux_state.fixed_clock(NOW), fence=lease
+        )
+        return await fleet.use_turn(
+            transaction,
+            tenant_id=run.tenant_id,
+            worker_id=worker.id,
+            expected_version=worker.version,
+        )
+
+
+async def test_a_model_input_counts_once_with_its_winning_send(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    run, worker, lease = await _running_worker(sm, store)
+    key = f"fleet:{run.id}:input:{worker.ordinal}:1"
+    counted = await _count_input(sm, store, run, worker, lease, key)
+    assert counted.turns_used == 1
+
+    # A retry of the same input (a re-run guard, a lease successor) loses the send
+    # claim, and its count rolls back with it.
+    with pytest.raises(SendClaimed):
+        async with sm.begin() as transaction:
+            await mux_state.claim_send(
+                transaction,
+                _driver_scope(run),
+                key,
+                now=NOW,
+                clock=mux_state.fixed_clock(NOW),
+                fence=lease,
+            )
+            await fleet.use_turn(
+                transaction,
+                tenant_id=run.tenant_id,
+                worker_id=worker.id,
+                expected_version=counted.version,
+            )
+    _, (after,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert after.turns_used == 1 and after.version == counted.version
+
+
+async def test_a_worker_cannot_use_more_than_its_max_turns(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    run, worker, lease = await _running_worker(sm, store)  # max_turns 3
+    for n in range(1, 4):
+        worker = await _count_input(sm, store, run, worker, lease, f"in:{n}")
+    assert worker.turns_used == 3
+    with pytest.raises(FleetConflict, match="used its 3 turns"):
+        await _count_input(sm, store, run, worker, lease, "in:4")
+    with pytest.raises(FleetConflict, match="at version"):
+        await fleet.use_turn(
+            sm, tenant_id=run.tenant_id, worker_id=worker.id, expected_version=worker.version - 1
+        )
+    _, (after,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert after.turns_used == 3
