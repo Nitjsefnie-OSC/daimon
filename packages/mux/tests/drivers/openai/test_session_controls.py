@@ -368,3 +368,25 @@ async def test_worker_echo_admission_preserves_ordinary_deployment_caps(require_
         "metadata": {"mux_tenant": "t", "mux_config_revision": "1"},
         "spend_control": {"limit": 5},
     }
+
+
+@pytest.mark.parametrize("cap", [None, 4])
+@pytest.mark.parametrize("explicit_false", [False, True])
+def test_ordinary_control_serialization_preserves_prior_policy_identity(cap, explicit_false):
+    from mux.state.operations import request_digest
+
+    prior = {
+        "model": "gpt-6-luna",
+        "multi_agent_enabled": False,
+        "container_size": "small",
+        "spend_limit_usd_cents": cap,
+    }
+    value = {**prior, **({"require_spend_control_echo": False} if explicit_false else {})}
+    controls = SessionControls.model_validate(value)
+    assert controls.model_dump() == prior
+    assert controls.model_dump(mode="json") == prior
+    assert json.loads(controls.model_dump_json()) == prior
+    assert request_digest(controls.model_dump(mode="json")) == request_digest(prior)
+    strict = controls.model_copy(update={"require_spend_control_echo": True})
+    assert strict.model_dump(mode="json") == {**prior, "require_spend_control_echo": True}
+    assert request_digest(strict.model_dump(mode="json")) != request_digest(prior)

@@ -1020,3 +1020,7 @@ Execution checks retrieve the session again, so a provisioning receipt does not
 authorize model input. Rejected allocations use owned session deletion through
 the existing bounded cleanup path; OpenAI's unsupported archive port is not
 reported as a successful archive.
+
+Default-off worker echo admission is omitted from serialized controls so
+existing ordinary host plan and creation identities remain unchanged. Enabled
+echo admission is serialized and distinguishes the worker policy.

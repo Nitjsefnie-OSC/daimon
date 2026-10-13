@@ -1171,3 +1171,10 @@ worker `native_budget_usd`, preserve their prior request and readback behavior.
 Only an explicit worker budget enables strict native echo validation, against
 the exact integer cents sent in that session request. A deployment limit alone
 does not enable provisioning receipts or budget-rejection cleanup.
+
+The worker echo requirement is omitted from serialized controls when false.
+All prior control fields, including null caps and disabled delegation, remain
+verbatim in plan and creation digests. Existing ordinary bindings and retained
+creation receipts therefore recover under the same stable identity. A true
+worker echo requirement remains part of policy identity; no digest fallback or
+replacement key is used.

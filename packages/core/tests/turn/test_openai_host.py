@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
+from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 import pytest
@@ -21,12 +22,13 @@ from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, ThreadRef
-from mux.contracts.resources import SessionSpec
+from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport
 from mux.errors import ContinuityLost, OperationConflict, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
 from mux.state.memory import MemoryStateStore
+from mux.state.operations import request_digest
 from openai import AsyncOpenAI
 
 from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission, deps_for
@@ -1191,3 +1193,126 @@ async def test_recovery_after_upgrade_keeps_recorded_message_identity(composed, 
         assert saved[0].id == retained.id
         assert saved[0].native == retained.native
         assert saved[0].payload == retained.payload
+
+
+@pytest.fixture(params=[None, 4])
+async def prechange_controls(composed, request):
+    application, wire, store, observations, runtime = composed
+    cap = request.param
+    runtime = replace(
+        runtime, controls=runtime.controls.model_copy(update={"spend_limit_usd_cents": cap})
+    )
+    application = replace(
+        application, deps=replace(application.deps, turn_runtimes={PROFILE: runtime})
+    )
+    wire.expected_spend_limit = cap
+    spec = await runtime.session_plan(application)
+    slot = Slot(
+        thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+        account_id=SCOPE.account_id,
+    )
+    # Literal persisted control shape from before echo admission was added.
+    controls = {
+        "model": "gpt-6-luna",
+        "multi_agent_enabled": False,
+        "container_size": "small",
+        "spend_limit_usd_cents": cap,
+    }
+    digest = request_digest({"spec": spec.model_dump(mode="json"), "controls": controls})
+    key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json()))
+    await store.put_config_revision(REVISION)
+    return application, wire, store, runtime, spec, slot, digest, key
+
+
+async def test_prechange_binding_reuses_native_session_without_replacement(prechange_controls):
+    from daimon.core.stores.mux_state import PostgresStateStore
+
+    application, wire, store, runtime, _, slot, digest, _ = prechange_controls
+    binding = ProviderBinding(
+        id=str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
+        thread=slot.thread,
+        provider="openai",
+        profile=PROFILE,
+        native_refs={
+            "session": SESSION_ID,
+            "agent": "native-agent",
+            "environment": "native-environment",
+            "account_scope": "project",
+            "model": "gpt-6-luna",
+            "plan_digest": digest,
+        },
+        generation=1,
+        config_revision=REVISION.local,
+        legacy_account_id=SCOPE.account_id,
+    )
+    await store.put_binding(binding, expected_generation=0)
+    # Reload real persisted state through a new owner, as after an upgrade.
+    if isinstance(store, PostgresStateStore):
+        store = PostgresStateStore(application.deps.sessionmaker)
+        application = replace(application, deps=replace(application.deps, state_store=store))
+    prepared = await prepare_openai(application)
+    assert prepared.reused and prepared.session_ref.id == SESSION_ID
+    retained = await store.get_binding(slot)
+    assert retained == binding and retained.native_refs["plan_digest"] == digest
+    assert not any(request.method == "POST" for request in wire.requests)
+    assert all(request.method == "GET" for request in wire.requests)
+
+    changed = replace(
+        runtime, controls=runtime.controls.model_copy(update={"require_spend_control_echo": True})
+    )
+    changed_application = replace(
+        application, deps=replace(application.deps, turn_runtimes={PROFILE: changed})
+    )
+    before = len(wire.requests)
+    with pytest.raises(ContinuityLost, match="configuration changed"):
+        await prepare_openai(changed_application)
+    assert len(wire.requests) == before
+
+
+async def test_prechange_processed_creation_receipt_recovers_same_key_and_session(
+    prechange_controls,
+):
+    from daimon.core.stores.mux_state import PostgresStateStore
+
+    application, wire, store, runtime, spec, slot, digest, key = prechange_controls
+    await store.begin_operation(
+        SCOPE, key=key, request_digest=digest, operation_id=key, slot=slot, now=application.now()
+    )
+    lease = await store.acquire_lease(
+        slot, holder="prior-process", turn_id=key, now=application.now(), ttl=timedelta(minutes=5)
+    )
+    try:
+        await store.claim_send(SCOPE, key, now=application.now(), fence=lease)
+        native = await openai_host.driver(runtime, REVISION, SCOPE).sessions.create(
+            SCOPE, spec, key=key
+        )
+        assert native.state == "idle" and native.native is None
+        receipt = await store.advance_operation(
+            SCOPE,
+            key,
+            "processed",
+            now=application.now(),
+            fence=lease,
+            resource=native.ref,
+            result=native.model_dump(mode="json"),
+        )
+    finally:
+        await store.release_lease(lease)
+    assert await store.get_binding(slot) is None
+    if isinstance(store, PostgresStateStore):
+        store = PostgresStateStore(application.deps.sessionmaker)
+        application = replace(application, deps=replace(application.deps, state_store=store))
+    before = len(wire.requests)
+    prepared = await prepare_openai(application)
+    assert not prepared.reused and prepared.session_ref == native.ref
+    recovered = await store.get_operation(SCOPE, key)
+    assert recovered == receipt
+    assert recovered.operation.request_digest == digest and recovered.operation.key == key
+    binding = await store.get_binding(slot)
+    assert binding.native_refs["plan_digest"] == digest
+    assert all(request.method == "GET" for request in wire.requests[before:])
+    created = [request for request in wire.requests if request.method == "POST"]
+    assert len(created) == 1 and created[0].headers["Idempotency-Key"] == key
+    again = await prepare_openai(application)
+    assert again.reused and again.session_ref == native.ref
+    assert len([request for request in wire.requests if request.method == "POST"]) == 1

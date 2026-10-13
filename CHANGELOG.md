@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reserve opt-in fleet root origins and tenant-wide intent ownership before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.
 - Reserve opt-in fleet root origins before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.
 - Resolve opted-in Discord fleet cards from the frozen root and genuine turn intent, preserving the original account while rechecking control-click roles.
+- Preserve ordinary OpenAI plan and creation-receipt identities when worker budget-echo admission is disabled.
+
 - Scope OpenAI budget-echo validation to explicitly budgeted workers, preserving ordinary native host session behavior.
 
 - Retain acknowledged OpenAI session identities before rejecting native budget echoes, then clean up owned rejected allocations without sending input.
