@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
+from daimon.core.channel_backend import load_backend_agent
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.stores.domain import BackendAgent
@@ -194,7 +196,7 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
     revision = request.admission.backend_revision
     origin = request.admission.backend_revision_origin
     if not fixed_plan_origin_allowed(origin) and (
-        origin != "agent" or request.worker is None or not request.deps.agent_backends
+        origin != "agent" or not request.deps.agent_backends
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     if revision is None or revision.profile != PROFILE:
@@ -238,18 +240,30 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
 
         return GeminiTransportRuntime(
             configured_transport(api_key=secret),
-            configured_catalog_transport(api_key=secret) if request.worker is not None else None,
+            configured_catalog_transport(api_key=secret)
+            if request.admission.backend_revision_origin == "agent"
+            else None,
         )
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         validate_counterpart_request(plan, preparation)
-        if (
-            preparation.source is None
-            or preparation.worker is None
-            or preparation.worker != request.worker
-            or plan.worker_deployment(preparation.worker, revision) != deployment
-        ):
+        if preparation.worker != request.worker:
             raise AdmissionDenied(reason="backend_unsupported")
+        source = preparation.source
+        if preparation.worker is not None:
+            if source is None or plan.worker_deployment(preparation.worker, revision) != deployment:
+                raise AdmissionDenied(reason="backend_unsupported")
+        elif source is None:
+            source = await load_backend_agent(
+                preparation.deps.anthropic,
+                preparation.deps.sessionmaker,
+                tenant_id=preparation.tenant_id,
+                agent_name=(preparation.admission.agent.metadata or {}).get(
+                    MA_METADATA_KEY_NAME, preparation.admission.config.agent_name
+                )
+                or "",
+                actual_agent=preparation.admission.agent,
+            )
         backend = gemini_backend(revision, preparation.scope, runtime, plan.project)
         resources = NeutralResourceHost(
             backend,
@@ -260,13 +274,11 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             resource_catalog_enabled=True,
             catalog_adapter=backend.catalog_adapter,
         )
-        return await plan.read_counterpart(
-            preparation, source=preparation.source, resources=resources
-        )
+        return await plan.read_counterpart(preparation, source=source, resources=resources)
 
     runtime = TurnRuntime(
         transport_factory=transport,
-        read_agent_counterpart=read if request.worker is not None else None,
+        read_agent_counterpart=read,
         journal=GeminiJournal(
             SQLiteGeminiStorage(plan.records_path, namespace=namespace),
             request.deps.state_store,
