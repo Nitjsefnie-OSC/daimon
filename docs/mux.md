@@ -2379,10 +2379,9 @@ until that boundary is established. Rows must never be relabeled as timers or
 handoffs. Reader tests can inject future rows directly into an isolated test
 schema; those fixtures are not successful host production or fleet execution.
 
-The host supplies the authorized orchestrator address and must revalidate its
-concrete target and binding at dispatch. The existing dispatcher accepts an
-optional `worker_finished_decision` host hook. Missing or unavailable decisions
-leave the row pending; worker completion never falls back to the legacy agent
+Bind `worker_finished_decision` to `decide_worker_finished` with the host factory.
+It re-reads frozen batches, original roots and live turns. Missing hooks leave rows
+unclaimed; stale facts defer. Normal runner checks remain required, without a legacy agent
 lookup or human-history supersession rule. The existing claim/start/settle
 ladder fences the turn before its first effect, so an expired started wake is
 interrupted rather than automatically replayed. Native execution and result

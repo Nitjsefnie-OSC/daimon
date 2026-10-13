@@ -9,10 +9,12 @@ import types
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 
 import pytest
 from daimon.core._models import FleetWorker as FleetWorkerRow
+from daimon.core._models import JournalSession, PlatformPrincipal, TaskContinuation
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     ContinuationReasonUnavailable,
@@ -27,6 +29,7 @@ from daimon.core.continuity.wakes import (
     abandon_interrupted_wakes,
     arm_worker_finished,
     claim_wake,
+    decide_worker_finished,
     enqueue_wake,
     enqueue_worker_finished,
     list_dispatchable_wakes,
@@ -35,15 +38,20 @@ from daimon.core.continuity.wakes import (
     worker_finished_key,
 )
 from daimon.core.fleet import FleetRun, FleetWorker
-from daimon.core.stores import fleet
+from daimon.core.stores import fleet, mux_state
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.task_continuations import record_continuation as insert_reader_fixture
 from daimon.testing.db import build_test_engine, isolated_test_schema, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic
+from mux.contracts.events import Event, NativeProvenance
+from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
+from mux.contracts.resources import ProviderBinding
+from mux.state.journal import JournalEntry
+from mux.state.lease import Slot
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 10, 12, 18, tzinfo=UTC)
@@ -277,11 +285,14 @@ async def test_unavailable_or_busy_host_decision_defers_without_native_send(
         return ContinuationDecision(action="skip_turn_running") if mode == "busy" else None
 
     turns: list[uuid.UUID] = []
+    before = await _read(pooled, run)
     await _dispatch(pooled, run, None if mode == "absent" else decision, turns)
     row = await _read(pooled, run)
     assert turns == [] and row is not None
     assert row.status == "pending" and row.attempts == 0 and row.started_at is None
-    assert row.available_at == _NOW + WAKE_RETRY_DELAY
+    assert row.available_at == (_NOW if mode == "absent" else _NOW + WAKE_RETRY_DELAY)
+    if mode == "absent":
+        assert row == before
 
 
 async def test_restart_and_two_dispatchers_resume_at_most_once(
@@ -613,3 +624,218 @@ async def test_racing_terminal_moves_publish_once_and_restart_keeps_the_fence(
         )
     finally:
         await engine.dispose()
+
+
+def _root_event(ref, kind, payload):
+    event = Event(
+        id=str(uuid.uuid4()),
+        session_id=ref.id,
+        sequence=0,
+        type=kind,
+        observed_at=_NOW,
+        authority="record",
+        payload=payload,
+        native=NativeProvenance(provider=ref.provider, api_revision="fixture"),
+    )
+    return JournalEntry(source_key=event.id, event=event)
+
+
+async def _ready_root(pooled, provider="anthropic"):
+    run = await _run(pooled, quorum=1)
+    workers = [await _worker(pooled, run, i) for i in range(2)]
+    async with pooled.begin() as db:
+        db.add(
+            PlatformPrincipal(
+                tenant_id=run.tenant_id,
+                platform=run.platform,
+                external_id="human",
+                account_id=run.orchestrator_account_id,
+            )
+        )
+        row = await _arm(db, run, workers)
+        assert await _finish_batch(db, run, workers[0])
+    slot = Slot(
+        thread=ThreadRef(
+            channel=ChannelRef(
+                tenant_id=str(run.tenant_id), platform=run.platform, channel_id=run.channel_id
+            ),
+            thread_id=run.thread_id,
+        ),
+        account_id=str(run.orchestrator_account_id),
+    )
+    binding = ProviderBinding(
+        id=run.orchestrator_binding_id,
+        thread=slot.thread,
+        provider=provider,
+        profile="fixture",
+        native_refs={"session": run.orchestrator_session_id, "agent": f"{provider}-native-agent"},
+        generation=1,
+        config_revision=1,
+        legacy_account_id=slot.account_id,
+    )
+    ref = ResourceRef(
+        id=run.orchestrator_session_id,
+        kind="session",
+        provider=provider,
+        account_scope_id="workspace",
+    )
+    store = mux_state.PostgresStateStore(pooled, trust_caller_clock=True)
+    await store.put_binding(binding, expected_generation=0)
+    lease = await store.acquire_lease(
+        slot, holder="root", turn_id="root", now=_NOW, ttl=timedelta(minutes=5)
+    )
+    await store.append_events(
+        ref,
+        [
+            _root_event(ref, "session.status_running", {"root_turn_id": "root"}),
+            _root_event(
+                ref, "session.turn_ended", {"root_turn_id": "root", "outcome": "completed"}
+            ),
+        ],
+        fence=lease,
+        cursor="root-ended",
+        now=_NOW,
+    )
+    await store.release_lease(lease)
+    return run, row, store, slot, ref
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+async def test_durable_decision_seeds_the_original_root_and_dispatches_once(pooled, provider):
+    run, row, _, _, _ = await _ready_root(pooled, provider)
+    decision = await decide_worker_finished(pooled, row, _NOW)
+    assert decision.action == "dispatch" and len(decision.seed_user_message) <= 500
+    assert str(run.id) in decision.seed_user_message
+    assert str(row.idempotency_key) in decision.seed_user_message
+    assert "cancelled" in decision.seed_user_message and "pending" in decision.seed_user_message
+
+    turns = []
+    for _ in range(2):
+        await _dispatch(pooled, run, partial(decide_worker_finished, pooled), turns)
+    assert turns == [row.idempotency_key]
+    async with pooled() as db:
+        settled = await get_continuation(db, idempotency_key=row.idempotency_key)
+    assert settled.status == "delivered" and settled.attempts == 1
+
+
+async def test_decision_rereads_an_address_changed_after_the_dispatch_scan(pooled):
+    _, row, _, _, _ = await _ready_root(pooled)
+    async with pooled.begin() as db:
+        await db.execute(
+            update(TaskContinuation).where(TaskContinuation.id == row.id).values(thread_id="other")
+        )
+    assert await decide_worker_finished(pooled, row, _NOW) is None
+
+
+@pytest.mark.parametrize("field", ["binding_id", "session_id", "worker_ids", "quorum", "run_id"])
+async def test_decision_refuses_changed_durable_frozen_batch(pooled, field):
+    _, row, _, _, _ = await _ready_root(pooled)
+    batch = FrozenWorkerBatch.model_validate_json(row.requested_work)
+    changes = {
+        "binding_id": "other",
+        "session_id": "other",
+        "worker_ids": (uuid.uuid4(),),
+        "quorum": 2,
+        "run_id": uuid.uuid4(),
+    }
+    payload = batch.model_copy(update={field: changes[field]}).model_dump_json()
+    async with pooled.begin() as db:
+        await db.execute(
+            update(TaskContinuation)
+            .where(TaskContinuation.id == row.id)
+            .values(requested_work=payload)
+        )
+        altered = await get_continuation(db, idempotency_key=row.idempotency_key)
+    assert await decide_worker_finished(pooled, altered, _NOW) is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "session",
+        "missing_projection",
+        "terminated",
+        "gap",
+        "foreign_projection",
+        "principal",
+        "not_ready",
+        "ended",
+        "deadline",
+        "settled",
+    ],
+)
+async def test_missing_stale_or_incomplete_root_facts_never_authorize_a_turn(pooled, mutation):
+    run, row, store, slot, ref = await _ready_root(pooled)
+    if mutation == "session":
+        binding = await store.get_binding(slot)
+        refs = {**binding.native_refs, mutation: "other"}
+        successor = binding.model_copy(update={"generation": 2, "native_refs": refs})
+        await store.put_binding(successor, expected_generation=1)
+    elif mutation in {"missing_projection", "terminated", "gap", "foreign_projection"}:
+        projection = await store.projection(ref.id)
+        changes = {
+            "terminated": {"state": "terminated"},
+            "gap": {"gaps": ("missing",)},
+            "foreign_projection": {"session": ref.model_copy(update={"account_id": "other"})},
+        }
+        value = (
+            None
+            if mutation == "missing_projection"
+            else projection.model_copy(update=changes[mutation]).model_dump(mode="json")
+        )
+        async with pooled.begin() as db:
+            await db.execute(
+                update(JournalSession)
+                .where(JournalSession.session_id == ref.id)
+                .values(projection=value)
+            )
+    elif mutation == "principal":
+        async with pooled.begin() as db:
+            await db.execute(
+                update(PlatformPrincipal)
+                .where(PlatformPrincipal.account_id == run.orchestrator_account_id)
+                .values(external_id="other")
+            )
+    elif mutation == "not_ready":
+        async with pooled.begin() as db:
+            await db.execute(
+                update(FleetWorkerRow)
+                .where(FleetWorkerRow.run_id == run.id)
+                .values(status="running")
+            )
+    elif mutation == "ended":
+        await fleet.set_run_status(
+            pooled,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            expected_version=run.version,
+            status="cancelled",
+        )
+    elif mutation == "settled":
+        async with pooled.begin() as db:
+            await db.execute(
+                update(TaskContinuation)
+                .where(TaskContinuation.id == row.id)
+                .values(status="delivered")
+            )
+            row = await get_continuation(db, idempotency_key=row.idempotency_key)
+    now = run.deadline_at if mutation == "deadline" else _NOW
+    assert await decide_worker_finished(pooled, row, now) is None
+
+
+@pytest.mark.parametrize("busy", ["lease", "journal"])
+async def test_live_root_turn_defers_and_keeps_the_same_wait(pooled, busy):
+    run, row, store, slot, ref = await _ready_root(pooled)
+    lease = await store.acquire_lease(
+        slot, holder="next", turn_id="next", now=_NOW, ttl=timedelta(minutes=5)
+    )
+    if busy == "journal":
+        await store.append_events(
+            ref,
+            [_root_event(ref, "session.status_running", {"root_turn_id": "next"})],
+            fence=lease,
+            cursor="next-running",
+            now=_NOW,
+        )
+        await store.release_lease(lease)
+    assert (await decide_worker_finished(pooled, row, _NOW)).action == "skip_turn_running"

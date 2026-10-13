@@ -37,9 +37,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 import structlog
-from daimon.core.continuity.continuation import ContinuationRequest, require_writable_reason
-from daimon.core.fleet import FleetRun, FleetWorker, run_settled
-from daimon.core.stores import fleet, task_continuations
+from daimon.core.continuity.continuation import (
+    MAX_REQUESTED_WORK,
+    ContinuationDecision,
+    ContinuationRequest,
+    require_writable_reason,
+)
+from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker, run_settled
+from daimon.core.stores import accounts, fleet, mux_state, task_continuations, thread_sessions
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
@@ -54,6 +59,8 @@ from daimon.core.stores.task_continuations import (
     start_wake_row,
 )
 from daimon.core.turn.ceiling import TURN_CEILING_S
+from mux.contracts.ids import ChannelRef, ThreadRef
+from mux.state.lease import Slot
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -75,6 +82,7 @@ __all__ = [
     "busy_retry_at",
     "cancel_wake",
     "claim_wake",
+    "decide_worker_finished",
     "enqueue_wake",
     "enqueue_worker_finished",
     "list_dispatchable_wakes",
@@ -246,6 +254,124 @@ def _address_matches(run: FleetRun, request: ContinuationRequest | TaskContinuat
     )
 
 
+def _retained_batch(run: FleetRun, workers: Sequence[FleetWorker], row: TaskContinuationRow):
+    batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
+    if (
+        batch.run_id != run.id
+        or not _address_matches(run, row)
+        or batch != _batch(run, workers, batch.worker_ids)
+        or row.requested_work != batch.model_dump_json()
+        or row.idempotency_key != worker_finished_key(run.id, batch.worker_ids)
+    ):
+        raise ValueError("Frozen batch intent differs from its original run")
+    return batch
+
+
+async def decide_worker_finished(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    row: TaskContinuationRow,
+    now: datetime,
+) -> ContinuationDecision | None:
+    """Re-read the frozen root before normal runner admission; this grants no send.
+
+    Missing or stale durable facts defer. The adapter retains its per-thread
+    guard and repeats current authorization/binding checks before any effect.
+    """
+    try:
+        async with sessionmaker.begin() as db:
+            retained = await task_continuations.get_continuation(
+                db, idempotency_key=row.idempotency_key
+            )
+            if retained is None or any(
+                getattr(retained, key) != getattr(row, key)
+                for key in (*ContinuationRequest.model_fields, "id")
+            ):
+                return None
+            if retained.status not in {"pending", "claimed"} or retained.started_at is not None:
+                return None
+            if retained.available_at is None or retained.available_at > now:
+                return None
+            parsed = FrozenWorkerBatch.model_validate_json(retained.requested_work or "")
+            run, workers = await fleet.run_status(
+                db, tenant_id=row.tenant_id, run_id=parsed.run_id, for_update=True
+            )
+            batch = _retained_batch(run, workers, retained)
+            members = [worker for worker in workers if worker.id in batch.worker_ids]
+            if run.status != "running" or now >= run.deadline_at:
+                return None
+            if not run_settled(replace(run, quorum=batch.quorum), members):
+                return None
+            identity = await accounts.get_account_with_tenant(
+                db, account_id=run.orchestrator_account_id
+            )
+            if (
+                identity is None
+                or identity.tenant_id != run.tenant_id
+                or identity.platform != run.platform
+                or identity.platform_user_id != row.requester_external_user_id
+            ):
+                return None
+            slot = Slot(
+                thread=ThreadRef(
+                    channel=ChannelRef(
+                        tenant_id=str(run.tenant_id),
+                        platform=run.platform,
+                        channel_id=run.channel_id,
+                    ),
+                    thread_id=run.thread_id,
+                ),
+                account_id=str(run.orchestrator_account_id),
+            )
+            binding = await mux_state.get_binding(db, slot)
+            if (
+                binding is None
+                or binding.id != batch.binding_id
+                or binding.thread != slot.thread
+                or binding.legacy_account_id != slot.account_id
+                or binding.native_refs.get("session") != batch.session_id
+            ):
+                return None
+            projection = await mux_state.projection(db, batch.session_id)
+            if (
+                projection is None
+                or projection.session.id != batch.session_id
+                or projection.session.kind != "session"
+                or projection.session.provider != binding.provider
+                or projection.session.tenant_id not in {None, str(run.tenant_id)}
+                or projection.session.account_id not in {None, slot.account_id}
+                or projection.gaps
+                or projection.state == "terminated"
+            ):
+                return None
+            lease = await mux_state.active_lease(db, slot)
+            live = await thread_sessions.get_live_thread_session(
+                db,
+                tenant_id=run.tenant_id,
+                platform=run.platform,
+                thread_id=run.thread_id,
+                account_id=run.orchestrator_account_id,
+            )
+            if live is not None and (
+                live.ma_session_id != batch.session_id
+                or live.channel_id != run.channel_id
+                or live.ma_agent_id != row.target_ma_agent_id
+            ):
+                return None
+            if live is not None and live.active_turn_message_id is not None:
+                return ContinuationDecision(action="skip_turn_running")
+            if projection.state != "idle" or projection.active_root_turn is not None or lease:
+                return ContinuationDecision(action="skip_turn_running")
+    except (FleetConflict, ValidationError, ValueError):
+        return None
+    summary = ", ".join(f"{worker.id}:{worker.status}" for worker in members[:5])
+    seed = (
+        f"Resume fleet run {run.id}; frozen batch {row.idempotency_key} is ready "
+        f"at threshold {batch.quorum}/{len(members)}. Worker state excerpt: {summary}. "
+        "Re-read fleet_status and validate fleet_collect; readiness does not certify success."
+    )[:MAX_REQUESTED_WORK]
+    return ContinuationDecision(action="dispatch", seed_user_message=seed)
+
+
 async def arm_worker_finished(
     session: AsyncSession,
     request: ContinuationRequest,
@@ -334,14 +460,7 @@ async def enqueue_worker_finished(
             batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
             if batch.run_id != run_id:
                 continue
-            expected = _batch(run, workers, batch.worker_ids)
-            if (
-                not _address_matches(run, row)
-                or batch != expected
-                or row.requested_work != batch.model_dump_json()
-                or row.idempotency_key != worker_finished_key(run_id, batch.worker_ids)
-            ):
-                raise ValueError("Frozen batch intent differs from its original run")
+            batch = _retained_batch(run, workers, row)
         except (ValidationError, ValueError):
             log.warning("wake.invalid_worker_batch", idempotency_key=str(row.idempotency_key))
             continue
