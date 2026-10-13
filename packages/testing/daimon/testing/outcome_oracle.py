@@ -10,10 +10,18 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Literal
+from uuid import UUID
 
 from daimon.core.continuity.wakes import FrozenWorkerBatch
-from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker, check_result
-from mux.contracts.events import AgentMessagePayload, Event, TextPart
+from daimon.core.fleet import (
+    FleetConflict,
+    FleetRun,
+    FleetWorker,
+    ResultPointer,
+    WorkerStatus,
+    check_result,
+)
+from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance, TextPart
 from mux.contracts.ids import Provider
 from mux.contracts.resources import ProviderBinding
 from mux.profiles import backend_selection
@@ -25,8 +33,11 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     ValidationError,
+    field_serializer,
+    field_validator,
     model_validator,
 )
+from pydantic.dataclasses import dataclass
 
 type Status = Literal["PASS", "FAIL", "PENDING"]
 type Authority = Literal["record", "reconciled", "preview", "gap"]
@@ -244,16 +255,138 @@ class FleetScope(EvidenceModel):
     root_session_id: str = Field(min_length=1)
 
 
+class FleetReviewFacts(EvidenceModel):
+    format: Literal["text", "review"] | None = None
+    review_required: bool | None = None
+    reviewed_digest: str | None = None
+
+
+@dataclass(frozen=True, config=ConfigDict(extra="forbid", strict=True, allow_inf_nan=False))
+class FleetWorkerFacts:
+    """Persisted worker facts without its private spec or arbitrary contract maps."""
+
+    id: UUID
+    run_id: UUID
+    tenant_id: UUID
+    ordinal: int
+    role: str
+    spec_digest: str
+    backend: str
+    profile: str
+    model: str
+    binding_id: str | None
+    status: WorkerStatus
+    turns_used: int
+    attempts: int
+    reviewer_of: UUID | None
+    result: ResultPointer | None
+    error_code: str | None
+    version: int
+    review: FleetReviewFacts | None
+    review_complete: bool = False
+
+    @classmethod
+    def from_worker(cls, worker: FleetWorker) -> FleetWorkerFacts:
+        contract = dict(worker.result_contract or {})
+        known = {
+            key: value for key, value in contract.items() if key in FleetReviewFacts.model_fields
+        }
+        complete = len(known) == len(contract)
+        try:
+            review = FleetReviewFacts.model_validate(known)
+        except ValidationError:
+            review = None
+            complete = False
+        return cls(
+            id=worker.id,
+            run_id=worker.run_id,
+            tenant_id=worker.tenant_id,
+            ordinal=worker.ordinal,
+            role=worker.role,
+            spec_digest=worker.spec_digest,
+            backend=worker.backend,
+            profile=worker.profile,
+            model=worker.model,
+            binding_id=worker.binding_id,
+            status=worker.status,
+            turns_used=worker.turns_used,
+            attempts=worker.attempts,
+            reviewer_of=worker.reviewer_of,
+            result=worker.result,
+            error_code=worker.error_code,
+            version=worker.version,
+            review=review,
+            review_complete=complete,
+        )
+
+    @property
+    def result_contract(self) -> dict[str, JsonValue] | None:
+        return self.review.model_dump(mode="json", exclude_none=True) if self.review else None
+
+
+class FleetNativeFacts(NativeProvenance):
+    raw_ref: str | None = Field(default=None, exclude=True)
+    record: JsonValue | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def non_opaque(self) -> FleetNativeFacts:
+        if self.raw_ref is not None or self.record is not None:
+            raise ValueError("fleet result cannot contain opaque native provenance")
+        return self
+
+
+class FleetResultFacts(Event):
+    """An unchanged normalized text result with closed, non-opaque provenance."""
+
+    type: str = Field(default="agent.message", pattern=r"^agent\.message$")
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, Event)
+            and other.native.raw_ref is None
+            and other.native.record is None
+            and self.model_dump() == other.model_dump(exclude={"native": {"raw_ref", "record"}})
+        )
+
+    @field_validator("native", mode="before")
+    @classmethod
+    def fixed_native(cls, value: object) -> FleetNativeFacts:
+        if isinstance(value, NativeProvenance):
+            value = value.model_dump(mode="python")
+        return FleetNativeFacts.model_validate(value)
+
+    @field_serializer("native")
+    def public_native(self, value: NativeProvenance) -> dict[str, JsonValue]:
+        return value.model_dump(mode="json", exclude={"raw_ref", "record"})
+
+    @model_validator(mode="before")
+    @classmethod
+    def from_event(cls, value: object) -> object:
+        return value.model_dump(mode="python") if isinstance(value, Event) else value
+
+    @model_validator(mode="after")
+    def text_only(self) -> FleetResultFacts:
+        message = AgentMessagePayload.model_validate(self.payload)
+        if any(not isinstance(part, TextPart) for part in message.content):
+            raise ValueError("fleet result requires normalized text-only content")
+        return self
+
+
 class FleetWorkerCapture(FleetScope):
     evidence_id: str = Field(min_length=1)
-    worker: FleetWorker
+    worker: FleetWorkerFacts
     binding: ProviderBinding | None = None
     input_record: PostInputAcknowledgement | None = None
     terminal: TerminalEvidence | None = None
     native_backend: str | None = None
     native_model: str | None = None
     native_started_s: float | None = Field(default=None, ge=0)
-    result: Event | None = None
+    result: FleetResultFacts | None = None
+
+    @field_validator("worker", mode="before")
+    @classmethod
+    def project_worker(cls, value: object) -> object:
+        return FleetWorkerFacts.from_worker(value) if isinstance(value, FleetWorker) else value
 
 
 class FleetWakeCapture(FleetScope):
@@ -966,7 +1099,10 @@ def fleet_checks(
             add(cell, "PENDING", "WORKER_NOT_SUCCEEDED", item.evidence_id)
         if worker.turns_used != 1 or worker.attempts != 1:
             add(cell, "FAIL", "EXTRA_WORKER_INPUT", item.evidence_id)
-        if ordinal == 1 and (worker.result_contract or {}).get("review_required") is not True:
+        if worker.review is None or not worker.review_complete:
+            add(cell, "PENDING", "REVIEW_CONTRACT_UNBOUND", item.evidence_id)
+        required = (worker.result_contract or {}).get("review_required")
+        if ordinal == 1 and (required is False or worker.review_complete and required is not True):
             add(cell, "FAIL", "REVIEW_NOT_REQUIRED", item.evidence_id)
         if worker.binding_id is None:
             add(cell, "PENDING", "DURABLE_BINDING_UNBOUND", item.evidence_id)
@@ -1052,12 +1188,29 @@ def fleet_checks(
             verdict = json.loads(texts[4], object_pairs_hook=unique)
         except ValueError:
             verdict = None
-        if (
-            (target.result_contract or {}).get("review_required") is not True
-            or reviewer.reviewer_of != target.id
-            or reviewer.result_contract != {"format": "review", "reviewed_digest": digest}
-            or verdict != {"verdict": "approved", "reviewed_digest": digest}
+        if reviewer.reviewer_of != target.id or verdict != {
+            "verdict": "approved",
+            "reviewed_digest": digest,
+        }:
+            add("W4", "FAIL", "REVIEW_REFUSED_OR_UNBOUND")
+        elif target.review is None or reviewer.review is None:
+            add("W4", "PENDING", "REVIEW_CONTRACT_UNBOUND")
+        elif (
+            target.review.review_required is False
+            or reviewer.review.format is not None
+            and reviewer.review.format != "review"
+            or reviewer.review.reviewed_digest is not None
+            and reviewer.review.reviewed_digest != digest
         ):
+            add("W4", "FAIL", "REVIEW_REFUSED_OR_UNBOUND")
+        elif not target.review_complete or not reviewer.review_complete:
+            add("W4", "PENDING", "REVIEW_CONTRACT_UNBOUND")
+        elif (target.result_contract or {}).get(
+            "review_required"
+        ) is not True or reviewer.result_contract != {
+            "format": "review",
+            "reviewed_digest": digest,
+        }:
             add("W4", "FAIL", "REVIEW_REFUSED_OR_UNBOUND")
         else:
             add("W4", "PASS", "EXACT_APPROVED_REVIEW", w4[0].evidence_id)

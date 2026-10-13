@@ -984,3 +984,12 @@ counts do not bound Managed Agents internal inference, and this local wrapper
 does not automatically attach to a remotely deployed Discord adapter or smoke.
 Those actual request edges must be bound before a live run. No new SDK clients,
 credential loaders, ledger, staging runner or product hooks are installed.
+
+Fleet outcome captures persist `FleetWorkerFacts.from_worker(worker)` through
+the existing `FleetWorkerCapture.worker` field. The projection omits private
+specs and arbitrary contract maps, retains original result pointers, and keeps
+only typed review facts with explicit coverage. Unsupported review data stays
+unverified without hiding a known failure. Recorded results accept unchanged
+normalized text payloads and exclude opaque native records/references; a
+private or binary payload is refused. Genuine in-memory worker/event inputs
+are projected at the boundary; serialized raw worker maps are rejected.
