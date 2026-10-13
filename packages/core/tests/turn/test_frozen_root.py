@@ -13,11 +13,12 @@ import httpx
 import pytest
 from daimon.core._models import FleetRun, MuxOperation
 from daimon.core.authz import Subject, Surface, build_agent_ref
-from daimon.core.channel_backend import load_backend_agent
+from daimon.core.channel_backend import AgentBackendService, BackendActor, load_backend_agent
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.neutral_resources import WorkerSpecRefused
+from daimon.core.neutral_resources import AgentFleetGrant, WorkerSpecRefused
 from daimon.core.scope import ResolvedConfig
+from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
 from daimon.core.session_ports_compat import create_session_record
 from daimon.core.sessions import project_session_resources
 from daimon.core.stores import access_policy, fleet, mux_state, turn_card_intents, turn_origins
@@ -25,7 +26,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
-from daimon.core.turn.prepare import PreparedTurn
+from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtime_manifest import freeze_prepared_root, read_frozen_root
 from daimon.core.turn_origin import turn_origin
@@ -78,6 +79,11 @@ async def root_turn(db_preflight, db_nullpool_engine):
         "GET",
         r"/v1/agents/root-source",
         lambda request, match: httpx.Response(200, json=native.model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        rf"/v1/environments/{environment.id}",
+        lambda request, match: httpx.Response(200, json=environment.model_dump(mode="json")),
     )
     router.add(
         "POST",
@@ -208,6 +214,32 @@ async def root_turn(db_preflight, db_nullpool_engine):
                     update={"deadline": datetime.now(UTC) + timedelta(minutes=10)}
                 ),
             )
+            grant_service = AgentBackendService(sm, enabled=True)
+            admin = BackendActor(tenant.id, account.id, Subject(is_admin=True))
+            admin_value = AgentFleetGrant(
+                max_workers=8,
+                choices=tuple(
+                    (backend, model)
+                    for backend in root.backend_grants
+                    for model in root.models
+                    if backend.backend == model.provider
+                ),
+                limits=root.limits,
+                max_run_seconds=600,
+                max_worker_seconds=120,
+                max_root_turns=3,
+            )
+            preview = await grant_service.preview_fleet_grant(
+                captured, admin_value, now=datetime.now(UTC)
+            )
+            await grant_service.set_fleet_grant(
+                captured,
+                admin_value,
+                0,
+                admin,
+                expected_preview_digest=preview.digest,
+                now=datetime.now(UTC),
+            )
             store = mux_state.PostgresStateStore(sm)
             binding = ProviderBinding(
                 id=str(uuid4()),
@@ -246,6 +278,21 @@ async def root_turn(db_preflight, db_nullpool_engine):
                 session_ref=resource_ref(backend, "session", acknowledged.id, scope=scope),
                 _scope=scope,
                 _source=captured,
+                _preparation=ProviderPreparationRequest(
+                    deps,
+                    admission,
+                    scope,
+                    tenant.id,
+                    "discord",
+                    "requester",
+                    thread.thread_id,
+                    account.id,
+                    False,
+                    DEFAULT_MA_CAPABILITIES,
+                    None,
+                    root.limits.deadline,
+                    lambda: datetime.now(UTC),
+                ),
             )
             yield deps, prepared, grants, intent, origin, scope, binding, transport
 

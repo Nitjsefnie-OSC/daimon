@@ -1,0 +1,447 @@
+"""Reconstruct only the exact retained root under its current admin epoch."""
+
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+import pytest
+from daimon.core.authz import Subject
+from daimon.core.channel_backend import AgentBackendService, BackendActor
+from daimon.core.neutral_resources import WorkerSpecRefused
+from daimon.core.turn.runtime_manifest import read_frozen_preparation, read_frozen_root
+
+from .test_frozen_root import freeze
+from .test_frozen_root import root_turn as root_turn
+
+
+async def retained(value):
+    deps, _, _, intent, _, scope, _, _ = value
+    await freeze(value)
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    return parent
+
+
+async def revoke(value):
+    deps, prepared, *_ = value
+    source = prepared._source
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
+    preview = await service.preview_fleet_grant(source, None, now=datetime.now(UTC))
+    return await service.revoke_fleet_grant(
+        source,
+        preview.setting_revision,
+        actor,
+        expected_preview_digest=preview.digest,
+        now=datetime.now(UTC),
+    )
+
+
+async def test_exact_request_reconstructed_from_retained_facts(root_turn):
+    deps, prepared, _, _, _, scope, binding, transport = root_turn
+    parent = await retained(root_turn)
+    before = len(transport.requests)
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.deps is deps and request.scope == scope
+    assert request.admission.account_id == prepared.admission.account_id
+    assert request.admission.grant == prepared.admission.grant
+    assert not request.admission.grant.subject.is_admin
+    assert request.admission.config == prepared.admission.config
+    assert request.admission.agent.id == prepared.admission.agent.id
+    assert request.admission.environment.id == prepared.admission.environment.id
+    assert request.source.source.ref == parent.source_agents[0]
+    assert request.source.source.revision == parent.source_revisions[0][1]
+    assert request.session_account_id == UUID(scope.account_id)
+    assert request.thread_id == binding.thread.thread_id
+    assert request.external_user_id == "requester"
+    assert request.deadline == parent.limits.deadline
+    assert all(item.method == "GET" for item in transport.requests[before:])
+
+
+@pytest.mark.parametrize("fault", ["scope", "subject", "run"])
+async def test_foreign_preparation_parent_refuses_before_sdk_read(root_turn, fault):
+    deps, _, _, _, _, _, _, transport = root_turn
+    parent = await retained(root_turn)
+    if fault == "scope":
+        parent = replace(
+            parent,
+            fleet=replace(
+                parent.fleet,
+                scope=parent.fleet.scope.model_copy(update={"account_id": str(UUID(int=7))}),
+            ),
+        )
+    elif fault == "subject":
+        parent = replace(parent, subject=Subject(is_admin=True))
+    else:
+        parent = replace(parent, fleet=replace(parent.fleet, run_id=UUID(int=7)))
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_preparation(
+            deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+        )
+    assert len(transport.requests) == before
+
+
+async def test_revoke_and_same_value_regrant_never_revive_retained_root(root_turn):
+    deps, prepared, _, intent, _, scope, _, transport = root_turn
+    parent = await retained(root_turn)
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    value = await service.read_fleet_grant(
+        prepared._source.tenant_id, prepared._source.agent_id, now=datetime.now(UTC)
+    )
+    await revoke(root_turn)
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_preparation(
+            deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+        )
+    actor = BackendActor(
+        prepared._source.tenant_id, prepared.admission.account_id, Subject(is_admin=True)
+    )
+    preview = await service.preview_fleet_grant(prepared._source, value, now=datetime.now(UTC))
+    await service.set_fleet_grant(
+        prepared._source,
+        value,
+        preview.setting_revision,
+        actor,
+        expected_preview_digest=preview.digest,
+        now=datetime.now(UTC),
+    )
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    assert len(transport.requests) == before
+
+
+async def test_stricter_caller_deadline_is_preserved(root_turn):
+    deps = root_turn[0]
+    parent = await retained(root_turn)
+    bound = datetime.now(UTC) + timedelta(seconds=15)
+    result = await read_frozen_preparation(
+        deps, parent, deadline=bound, now=lambda: datetime.now(UTC)
+    )
+    assert result.deadline == bound < parent.limits.deadline
+
+
+async def test_default_constructor_uses_current_db_grant_and_actual_source(root_turn):
+    from daimon.core.neutral_resources import AgentFleetGrant
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_memory_stores
+    from mux.contracts.ids import ModelRef
+    from mux.profiles import backend_selection
+
+    deps, prepared, _, intent, _, scope, _, transport = root_turn
+    source = prepared._source
+    async with deps.sessionmaker.begin() as db:
+        await agent_memory_stores.insert_memory_store(
+            db,
+            tenant_id=source.tenant_id,
+            agent_id=source.agent_id,
+            memory_store_id="warm-root-memory",
+        )
+    source = await project_session_resources(
+        source,
+        agent=prepared.admission.agent,
+        environment=prepared.admission.environment,
+        session_factory=deps.sessionmaker,
+        tenant_id=source.tenant_id,
+        agent_uuid=source.agent_id,
+        account_id=prepared.admission.account_id,
+        resource_scope=scope,
+        memory_read_only=True,
+    )
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    current = await service.read_fleet_grant(
+        source.tenant_id, source.agent_id, now=datetime.now(UTC)
+    )
+    value = AgentFleetGrant.model_validate(
+        current.model_dump()
+        | {
+            "choices": (
+                (
+                    backend_selection("anthropic"),
+                    ModelRef(provider="anthropic", id="claude-haiku-5-5"),
+                ),
+                (backend_selection("openai"), ModelRef(provider="openai", id="gpt-6-luna")),
+                (
+                    backend_selection("gemini").model_copy(
+                        update={"model": "gemini-3.5-flash-lite"}
+                    ),
+                    ModelRef(provider="gemini", id="gemini-3.5-flash-lite"),
+                ),
+            ),
+            "max_workers": 2,
+        }
+    )
+    actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
+    preview = await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
+    await service.set_fleet_grant(
+        source,
+        value,
+        preview.setting_revision,
+        actor,
+        expected_preview_digest=preview.digest,
+        now=datetime.now(UTC),
+    )
+    deps = replace(deps, fleet_root_grants=None)
+    prepared = replace(prepared, _source=source)
+    updated = (deps, prepared, *root_turn[2:])
+    before = len(transport.requests)
+    await freeze(updated)
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    assert parent.backend_grants == value.backends and parent.models == value.models
+    assert parent.spec.model.id == "claude-haiku-5-5"
+    assert parent.subject == prepared.admission.grant.subject and not parent.subject.is_admin
+    assert parent.source_revisions == ((source.source.ref, source.source.revision),)
+    assert parent.resources[-1].id == "warm-root-memory"
+    from daimon.core.stores import fleet
+
+    run, _ = await fleet.run_status(
+        deps.sessionmaker, tenant_id=source.tenant_id, run_id=parent.fleet.run_id
+    )
+    assert run.max_workers == 2 and run.total_budget_usd == value.limits.budget_usd
+    assert parent.spec.declared_drops == ()
+    assert parent.limits.deadline <= datetime.now(UTC) + timedelta(seconds=120)
+    assert len(transport.requests) == before
+
+
+async def test_no_grant_keeps_uncaptured_ordinary_root_without_new_effects(root_turn):
+    from daimon.core.stores import mux_state
+
+    deps, prepared, _, intent, _, scope, _, transport = root_turn
+    await revoke(root_turn)
+    before = len(transport.requests)
+    value = (
+        replace(deps, fleet_root_grants=None),
+        replace(prepared, _source=None, _preparation=None),
+        *root_turn[2:],
+    )
+    await freeze(value)
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+    assert len(transport.requests) == before
+
+
+async def test_revoked_prepared_source_refuses_before_root_allocation(root_turn):
+    from daimon.core.stores import mux_state
+
+    deps, _, _, intent, _, scope, _, transport = root_turn
+    await revoke(root_turn)
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused, match="stale"):
+        await freeze(root_turn)
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+    assert len(transport.requests) == before
+
+
+@pytest.mark.parametrize("operation", ["read", "preview", "disabled"])
+async def test_naive_grant_clock_is_typed_refused_or_disabled_noop(root_turn, operation):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    deps, prepared, *_ = root_turn
+    source = prepared._source
+    service = AgentBackendService(deps.sessionmaker, enabled=operation != "disabled")
+    instant = datetime.now(UTC).replace(tzinfo=None)
+    if operation == "disabled":
+        assert (
+            await service.read_fleet_grant(source.tenant_id, source.agent_id, now=instant) is None
+        )
+        return
+    with pytest.raises(AgentBackendRefused, match="invalid fleet grant"):
+        if operation == "read":
+            await service.read_fleet_grant(source.tenant_id, source.agent_id, now=instant)
+        else:
+            value = await service.read_fleet_grant(
+                source.tenant_id, source.agent_id, now=datetime.now(UTC)
+            )
+            await service.preview_fleet_grant(source, value, now=instant)
+
+
+@pytest.mark.parametrize("field", ["model", "system", "version", "tools", "environment"])
+async def test_fresh_native_drift_refuses_under_retained_source_authority(root_turn, field):
+    import httpx
+    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+    deps, prepared, *_ = root_turn
+    parent = await retained(root_turn)
+    native = prepared.admission.agent.model_dump(mode="json")
+    environment = prepared.admission.environment.model_dump(mode="json")
+    if field == "model":
+        native["model"] = {"id": "claude-different"}
+    elif field == "system":
+        native["system"] = "Drifted instructions"
+    elif field == "version":
+        native["version"] = 2
+    elif field == "tools":
+        native["tools"] = [
+            {
+                "type": "custom",
+                "name": "new-tool",
+                "description": "New",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ]
+    else:
+        environment["config"]["packages"]["pip"] = ["unexpected"]
+    trace = ScriptedTransport()
+    trace.queue(
+        ScriptedReply("GET", "/v1/agents/" + native["id"], httpx.Response(200, json=native))
+    )
+    if field == "environment":
+        trace.queue(
+            ScriptedReply(
+                "GET",
+                "/v1/environments/" + environment["id"],
+                httpx.Response(200, json=environment),
+            )
+        )
+    async with trace.client() as client:
+        with pytest.raises(WorkerSpecRefused):
+            await read_frozen_preparation(
+                replace(deps, anthropic=client),
+                parent,
+                deadline=parent.limits.deadline,
+                now=lambda: datetime.now(UTC),
+            )
+    assert trace.requests and all(item.method == "GET" for item in trace.requests)
+
+
+async def test_default_host_ports_reaches_retained_original_preparation(root_turn):
+    from decimal import Decimal
+
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.fleet import WorkerPool
+
+    deps, _, *_ = root_turn
+    parent = await retained(root_turn)
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        source = await ports.capture_source(parent)
+        assert source.source.ref == parent.source_agents[0]
+        assert source.source.revision == parent.source_revisions[0][1]
+        assert source.resource_scope == parent.fleet.scope
+    finally:
+        await ports.close()
+
+
+@pytest.mark.parametrize("field", ["missing_source", "extra_admission", "invalid_account"])
+async def test_malformed_retained_preparation_is_typed_refused_without_sdk_io(root_turn, field):
+    from copy import deepcopy
+
+    from daimon.core._models import MuxOperation
+    from sqlalchemy import select, update
+
+    deps, _, _, _, origin, _, _, transport = root_turn
+    parent = await retained(root_turn)
+    async with deps.sessionmaker.begin() as db:
+        row = (
+            await db.execute(
+                select(MuxOperation).where(
+                    MuxOperation.tenant_id == origin.tenant_id,
+                    MuxOperation.key == "fleet_root:" + str(origin.id) + ":root:0",
+                )
+            )
+        ).scalar_one()
+        record = deepcopy(row.record)
+        facts = record["result"]["preparation"]
+        if field == "missing_source":
+            del facts["source"]
+        elif field == "extra_admission":
+            facts["admission"]["unexpected"] = True
+        else:
+            facts["admission"]["account_id"] = "invalid"
+        await db.execute(
+            update(MuxOperation)
+            .where(
+                MuxOperation.tenant_id == row.tenant_id,
+                MuxOperation.account_id == row.account_id,
+                MuxOperation.key == row.key,
+            )
+            .values(record=record)
+        )
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_preparation(
+            deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+        )
+    assert len(transport.requests) == before
+
+
+@pytest.mark.parametrize("mode", ["unrestricted", "limited"])
+def test_environment_sdk_facade_preserves_represented_network_packages_and_dates(mode):
+    from daimon.core.mux_compat import sdk_environment, source_environment_record
+    from daimon.testing.ma_models import ma_environment
+    from mux.contracts.ids import Scope
+
+    native = ma_environment()
+    payload = native.model_dump(mode="json")
+    payload["config"]["packages"] = {
+        "apt": ["git"],
+        "pip": ["pytest"],
+        "npm": ["typescript"],
+        "cargo": [],
+        "gem": [],
+        "go": [],
+    }
+    payload["config"]["networking"] = (
+        {"type": "unrestricted"}
+        if mode == "unrestricted"
+        else {
+            "type": "limited",
+            "allowed_hosts": ["example.invalid"],
+            "allow_mcp_servers": False,
+            "allow_package_managers": False,
+        }
+    )
+    native = type(native).model_validate(payload)
+    scope = Scope(
+        tenant_id="tenant", account_id="account", principal_id="host", authorization_id="verified"
+    )
+    captured = source_environment_record(native, scope)
+    assert sdk_environment(captured).model_dump(mode="json") == native.model_dump(mode="json")
+    restored = sdk_environment(captured.model_copy(update={"native": None}))
+    assert restored.config.model_dump(mode="json") == native.config.model_dump(mode="json")
+    assert restored.created_at == native.created_at and restored.updated_at == native.updated_at
+
+
+@pytest.mark.parametrize("change", ["revoke", "expire"])
+async def test_after_source_await_refuses_before_environment_read(root_turn, change):
+    import httpx
+    from daimon.core.errors import TurnError
+    from daimon.testing.ma import MARouter
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    deps, prepared, *_ = root_turn
+    parent = await retained(root_turn)
+    clock = [datetime.now(UTC)]
+    bound = clock[0] + timedelta(seconds=1)
+    router = MARouter()
+
+    async def read_source(request, match):
+        if change == "revoke":
+            await revoke(root_turn)
+        else:
+            clock[0] = bound + timedelta(seconds=1)
+        return httpx.Response(200, json=prepared.admission.agent.model_dump(mode="json"))
+
+    router.add("GET", "/v1/agents/" + prepared.admission.agent.id, read_source)
+    trace = ScriptedTransport(router=router)
+    async with trace.client() as client:
+        with pytest.raises((WorkerSpecRefused, TurnError)) as refused:
+            await read_frozen_preparation(
+                replace(deps, anthropic=client), parent, deadline=bound, now=lambda: clock[0]
+            )
+    if change == "expire":
+        assert isinstance(refused.value, TurnError) and refused.value.kind == "ceiling"
+    else:
+        assert isinstance(refused.value, WorkerSpecRefused)
+    assert [(item.method, item.path) for item in trace.requests] == [
+        ("GET", "/v1/agents/" + prepared.admission.agent.id),
+    ]

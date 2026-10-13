@@ -2864,3 +2864,42 @@ canonical cohort/key/address validation and snapshot coherence remain exporter
 checks. Reads project persisted columns without flushing or overwriting caller
 objects; effective dirty or deleted state for its source tables is refused by
 the shared store reader. Reading this audit never claims or runs a wake.
+
+## Captured root permission composition
+
+`neutral_resources.fleet_root_permissions` derives the existing `WorkerPermissions`
+from an owner-captured `BackendAgent`, its actual `AdmissionGrant`, a current scoped
+`AgentFleetGrant`, and the caller's joined `FleetFacts`. The caller rechecks the grant
+epoch and expiry around awaited reads and validates the original origin/binding.
+The constructor preserves the exact admitted subject/place/category, source revision,
+environment, seals, and paired backend/model ceilings, including explicit model pins.
+It delegates normalization and source-obligation checking to `freeze_root_permissions`.
+
+The common permission deadline is conservatively bounded by grant expiry and the
+smaller of the finite run/worker durations and the existing turn ceiling.
+Worker budget and request ceilings come
+from the grant's existing `WorkerLimits`; funding remains a separate owner decision.
+The caller retains worker counts, grant epoch, and root-input controls through the
+existing run/context. This constructor does not impose a whole-root financial cap.
+
+Only a captured, already-bound warm memory store can become a mount. It uses the
+existing memory mount codec and exact caller resource scope, with the captured access
+mode; there is no provisioning. The complete source remains available to the existing
+obligation classifier after represented native custom tools are projected. Credentials,
+unsupported MCP/native controls, missing memory, repositories, and opaque requirements
+remain typed refusals. No obligations or declared drops are inferred or filtered.
+This API alone does not install runtime fleet execution or prove main defaults portable.
+
+
+An enabled fleet freezes worker authority from the actual admitted agent's
+current per-agent grant. A missing grant leaves ordinary root input unchanged.
+Revocation or replacement invalidates retained roots by their pinned epoch and
+grant digest. The worker request reader joins the exact original run, origin,
+account, binding, source revision and current policy; it refuses missing or
+legacy preparation facts and source or environment drift. It retains neutral
+facts, never SDK clients, transports, credential values or accounting callbacks.
+
+The grant's budget ceiling covers workers only. The ordinary root's requests
+are separate; fleet installation does not establish a whole-root provider bill
+cap. Root financial controls require their own installation before a bounded
+root-and-workers run.

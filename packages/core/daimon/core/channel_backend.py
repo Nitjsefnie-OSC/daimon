@@ -533,6 +533,8 @@ class AgentBackendService:
     ) -> AgentFleetGrant | None:
         if not self.enabled:
             return None
+        if now.utcoffset() is None:
+            raise AgentBackendRefused("invalid_fleet_grant")
         if not isinstance(cast(object, tenant_id), uuid.UUID) or not isinstance(
             cast(object, agent_id), uuid.UUID
         ):
@@ -563,7 +565,7 @@ class AgentBackendService:
         if value is not None:
             try:
                 value = AgentFleetGrant.model_validate_json(value.model_dump_json())
-                if value.expires_at <= now:
+                if now.utcoffset() is None or value.expires_at <= now:
                     raise ValueError("expired grant")
                 for choice in value.backends:
                     check_backend(

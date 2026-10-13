@@ -990,11 +990,7 @@ async def run_prepared_turn_impl(
         with persistence.activate():
             yield
 
-    root_intent = (
-        turn_card_intent_id
-        if deps.fleet_enabled and deps.fleet_root_grants is not None and origin != "worker"
-        else None
-    )
+    root_intent = turn_card_intent_id if deps.fleet_enabled and origin != "worker" else None
 
     async def checked_send() -> None:
         await decide_before_send(deps, prepared.admission)()
