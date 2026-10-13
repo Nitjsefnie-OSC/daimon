@@ -142,7 +142,9 @@ stay that channel's own agent with what it read across the Space in its
 memory, so `remove` and `delete` refuse unless `--keep-agents` is given.
 Daimon does not archive that memory. The rule is also stored
 on each member, so a process on a build without Spaces keeps every member
-contained. Channel admins administer channels, not Spaces: an agent whose
+contained, and `daimon tenants access-policy set --clear` is refused while a
+workspace has Spaces. Deploy every worker before creating the first Space:
+an older worker still lets a panel or chat change a member's rule. Channel admins administer channels, not Spaces: an agent whose
 home is a Space needs a server or workspace admin to change its setup.
 
 ## Changing agent setup

@@ -35,6 +35,7 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.core.stores.domain import Platform
+from daimon.core.stores.spaces import list_spaces_for_tenant
 from daimon.core.stores.tenants import (
     delete_tenant,
     get_tenant,
@@ -669,6 +670,14 @@ async def tenants_access_policy_set(
         await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
         await lock_access_policy(session, tenant_id=tenant_id)
         if clear:
+            # Without the stored member rules, workers of an older build would
+            # leave every member of a Space open.
+            if spaces := await list_spaces_for_tenant(session, tenant_id=tenant_id):
+                raise typer.BadParameter(
+                    f"--clear would drop the rules of the members of Space "
+                    f"{', '.join(s.name for s in spaces)}; delete the Spaces first "
+                    "(`daimon spaces delete`). Nothing was changed."
+                )
             try:
                 dropped = sorted(
                     (await load_access_policy(session, tenant_id=tenant_id)).agent_rules

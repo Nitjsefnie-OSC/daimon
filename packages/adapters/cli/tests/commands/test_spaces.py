@@ -14,6 +14,7 @@ from daimon.adapters.cli.commands.spaces import (
     spaces_list,
     spaces_remove,
 )
+from daimon.adapters.cli.commands.tenants import tenants_access_policy_set
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.permissions import channel_rule
@@ -66,6 +67,10 @@ async def test_spaces_need_confirming_then_create_add_list_remove_delete(
     assert space.channel_ids == {"C1", "C2"}, "C3 left"
     assert channel_rule(policy, "C3") == ChannelRule(readers="own", writers="own"), "contained"
 
+    with pytest.raises(typer.BadParameter, match="delete the Spaces first"):
+        await tenants_access_policy_set(
+            rt=rt, console=console, platform="slack", external_id="T1", clear=True
+        )
     await spaces_delete(**args, name="client")
     assert "Space client deleted; C1, C2 keep its rule." in _out(console), "deleted"
 
