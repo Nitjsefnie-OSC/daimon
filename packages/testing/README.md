@@ -1,3 +1,59 @@
+## Offline fleet outcome scoring
+
+The existing `outcome_oracle.evaluate` accepts a `fleet_outcome` assertion and
+optional `RunEvidence.fleet`. Ordinary recordings omit that field. This is the
+behavioral I7 scorer; it supplies no live authority, financial certification,
+source-drift decision or cleanup proof.
+
+Bind the assertion to the signed `attempt_id`, `run_id`, original
+`root_session_id`, `root_binding_id` and actual `root_card_id`. Populate
+`FleetEvidence` from the real `FleetRun` and `FleetWorker` rows, provider bindings,
+acknowledged native inputs, authoritative native terminals and full journal
+`Event` objects. Each `FleetWorkerCapture`, `FleetWakeCapture` and
+`FleetCollectCapture` carries the same attempt/run/root scope. Wakes retain the
+owner's `FrozenWorkerBatch`; collect retains the actual public response. All
+observation times share the runner's monotonic clock. Set capture-complete flags
+only when the corresponding owner confirms complete coverage. Root turns and
+Discord post history use the existing `TurnEvidence` and acknowledged delivery
+capture; no placeholder card or native outcome counts.
+
+```python
+report = evaluate(
+    captured_run,
+    [{"kind": "fleet_outcome", "attempt_id": signed_attempt,
+      "run_id": actual_run_id, "root_session_id": original_root_session,
+      "root_binding_id": original_root_binding, "root_card_id": actual_card_id}],
+    finding_judge=offline_judge,
+)
+```
+
+`finding_judge(role, full_text, expected_finding)` returns exactly `PASS`, `FAIL`
+or `PENDING`. Bind it explicitly to the runner's semantic judge. It receives each
+worker's full authoritative payload, never its truncated excerpt or the root's
+substitute answer. W1 must reject unknown usage being treated as zero and retain
+the bound; W2 must reject permission expansion; W3 must recommend retaining
+bounds, attenuating grants and joining genuine native/platform evidence. Root
+delivery must integrate these findings and the exact approved cross-review.
+Equivalent wording is allowed. No keyword matcher or default approval is
+installed; an absent or unavailable judge stays PENDING.
+
+The scorer reuses `core.fleet.check_result` to join native completion, durable
+success and the worker's own result pointer/session/binding. W4 must approve the
+exact W1 digest, with duplicate JSON keys and extra verdict fields refused.
+Its native start must follow the initial cohort's completion, first frozen wake
+and resumed original-root input. Queued dispatch may begin after that root turn
+finishes; missing timing remains PENDING, and a known early start fails.
+The text-contract slice also checks three overlapping native worker intervals,
+two correctly scoped frozen wakes, the original root's three inputs, exact
+collected results, finalized card identity and complete actual Discord delivery.
+Other result formats need their owner binding before use with this slice.
+
+`OutcomeReport.status` remains FAIL before PENDING before PASS: an established
+wrong finding, failed native/durable worker, refused review, foreign identity or
+failed delivery survives missing downstream evidence. Missing coverage or
+binding alone stays PENDING. The scorer cannot authenticate caller-authored
+captures; the executor must supply owner evidence, not fixture declarations.
+
 # Discord surface capture
 
 `daimon.testing.discord_surface.DiscordSurfaceHarness` captures offline Discord

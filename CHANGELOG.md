@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add read-only QA resource manifests and independent cleanup readback checks without performing cleanup mutations.
 
 - Preserve retrieved Anthropic builtin tool-config type fields in session overrides while retaining strict native configuration validation.
+- Score offline fleet outcomes from scoped native completion, durable worker success and authoritative journal results, retaining known failures when evidence is missing.
+- Score offline fleet outcomes from scoped native completion, durable worker success and authoritative journal results, retaining known failures when evidence is missing and fencing review dispatch behind the ready cohort and original-root resume.
+
 - Keep all adversarial redaction growth checks stable under load by measuring capturing-thread CPU time.
 - Reserve opt-in fleet root origins and tenant-wide intent ownership before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.
 - Reserve opt-in fleet root origins before run creation across pending and unknown outcomes; keep ordinary turns with an installed root loader on their normal input path.
