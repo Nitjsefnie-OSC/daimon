@@ -1049,3 +1049,13 @@ billing markup, hosted runtime, external tools and cache storage. The worst-case
 per-turn cost remains explicitly unknown: token limits on one request do not
 bound a turn's request count or other charges. A preview neither reserves spend
 nor establishes a financial cap.
+
+
+Host-worker accounting reads use `usage_delegation.read_delegated_usage` with
+host-authorized worker bindings and resolved tariffs. The read preserves each
+worker's native session, model, observation, revision and ledger identity. It
+returns disjoint token floors at provider list price without markup, existing
+signed customer ledger debits including markup, and pending revisions. The
+floor and debit amounts overlap and must not be added. The orchestrator rollup
+creates no second debit. Token floors omit unknown infrastructure and rates. A zero floor or settled latest observation
+is not proof of complete final usage and never releases an admitted bound.

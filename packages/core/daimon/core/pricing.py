@@ -361,6 +361,82 @@ def provider_cost_of(
         ) + infrastructure_usd
 
 
+def minimum_cost_of(
+    usage: UsageObservation,
+    rates: ModelRates | ProviderPrice | None,
+) -> Decimal | None:
+    """Price a reported token floor, never an exact bill or a spend ceiling.
+
+    The caller supplies the resolved tariff. Inclusive input with an unknown
+    cache split is priced at the cheapest applicable input stage. Known cache
+    stages are retained even when another category is unknown. Reasoning is
+    included in output, so those counts are never summed. Unknown runtime is
+    outside this token floor; it still prevents complete settlement.
+    """
+    if rates is None:
+        return None
+    if isinstance(rates, ProviderPrice):
+        if usage.model is None or (
+            usage.session.provider,
+            usage.model.provider,
+            usage.model.id,
+        ) != (rates.provider, rates.provider, rates.model):
+            raise ValueError("usage and dated provider pricing identity differ")
+        if not rates.verified or rates.checked_on > usage.observed_at.date():
+            return None
+        variants = (rates,)
+    elif rates.long_context is None:
+        variants = (rates,)
+    elif usage.input_tokens is None or usage.grain != "model_request":
+        # A turn/session total can contain many short prompts. Its total
+        # tokens cannot establish a request's long-context pricing tier.
+        variants = (rates, rates.long_context)
+    else:
+        variants = (
+            rates.long_context if usage.input_tokens > LONG_CONTEXT_PROMPT_TOKENS else rates,
+        )
+
+    cached = usage.input_cached_tokens or 0
+    written = usage.input_cache_write_tokens or 0
+    incoming = usage.input_tokens
+    if incoming is not None and incoming < cached + written:
+        raise ValueError("cached input exceeds inclusive input tokens")
+    # The inclusive total owns output when present. A contradictory reasoning
+    # subset cannot inflate its valid floor; an absent total can still retain
+    # the independently reported reasoning floor.
+    output = (
+        usage.output_tokens
+        if usage.output_tokens is not None
+        else usage.output_reasoning_tokens or 0
+    )
+    floors: list[Decimal] = []
+    with localcontext() as context:
+        context.prec = 80
+        for variant in variants:
+            prices = [
+                Decimal(str(variant.input)),
+                Decimal(str(variant.cache_read)),
+                Decimal(str(variant.output)),
+            ]
+            write_rate = None if variant.cache_write is None else Decimal(str(variant.cache_write))
+            if any(not value.is_finite() or value < 0 for value in prices) or (
+                write_rate is not None and (not write_rate.is_finite() or write_rate < 0)
+            ):
+                raise ValueError("token floors require finite nonnegative rates")
+            if written and write_rate is None:
+                raise ValueError("provider reported an inapplicable cache-write stage")
+            token_cost = Decimal(cached) * prices[1] + Decimal(written) * (write_rate or Decimal(0))
+            if incoming is not None:
+                unknown_stage_rates = [prices[0]]
+                if usage.input_cached_tokens is None:
+                    unknown_stage_rates.append(prices[1])
+                if usage.input_cache_write_tokens is None and write_rate is not None:
+                    unknown_stage_rates.append(write_rate)
+                token_cost += Decimal(incoming - cached - written) * min(unknown_stage_rates)
+            floors.append((token_cost + Decimal(output) * prices[2]) / Decimal(1_000_000))
+        return min(floors)
+
+
 def list_price_preview(model: str, rates: ModelRates | ProviderPrice | None) -> str:
     """Describe supplied list rates without promising an invoice ceiling.
 
