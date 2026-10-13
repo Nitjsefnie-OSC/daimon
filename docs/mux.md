@@ -2662,3 +2662,11 @@ warm memory resource; readonly narrowing is retained. Cold memory and
 unrepresented credential, file, repository or application resources refuse.
 Ordinary turns and deployments without explicit backend selection retain their
 existing path.
+Frozen fleet root permissions are built from trusted finite host grants, the
+original admission and the scoped source/resource capture. The existing worker
+resolver checks policy, profiles, limits and source obligations; the root keeps
+its complete admitted place, subject and exact source revision pins. Missing,
+foreign, stale or unsupported facts refuse. The caller must first verify the
+exact active origin, native binding and card intent association. This projection
+does not derive authority from balance, pricing, mutable agent names or tool
+requests, and does not reserve funds or activate a run.
