@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from daimon.core.access_policy import TenantAccessPolicy
@@ -24,6 +25,9 @@ from pydantic import JsonValue
 if TYPE_CHECKING:
     from daimon.core.fleet import FleetRun, FleetWorker
     from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerLimits, WorkerPermissions
+    from daimon.core.pricing import ModelRates, ProviderPrice
+    from daimon.core.stores.domain import BackendAgent
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 type Control = Literal["kill", "resume"]
@@ -51,6 +55,15 @@ def _review_required(contract: Mapping[str, JsonValue] | None) -> bool:
     if type(required) is not bool:
         raise FleetRefused("review_policy_invalid")
     return required
+
+
+def _result_format(contract: Mapping[str, JsonValue] | None) -> Literal["text", "json"]:
+    contract = contract or {}
+    format_ = contract.get("format", "text")
+    if set(contract) - {"format", "review_required"} or format_ not in ("text", "json"):
+        raise FleetRefused("result_contract_unsupported")
+    _review_required(contract)
+    return "json" if format_ == "json" else "text"
 
 
 class FleetPorts(Protocol):
@@ -141,6 +154,63 @@ class FleetPorts(Protocol):
         ...
 
 
+def _authorize(parent: WorkerPermissions, policy: TenantAccessPolicy) -> None:
+    from daimon.core.authz import Action, Surface, authorize
+
+    facts = parent.fleet
+    decision = authorize(
+        policy,
+        subject=parent.subject,
+        action=Action.SPAWN_WORKER,
+        surface=Surface.FLEET,
+        agent=parent.agent,
+        place=facts.place,
+        fleet=facts,
+    )
+    if not decision:
+        raise FleetRefused(decision.reason or "permission_refused")
+    if parent.agent_id is None:
+        raise FleetRefused("root_identity_unbound")
+
+
+def _scope(parent: WorkerPermissions, run: FleetRun) -> None:
+    facts = parent.fleet
+    if (
+        run.id != facts.run_id
+        or str(run.tenant_id) != facts.scope.tenant_id
+        or run.orchestrator_account_id != facts.account_id
+        or run.platform != facts.root.channel.platform
+        or run.channel_id != facts.root.channel.channel_id
+        or run.thread_id != facts.root.thread_id
+    ):
+        raise FleetRefused("foreign_run")
+
+
+def _session_authorize(
+    parent: WorkerPermissions, policy: TenantAccessPolicy, *, continuing: bool = False
+) -> None:
+    from daimon.core.authz import Action, SessionFacts, Surface, authorize
+
+    root = parent.fleet.root
+    decision = authorize(
+        policy,
+        subject=parent.subject,
+        action=Action.CONTINUE_SESSION if continuing else Action.READ_SESSION,
+        surface=Surface.FLEET,
+        agent=parent.agent,
+        origin=parent.fleet.place,
+        origin_channel_ids=frozenset({root.channel.channel_id, root.thread_id}),
+        session=SessionFacts(
+            channel=root.channel.channel_id,
+            thread=root.thread_id,
+            seal_ids=parent.seal_ids,
+            owned=parent.fleet.scope.account_id == str(parent.fleet.account_id),
+        ),
+    )
+    if not decision:
+        raise FleetRefused(decision.reason or "permission_refused")
+
+
 class FleetOrchestrator:
     """Shared operations for authenticated MCP and platform control adapters."""
 
@@ -151,63 +221,6 @@ class FleetOrchestrator:
         if self._ports is None:
             raise FleetRefused("prerequisites_unavailable")
         return self._ports
-
-    @staticmethod
-    def _authorize(parent: WorkerPermissions, policy: TenantAccessPolicy) -> None:
-        from daimon.core.authz import Action, Surface, authorize
-
-        facts = parent.fleet
-        decision = authorize(
-            policy,
-            subject=parent.subject,
-            action=Action.SPAWN_WORKER,
-            surface=Surface.FLEET,
-            agent=parent.agent,
-            place=facts.place,
-            fleet=facts,
-        )
-        if not decision:
-            raise FleetRefused(decision.reason or "permission_refused")
-        if parent.agent_id is None:
-            raise FleetRefused("root_identity_unbound")
-
-    @staticmethod
-    def _scope(parent: WorkerPermissions, run: FleetRun) -> None:
-        facts = parent.fleet
-        if (
-            run.id != facts.run_id
-            or str(run.tenant_id) != facts.scope.tenant_id
-            or run.orchestrator_account_id != facts.account_id
-            or run.platform != facts.root.channel.platform
-            or run.channel_id != facts.root.channel.channel_id
-            or run.thread_id != facts.root.thread_id
-        ):
-            raise FleetRefused("foreign_run")
-
-    @staticmethod
-    def _session_authorize(
-        parent: WorkerPermissions, policy: TenantAccessPolicy, *, continuing: bool = False
-    ) -> None:
-        from daimon.core.authz import Action, SessionFacts, Surface, authorize
-
-        root = parent.fleet.root
-        decision = authorize(
-            policy,
-            subject=parent.subject,
-            action=Action.CONTINUE_SESSION if continuing else Action.READ_SESSION,
-            surface=Surface.FLEET,
-            agent=parent.agent,
-            origin=parent.fleet.place,
-            origin_channel_ids=frozenset({root.channel.channel_id, root.thread_id}),
-            session=SessionFacts(
-                channel=root.channel.channel_id,
-                thread=root.thread_id,
-                seal_ids=parent.seal_ids,
-                owned=parent.fleet.scope.account_id == str(parent.fleet.account_id),
-            ),
-        )
-        if not decision:
-            raise FleetRefused(decision.reason or "permission_refused")
 
     @staticmethod
     def _controller_authorize(parent: WorkerPermissions) -> None:
@@ -221,12 +234,12 @@ class FleetOrchestrator:
         self, parent: WorkerPermissions, policy: TenantAccessPolicy, run_id: uuid.UUID
     ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:
         """Read canonical rows through the shared current-authority/membership fence."""
-        self._authorize(parent, policy)
-        self._session_authorize(parent, policy)
+        _authorize(parent, policy)
+        _session_authorize(parent, policy)
         if run_id != parent.fleet.run_id:
             raise FleetRefused("foreign_run")
         run, workers = await self._owner().read_run(parent.fleet.scope, run_id)
-        self._scope(parent, run)
+        _scope(parent, run)
         if any(worker.run_id != run.id or worker.tenant_id != run.tenant_id for worker in workers):
             raise FleetRefused("foreign_worker")
         if len({worker.id for worker in workers}) != len(workers):
@@ -251,13 +264,14 @@ class FleetOrchestrator:
         session: SessionSpec | None = None,
         result_contract: Mapping[str, JsonValue] | None = None,
         reviewer_of: uuid.UUID | None = None,
+        captured_source: BackendAgent | None = None,
     ) -> Mapping[str, JsonValue]:
         """Resolve once, then hand admission to the atomic owner operation.
 
         Cross-review follows exactly this path with the target's durable result
         attached as input by the host. The model cannot supply review evidence.
         """
-        self._authorize(parent, policy)
+        _authorize(parent, policy)
         owner = self._owner()
         from daimon.core.neutral_resources import resolve_worker_spec
 
@@ -275,7 +289,7 @@ class FleetOrchestrator:
             # resolved grant; arbitrary native refs are never request authority.
             raise FleetRefused("session_resources_unavailable")
         if reviewer_of is None:
-            _review_required(result_contract)
+            _result_format(result_contract)
         source: AgentSpec | Agent
         if clone is not None:
             if clone.kind != "agent" or clone_revision is None:
@@ -299,6 +313,7 @@ class FleetOrchestrator:
             backend=backend,
             overrides=overrides,
             limits=limits,
+            captured_source=captured_source,
         )
         reviewed: Event | None = None
         if reviewer_of is not None:
@@ -322,7 +337,7 @@ class FleetOrchestrator:
             reviewer_of=reviewer_of,
             reviewed_result=reviewed,
         )
-        self._scope(parent, run)
+        _scope(parent, run)
         if worker.run_id != run.id or worker.tenant_id != run.tenant_id:
             raise FleetRefused("foreign_worker")
         if (
@@ -386,7 +401,7 @@ class FleetOrchestrator:
         if now.utcoffset() is None:
             raise FleetRefused("deadline_timezone_required")
         run, workers = await self.read_snapshot(parent, policy, run_id)
-        self._session_authorize(parent, policy, continuing=True)
+        _session_authorize(parent, policy, continuing=True)
         self._controller_authorize(parent)
         worker = next((row for row in workers if row.id == worker_id), None)
         if worker_id is not None and worker is None:
@@ -595,3 +610,251 @@ class FleetOrchestrator:
             if worker.reviewer_of is None
         ]
         return {"run_id": str(run.id), "status": "ready", "results": outputs}
+
+
+class HostFleetPorts:
+    """Compose durable fleet, admission and full-result owners for the host.
+
+    Native dispatch and completion/control hooks are installed by their existing
+    host owners. An absent hook refuses before funding or native effects.
+    """
+
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
+        markup: Decimal,
+        dispatch: Callable[
+            [WorkerPermissions, FleetWorker, ResolvedWorkerSpec, Event | None], Awaitable[None]
+        ]
+        | None = None,
+        clone_reader: Callable[[WorkerPermissions, ResourceRef, Revision], Awaitable[Agent]]
+        | None = None,
+        wait: Callable[[WorkerPermissions, FleetRun, tuple[FleetWorker, ...]], Awaitable[None]]
+        | None = None,
+    ) -> None:
+        self.sessions, self.prices, self.markup = sessions, prices, markup
+        self._dispatch, self._clone_reader, self._wait = dispatch, clone_reader, wait
+
+    async def read_run(
+        self, scope: Scope, run_id: uuid.UUID
+    ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:
+        from daimon.core.stores import fleet
+
+        if scope.is_platform or scope.is_legacy_host_authorized:
+            raise FleetRefused("root_scope_required")
+        run, workers = await fleet.run_status(
+            self.sessions, tenant_id=uuid.UUID(scope.tenant_id), run_id=run_id
+        )
+        if str(run.orchestrator_account_id) != scope.account_id:
+            raise FleetRefused("foreign_run")
+        return run, workers
+
+    async def read_clone(
+        self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision
+    ) -> Agent:
+        if self._clone_reader is None:
+            raise FleetRefused("prerequisites_unavailable")
+        return await self._clone_reader(parent, ref, revision)
+
+    async def admit(
+        self,
+        parent: WorkerPermissions,
+        resolved: ResolvedWorkerSpec,
+        *,
+        run_id: uuid.UUID,
+        operation_key: str,
+        role: str,
+        session: SessionSpec | None,
+        result_contract: Mapping[str, JsonValue] | None,
+        reviewer_of: uuid.UUID | None,
+        reviewed_result: Event | None,
+    ) -> tuple[FleetRun, FleetWorker]:
+        from daimon.core.channel_budget import admit_fleet_worker
+        from daimon.core.fleet import FleetConflict
+        from daimon.core.stores import access_policy, fleet, mux_state
+        from mux.errors import OperationConflict
+        from mux.state.operations import request_digest
+
+        if self._dispatch is None or session is not None or run_id != parent.fleet.run_id:
+            raise FleetRefused("prerequisites_unavailable")
+        if (reviewer_of is None) != (reviewed_result is None):
+            raise FleetRefused("review_evidence_invalid")
+        scope = parent.fleet.scope
+        tenant_id = uuid.UUID(scope.tenant_id)
+        key = f"fleet:{run_id}:admit:{operation_key}"
+        digest = request_digest(
+            {
+                "resolved": resolved.digest,
+                "role": role,
+                "result_contract": dict(result_contract) if result_contract is not None else None,
+                "reviewer_of": str(reviewer_of) if reviewer_of is not None else None,
+                "reviewed_result": reviewed_result.model_dump(mode="json")
+                if reviewed_result is not None
+                else None,
+            }
+        )
+        try:
+            async with self.sessions.begin() as db:
+                policy = await access_policy.load_access_policy(db, tenant_id=tenant_id)
+                _authorize(parent, policy)
+                # Lock before the ordinal read; admission reuses this same transaction lock.
+                await fleet.lock_budget(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_id=parent.fleet.account_id,
+                    run_id=run_id,
+                )
+                run, workers = await fleet.run_status(db, tenant_id=tenant_id, run_id=run_id)
+                _scope(parent, run)
+                begun = await mux_state.begin_operation(
+                    db,
+                    scope,
+                    key=key,
+                    request_digest=digest,
+                    operation_id=key,
+                    now=await mux_state.database_clock(db),
+                )
+                if not begun.fresh:
+                    worker = next(
+                        (
+                            row
+                            for row in workers
+                            if str(row.id) == begun.record.result.get("worker_id")
+                        ),
+                        None,
+                    )
+                    if begun.record.operation.status != "processed" or worker is None:
+                        raise FleetRefused("admission_evidence_unavailable")
+                else:
+                    usage = await admit_fleet_worker(
+                        db,
+                        parent=parent,
+                        policy=policy,
+                        resolved=resolved,
+                        ordinal=len(workers),
+                        role=role,
+                        prices=self.prices,
+                        markup=self.markup,
+                        reviewer_of=reviewer_of,
+                        result_contract=result_contract,
+                    )
+                    await mux_state.claim_send(
+                        db,
+                        scope,
+                        key,
+                        now=await mux_state.database_clock(db),
+                        clock=mux_state.database_clock,
+                        fence=None,
+                    )
+                    await mux_state.advance_operation(
+                        db,
+                        scope,
+                        key,
+                        "processed",
+                        now=await mux_state.database_clock(db),
+                        clock=mux_state.database_clock,
+                        fence=None,
+                        result={"worker_id": str(usage.worker.id)},
+                    )
+                    run, worker = usage.run, usage.worker
+            if worker.status == "cancelled" and worker.error_code is not None:
+                raise FleetRefused("financial_admission_refused")
+            if worker.status == "pending":
+                await self._dispatch(parent, worker, resolved, reviewed_result)
+            return run, worker
+        except OperationConflict:
+            raise FleetRefused("operation_conflict") from None
+        except FleetConflict:
+            raise FleetRefused("admission_evidence_invalid") from None
+
+    async def read_result(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        run: FleetRun,
+        worker: FleetWorker,
+    ) -> Event:
+        from daimon.core.fleet import FleetConflict, check_result, worker_slot
+        from daimon.core.stores import access_policy, fleet, mux_state
+
+        _scope(parent, run)
+        async with self.sessions.begin() as db:
+            fresh = await access_policy.load_access_policy(db, tenant_id=run.tenant_id)
+            _authorize(parent, fresh)
+            _session_authorize(parent, fresh)
+            actual_run, workers = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+            _scope(parent, actual_run)
+            actual = next((row for row in workers if row.id == worker.id), None)
+            if (
+                actual is None
+                or actual != worker
+                or actual.result is None
+                or actual.status != "succeeded"
+            ):
+                raise FleetRefused("result_unavailable")
+            binding = await mux_state.get_binding(db, worker_slot(actual_run, actual))
+            records = await mux_state.read_events(
+                db, actual.result.session_id, after=actual.result.sequence - 1, limit=1
+            )
+            result = records[0] if records else None
+            try:
+                check_result(actual_run, actual, binding, result, actual.result)
+            except FleetConflict:
+                raise FleetRefused("result_evidence_invalid") from None
+            assert result is not None
+            return result
+
+    def validate_contract(
+        self, contract: Mapping[str, JsonValue] | None, result: Event
+    ) -> JsonValue:
+        format_ = _result_format(contract)
+        message = AgentMessagePayload.model_validate(result.payload)
+        if (
+            not message.complete
+            or not message.content
+            or any(not isinstance(part, TextPart) for part in message.content)
+        ):
+            raise FleetRefused("result_contract_invalid")
+        text = "".join(part.text for part in message.content if isinstance(part, TextPart))
+        if format_ == "text":
+            return text
+        try:
+            value = json.loads(text, object_pairs_hook=_unique_object)
+            json.dumps(value, allow_nan=False)
+            return value
+        except ValueError:
+            raise FleetRefused("result_contract_invalid") from None
+
+    async def wait(
+        self, parent: WorkerPermissions, run: FleetRun, workers: tuple[FleetWorker, ...]
+    ) -> None:
+        if self._wait is None:
+            raise FleetRefused("prerequisites_unavailable")
+        await self._wait(parent, run, workers)
+
+    async def retained_control(
+        self,
+        parent: WorkerPermissions,
+        run: FleetRun,
+        worker: FleetWorker | None,
+        *,
+        action: Control,
+        operation_key: str,
+        expected_version: int,
+    ) -> Mapping[str, JsonValue] | None:
+        raise FleetRefused("prerequisites_unavailable")
+
+    async def control(
+        self,
+        parent: WorkerPermissions,
+        run: FleetRun,
+        worker: FleetWorker | None,
+        *,
+        action: Control,
+        operation_key: str,
+        expected_version: int,
+        resolved: tuple[ResolvedWorkerSpec, ...],
+    ) -> Mapping[str, JsonValue]:
+        raise FleetRefused("prerequisites_unavailable")

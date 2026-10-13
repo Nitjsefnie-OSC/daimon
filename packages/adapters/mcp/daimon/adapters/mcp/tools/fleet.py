@@ -61,10 +61,15 @@ class FleetToolService(Protocol):
         max_turns: int,
         result_contract: Mapping[str, JsonValue] | None,
         reviewer_of: uuid.UUID | None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
     async def status(
-        self, caller: AuthIdentity, *, run_id: uuid.UUID
+        self,
+        caller: AuthIdentity,
+        *,
+        run_id: uuid.UUID,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
     async def kill(
@@ -75,6 +80,7 @@ class FleetToolService(Protocol):
         worker_id: uuid.UUID | None,
         expected_version: int,
         operation_key: str,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
     async def resume(
@@ -85,10 +91,15 @@ class FleetToolService(Protocol):
         worker_id: uuid.UUID | None,
         expected_version: int,
         operation_key: str,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
     async def collect(
-        self, caller: AuthIdentity, *, run_id: uuid.UUID
+        self,
+        caller: AuthIdentity,
+        *,
+        run_id: uuid.UUID,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
 
@@ -104,7 +115,11 @@ class FleetParentLoader(Protocol):
     """
 
     async def __call__(
-        self, caller: AuthIdentity
+        self,
+        caller: AuthIdentity,
+        *,
+        origin_context_id: uuid.UUID | None = None,
+        run_id: uuid.UUID | None = None,
     ) -> tuple[WorkerPermissions, TenantAccessPolicy]: ...
 
 
@@ -115,15 +130,45 @@ class HostFleetToolService:
         self,
         orchestrator: FleetOrchestrator,
         parent_loader: FleetParentLoader | None = None,
+        *,
+        runtime: McpRuntime | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._parent_loader = parent_loader
+        self._runtime = runtime
 
-    async def _parent(self, caller: AuthIdentity) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+    async def _parent(
+        self,
+        caller: AuthIdentity,
+        *,
+        origin_context_id: uuid.UUID | None = None,
+        run_id: uuid.UUID | None = None,
+    ) -> tuple[WorkerPermissions, TenantAccessPolicy]:
         if self._parent_loader is None:
             raise ToolError("Fleet orchestration is unavailable: current root is not bound.")
-        parent, policy = await self._parent_loader(caller)
+        origin = None
+        if self._runtime is not None:
+            from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
+
+            origin = await get_verified_origin(
+                self._runtime, caller, str(origin_context_id) if origin_context_id else None
+            )
+            if origin is None or origin.is_external or origin.is_setup:
+                raise ToolError("Fleet orchestration refused: active_origin_required.")
+        parent, policy = (
+            await self._parent_loader(caller)
+            if origin_context_id is None
+            else await self._parent_loader(
+                caller, origin_context_id=origin_context_id, run_id=run_id
+            )
+        )
         facts = parent.fleet
+        if origin is not None and (
+            facts.origin_id != origin.id
+            or facts.root.channel.channel_id != origin.parent_channel_id
+            or facts.root.thread_id != origin.thread_id
+        ):
+            raise ToolError("Fleet orchestration refused: caller_root_mismatch.")
         if (
             facts.scope.tenant_id != str(caller.tenant_id)
             or facts.scope.account_id != str(caller.account_id)
@@ -159,8 +204,11 @@ class HostFleetToolService:
         max_turns: int,
         result_contract: Mapping[str, JsonValue] | None,
         reviewer_of: uuid.UUID | None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]:
-        parent, policy = await self._parent(caller)
+        parent, policy = await self._parent(
+            caller, origin_context_id=origin_context_id, run_id=run_id
+        )
         from daimon.core.neutral_resources import WorkerLimits
 
         return await self._orchestrator.spawn(
@@ -181,8 +229,12 @@ class HostFleetToolService:
             reviewer_of=reviewer_of,
         )
 
-    async def status(self, caller: AuthIdentity, *, run_id: uuid.UUID) -> Mapping[str, JsonValue]:
-        parent, policy = await self._parent(caller)
+    async def status(
+        self, caller: AuthIdentity, *, run_id: uuid.UUID, origin_context_id: uuid.UUID | None = None
+    ) -> Mapping[str, JsonValue]:
+        parent, policy = await self._parent(
+            caller, origin_context_id=origin_context_id, run_id=run_id
+        )
         return await self._orchestrator.status(parent, policy, run_id=run_id)
 
     async def kill(
@@ -193,8 +245,11 @@ class HostFleetToolService:
         worker_id: uuid.UUID | None,
         expected_version: int,
         operation_key: str,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]:
-        parent, policy = await self._parent(caller)
+        parent, policy = await self._parent(
+            caller, origin_context_id=origin_context_id, run_id=run_id
+        )
         return await self._orchestrator.control(
             parent,
             policy,
@@ -214,8 +269,11 @@ class HostFleetToolService:
         worker_id: uuid.UUID | None,
         expected_version: int,
         operation_key: str,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]:
-        parent, policy = await self._parent(caller)
+        parent, policy = await self._parent(
+            caller, origin_context_id=origin_context_id, run_id=run_id
+        )
         return await self._orchestrator.control(
             parent,
             policy,
@@ -227,8 +285,12 @@ class HostFleetToolService:
             now=datetime.now(UTC),
         )
 
-    async def collect(self, caller: AuthIdentity, *, run_id: uuid.UUID) -> Mapping[str, JsonValue]:
-        parent, policy = await self._parent(caller)
+    async def collect(
+        self, caller: AuthIdentity, *, run_id: uuid.UUID, origin_context_id: uuid.UUID | None = None
+    ) -> Mapping[str, JsonValue]:
+        parent, policy = await self._parent(
+            caller, origin_context_id=origin_context_id, run_id=run_id
+        )
         return await self._orchestrator.collect(parent, policy, run_id=run_id)
 
 
@@ -273,6 +335,7 @@ def register_fleet_tools(
         max_turns: int,
         result_contract: Mapping[str, JsonValue] | None,
         reviewer_of: uuid.UUID | None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         if (agent is None) == (clone is None):
             raise ToolError("Choose an agent spec or a pinned clone, exactly one.")
@@ -287,6 +350,7 @@ def register_fleet_tools(
             await owner().spawn(
                 caller,
                 run_id=run_id,
+                origin_context_id=origin_context_id,
                 operation_key=operation_key,
                 role=role,
                 backend=backend,
@@ -319,15 +383,18 @@ def register_fleet_tools(
         overrides: AgentPatch | None = None,
         session: SessionSpec | None = None,
         result_contract: dict[str, JsonValue] | None = None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         """Spawn a bounded worker through the root's current derived authority.
 
+        Name the live turn's origin_context_id from its turn controls.
         Supply a fresh agent spec or an authorized clone and sparse overrides.
         A handle or role never grants permission. Retries retain operation_key.
         """
         return await spawn(
             ctx,
             run_id=run_id,
+            origin_context_id=origin_context_id,
             operation_key=operation_key,
             role=role,
             backend=backend,
@@ -345,10 +412,16 @@ def register_fleet_tools(
 
     @mcp.tool(tags={"fleet"})
     async def fleet_status(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, run_id: uuid.UUID
+        ctx: Context,
+        run_id: uuid.UUID,
+        origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         """Read the authorized run's durable worker status; do not start work."""
-        return dict(await owner().status(await _auth(ctx), run_id=run_id))
+        return dict(
+            await owner().status(
+                await _auth(ctx), run_id=run_id, origin_context_id=origin_context_id
+            )
+        )
 
     @mcp.tool(tags={"fleet"})
     async def fleet_kill(  # pyright: ignore[reportUnusedFunction]
@@ -357,12 +430,14 @@ def register_fleet_tools(
         operation_key: OperationKey,
         expected_version: PositiveCount,
         worker_id: uuid.UUID | None = None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         """Request a scoped stop; acknowledgement is not proof the worker stopped."""
         return dict(
             await owner().kill(
                 await _auth(ctx),
                 run_id=run_id,
+                origin_context_id=origin_context_id,
                 worker_id=worker_id,
                 operation_key=operation_key,
                 expected_version=expected_version,
@@ -376,12 +451,14 @@ def register_fleet_tools(
         operation_key: OperationKey,
         expected_version: PositiveCount,
         worker_id: uuid.UUID | None = None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         """Reconcile and explicitly resume under original ceilings and current authority."""
         return dict(
             await owner().resume(
                 await _auth(ctx),
                 run_id=run_id,
+                origin_context_id=origin_context_id,
                 worker_id=worker_id,
                 operation_key=operation_key,
                 expected_version=expected_version,
@@ -405,6 +482,7 @@ def register_fleet_tools(
         overrides: AgentPatch | None = None,
         session: SessionSpec | None = None,
         result_contract: dict[str, JsonValue] | None = None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         """Spawn a reviewer of verified journal evidence through the same worker path.
 
@@ -414,6 +492,7 @@ def register_fleet_tools(
         return await spawn(
             ctx,
             run_id=run_id,
+            origin_context_id=origin_context_id,
             operation_key=operation_key,
             role=role,
             backend=backend,
@@ -431,11 +510,17 @@ def register_fleet_tools(
 
     @mcp.tool(tags={"fleet"})
     async def fleet_collect(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, run_id: uuid.UUID
+        ctx: Context,
+        run_id: uuid.UUID,
+        origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         """Collect verified outputs only after contracts and required reviews pass.
 
         The host returns waiting or blocked when evidence is incomplete. Status
         excerpts, a reached quorum, or a wake are not result certificates.
         """
-        return dict(await owner().collect(await _auth(ctx), run_id=run_id))
+        return dict(
+            await owner().collect(
+                await _auth(ctx), run_id=run_id, origin_context_id=origin_context_id
+            )
+        )

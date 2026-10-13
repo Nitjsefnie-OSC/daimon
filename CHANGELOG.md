@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reuse verified Gemini worker readback and share native worker publication authority checks.
 - Keep continuation timers and known work readable during queue upgrades by filtering unsupported reasons before batching, validation and lease mutations. Worker-completion publication remains closed.
+- Compose scoped fleet journal reads and financially locked admission through the existing owners; validate result contracts before funding, recover pending dispatch, and validate exact live origins for explicitly installed MCP bridges.
 
 - Preserve a tenant-wide clone source identity only under its exact root source/revision grant and authorized account capture.
 - Refuse worker resource preparation if the captured source environment is missing or differs from the requested native environment.
