@@ -2433,7 +2433,7 @@ inside chat turns.
 
 Backend selection retains the authorized source definition and concrete revision, including instructions, tools, skills and native constraints. The existing session owner can project caller-specific tool policy and resource intent using metadata-only store reads. Projection never decrypts credentials, uploads files, mints tokens or provisions native resources. It retains the actual admission scope; an unknown native workspace is unbound rather than assigned an invented routing identity.
 
-Persistent memory is required even when no binding exists: the ordinary session composer lazily provisions it. The projection records required provisioning, access and guidance without creating a store. Source environment defaults, repository access, credentials and inherited restrictions also remain obligations. The projection carries captured facts; the preparation boundary alone derives the outstanding preservation obligations. Source capture and counterpart identity readback do not establish preservation. All unproved target mappings remain typed refusals at the existing preparation boundary; default and channel-origin turn dispatch remain unchanged.
+Persistent memory is required even when no binding exists: the ordinary session composer lazily provisions it. The projection records required provisioning, access and guidance without creating a store. Source environment defaults, repository access, credentials and inherited restrictions also remain obligations. The projection carries captured facts; the preparation boundary alone derives the outstanding preservation obligations. Projection and materialization share the same repository, PAT, caller-vault and Copilot selectors, including the app-mode Copilot exclusion. The projection receives the actual credential-key availability without decrypting anything; metadata reads share the PAT resolver’s overlay-only selector. Caller JWT vault capability and fresh app-vault intent are explicit owned references. A fresh app vault remains opaque until the existing authorization/materializer proves its remote access; a memory or sandbox drop does not remove that obligation. Source capture and counterpart identity readback do not establish preservation. All unproved target mappings remain typed refusals at the existing preparation boundary; default and channel-origin turn dispatch remain unchanged.
 
 The shared preparation seam reports closed obligation labels for instructions,
 tools and approval, skills, MCP, credentials, files, repository, memory and
@@ -2445,9 +2445,47 @@ No installed source-preservation positive is claimed by this capture path.
 
 Obligation labels are derived only at the shared preparation boundary from the actual captured definition and resource intent. An empty source baseline still requires implicit memory and an unproved environment; unrelated instruction, tool, attachment and credential labels are not pre-filled. With agent backend capture enabled, existing balance, cap and channel-budget refusals win before source projection and publish no backend revision.
 
-
 ### Declared worker restrictions
 
 Worker specs accept one default-empty `declared_drops` tuple: `memory`, `sandbox`, `skills`, `mcp`, `tools`, `files`, or `repository`. These declarations apply only to authorized fleet derivation; ordinary agent backend changes retain their source-preservation refusals. Unknown/duplicate declarations refuse. Scope, source revision, current policy, budget, protected guidance, seals and readonly ceilings still apply. Inherited declarations cannot be cleared.
 
 A sandbox declaration removes its environment and execution builtins and prevents implicit execution injection. Tools declarations remove tools and remote MCP connections; MCP declarations also remove their toolsets. Other declarations remove the corresponding owned mounts or attachments. The validated spec, digest and derived permissions retain the declarations; worker guidance describes relevant restrictions. Call the existing audit helper with `worker=resolved_spec` to record the closed labels in its existing reason field and verify root provenance. Pure attenuation is not native execution authority: the registered preparer must consume the exact restricted plan and independently refuse any implicit tool/resource it cannot remove.
+
+The existing provider preparation request can carry the canonical resolved worker beside its actual source and scoped counterpart. The worker is hidden from representation and absent by default. Carrying a resolved spec alone is not an execution grant: the shared source proof and registered native plan must independently verify and consume the same restrictions before a worker can run.
+
+OpenAI hosted worker plans require an explicit persistent-memory drop, an authorized Bash grant, known hosted network/package policy, explicit empty template inputs and no inherited resource mounts. Readback compares the exact resolved agent and environment, including protected instructions, attachments and metadata stamps. Residual template files, opaque environment configuration and unbound MCP credentials refuse. A no-tools or no-sandbox declaration cannot silently retain hosted Bash. Conversation-only worker execution remains refused until session creation can consume the real first input with a durable acknowledgment that prevents a second send. Ordinary channel plans and unsupported seal, read-only and publishing restrictions retain their behavior.
+
+Gemini's deployment owner checks the exact resolved worker instructions, tools,
+skill pins and native catalog readback before its preparer consumes the checked
+native identity. A Gemini worker must declare persistent memory dropped. A
+sandbox drop uses an explicitly authored remote environment without sources
+and removes execution tools; it does not remove the provider-hosted runtime.
+Retained session resources, unsupported environment policies and custom host
+functions refuse. Seals, shared ownership, publishing restrictions and transfer
+remain admission constraints; dropping memory leaves the admission's readonly
+ceiling intact. Ordinary agent switches without a resolved worker remain
+refused.
+
+The shared worker preparation proof captures the authorized source through the
+existing session resource composer. A canonical resolved worker can discharge
+only its explicitly declared attachment, memory and sandbox losses; protected
+instructions, publication policy, credentials and opaque private resources are
+still obligations. The proof checks root scope, source identity/version, derived
+permissions and deadline, reads the complete native counterpart, then re-reads
+resource intent to reject drift before handing that exact plan to preparation.
+Existing agent switches without a resolved worker remain refused. Configured
+caller MCP credentials also remain obligations, so these workers refuse in a
+host configuration requiring them until a credential materializer exists.
+
+Native readback does not grant fleet execution authority: the headless caller
+must use the canonical resolver output and obtain fresh fleet/budget admission
+before native execution. Ordinary OpenAI legacy-source environment preservation
+remains refused. All switches remain default off; the legacy and channel paths
+keep their existing behavior.
+
+Restricted worker preparation uses the earlier of the caller's turn deadline and
+the canonical worker deadline. A shorter caller bound is valid. The same bound
+travels with the preparation request through source capture, counterpart readback,
+source recapture and native preparation. Expiry is checked before successful proof
+and prepared-turn handoffs; exhausted authority uses the existing ceiling refusal.
+The headless caller must pass that bound to the existing turn runner as well.

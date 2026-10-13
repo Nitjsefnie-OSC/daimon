@@ -96,6 +96,7 @@ from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
+    from daimon.core.neutral_resources import ResolvedWorkerSpec
     from daimon.core.session_preparation_stages import WorkspaceTransfer
     from daimon.core.stores.neutral_catalog import AgentRevision
 
@@ -199,6 +200,7 @@ class ProviderPreparationRequest:
     now: Callable[[], dt.datetime]
     counterpart: AgentRevision | None = field(default=None, kw_only=True)
     source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
+    worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
@@ -914,6 +916,7 @@ async def bind_session_impl(
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     _on_prepared: Callable[[PreparedTurn], Awaitable[None]] | None = None,
+    worker: ResolvedWorkerSpec | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
 
@@ -962,14 +965,24 @@ async def bind_session_impl(
         )
 
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+    if worker is not None:
+        effective_deadline = turn_deadline(
+            now=now(), deadline=effective_deadline, authority_deadline=worker.limits.deadline
+        )
 
     async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
         result = await preparing
+        if worker is not None:
+            remaining_s(effective_deadline, now=now(), refuse_expired=True)
         if _on_prepared is not None:
             await _on_prepared(result)
+        if worker is not None:
+            remaining_s(effective_deadline, now=now(), refuse_expired=True)
         return result
 
     profile = _admitted_profile(admission)
+    if worker is not None and admission.backend_revision_origin != "agent":
+        raise AdmissionDenied(reason="backend_unsupported")
     if profile != "anthropic.managed_agents":
         if (deps.turn_path or load_turn_settings().path) != "mux":
             raise AdmissionDenied(reason="backend_unsupported")
@@ -990,6 +1003,14 @@ async def bind_session_impl(
         if prepare is None:
             raise AdmissionDenied(reason="backend_unsupported")
         scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
+        if worker is not None:
+            worker_scope = worker.permissions.fleet.scope
+            if (worker_scope.tenant_id, worker_scope.account_id) != (
+                scope.tenant_id,
+                scope.account_id,
+            ):
+                raise AdmissionDenied(reason="backend_unsupported")
+            scope = worker_scope
         request = ProviderPreparationRequest(
             deps,
             admission,
@@ -1004,6 +1025,7 @@ async def bind_session_impl(
             transfer,
             effective_deadline,
             now,
+            worker=worker,
         )
         request, runtimes = scope_channel_runtimes(request)
 
@@ -1013,6 +1035,8 @@ async def bind_session_impl(
                 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 
                 selected = await read_preparation_counterpart(request)
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
             result = await prepare(selected)
             ref = result.session_ref
             backend = result.backend
@@ -1035,11 +1059,13 @@ async def bind_session_impl(
             return result
 
         try:
-            return await asyncio.wait_for(
-                _complete(_prepare_provider()), timeout=remaining_s(effective_deadline, now=now())
-            )
+            timeout = remaining_s(effective_deadline, now=now(), refuse_expired=worker is not None)
+            return await asyncio.wait_for(_complete(_prepare_provider()), timeout=timeout)
         except TimeoutError as error:
             raise ceiling_error() from error
+
+    if worker is not None:
+        raise AdmissionDenied(reason="backend_unsupported")
 
     async def _bind() -> PreparedTurn:
         # Decide the admission again at the moment its session is found,

@@ -55,9 +55,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         config.thread_mode != "per_caller"
         or admission.shared_owner is not None
         or admission.origin_seal_ids
-        or admission.memory_read_only
+        or (
+            admission.memory_read_only
+            and (request.worker is None or "memory" not in request.worker.declared_drops)
+        )
         or admission.asks_before_publishing
-        or admission.channel_skills
+        or (
+            admission.channel_skills
+            and (request.worker is None or "skills" not in request.worker.declared_drops)
+        )
         or request.transfer is not None
         or not request.reuse_existing
     ):
@@ -68,11 +74,26 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         raise UnsupportedCapability(("gemini_durable_runtime",), PROFILE)
     journal, usage = runtime.journal, runtime.usage_store
     deployment = journal.deployment
-    if admission.backend_revision_origin == "agent":
-        checked = request.counterpart
-        if not request.deps.agent_backends or checked is None or deployment is None:
+    if request.worker is not None or admission.backend_revision_origin == "agent":
+        from daimon.core.turn.gemini_deployment import load_gemini_deployment
+
+        if request.worker is None or request.counterpart is None or request.source is None:
             raise AdmissionDenied(reason="backend_unsupported")
-        deployment = replace(deployment, native_agent=checked.agent)
+        plan = load_gemini_deployment(request)
+        expected = plan.worker_deployment(request.worker, config)
+        checked, ref = request.counterpart, request.counterpart.agent.ref
+        if (
+            deployment is None
+            or replace(deployment, native_agent=None) != expected
+            or checked.agent.spec != expected.agent
+            or checked.catalog_id != plan.counterpart_catalog_id
+            or checked.local_revision != plan.counterpart_catalog_revision
+            or ref.id != plan.agent_id
+            or (ref.provider, ref.kind, ref.tenant_id, ref.account_id, ref.account_scope_id)
+            != ("gemini", "agent", request.scope.tenant_id, request.scope.account_id, plan.project)
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        deployment = replace(deployment, native_agent=request.counterpart.agent)
         journal = replace(journal, deployment=deployment)
         runtime = replace(runtime, journal=journal)
     if (
@@ -219,7 +240,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         session_account_id=request.session_account_id,
         _record=record,
         backend=backend,
-        runtime=runtime if deployment.native_agent is not None else None,
         session_ref=session_ref,
         native_footer_cost=footer_cost,
+        runtime=runtime if request.worker is not None else None,
     )

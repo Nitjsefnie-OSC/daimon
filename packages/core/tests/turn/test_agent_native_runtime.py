@@ -40,6 +40,7 @@ from .test_native_counterpart import (
     provider as provider,
 )
 from .test_openai_host import Wire as OpenAIWire
+from .test_openai_worker_plan import target as target
 
 
 @pytest.fixture
@@ -404,6 +405,18 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
             )
             is None
         )
+    if obligation == "credentials":
+        from cryptography.fernet import Fernet, MultiFernet
+        from daimon.core.config import McpSettings
+
+        request = replace(
+            request,
+            deps=replace(
+                request.deps,
+                fernet=MultiFernet([Fernet(Fernet.generate_key())]),
+                mcp=McpSettings(public_url="https://mcp.invalid", jwt_secret=SecretStr("offline")),
+            ),
+        )
     if obligation == "environment":
         raw = request.admission.environment.model_dump()
         raw["config"]["packages"]["pip"] = ["required-source-package==1"]
@@ -498,3 +511,739 @@ async def test_opaque_caller_resource_is_an_unproved_source_definition(native_re
     assert isinstance(detail, UnsupportedCapability)
     assert {"source_definition", "memory", "environment"} <= set(detail.missing)
     assert owned.wire.requests == [] and wire.requests == [] and posts == []
+
+
+@pytest.fixture
+async def explicit_worker_request(owned, monkeypatch):
+    from datetime import timedelta
+
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from mux.contracts.ids import ThreadRef
+
+    from ..test_fleet_permissions import POLICY, parent
+
+    request = replace(
+        owned.request,
+        admission=replace(
+            owned.request.admission,
+            agent=owned.request.admission.agent.model_copy(
+                update={
+                    "metadata": {
+                        MA_METADATA_KEY_TENANT: str(owned.request.tenant_id),
+                        MA_METADATA_KEY_NAME: owned.request.admission.config.agent_name,
+                    }
+                }
+            ),
+        ),
+    )
+    source_values = request.admission.agent.model_dump()
+    source_values.update(
+        system="Retained instructions",
+        skills=[{"type": "custom", "skill_id": "source-required-skill", "version": "1"}],
+        mcp_servers=[
+            {"type": "url", "name": "source-required-mcp", "url": "https://mcp.invalid/mcp"}
+        ],
+        tools=[
+            {
+                "type": "agent_toolset_20260401",
+                "configs": [
+                    {"name": "bash", "enabled": True, "permission_policy": {"type": "always_ask"}}
+                ],
+                "default_config": {"enabled": False, "permission_policy": {"type": "always_ask"}},
+            }
+        ],
+    )
+    request = replace(
+        request,
+        admission=replace(
+            request.admission, agent=type(request.admission.agent).model_validate(source_values)
+        ),
+    )
+    root = parent(owned.wire.provider)
+    root = replace(
+        root,
+        fleet=replace(
+            root.fleet,
+            scope=request.scope,
+            root=ThreadRef(
+                channel=request.admission.backend_revision.channel, thread_id=request.thread_id
+            ),
+            account_id=request.admission.account_id,
+        ),
+        agent_id=derive_agent_uuid(
+            tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+        ),
+        spec=owned.retained.agent.spec,
+        base_system=owned.retained.agent.spec.system,
+        limits=root.limits.model_copy(update={"deadline": request.now() + timedelta(seconds=20)}),
+    )
+    worker = resolve_worker_spec(
+        root,
+        root.spec.model_copy(
+            update={
+                "declared_drops": (
+                    "memory",
+                    "sandbox",
+                    "skills",
+                    "mcp",
+                    "tools",
+                    "files",
+                    "repository",
+                )
+            }
+        ),
+        policy=POLICY,
+        now=request.now(),
+    )
+    scope = worker.permissions.fleet.scope
+    agent = await owned.resources.backend.agents.create(scope, worker.spec, key="restricted-worker")
+    row = await owned.resources.catalog.put_agent(
+        scope,
+        owned.retained.catalog_id,
+        agent,
+        expected_revision=owned.retained.local_revision,
+    )
+    plan = owned.plan.model_copy(
+        update={
+            "agent_name": worker.spec.name,
+            "system": worker.spec.system,
+            "tools": (),
+            "agent_id": agent.ref.id,
+            "skill_ids": (),
+            "counterpart_catalog_revision": row.local_revision,
+        }
+    )
+    owned.manifest_path.write_text(json.dumps([plan.model_dump(mode="json")]))
+    request = replace(
+        request,
+        scope=scope,
+        worker=worker,
+        deps=replace(request.deps, agent_backends=True, agent_github_app=None),
+    )
+    from .test_gemini_codec import TrackedTransport
+
+    transport = TrackedTransport()
+    original = os.environ.get
+    monkeypatch.setattr(
+        os.environ,
+        "get",
+        lambda name, default=None: (
+            "offline" if name == plan.api_key_env else original(name, default)
+        ),
+    )
+    request, runtime = install_runtime(request, owned, monkeypatch, transport)
+    owned.wire.requests.clear()
+    yield request, runtime, owned, transport
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_complete_declared_worker_proof_consumes_actual_native_counterpart(
+    explicit_worker_request,
+):
+    request, runtime, owned, transport = explicit_worker_request
+    selected = await read_preparation_counterpart(request)
+    assert selected.deadline == min(request.deadline, request.worker.limits.deadline)
+    assert selected.worker == request.worker
+    assert selected.source.resource_scope == request.scope
+    assert selected.source.memory_required is True
+    assert selected.counterpart.agent.spec == request.worker.spec
+    assert selected.counterpart.agent.ref.id == owned.wire.native_id
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=True,
+        deadline=request.deadline,
+        now=request.now,
+        worker=request.worker,
+    )
+    assert prepared.backend is not None
+    assert prepared.runtime.journal.deployment.native_agent == selected.counterpart.agent
+    assert prepared.admission.backend_revision_origin == "agent"
+    assert prepared.runtime.journal.deployment.agent == request.worker.spec
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+
+    from .test_gemini_codec import interaction
+
+    transport.responses.append(interaction("verified-worker-turn", status="completed"))
+    await prepared.backend.events.send(
+        request.scope,
+        prepared.session_ref,
+        (UserMessage(content=(TextPart(text="run the restricted task"),)),),
+        key="worker-input",
+    )
+    assert len(transport.requests) == 1
+    sent = transport.requests[0]
+    assert sent["agent"] == selected.counterpart.agent.ref.id
+    assert sent["tools"] == []
+    assert sent["environment"] == {"type": "remote", "sources": []}
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "memory",
+        "sandbox",
+        "instructions",
+        "tools",
+        "skills",
+        "mcp",
+        "repository",
+        "ask_without_tools",
+        "credentials",
+        "files",
+        "private",
+        "scope",
+        "expired",
+        "foreign_root",
+        "missing_reader",
+        "flag_off",
+        "native_drift",
+        "source_drift",
+        "model_controls",
+    ],
+)
+async def test_explicit_drops_do_not_discharge_unproved_obligations(
+    explicit_worker_request, failure, monkeypatch
+):
+    from daimon.core import sessions
+    from daimon.core._models import AgentFile
+    from mux.contracts.resources import ResourceBinding
+
+    request, runtime, owned, transport = explicit_worker_request
+    worker = request.worker
+    if failure in ("tools", "skills", "mcp", "repository"):
+        if failure == "repository":
+            from daimon.core.stores import agent_repo_binding
+
+            async with request.deps.sessionmaker.begin() as db:
+                await agent_repo_binding.set_binding(
+                    db,
+                    tenant_id=request.tenant_id,
+                    agent_id=worker.permissions.agent_id,
+                    repo_url="example/source",
+                    default_branch="main",
+                    ma_secret_ref="unread",
+                    proof=None,
+                )
+        removed = {failure, "tools"} if failure == "mcp" else {failure}
+        spec = worker.spec.model_copy(
+            update={"declared_drops": tuple(x for x in worker.declared_drops if x not in removed)}
+        )
+        worker = replace(worker, spec=spec, permissions=replace(worker.permissions, spec=spec))
+    elif failure in ("memory", "sandbox"):
+        spec = worker.spec.model_copy(
+            update={"declared_drops": tuple(x for x in worker.declared_drops if x != failure)}
+        )
+        worker = replace(worker, spec=spec, permissions=replace(worker.permissions, spec=spec))
+    elif failure == "instructions":
+        agent = request.admission.agent.model_copy(
+            update={"system": "Protected source instructions"}
+        )
+        request = replace(request, admission=replace(request.admission, agent=agent))
+    elif failure == "ask_without_tools":
+        request = replace(
+            request,
+            admission=replace(
+                request.admission,
+                asks_before_publishing=True,
+                agent=request.admission.agent.model_copy(update={"tools": []}),
+            ),
+        )
+    elif failure == "model_controls":
+        agent = request.admission.agent.model_copy(
+            update={"model": request.admission.agent.model.model_copy(update={"speed": "fast"})}
+        )
+        request = replace(request, admission=replace(request.admission, agent=agent))
+    elif failure == "source_drift":
+        read = runtime.read_agent_counterpart
+
+        async def drift(selected):
+            checked = await read(selected)
+            async with request.deps.sessionmaker.begin() as db:
+                db.add(
+                    AgentFile(
+                        tenant_id=request.tenant_id,
+                        agent_id=worker.permissions.agent_id,
+                        key="LATE_PRIVATE",
+                        content="invalid-ciphertext",
+                        encoding="fernet_v1",
+                    )
+                )
+            return checked
+
+        request = replace(
+            request,
+            deps=replace(
+                request.deps,
+                turn_runtimes={
+                    request.admission.backend_revision.profile: replace(
+                        runtime, read_agent_counterpart=drift
+                    )
+                },
+            ),
+        )
+    elif failure in ("credentials", "files"):
+        if failure == "files":
+            spec = worker.spec.model_copy(
+                update={"declared_drops": tuple(x for x in worker.declared_drops if x != "files")}
+            )
+            worker = replace(worker, spec=spec, permissions=replace(worker.permissions, spec=spec))
+        async with request.deps.sessionmaker.begin() as db:
+            db.add(
+                AgentFile(
+                    tenant_id=request.tenant_id,
+                    agent_id=worker.permissions.agent_id,
+                    key="UNREAD_PRIVATE",
+                    content="invalid-ciphertext",
+                    encoding="fernet_v1",
+                )
+            )
+    elif failure == "private":
+        capture = sessions.project_session_resources
+
+        async def private(*args, **kwargs):
+            source = await capture(*args, **kwargs)
+            return source.model_copy(
+                update={
+                    "resource_requirements": (ResourceBinding(id="opaque-private", kind="native"),)
+                }
+            )
+
+        monkeypatch.setattr(sessions, "project_session_resources", private)
+    elif failure == "scope":
+        request = replace(request, scope=request.scope.model_copy(update={"account_id": "foreign"}))
+    elif failure == "expired":
+        limits = worker.limits.model_copy(update={"deadline": request.now()})
+        worker = replace(
+            worker, limits=limits, permissions=replace(worker.permissions, limits=limits)
+        )
+    elif failure == "foreign_root":
+        worker = replace(worker, permissions=replace(worker.permissions, agent_id=None))
+    elif failure == "missing_reader":
+        request = replace(
+            request,
+            deps=replace(
+                request.deps,
+                turn_runtimes={
+                    request.admission.backend_revision.profile: replace(
+                        runtime, read_agent_counterpart=None
+                    )
+                },
+            ),
+        )
+    elif failure == "flag_off":
+        request = replace(request, deps=replace(request.deps, agent_backends=False))
+    elif failure == "native_drift":
+        owned.wire.agent["system_instruction"] = "Dropped protected instructions"
+    request = replace(request, worker=worker)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported") as refused:
+        await read_preparation_counterpart(request)
+    from mux.errors import UnsupportedCapability
+
+    if failure == "expired":
+        from daimon.core.errors import TurnError
+
+        assert isinstance(refused.value.__cause__, TurnError)
+        assert refused.value.__cause__.kind == "ceiling"
+    elif failure not in {"native_drift", "scope", "flag_off"}:
+        assert isinstance(refused.value.__cause__, UnsupportedCapability)
+        expected = {
+            "sandbox": "environment",
+            "private": "source_definition",
+            "expired": "worker_context",
+            "foreign_root": "worker_context",
+            "missing_reader": "native_counterpart",
+            "source_drift": "source_drift",
+            "model_controls": "source_definition",
+            "ask_without_tools": "tools",
+        }.get(failure, failure)
+        assert expected in refused.value.__cause__.missing
+    assert not any(r.method != "GET" for r in owned.wire.requests)
+    assert transport.requests == []
+    if failure not in {"native_drift", "source_drift"}:
+        assert owned.wire.requests == []
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_worker_source_refusal_precedes_revision_publication(explicit_worker_request):
+    from daimon.core.authz import Subject
+    from daimon.core.channel_backend import AgentBackendService, BackendActor, resolve_turn_backend
+    from daimon.core.stores import mux_state
+    from sqlalchemy import text
+
+    request, _, _, transport = explicit_worker_request
+    selected = await read_preparation_counterpart(request)
+    source = selected.source
+    service = AgentBackendService(request.deps.sessionmaker, enabled=True)
+    actor = BackendActor(request.tenant_id, request.session_account_id, Subject(is_admin=True))
+    policy = await service.tenant_policy(request.tenant_id)
+    await service.set_tenant_allowlist(
+        request.tenant_id, ("anthropic", "gemini"), policy.revision, actor
+    )
+    await service.set_backend(source, "gemini", 0, actor)
+    drops = tuple(x for x in request.worker.declared_drops if x != "skills")
+    spec = request.worker.spec.model_copy(update={"declared_drops": drops})
+    worker = replace(
+        request.worker, spec=spec, permissions=replace(request.worker.permissions, spec=spec)
+    )
+
+    async def verify(selection, origin, revision):
+        if revision is not None:
+            candidate = replace(
+                request,
+                worker=worker,
+                admission=replace(
+                    request.admission, backend_revision=revision, backend_revision_origin=origin
+                ),
+            )
+            await read_preparation_counterpart(candidate)
+
+    channel = request.admission.backend_revision.channel
+    async with request.deps.sessionmaker.begin() as db:
+        with pytest.raises(AdmissionDenied):
+            await resolve_turn_backend(db, channel, source, enabled=True, validate_origin=verify)
+        assert await mux_state.latest_config_revision(db, channel) is None
+        assert (
+            await db.scalar(
+                text(
+                    "SELECT count(*) FROM channel_config_revision WHERE tenant_id=:tenant AND channel_id=:channel"
+                ),
+                {"tenant": request.tenant_id, "channel": channel.channel_id},
+            )
+            == 0
+        )
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_worker_proof_cancellation_does_not_reach_preparation(explicit_worker_request):
+    import asyncio
+
+    request, runtime, owned, transport = explicit_worker_request
+
+    async def cancelled(selected):
+        raise asyncio.CancelledError
+
+    request = replace(
+        request,
+        deps=replace(
+            request.deps,
+            turn_runtimes={
+                request.admission.backend_revision.profile: replace(
+                    runtime, read_agent_counterpart=cancelled
+                )
+            },
+        ),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await read_preparation_counterpart(request)
+    assert not owned.wire.requests and not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["openai"], indirect=True)
+async def test_openai_hosted_component_cannot_erase_the_legacy_source_environment(
+    target,
+):
+    from datetime import timedelta
+
+    from daimon.core.ma_identity import derive_agent_uuid
+    from mux.errors import UnsupportedCapability
+
+    request, worker, _, _, owned = target
+    agent = request.admission.agent.model_copy(
+        update={
+            "metadata": {
+                MA_METADATA_KEY_TENANT: str(request.tenant_id),
+                MA_METADATA_KEY_NAME: request.admission.config.agent_name,
+            }
+        }
+    )
+    limits = worker.limits.model_copy(update={"deadline": request.now() + timedelta(seconds=20)})
+    worker = replace(
+        worker,
+        limits=limits,
+        permissions=replace(
+            worker.permissions,
+            limits=limits,
+            agent_id=derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=agent.id),
+        ),
+    )
+    request = replace(
+        request,
+        worker=worker,
+        admission=replace(request.admission, agent=agent),
+        deps=replace(request.deps, agent_github_app=None),
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(request)
+    assert isinstance(refused.value.__cause__, UnsupportedCapability)
+    assert "environment" in refused.value.__cause__.missing
+    assert not owned.wire.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("route", ["channel", "legacy"])
+async def test_worker_cannot_bypass_source_proof_through_channel_origin(
+    explicit_worker_request, monkeypatch, route
+):
+    from daimon.core.turn import prepare as preparation
+
+    request, _, owned, transport = explicit_worker_request
+
+    async def forbidden(selected):
+        raise AssertionError("a worker reached the preparer without its source proof")
+
+    monkeypatch.setitem(
+        preparation._PROVIDER_PREPARATIONS, request.admission.backend_revision.profile, forbidden
+    )
+    admission = replace(request.admission, backend_revision_origin="channel")
+    if route == "legacy":
+        from mux.contracts.config import ConfigRevision
+        from mux.profiles import backend_selection
+
+        admission = replace(
+            request.admission,
+            backend_revision=ConfigRevision.create(
+                request.admission.backend_revision.channel, 1, backend_selection("anthropic")
+            ),
+        )
+    with pytest.raises(AdmissionDenied):
+        await bind_session_impl(
+            request.deps,
+            admission,
+            tenant_id=request.tenant_id,
+            platform=request.platform,
+            external_user_id=request.external_user_id,
+            thread_id=request.thread_id,
+            session_account_id=request.session_account_id,
+            reuse_existing=True,
+            deadline=request.deadline,
+            now=request.now,
+            worker=request.worker,
+        )
+    assert not owned.wire.requests and not transport.requests
+
+
+async def _bind_worker(request, **kwargs):
+    return await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=True,
+        deadline=request.deadline,
+        now=request.now,
+        worker=request.worker,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("entry", ["proof", "registered"])
+async def test_worker_readback_cannot_outlive_its_shorter_authority(
+    explicit_worker_request, monkeypatch, entry
+):
+    from datetime import timedelta
+
+    from daimon.core.errors import TurnError
+    from daimon.core.turn import prepare as preparation
+
+    request, runtime, owned, transport = explicit_worker_request
+    clock = [request.now()]
+    bound = request.worker.limits.deadline
+    assert bound < request.deadline
+    prepared_callbacks = []
+    preparer_calls = []
+    readback_bounds = []
+
+    async def slow_readback(selected):
+        readback_bounds.append(selected.deadline)
+        result = await runtime.read_agent_counterpart(selected)
+        clock[0] = bound + timedelta(seconds=1)
+        assert clock[0] < request.deadline
+        return result
+
+    async def forbidden(selected):
+        preparer_calls.append(selected)
+        raise AssertionError("expired proof reached native preparation")
+
+    async def on_prepared(prepared):
+        prepared_callbacks.append(prepared)
+
+    profile = request.admission.backend_revision.profile
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, forbidden)
+    request = replace(
+        request,
+        now=lambda: clock[0],
+        deps=replace(
+            request.deps,
+            turn_runtimes={profile: replace(runtime, read_agent_counterpart=slow_readback)},
+        ),
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        if entry == "proof":
+            await read_preparation_counterpart(request)
+        else:
+            await _bind_worker(request, _on_prepared=on_prepared)
+    assert isinstance(refused.value.__cause__, TurnError)
+    assert refused.value.__cause__.kind == "ceiling"
+    assert readback_bounds == [bound]
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert preparer_calls == [] and prepared_callbacks == [] and transport.requests == []
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_stricter_caller_bound_reaches_the_registered_preparer(
+    explicit_worker_request, monkeypatch
+):
+    from datetime import timedelta
+
+    from daimon.core.turn import prepare as preparation
+
+    request, runtime, owned, transport = explicit_worker_request
+    original_worker = request.worker
+    bound = request.now() + timedelta(seconds=10)
+    assert bound < original_worker.limits.deadline
+    profile = request.admission.backend_revision.profile
+    assert preparation.ensure_channel_runtime(
+        profile, ready=lambda: profile in preparation._PROVIDER_PREPARATIONS
+    )
+    prepare = preparation._PROVIDER_PREPARATIONS[profile]
+    seen = []
+
+    async def bounded_preparation(selected):
+        assert selected.deadline == bound
+        assert selected.worker == original_worker
+        seen.append(selected)
+        return await prepare(selected)
+
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, bounded_preparation)
+    selected = await read_preparation_counterpart(replace(request, deadline=bound))
+    assert selected.deadline == bound and selected.worker == original_worker
+    prepared = await _bind_worker(replace(request, deadline=bound))
+    assert prepared.backend is not None and len(seen) == 1
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_hanging_final_source_capture_is_bounded_and_cancelled(
+    explicit_worker_request, monkeypatch
+):
+    import asyncio
+    from datetime import timedelta
+
+    from daimon.core import sessions
+
+    request, runtime, owned, transport = explicit_worker_request
+    clock = [request.now()]
+    bound = request.worker.limits.deadline
+
+    async def readback(selected):
+        result = await runtime.read_agent_counterpart(selected)
+        clock[0] = bound - timedelta(seconds=0.05)
+        return result
+
+    request = replace(
+        request,
+        now=lambda: clock[0],
+        deps=replace(
+            request.deps,
+            turn_runtimes={
+                request.admission.backend_revision.profile: replace(
+                    runtime, read_agent_counterpart=readback
+                )
+            },
+        ),
+    )
+    capture = sessions.project_session_resources
+    calls = []
+    cancelled = []
+
+    async def hanging_capture(*args, **kwargs):
+        calls.append(None)
+        if len(calls) == 1:
+            return await capture(*args, **kwargs)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(sessions, "project_session_resources", hanging_capture)
+    with pytest.raises(AdmissionDenied) as refused:
+        await asyncio.wait_for(read_preparation_counterpart(request), timeout=1)
+    assert isinstance(refused.value.__cause__, TimeoutError)
+    assert len(calls) == 2 and cancelled == [True]
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("stage", ["capture", "preparation", "callback"])
+async def test_expiry_is_rechecked_before_successful_worker_handoff(
+    explicit_worker_request, monkeypatch, stage
+):
+    from datetime import timedelta
+
+    from daimon.core import sessions
+    from daimon.core.errors import TurnError
+    from daimon.core.turn import prepare as preparation
+
+    request, _, owned, transport = explicit_worker_request
+    clock = [request.now()]
+    bound = request.worker.limits.deadline
+    request = replace(request, now=lambda: clock[0])
+    profile = request.admission.backend_revision.profile
+    assert preparation.ensure_channel_runtime(
+        profile, ready=lambda: profile in preparation._PROVIDER_PREPARATIONS
+    )
+    prepare = preparation._PROVIDER_PREPARATIONS[profile]
+    capture = sessions.project_session_resources
+    capture_calls = []
+    preparation_calls = []
+    callbacks = []
+
+    async def timed_capture(*args, **kwargs):
+        result = await capture(*args, **kwargs)
+        capture_calls.append(None)
+        if stage == "capture" and len(capture_calls) == 2:
+            clock[0] = bound + timedelta(seconds=1)
+        return result
+
+    async def timed_prepare(selected):
+        assert selected.deadline == bound
+        preparation_calls.append(selected)
+        result = await prepare(selected)
+        if stage == "preparation":
+            clock[0] = bound + timedelta(seconds=1)
+        return result
+
+    async def on_prepared(prepared):
+        callbacks.append(prepared)
+        if stage == "callback":
+            clock[0] = bound + timedelta(seconds=1)
+
+    monkeypatch.setattr(sessions, "project_session_resources", timed_capture)
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, timed_prepare)
+    with pytest.raises((AdmissionDenied, TurnError)) as refused:
+        await _bind_worker(request, _on_prepared=on_prepared)
+    error = refused.value
+    if isinstance(error, AdmissionDenied):
+        error = error.__cause__
+    assert isinstance(error, TurnError) and error.kind == "ceiling"
+    assert len(preparation_calls) == (stage != "capture")
+    assert len(callbacks) == (stage == "callback")
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests

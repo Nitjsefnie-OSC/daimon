@@ -5,32 +5,61 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, cast
+from uuid import UUID
 
+import httpx
 import pytest
 from daimon.core.channel_backend import check_backend
+from daimon.core.neutral_resources import ResolvedWorkerSpec, resolve_worker_spec
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.gemini import PROFILE, GeminiJournal, GeminiUsageRuntime
+from daimon.core.turn.gemini import (
+    PROFILE,
+    GeminiJournal,
+    GeminiUsageRuntime,
+)
+from daimon.core.turn.gemini_deployment import GeminiPlan, build_gemini_runtime
+from daimon.core.turn.gemini_prepare import prepare_gemini_turn
 from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiStorage
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtimes import build_channel_runtime
+from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_tenant
+from daimon.testing.isolated_sdk import build_gemini_client
 from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
-from mux.contracts.ids import ModelRef, ResourceRef
-from mux.contracts.resources import Artifact
+from mux.contracts.events import TextPart
+from mux.contracts.ids import ModelRef, ResourceRef, Scope
+from mux.contracts.resources import (
+    Artifact,
+    EnvironmentSpec,
+    MCPConnection,
+    NetworkPolicy,
+    ResourceBinding,
+    ToolSpec,
+    WorkspaceSource,
+)
+from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
-from mux.drivers.gemini.storage import ArtifactRecord
+from mux.drivers.gemini.storage import ArtifactRecord, Storage
+from mux.drivers.gemini.transport import Transport
 from mux.errors import ScopeViolation
 from pydantic import JsonValue
 
+from ..test_fleet_permissions import NOW, POLICY, parent
+from .test_gemini_codec import TrackedTransport, interaction
+from .test_native_counterpart import Owned
+from .test_native_counterpart import clean_sdk_environment as clean_sdk_environment
+from .test_native_counterpart import owned as owned
 from .test_openai_deployment import application as application
 from .test_openai_deployment import manifest
 
@@ -75,6 +104,419 @@ def entry(selected: ProviderPreparationRequest, tmp_path: Path) -> dict[str, Jso
         "tools": [],
         "environment": {"name": "explicit-inline"},
     }
+
+
+@pytest.fixture
+def worker_target(tmp_path: Path) -> tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec]:
+    root = parent("gemini")
+    worker = resolve_worker_spec(
+        root,
+        root.spec.model_copy(
+            update={
+                "declared_drops": (
+                    "memory",
+                    "sandbox",
+                    "skills",
+                    "mcp",
+                    "tools",
+                    "files",
+                    "repository",
+                )
+            }
+        ),
+        policy=POLICY,
+        now=NOW,
+    )
+    revision = ConfigRevision.create(root.fleet.root.channel, 1, worker.backend)
+    plan = GeminiPlan(
+        profile=PROFILE,
+        tenant_id=root.fleet.scope.tenant_id,
+        platform=root.fleet.root.channel.platform,
+        channel_id=root.fleet.root.channel.channel_id,
+        account_id=root.fleet.scope.account_id,
+        config_digest=revision.digest,
+        project="project",
+        api_key_env="OFFLINE_WORKER_KEY",
+        records_path=tmp_path / "records.sqlite",
+        holds_path=tmp_path / "holds.sqlite",
+        hold_usd=Decimal("0.05"),
+        cap_usd=Decimal("0.25"),
+        agent_name=worker.spec.name,
+        system=worker.spec.system,
+        tools=(),
+        environment=EnvironmentSpec(name="explicit-no-execution"),
+    )
+    return plan, revision, worker
+
+
+def test_resolved_drops_compile_remote_without_execution_or_memory(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+) -> None:
+    from mux.drivers.gemini.core import compile_environment
+
+    plan, revision, worker = worker_target
+    deployment = plan.worker_deployment(worker, revision)
+    assert deployment.agent == worker.spec
+    assert deployment.config_digest == revision.digest
+    assert compile_agent(deployment.agent)["tools"] == []
+    assert compile_environment(deployment.environment) == {"type": "remote", "sources": []}
+    assert worker.resources == ()
+    assert worker.spec.system is not None
+    assert worker.spec.system.startswith(worker.permissions.base_system + "\n\n")
+    assert "no persistent memory" in worker.spec.system
+    assert "no sandbox execution" in worker.spec.system
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "memory",
+        "sandbox",
+        "execution",
+        "custom",
+        "mcp",
+        "resources",
+        "network",
+        "packages",
+        "environment-none",
+        "files",
+        "repository",
+        "instructions",
+        "scope",
+        "model",
+    ),
+)
+def test_worker_target_refuses_undeclared_or_unrepresentable_native_intent(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+    drift: str,
+) -> None:
+    plan, revision, worker = worker_target
+    if drift in ("memory", "sandbox"):
+        worker = replace(
+            worker,
+            spec=worker.spec.model_copy(
+                update={
+                    "declared_drops": tuple(item for item in worker.declared_drops if item != drift)
+                }
+            ),
+        )
+    elif drift in ("execution", "custom"):
+        tool = ToolSpec(
+            name="code_execution" if drift == "execution" else "run_command",
+            kind="builtin" if drift == "execution" else "custom",
+        )
+        worker = replace(
+            worker,
+            spec=worker.spec.model_copy(
+                update={
+                    "tools": (tool,),
+                    "declared_drops": tuple(
+                        item for item in worker.declared_drops if item != "tools"
+                    ),
+                }
+            ),
+        )
+        plan = plan.model_copy(update={"tools": (tool,)})
+    elif drift == "mcp":
+        worker = replace(
+            worker,
+            spec=worker.spec.model_copy(
+                update={
+                    "mcp_servers": (MCPConnection(name="execute", url="https://mcp.invalid"),),
+                    "declared_drops": tuple(
+                        item for item in worker.declared_drops if item not in ("mcp", "tools")
+                    ),
+                }
+            ),
+        )
+    elif drift == "resources":
+        worker = replace(
+            worker,
+            resources=(ResourceBinding(id="retained", kind="artifact", target_path="input.txt"),),
+        )
+    elif drift in ("network", "packages", "environment-none", "files", "repository"):
+        update = (
+            {"network": NetworkPolicy(mode="none")}
+            if drift == "network"
+            else {"packages": {"pip": ("numpy",)}}
+            if drift == "packages"
+            else {"execution": "none"}
+            if drift == "environment-none"
+            else {"sources": (WorkspaceSource(kind="file", target_path="input.txt"),)}
+            if drift == "files"
+            else {
+                "sources": (
+                    WorkspaceSource(
+                        kind="repository", target_path="repo", repository_url="https://repo.invalid"
+                    ),
+                )
+            }
+        )
+        plan = plan.model_copy(update={"environment": plan.environment.model_copy(update=update)})
+    elif drift == "instructions":
+        plan = plan.model_copy(update={"system": "Stripped protected guidance"})
+    elif drift == "scope":
+        plan = plan.model_copy(update={"account_id": "foreign"})
+    elif drift == "model":
+        worker = replace(
+            worker,
+            spec=worker.spec.model_copy(
+                update={"model": ModelRef(provider="gemini", id="gemini-3.5-pro")}
+            ),
+        )
+    with pytest.raises(AdmissionDenied) as refused:
+        plan.worker_deployment(worker, revision)
+    assert refused.value.reason == "backend_unsupported"
+
+
+@pytest.fixture
+def provider() -> Literal["gemini"]:
+    return "gemini"
+
+
+@pytest.mark.parametrize(
+    "preparation",
+    (
+        "checked",
+        "missing",
+        "ordinary",
+        "drift",
+        "sealed",
+        "publish",
+        "identity",
+        "revision",
+        "tenant",
+        "account",
+        "workspace",
+        "provider",
+    ),
+)
+async def test_worker_native_readback_checks_stripped_tools_mounts_and_protected_guidance(
+    owned: Owned,
+    monkeypatch: pytest.MonkeyPatch,
+    preparation: str,
+) -> None:
+    root = parent("gemini")
+    config = owned.request.admission.backend_revision
+    assert config is not None and isinstance(owned.plan, GeminiPlan)
+    root = replace(
+        root,
+        fleet=replace(
+            root.fleet,
+            scope=owned.request.scope,
+            root=root.fleet.root.model_copy(update={"channel": config.channel}),
+            account_id=UUID(owned.request.scope.account_id),
+        ),
+        spec=owned.retained.agent.spec,
+        base_system=owned.retained.agent.spec.system or "",
+    )
+    worker = resolve_worker_spec(
+        root,
+        root.spec.model_copy(
+            update={
+                "declared_drops": (
+                    "memory",
+                    "sandbox",
+                    "skills",
+                    "mcp",
+                    "tools",
+                    "files",
+                    "repository",
+                )
+            }
+        ),
+        policy=POLICY,
+        now=NOW,
+    )
+    agent = await owned.resources.backend.agents.create(
+        owned.request.scope, worker.spec, key="explicit-worker-counterpart"
+    )
+    retained = await owned.resources.catalog.put_agent(
+        owned.request.scope, "owned-counterpart", agent, expected_revision=1
+    )
+    plan = owned.plan.model_copy(
+        update={
+            "agent_name": worker.spec.name,
+            "system": worker.spec.system,
+            "agent_id": agent.ref.id,
+            "skill_ids": (),
+            "counterpart_catalog_revision": retained.local_revision,
+        }
+    )
+    owned.manifest_path.write_text(json.dumps([plan.model_dump(mode="json")]))
+    owned.wire.requests.clear()
+    checked = await plan.read_counterpart(
+        replace(owned.request, worker=worker), source=owned.source, resources=owned.resources
+    )
+    assert checked == retained
+    assert owned.wire.agent["tools"] == []
+    assert owned.wire.agent["base_environment"] == {"type": "remote", "sources": []}
+    assert owned.wire.agent["system_instruction"] == worker.spec.system
+    assert [request.method for request in owned.wire.requests] == ["GET"]
+    for field, drift in (
+        ("tools", [{"type": "code_execution"}]),
+        (
+            "base_environment",
+            {
+                "type": "remote",
+                "sources": [
+                    {
+                        "type": "inline",
+                        "target": ".agents/skills/hidden/SKILL.md",
+                        "content": "hidden",
+                    }
+                ],
+            },
+        ),
+        ("system_instruction", root.base_system),
+    ):
+        original = owned.wire.agent[field]
+        owned.wire.agent[field] = drift
+        with pytest.raises(AdmissionDenied) as refused:
+            await plan.read_counterpart(
+                replace(owned.request, worker=worker),
+                source=owned.source,
+                resources=owned.resources,
+            )
+        assert refused.value.reason == "backend_unsupported"
+        owned.wire.agent[field] = original
+
+    # Persist the independently read-back native acknowledgement at the owned storage edge.
+    from daimon.core.turn import gemini_deployment
+    from mux.drivers.gemini import deployment as sdk_deployment
+
+    storage = MemoryStorage()
+    async with storage.transaction() as records:
+        records.agents[checked.agent.ref.id] = checked.agent
+    transport = TrackedTransport()
+    async with AsyncExitStack() as stack:
+        client = build_gemini_client(
+            transport=httpx.MockTransport(owned.wire.handle),
+            api_key="offline",
+            base_url="https://gemini.invalid",
+        )
+        stack.callback(client.close)
+        stack.push_async_callback(client.aio.aclose)
+        catalog = SDKAgentCatalogTransport(client)
+
+        def retained_storage(path: Path, *, namespace: str) -> Storage:
+            return storage
+
+        def offline_transport(*, api_key: str) -> Transport:
+            if api_key != "offline":
+                raise AssertionError("only the explicit offline credential is accepted")
+            return transport
+
+        def offline_catalog(*, api_key: str) -> AgentCatalogTransport:
+            if api_key != "offline":
+                raise AssertionError("only the explicit offline credential is accepted")
+            return catalog
+
+        original_get = os.environ.get
+
+        def offline_key(name: str, default: str | None = None) -> str | None:
+            return "offline" if name == plan.api_key_env else original_get(name, default)
+
+        monkeypatch.setattr(gemini_deployment, "SQLiteGeminiStorage", retained_storage)
+        monkeypatch.setattr(sdk_deployment, "configured_transport", offline_transport)
+        monkeypatch.setattr(sdk_deployment, "configured_catalog_transport", offline_catalog)
+        monkeypatch.setattr(os.environ, "get", offline_key)
+        request = replace(
+            owned.request,
+            source=owned.source,
+            worker=worker,
+            counterpart=checked,
+            deps=replace(owned.request.deps, agent_backends=True),
+            admission=replace(owned.request.admission, memory_read_only=True),
+        )
+        runtime = build_gemini_runtime(request)
+        assert runtime.read_agent_counterpart is not None
+        assert await runtime.read_agent_counterpart(request) == checked
+        if preparation != "checked":
+            if preparation == "missing":
+                request = replace(request, counterpart=None)
+            elif preparation == "ordinary":
+                request = replace(request, worker=None)
+            elif preparation == "drift":
+                request = replace(
+                    request,
+                    counterpart=replace(
+                        checked,
+                        agent=checked.agent.model_copy(
+                            update={
+                                "spec": checked.agent.spec.model_copy(update={"system": "stripped"})
+                            }
+                        ),
+                    ),
+                )
+            elif preparation == "sealed":
+                request = replace(
+                    request,
+                    admission=replace(request.admission, origin_seal_ids=frozenset({UUID(int=1)})),
+                )
+            elif preparation == "publish":
+                request = replace(
+                    request, admission=replace(request.admission, asks_before_publishing=True)
+                )
+            elif preparation == "revision":
+                request = replace(
+                    request, counterpart=replace(checked, local_revision=checked.local_revision + 1)
+                )
+            else:
+                field = {
+                    "identity": "id",
+                    "tenant": "tenant_id",
+                    "account": "account_id",
+                    "workspace": "account_scope_id",
+                    "provider": "provider",
+                }[preparation]
+                request = replace(
+                    request,
+                    counterpart=replace(
+                        checked,
+                        agent=checked.agent.model_copy(
+                            update={
+                                "ref": checked.agent.ref.model_copy(
+                                    update={field: "openai" if field == "provider" else "foreign"}
+                                )
+                            }
+                        ),
+                    ),
+                )
+
+            def forbidden(config: ConfigRevision, scope: Scope) -> object:
+                raise AssertionError("refused preparation allocated a provider transport")
+
+            request = replace(
+                request,
+                deps=replace(
+                    request.deps,
+                    turn_runtimes={PROFILE: replace(runtime, transport_factory=forbidden)},
+                ),
+            )
+            with pytest.raises(AdmissionDenied) as refused:
+                await prepare_gemini_turn(request)
+            assert refused.value.reason == "backend_unsupported"
+            assert not transport.requests
+            return
+        prepared = await prepare_gemini_turn(
+            replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
+        )
+        assert prepared.admission.memory_read_only is True
+        assert prepared.backend is not None and prepared.session_ref is not None
+        assert prepared.runtime is not None and not transport.requests
+        transport.responses.append(interaction("worker-interaction", status="completed"))
+        await prepared.backend.events.send(
+            request.scope,
+            prepared.session_ref,
+            (UserMessage(content=(TextPart(text="Do the bounded task"),)),),
+            key="worker-input",
+        )
+        assert transport.requests[0]["agent"] == checked.agent.ref.id
+        assert transport.requests[0]["tools"] == []
+        assert transport.requests[0]["environment"] == {"type": "remote", "sources": []}
+        async with storage.transaction() as records:
+            assert records.sessions[prepared.session_ref.id].spec.resources == ()
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,7 @@ from uuid import UUID
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
-from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -45,7 +45,8 @@ from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.core import compile_agent, compile_environment
 from mux.drivers.gemini.flash import FLASH_PRIMARY
-from mux.errors import ScopeViolation
+from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.profiles.gemini import INLINE_REUSE
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -100,6 +101,62 @@ class GeminiPlan(BaseModel):
             )
         return self
 
+    def worker_deployment(
+        self, worker: ResolvedWorkerSpec, revision: ConfigRevision
+    ) -> GeminiDeployment:
+        """Compile the resolved worker without adding resources or implicit execution."""
+        spec, drops = worker.spec, worker.declared_drops
+        scope = worker.permissions.fleet.scope
+        if (
+            "memory" not in drops
+            or worker.resources
+            or revision.profile != self.profile
+            or revision.model != FLASH_PRIMARY
+            or spec.model != ModelRef(provider="gemini", id=FLASH_PRIMARY)
+            or worker.backend.profile != self.profile
+            or worker.backend.model != revision.model
+            or worker.backend.backend != revision.backend
+            or worker.backend.thread_mode != revision.thread_mode
+            or worker.backend.requires != revision.requires
+            or scope.is_platform
+            or scope.is_legacy_host_authorized
+            or (scope.tenant_id, scope.account_id) != (self.tenant_id, self.account_id)
+            or worker.permissions.fleet.root.channel != revision.channel
+            or spec.name != self.agent_name
+            or spec.system != self.system
+            or tuple(spec.tools or ()) != self.tools
+            or tuple(pin.id for pin in spec.skills or ()) != self.skill_ids
+            or ("skills" in drops and spec.skills)
+            or ("mcp" in drops and spec.mcp_servers)
+            or ("tools" in drops and (spec.tools or spec.mcp_servers))
+            or any(tool.kind == "custom" for tool in spec.tools or ())
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        if "sandbox" in drops:
+            if (
+                worker.environment is not None
+                or any(
+                    tool.kind != "builtin" or tool.name in INLINE_REUSE.execution_tools
+                    for tool in spec.tools or ()
+                )
+                or spec.mcp_servers
+            ):
+                raise AdmissionDenied(reason="backend_unsupported")
+            environment = self.environment
+        else:
+            if worker.environment is None or worker.environment != self.environment:
+                raise AdmissionDenied(reason="backend_unsupported")
+            environment = worker.environment
+        if environment.sources:
+            raise AdmissionDenied(reason="backend_unsupported")
+        try:
+            compile_agent(spec)
+            if compile_environment(environment) != {"type": "remote", "sources": []}:
+                raise AdmissionDenied(reason="backend_unsupported")
+        except UnsupportedCapability as error:
+            raise AdmissionDenied(reason="backend_unsupported") from error
+        return GeminiDeployment(revision.digest, revision.local, self.project, spec, environment)
+
     async def read_counterpart(
         self,
         request: ProviderPreparationRequest,
@@ -109,8 +166,17 @@ class GeminiPlan(BaseModel):
     ) -> AgentRevision:
         """Read native named-agent intent; no full source or execution proof is implied."""
 
+        expected = None
+        if request.worker is not None:
+            revision = request.admission.backend_revision
+            if revision is None:
+                raise AdmissionDenied(reason="backend_unsupported")
+            expected = self.worker_deployment(request.worker, revision)
+
         async def verify_native(checked: AgentRevision) -> None:
             adapter = resources.backend.agents
+            if expected is not None and checked.agent.spec != expected.agent:
+                raise AdmissionDenied(reason="backend_unsupported")
             if (
                 not isinstance(adapter, GeminiCatalogAdapter)
                 or not adapter.enabled
@@ -154,8 +220,14 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     )
     # Validate native policy before reading the selected credential or opening
     # persistence. Unsupported MCP, confirmations and workspace sources refuse.
-    compile_agent(agent)
-    compile_environment(plan.environment)
+    if request.worker is not None:
+        deployment = plan.worker_deployment(request.worker, revision)
+    else:
+        compile_agent(agent)
+        compile_environment(plan.environment)
+        deployment = GeminiDeployment(
+            revision.digest, revision.local, plan.project, agent, plan.environment
+        )
     namespace = json.dumps([scope.tenant_id, scope.account_id, plan.project], separators=(",", ":"))
 
     def transport(config: ConfigRevision, authorized: Scope) -> GeminiTransportRuntime:
@@ -175,21 +247,28 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         validate_counterpart_request(plan, preparation)
-        source = await load_backend_agent(
-            preparation.deps.anthropic,
-            preparation.deps.sessionmaker,
-            tenant_id=preparation.tenant_id,
-            agent_name=(preparation.admission.agent.metadata or {}).get(
-                MA_METADATA_KEY_NAME, preparation.admission.config.agent_name
+        if preparation.worker != request.worker:
+            raise AdmissionDenied(reason="backend_unsupported")
+        source = preparation.source
+        if preparation.worker is not None:
+            if source is None or plan.worker_deployment(preparation.worker, revision) != deployment:
+                raise AdmissionDenied(reason="backend_unsupported")
+        elif source is None:
+            source = await load_backend_agent(
+                preparation.deps.anthropic,
+                preparation.deps.sessionmaker,
+                tenant_id=preparation.tenant_id,
+                agent_name=(preparation.admission.agent.metadata or {}).get(
+                    MA_METADATA_KEY_NAME, preparation.admission.config.agent_name
+                )
+                or "",
+                actual_agent=preparation.admission.agent,
             )
-            or "",
-            actual_agent=preparation.admission.agent,
-        )
-        backend = gemini_backend(revision, scope, runtime, plan.project)
+        backend = gemini_backend(revision, preparation.scope, runtime, plan.project)
         resources = NeutralResourceHost(
             backend,
             preparation.deps.sessionmaker,
-            scope=scope,
+            scope=preparation.scope,
             account_scope_id=plan.project,
             operation_key="counterpart-read",
             resource_catalog_enabled=True,
@@ -203,9 +282,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         journal=GeminiJournal(
             SQLiteGeminiStorage(plan.records_path, namespace=namespace),
             request.deps.state_store,
-            GeminiDeployment(
-                revision.digest, revision.local, plan.project, agent, plan.environment
-            ),
+            deployment,
         ),
         usage_store=GeminiUsageRuntime(
             SQLiteFlashAccounting(

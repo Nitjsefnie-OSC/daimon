@@ -29,11 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Synchronize Discord gateway-lease tests with completed PostgreSQL backend shutdown before a successor attempts the released advisory lock.
 - Prepare worker-completion decoding and dispatch on the existing leased continuation ladder, while refusing new completion writes until a compatible-reader release protects legacy timer scans. Missing host decisions defer without a provider fallback.
-
+- Cap restricted worker preparation at the earlier of caller and canonical worker deadlines; refuse expired readback or preparation before a successful handoff.
+- Verify explicitly restricted worker source intent and native counterparts through the existing preparation seam; retain refusal for undeclared, private or unrepresentable obligations.
+- Verify declared OpenAI worker restrictions against native agent and hosted-environment readback; refuse missing memory declarations, residual mounts and unproven no-sandbox execution before allocation.
+- Verify explicitly restricted Gemini worker targets against native catalog readback and consume their checked identity, preserving admission restrictions and refusing unsupported retained resources.
+- Carry a hidden canonical resolved worker through the existing provider preparation request; native execution remains refused until complete source preservation is proven.
 - Derive refused source obligations only from captured intent and verify each classification with sensitive baseline tests.
-
 - Capture complete source and effective resource intent at the shared turn-preparation seam, including implicit memory, and refuse every unproved obligation before publishing a backend revision or preparing a native turn.
-
+- Share session repository, caller-vault and Copilot credential selection with read-only source projection, retaining opaque vault requirements without reading or minting secrets.
+- Allow fleet worker specs to declare closed resource drops, narrow their grants, remove sandbox execution tools, and record the declarations in existing scoped audits.
 - Retain complete scoped backend source records and read-only session resource facts without exposing secrets; the preparation boundary derives unproved native preservation obligations and refuses execution.
 
 - Keep Discord conformance tests on the adapter's shared database fixture lifetime so switching modules does not trigger premature schema teardown.

@@ -14,11 +14,12 @@ from uuid import UUID
 
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.openai_host import PROFILE, OpenAIHostRuntime, driver, register_host
+from daimon.core.turn.openai_codec import PROFILE
+from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
@@ -32,8 +33,10 @@ from daimon.core.turn.runtime_manifest import (
 )
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
-from mux.contracts.resources import SessionSpec
+from mux.contracts.resources import EnvironmentSpec, SessionSpec
+from mux.drivers.openai.mcp_auth import KEY as MCP_METADATA_KEY
 from mux.drivers.openai.session_controls import SessionControls
+from mux.drivers.openai.skill_bindings import reserved as skill_metadata_key
 from mux.drivers.openai.transport import Transport
 from mux.errors import ScopeViolation
 from pydantic import (
@@ -90,7 +93,25 @@ class OpenAIDeployment(BaseModel):
     ) -> AgentRevision:
         """Read the operator-pinned catalog component; complete source proof remains separate."""
 
+        worker = request.worker
+        expected = self.worker_environment(request, worker) if worker is not None else None
+
         async def verify_native(checked: AgentRevision) -> None:
+            if worker is not None:
+                if checked.agent.spec != worker.spec:
+                    raise AdmissionDenied(reason="backend_unsupported")
+                # The catalog verifies compiled tools, pins and instructions;
+                # independently retain every authored metadata stamp as well.
+                native = await resources.backend.agents.retrieve(request.scope, checked.agent.ref)
+                metadata = {
+                    key: value
+                    for key, value in (native.spec.metadata or {}).items()
+                    if key != "mux_tenant"
+                    and key != MCP_METADATA_KEY
+                    and not skill_metadata_key(key)
+                }
+                if metadata != dict(worker.spec.metadata or {}):
+                    raise AdmissionDenied(reason="backend_unsupported")
             scope = request.scope
             environment = await resources.backend.environments.retrieve(
                 scope,
@@ -105,10 +126,63 @@ class OpenAIDeployment(BaseModel):
             )
             if environment.lifecycle != "active" or environment.spec.execution != "hosted":
                 raise AdmissionDenied(reason="backend_unsupported")
+            if worker is not None and environment.spec != expected:
+                raise AdmissionDenied(reason="backend_unsupported")
 
         return await read_counterpart(
             self, request, source=source, resources=resources, verify_native=verify_native
         )
+
+    def worker_environment(
+        self, request: ProviderPreparationRequest, worker: ResolvedWorkerSpec
+    ) -> EnvironmentSpec:
+        """Refuse unrepresentable plans before reading or allocating native resources."""
+        revision = request.admission.backend_revision
+        drops, spec, environment = worker.declared_drops, worker.spec, worker.environment
+        if (
+            revision is None
+            or worker.backend.content_digest() != revision.content_digest()
+            or revision.profile != self.profile
+            or worker.spec.model.provider != "openai"
+            or worker.spec.model.id != revision.model
+            or worker.permissions.fleet.scope != request.scope
+            or "memory" not in drops
+            or "sandbox" in drops
+            or "tools" in drops
+            or worker.resources
+            or environment is None
+            or environment.execution != "hosted"
+            or environment.description is not None
+            or environment.scope is not None
+            or environment.metadata
+            or environment.native_config is not None
+            or environment.network is None
+            or environment.sources != ()
+            or environment.packages is None
+            or set(environment.packages) - {"python", "npm", "system"}
+            or spec.extensions
+            or spec.model.options
+            or spec.description is not None
+            or any(
+                key == "mux_tenant" or key == MCP_METADATA_KEY or skill_metadata_key(key)
+                for key in spec.metadata or {}
+            )
+            or not any(tool.kind == "builtin" and tool.name == "bash" for tool in spec.tools or ())
+            or any(tool.permission != "auto" for tool in spec.tools or ())
+            or any(tool.kind == "custom" for tool in spec.tools or ())
+            or ("skills" in drops and spec.skills)
+            or (
+                "mcp" in drops
+                and (
+                    spec.mcp_servers or any(tool.kind == "mcp_toolset" for tool in spec.tools or ())
+                )
+            )
+            or any(connection.credential_ref is not None for connection in spec.mcp_servers or ())
+        ):
+            # Conversation-only creation needs a consumed initial-input edge.
+            # Never substitute a hosted container for a no-execution declaration.
+            raise AdmissionDenied(reason="backend_unsupported")
+        return environment
 
 
 def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
@@ -193,6 +267,11 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 or checked.agent.ref != agent
             ):
                 raise AdmissionDenied(reason="backend_unsupported")
+            worker = preparation.worker
+            if worker is not None:
+                deployment.worker_environment(preparation, worker)
+                if checked.agent.spec != worker.spec:
+                    raise AdmissionDenied(reason="backend_unsupported")
             agent = checked.agent.ref
         return SessionSpec(
             agent=agent,
@@ -227,6 +306,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         validate_counterpart_request(deployment, preparation)
+        worker = preparation.worker
+        if worker is not None:
+            deployment.worker_environment(preparation, worker)
         source = await load_backend_agent(
             preparation.deps.anthropic,
             preparation.deps.sessionmaker,

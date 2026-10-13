@@ -2638,10 +2638,15 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
             account_id=account.id,
             resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
             memory_read_only=True,
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            mcp_settings=McpSettings(
+                public_url=HttpUrl("https://mcp.example.test/mcp"), jwt_secret=SecretStr("test-jwt")
+            ),
         )
     assert {resource.credential_ref for resource in projected.resource_requirements} == {
         f"agent-env:{tenant.id}:{identity}:SOURCE_KEY",
         f"agent-mcp:{credential.id}",
+        f"caller-mcp:{tenant.id}:{account.id}:{identity}",
     }
     assert projected.repository_sources[0].repository_url == "https://github.com/owner/source"
     assert projected.repository_sources[0].ref == "work"
@@ -2650,3 +2655,151 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
         assert "private-env-value" not in output and "private-ciphertext" not in output
         assert "owned-repo-credential" not in output and "SOURCE_KEY" not in output
     assert not transport.requests and not transport.violations
+
+
+@pytest.mark.parametrize("app_mode", [False, True])
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("crypto_available", [False, True])
+async def test_projection_uses_composer_vault_copilot_and_app_filters(
+    db_preflight, db_nullpool_engine, app_mode, configured, crypto_available, monkeypatch
+):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_mcp_credentials as credentials
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        foreign = await make_tenant(db)
+        foreign_account = await make_account(db, tenant=foreign)
+        agent = ma_agent(id="agent-composer", tenant_id=str(tenant.id), name="source")
+        identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+        db.add(
+            AgentGitHubMode(
+                tenant_id=tenant.id, agent_id=identity, mode="app" if app_mode else "legacy"
+            )
+        )
+        await github_binding_store.set_agent_github_binding(
+            db, agent_id=identity, principal_id=account.id
+        )
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", "SOURCE_KEY"):
+            await put_agent_file(
+                db,
+                tenant_id=tenant.id,
+                agent_id=identity,
+                key=key,
+                content="private-env-value",
+                set_by_account_id=None,
+            )
+        copilot = await credentials.upsert_credential(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            mcp_server_url=GITHUB_COPILOT_MCP_URL,
+            encrypted_token=b"private-copilot",
+        )
+        external = await credentials.upsert_credential(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            mcp_server_url="https://external.example.test/mcp",
+            encrypted_token=b"private-external",
+        )
+        other = await credentials.upsert_credential(
+            db,
+            tenant_id=foreign.id,
+            agent_id=identity,
+            mcp_server_url="https://foreign.example.test/mcp",
+            encrypted_token=b"private-foreign",
+        )
+        await repo_binding_store.set_binding(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            repo_url="owner/legacy",
+            default_branch="work",
+            ma_secret_ref="owned-repo-credential",
+            proof=None,
+        )
+    await upsert_credential_encrypted(
+        sessionmaker=sessions,
+        fernet=fernet,
+        principal_id=account.id,
+        github_login="owned",
+        plaintext_token="private-owned-pat",
+        scopes=("repo",),
+    )
+    await upsert_credential_encrypted(
+        sessionmaker=sessions,
+        fernet=fernet,
+        principal_id=foreign_account.id,
+        github_login="foreign",
+        plaintext_token="private-foreign-pat",
+        scopes=("repo",),
+    )
+
+    def no_secret_or_materialization(*args, **kwargs):
+        raise AssertionError("projection resolved a secret or materialized a resource")
+
+    for path in (
+        "daimon.core.github_credentials.decrypt_token",
+        "daimon.core.stores.agent_files.decode_value",
+        "daimon.core.stores.github_credentials.get_credential_by_principal",
+        "daimon.core.stores.agent_mcp_credentials.list_credentials",
+        "daimon.core.sessions.create_session_vault",
+        "daimon.core.sessions.ensure_agent_mcp_vault",
+        "daimon.core.sessions.add_github_copilot_credential",
+        "daimon.core.sessions.prepare_app_access",
+        "daimon.core.sessions.resolve_clone_token",
+    ):
+        monkeypatch.setattr(path, no_secret_or_materialization)
+    mcp = McpSettings(
+        public_url=HttpUrl("https://mcp.example.test/mcp"),
+        jwt_secret=SecretStr("private-jwt") if configured else None,
+    )
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+        projected = await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=identity,
+            account_id=account.id,
+            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+            memory_read_only=True,
+            mcp_settings=mcp,
+            fernet=fernet if crypto_available else None,
+        )
+    refs = {r.id for r in projected.resource_requirements}
+    assert (f"caller-mcp:{tenant.id}:{account.id}:{identity}" in refs) is configured
+    assert (f"app-session-vault:{tenant.id}:{identity}" in refs) is app_mode
+    assert ("github-copilot-mirror" in refs) is (configured and crypto_available and not app_mode)
+    assert (f"github-credential:{account.id}" in refs) is (crypto_available and not app_mode)
+    assert (f"agent-mcp:{copilot.id}" in refs) is (configured and crypto_available and not app_mode)
+    assert (f"agent-mcp:{external.id}" in refs) is (configured and crypto_available)
+    assert f"agent-mcp:{other.id}" not in refs
+    assert not any(str(foreign_account.id) in ref for ref in refs)
+    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+        assert (f"agent-env:{tenant.id}:{identity}:{key}" in refs) is (not app_mode)
+    assert f"agent-env:{tenant.id}:{identity}:SOURCE_KEY" in refs
+    assert bool(projected.repository_sources) is (not app_mode)
+    if not app_mode:
+        assert projected.repository_sources[0].repository_url == "https://github.com/owner/legacy"
+    assert projected.memory_required is True
+    assert projected.memory_store_id is None
+    assert not transport.requests and not transport.violations
+    for output in (repr(projected), projected.model_dump_json()):
+        assert "private-" not in output and "owned-repo-credential" not in output
