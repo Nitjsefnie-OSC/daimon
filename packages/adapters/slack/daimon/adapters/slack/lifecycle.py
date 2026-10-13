@@ -14,7 +14,7 @@ Design decisions:
 - Final answer rendered as a native markdown block (DEFAULT path,
   locked by live-workspace probe).
 - text= always passed alongside blocks= to satisfy Slack's notification
-  fallback requirement (Pitfall 3).
+  fallback requirement.
 - The Block Kit flush rides the render tick (`on_render`), not `on_sse_event`:
   the driver awaits `on_sse_event` inline in its consume loop, so a debounced
   `chat.update` living there would stall read-timeout detection and deaden
@@ -618,7 +618,7 @@ class SlackTurnLifecycle:
                 # cancelled." — matches the Discord parity reference.
                 if any(isinstance(block, ToolUseBlock) for block in state.content):
                     await self._flush_terminal(feedback=True)
-                    # #79: no reply to hang the notice under on a tool-only
+                    # No reply to hang the notice under on a tool-only
                     # turn, so a dropped server is named on its own line.
                     tool_only_notice = render_degraded_notice(state.mcp_failures)
                     if tool_only_notice is not None:
@@ -640,7 +640,7 @@ class SlackTurnLifecycle:
             if self.answer_prefix is not None:
                 final_text = f"{self.answer_prefix}\n\n{final_text}"
                 self.answer_prefix_applied = True
-            # #79: same trailer as Discord — a dropped server is named under
+            # Same trailer as Discord — a dropped server is named under
             # the reply rather than swallowing the reply.
             degraded_notice = render_degraded_notice(state.mcp_failures)
             if degraded_notice is not None:

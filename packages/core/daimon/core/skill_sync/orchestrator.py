@@ -20,8 +20,8 @@ ma_index` — truncation raises `SkillsListTruncatedError`, which the `_upload_a
 boundary records in `report.failed_uploads`.
 
 Recovery namespace check: before pushing a version onto a recovered skill, we
-verify the recovered skill's display_title carries this tenant's prefix
-(see #138). If it does not, the push is refused with a `DefaultsError`.
+verify the recovered skill's display_title carries this tenant's prefix.
+If it does not, the push is refused with a `DefaultsError`.
 
 Final step attaches uploaded skills (and any pre-existing user_skills rows)
 onto the MA agent via `client.beta.agents.update(agent_id, skills=...)`.
@@ -180,7 +180,7 @@ def _compute_skills_union_list(
 class SyncReport:
     synced: int = 0  # newly created skills on MA
     updated: int = 0  # new versions pushed to existing MA skills
-    deleted: int = 0  # orphan-deleted from MA + local (filled by 07b)
+    deleted: int = 0  # orphan-deleted from MA + local
     skipped_repos: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     failed_uploads: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     # (agent_name, reason) — attach step refused by MA (e.g. per-agent skill cap).
@@ -206,11 +206,11 @@ def _is_retryable_error(err: Exception) -> bool:
 class SyncRepoFailure(BaseModel):
     """Warning DTO for a repo or skill that failed during a sync run.
 
-    Consumed by the MCP envelope (Plan 02) and Discord toast (Plan 03).
+    Consumed by the MCP envelope and Discord toast.
 
     ``repo_url`` carries the repo URL for fetch-phase failures and the skill
     name for upload-phase failures (the repo URL is not cleanly derivable from
-    the skill name — Pitfall 4).
+    the skill name).
     """
 
     repo_url: str
@@ -226,7 +226,7 @@ def sync_report_failures(report: SyncReport) -> list[SyncRepoFailure]:
     Mapping rules:
     - ``skipped_repos`` tuples ``(repo_url, reason)`` → phase="fetch"
     - ``failed_uploads`` tuples ``(skill_name, reason)`` → phase="upload",
-      ``repo_url=skill_name`` (repo URL is not derivable; see Pitfall 4)
+      ``repo_url=skill_name`` (repo URL is not derivable)
     """
     failures: list[SyncRepoFailure] = []
     for repo_url, reason in report.skipped_repos:
@@ -586,7 +586,7 @@ async def sync_agent_skills(
         # Agent not found on MA — use agent_id=None (principal-default) only as
         # a safe fallback for public repos. Private repos will 404 as skipped_repos.
         resolved_agent_id = None
-    # WR-01: when the caller pre-selected a credential, it is the single authority —
+    # When the caller pre-selected a credential, it is the single authority —
     # do NOT re-resolve a per-agent PAT (that double-resolution is what silently
     # shadowed the App installation token).
     per_agent_credential: str | None = None
@@ -607,7 +607,7 @@ async def sync_agent_skills(
             fallback_pat=None,
         )
 
-    # CR-01: user_skills is a per-AGENT ledger, not a per-user one. Both the panel
+    # user_skills is a per-AGENT ledger, not a per-user one. Both the panel
     # sync (Discord-user account principal) and the webhook resync (synthetic webhook
     # principal) target the SAME (tenant, agent). Keying the ledger on the agent's
     # stable derived identity makes both paths share one ledger — so dedup and
@@ -844,7 +844,7 @@ async def sync_agent_skills(
         report.deleted += 1
 
     # 5. Attach step: patch agent.skills to (existing ∪ user_skill anthropic_ids).
-    # Fixes #40 — the Discord Add Skill modal previously uploaded skills but
+    # The Discord Add Skill modal previously uploaded skills but
     # never bound them to the agent.
     #
     # Short-circuit when there are no tracked user_skills for this agent: the
@@ -898,7 +898,7 @@ async def sync_agent_skills(
 
     # Retry closure: recomputes skills union from `fresh` so a concurrent update
     # doesn't cause us to clobber a skill added between our initial read and now
-    # (#144-2). `row_ids` (DB state) stays outside the closure — it doesn't change.
+    # `row_ids` (DB state) stays outside the closure — it doesn't change.
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         if target_ma_agent_id is not None and (
             fresh.archived_at is not None
@@ -923,7 +923,7 @@ async def sync_agent_skills(
         if collision is not None:
             raise DefaultsError(collision)
 
-        # #141 guard: if the agent lacks a base agent_toolset, attach it now so
+        # If the agent lacks a base agent_toolset, attach it now so
         # skills remain usable. MA rejects session creation on an agent with skills
         # but no agent_toolset_20260401 entry providing the read tool.
         has_base_toolset = any(

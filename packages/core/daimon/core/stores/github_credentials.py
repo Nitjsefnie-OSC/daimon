@@ -2,7 +2,7 @@
 
 UPSERT on principal_id: re-OAuth replaces the row with fresh
 github_login + encrypted_token + scopes and bumps updated_at. No
-try/except — DB exceptions propagate to the route boundary in Plan 05.
+try/except — DB exceptions propagate to the route boundary.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ async def get_credential_login_by_principal(
 
     Used by /cli/auth/status — never returns the encrypted token. The
     intentionally narrow signature avoids fanning credential plaintext (or
-    even ciphertext) out to the route layer (T-19-05-02).
+    even ciphertext) out to the route layer.
     """
     orm = await session.get(GitHubCredential, principal_id)
     if orm is None:

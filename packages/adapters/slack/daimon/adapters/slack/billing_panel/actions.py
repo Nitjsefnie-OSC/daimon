@@ -1,6 +1,6 @@
 """Slack /billing slash command handler + billing_topup block_actions handler.
 
-Follows ack-first Socket Mode discipline (S1) — callers ACK before spawning
+Follows ack-first Socket Mode discipline — callers ACK before spawning
 these functions as background tasks. These are the background side of the ack.
 
 Pattern sequence for slash command:
@@ -13,14 +13,14 @@ Pattern sequence for slash command:
 Pattern sequence for billing_topup block_action:
   1. resolve_web_client → client
   2. Re-verify is_admin (re-check at click time, not cached)
-  3. Validate amount ∈ preset set (T-82-10)
+  3. Validate amount ∈ preset set
   4. get_or_create_platform_principal → account_id
   5. create_checkout(http_client, …) → url
   6. chat_postEphemeral with "<url|Complete payment>" link
   7. On failure, views.update the open modal with a static "not configured" message
      instead of leaving the dropdown silently dead
 
-Error boundary (S3): catches DaimonError | httpx.HTTPStatusError | SlackApiError
+Error boundary: catches DaimonError | httpx.HTTPStatusError | SlackApiError
 at the handler level; logs + captures to Sentry, then answers the open modal
 via views.update. Never stripe.
 """
@@ -163,7 +163,7 @@ async def handle_topup_select(
     """Handle the billing_topup static_select block_action.
 
     Re-verifies admin status at click time, validates the selected amount
-    against the preset set (T-82-10), mints an internal token, POSTs to
+    against the preset set, mints an internal token, POSTs to
     /billing/checkout, and replies with an ephemeral "<url|Complete payment>" link.
 
     Args:
@@ -202,7 +202,7 @@ async def handle_topup_select(
             )
             return
 
-        # T-82-10: Validate amount against preset set
+        # Validate amount against preset set
         try:
             amount = int(raw_value)
         except (ValueError, TypeError):

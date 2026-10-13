@@ -21,8 +21,7 @@ def _normalize_owner_repo(url: str) -> str:
     'owner/repo', any with a trailing '/' or '.git'.
 
     Mirrors daimon.core.skill_sync.fetcher._normalize_owner_repo — both sides
-    must normalize identically so set_binding and get_bindings_for_repo match
-    (Pitfall 2 / T-56-09).
+    must normalize identically so set_binding and get_bindings_for_repo match.
     """
     return (
         url.removeprefix("https://github.com/")
@@ -135,7 +134,7 @@ async def get_bindings_for_repo(
 
     Install-agnostic: returns ALL tenants' bindings for the repo.
     Normalizes the lookup key the same way set_binding normalizes the write key,
-    so a webhook's 'owner/repo' always matches stored rows (Pitfall 2 fix).
+    so a webhook's 'owner/repo' always matches stored rows.
     """
     normalized = _normalize_owner_repo(repo_url)
     result = await session.execute(

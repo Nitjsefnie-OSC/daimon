@@ -22,7 +22,7 @@ representation ``reports_store`` documents: INTEGER micro-dollars and
 ISO-8601 TEXT respectively, never ``REAL``.
 
 Every stored message records the bundle digest and PDF revision it was
-grounded in (``bundle_sha256``, ``pdf_revision``) — the audit trail SPEC §3
+grounded in (``bundle_sha256``, ``pdf_revision``) — the audit trail
 requires: every answer must be traceable to the data and the report revision
 it was drawn from.
 """
@@ -195,7 +195,7 @@ def load_thread(
 
     A thread id from one recipient is not readable by another, and a thread
     id from one report is not readable under a different slug — this is the
-    store-level half of the isolation the routes rely on (T-21-12-A).
+    store-level half of the isolation the routes rely on.
     """
     row = conn.execute(
         "SELECT * FROM threads WHERE id = ? AND slug = ? AND recipient_token = ?",
@@ -207,8 +207,8 @@ def load_thread(
 def load_thread_by_id(conn: sqlite3.Connection, *, thread_id: int) -> ThreadRow | None:
     """Look up a thread by id alone, with no recipient or slug scope.
 
-    Reader-facing code always goes through `load_thread`'s three-way scope
-    (T-21-12-A). This unscoped lookup exists only for the upload route,
+    Reader-facing code always goes through `load_thread`'s three-way scope.
+    This unscoped lookup exists only for the upload route,
     which authorises by a per-turn token that already names its own thread
     id and has no recipient token to scope by — it still needs to read that
     thread's current status to refuse a token whose turn has already ended.
