@@ -1501,3 +1501,123 @@ async def test_bound_input_guard_rechecks_ordinary_debit_against_funded_snapshot
     assert not refused.admitted and refused.reason == "tenant_budget_exceeded"
     assert refused.prepaid_available_usd == Decimal("-.5")
     assert refused.worker_exposure_usd == 1
+
+
+@pytest.mark.parametrize("turns,attempts,allowed", [(1, 0, True), (2, 0, False), (1, 1, False)])
+async def test_financial_recapture_accepts_counted_first_input_without_recount_or_release(
+    sm, turns, attempts, allowed
+):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, binding = await bound_worker(sm, parent, run)
+    # Controlled persisted facts. The once-only count transition is store-owned.
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET turns_used=:turns, attempts=:attempts, version=version+1 "
+                "WHERE id=:worker_id AND tenant_id=:tenant_id"
+            ),
+            {
+                "turns": turns,
+                "attempts": attempts,
+                "worker_id": worker.id,
+                "tenant_id": run.tenant_id,
+            },
+        )
+    for _ in range(2):
+        async with sm.begin() as db:
+            current = await require_fleet_worker_admission(
+                db,
+                parent=parent,
+                policy=POLICY,
+                worker_id=worker.id,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                binding=binding,
+            )
+        assert current.admitted is allowed
+        assert current.worker.turns_used == turns and current.worker.attempts == attempts
+        assert current.worker_exposure_usd == 1
+        assert current.reason == (None if allowed else "accepted_attempt_inventory_unavailable")
+    async with sm() as db:
+        assert len(await security_audit.list_events(db, tenant_id=run.tenant_id)) == 1
+        assert len(await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)) == 1
+
+
+async def test_financial_recapture_refuses_used_unallocated_claim(sm):
+    from daimon.core.channel_budget import require_fleet_worker_admission
+
+    parent, run = await setup(sm)
+    worker, _ = await bound_worker(sm, parent, run, running=False)
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET turns_used=1, version=version+1 "
+                "WHERE id=:worker_id AND tenant_id=:tenant_id"
+            ),
+            {"worker_id": worker.id, "tenant_id": run.tenant_id},
+        )
+    async with sm.begin() as db:
+        refused = await require_fleet_worker_admission(
+            db,
+            parent=parent,
+            policy=POLICY,
+            worker_id=worker.id,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+        )
+    assert not refused.admitted
+    assert refused.reason == "accepted_attempt_inventory_unavailable"
+    assert refused.worker_exposure_usd == 1
+
+
+async def test_run_watch_keeps_counted_first_input_live_until_owner_finished(sm, monkeypatch):
+    from daimon.core import channel_budget
+
+    parent = root()
+    parent = replace(parent, limits=parent.limits.model_copy(update={"max_turns": 1}))
+    parent, run = await setup(sm, parent=parent)
+    worker, _ = await bound_worker(sm, parent, run)
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET turns_used=1, version=version+1 "
+                "WHERE id=:worker_id AND tenant_id=:tenant_id"
+            ),
+            {"worker_id": worker.id, "tenant_id": run.tenant_id},
+        )
+    finished, cancelled, polled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = channel_budget.produce_fleet_budget
+    passes = 0
+
+    async def observed(*args, **kwargs):
+        nonlocal passes
+        result = await original(*args, **kwargs)
+        assert result[worker.id].admitted
+        passes += 1
+        if passes >= 2:
+            polled.set()
+        return result
+
+    monkeypatch.setattr(channel_budget, "produce_fleet_budget", observed)
+    task = asyncio.create_task(
+        watch_fleet_budget(
+            sessionmaker=sm,
+            parent=parent,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            cancelled={worker.id: cancelled},
+            finished=finished,
+            poll_interval=0.01,
+            read_timeout=3,
+        )
+    )
+    try:
+        await asyncio.wait_for(polled.wait(), 3)
+        assert not cancelled.is_set() and not task.done()
+        finished.set()
+        assert await asyncio.wait_for(task, 3) == "finished"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

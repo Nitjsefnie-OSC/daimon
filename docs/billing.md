@@ -1102,3 +1102,11 @@ funds under the existing financial fence; it never reserves an unfunded worker.
 Callers commit refusals as well as successes before dispatch, and keep the
 existing lease, single-attempt input claim and canonical model/resource proof.
 Omitting `binding` keeps the unallocated starting-claim check.
+
+The worker store records the accepted initial input once under its stable
+operation identity. Financial guard recapture never increments that count.
+A funded running binding with one counted turn remains eligible for fresh
+checks and monitoring; the count is not proof of zero spend or final usage.
+Recovery attempts, extra turns and a used turn on an unallocated row stay
+refused in the single-input executor slice. The store's max-turn admission and
+input claim still precede dispatch; financial facts do not authorize replay.

@@ -558,7 +558,17 @@ async def _produce_fleet_budget(
                 reason = "worker_budget_exceeded"
             elif pricing_unavailable[worker.id] or unpriced_usage:
                 reason = "pricing_unavailable"
-            elif worker.attempts or worker.turns_used:
+            # The accepted initial input is counted by the worker store, not
+            # by guard recapture. Its funded running binding stays monitored.
+            elif worker.attempts or (
+                worker.turns_used
+                and (
+                    worker.turns_used != 1
+                    or worker.turns_used > worker.max_turns
+                    or worker.status != "running"
+                    or worker.binding_id is None
+                )
+            ):
                 reason = "accepted_attempt_inventory_unavailable"
             if reserve and reason is None and worker.reserved_usd < worker.budget_usd:
                 delta = worker.budget_usd - worker.reserved_usd
