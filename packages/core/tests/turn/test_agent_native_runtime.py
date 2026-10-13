@@ -1674,7 +1674,8 @@ async def test_claimed_worker_opaque_source_is_refused_before_funding_or_native_
             run_id=worker.run_id,
         )
         persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
-    assert persisted.status == "starting" and persisted.reserved_usd == 0
+    assert persisted.status == "failed" and persisted.error_code == "preparation_refused"
+    assert persisted.reserved_usd == 0
     assert persisted.turns_used == 0 and persisted.binding_id is None and persisted.result is None
 
 

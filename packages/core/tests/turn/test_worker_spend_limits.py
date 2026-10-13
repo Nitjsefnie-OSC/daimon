@@ -101,7 +101,7 @@ async def test_requested_unsupported_ceiling_cannot_allocate_or_consume_a_worker
             run_id=worker.run_id,
         )
         persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
-    assert persisted.status == "starting"
+    assert persisted.status == "failed" and persisted.error_code == "preparation_refused"
     assert persisted.binding_id is None and persisted.turns_used == 0
     assert persisted.reserved_usd == 0 and persisted.result is None
 
