@@ -988,7 +988,8 @@ credential loaders, ledger, staging runner or product hooks are installed.
 Fleet outcome captures persist `FleetWorkerFacts.from_worker(worker)` through
 the existing `FleetWorkerCapture.worker` field. The projection omits private
 specs and arbitrary contract maps, retains original result pointers, and keeps
-only typed review facts with explicit coverage. Unsupported review data stays
+only independently validated review facts with explicit coverage. An invalid
+sibling field never erases a valid finding. Unsupported review data stays
 unverified without hiding a known failure. Recorded results accept unchanged
 normalized text payloads and exclude opaque native records/references; a
 private or binary payload is refused. Genuine in-memory worker/event inputs

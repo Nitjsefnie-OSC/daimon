@@ -292,11 +292,15 @@ class FleetWorkerFacts:
             key: value for key, value in contract.items() if key in FleetReviewFacts.model_fields
         }
         complete = len(known) == len(contract)
-        try:
-            review = FleetReviewFacts.model_validate(known)
-        except ValidationError:
-            review = None
-            complete = False
+        valid: dict[str, JsonValue] = {}
+        for key, value in known.items():
+            try:
+                FleetReviewFacts.model_validate({key: value})
+            except ValidationError:
+                complete = False
+            else:
+                valid[key] = value
+        review = FleetReviewFacts.model_validate(valid)
         return cls(
             id=worker.id,
             run_id=worker.run_id,

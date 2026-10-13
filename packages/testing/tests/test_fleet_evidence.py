@@ -161,3 +161,35 @@ def test_safe_json_still_checks_original_result_binding_and_early_review():
     assert {"INVALID_RESULT_BINDING", "REVIEW_STARTED_BEFORE_READY_ROOT"} <= {
         c.code for c in report.checks
     }
+
+
+@pytest.mark.parametrize("invalid", [{"format": "json"}, {"reviewed_digest": 7}])
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("missing_reviewer", [False, True])
+def test_invalid_review_sibling_preserves_valid_requirement(invalid, required, missing_reviewer):
+    source, assertion = fleet_recording()
+    facts = FleetWorkerFacts.from_worker(original_worker({"review_required": required, **invalid}))
+    recording = replace_capture(source, worker=facts)
+    if missing_reviewer:
+        recording = recording.model_copy(
+            update={
+                "fleet": recording.fleet.model_copy(
+                    update={
+                        "workers": recording.fleet.workers[:3],
+                        "workers_capture_complete": False,
+                        "wakes": recording.fleet.wakes[:1],
+                        "wakes_capture_complete": False,
+                    }
+                )
+            }
+        )
+    restored = RunEvidence.model_validate_json(recording.model_dump_json())
+    report = evaluate(restored, [assertion], finding_judge=fixture_finding_judge)
+    assert restored.fleet.workers[0].worker.review.review_required is required
+    assert not restored.fleet.workers[0].worker.review_complete
+    assert any(c.code == "REVIEW_CONTRACT_UNBOUND" for c in report.checks)
+    if required:
+        assert report.status == "PENDING"
+    else:
+        assert report.status == "FAIL"
+        assert any(c.code == "REVIEW_NOT_REQUIRED" for c in report.checks)
