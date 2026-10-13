@@ -190,7 +190,7 @@ class HostFleetToolService:
             )
         facts = parent.fleet
         if origin is not None and (
-            facts.origin_id != origin.id
+            (self._parent_loader is not None and facts.origin_id != origin.id)
             or facts.root.channel.channel_id != origin.parent_channel_id
             or facts.root.thread_id != origin.thread_id
         ):

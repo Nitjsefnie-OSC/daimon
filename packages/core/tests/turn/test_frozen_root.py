@@ -91,10 +91,13 @@ async def root_turn(db_preflight, db_nullpool_engine):
         return send_events_response()
 
     class Stream(httpx.AsyncByteStream):
+        def __init__(self):
+            input_sent.clear()
+
         async def __aiter__(self):
             await input_sent.wait()
             response = sse_response(
-                [make_status_idle(event_id="root-idle").model_dump(mode="json")]
+                [make_status_idle(event_id="root-idle-" + str(uuid4())).model_dump(mode="json")]
             )
             yield response.content
 
@@ -848,3 +851,557 @@ async def test_one_intent_cannot_be_reserved_by_another_account(root_turn, statu
                 await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) == original
             )
         assert len(other_transport.requests) == 2
+
+
+async def run_root_input(value, *, intent_id=None, completion=None):
+    deps, prepared, _, intent, origin, _, _, _ = value
+
+    async def reseed():
+        return "root input"
+
+    lifecycle = RecordingLifecycle()
+    return await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=prepared.admission.grant.tenant_id,
+        platform="discord",
+        thread_id=origin.thread_id,
+        external_user_id="requester",
+        user_message="root input",
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: lifecycle,
+        turn_card_intent_id=intent_id or intent.id,
+        worker_finished=completion,
+    )
+
+
+async def completion_claim(value, *, ordinal=0, reviewer_of=None):
+    from daimon.core.continuity.continuation import ContinuationRequest
+    from daimon.core.continuity.wakes import (
+        arm_worker_finished,
+        claim_wake,
+        start_wake,
+        worker_finished_key,
+    )
+    from daimon.core.stores.task_continuations import get_continuation
+
+    deps, prepared, _, intent, origin, scope, _, _ = value
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    run, _ = await fleet.run_status(
+        deps.sessionmaker, tenant_id=origin.tenant_id, run_id=parent.fleet.run_id
+    )
+    worker = await fleet.add_worker(
+        deps.sessionmaker,
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        ordinal=ordinal,
+        role="review" if reviewer_of else "research",
+        spec={},
+        spec_digest=f"member-{ordinal}",
+        backend="anthropic",
+        profile="anthropic.managed_agents",
+        model="claude-haiku-5-5",
+        budget_usd=Decimal(0),
+        deadline_at=run.deadline_at,
+        max_turns=1,
+        reviewer_of=reviewer_of,
+    )
+    worker = await fleet.finish(
+        deps.sessionmaker,
+        tenant_id=run.tenant_id,
+        worker_id=worker.id,
+        expected_version=worker.version,
+        status="cancelled",
+        error_code="cancelled",
+    )
+    now = datetime.now(UTC)
+    request = ContinuationRequest(
+        tenant_id=run.tenant_id,
+        platform="discord",
+        parent_channel_id=run.channel_id,
+        thread_id=run.thread_id,
+        requester_account_id=run.orchestrator_account_id,
+        requester_external_user_id="requester",
+        target_ma_agent_id=prepared.admission.agent.id,
+        target_name=prepared.admission.agent.name,
+        requested_work=None,
+        reason="worker_finished",
+        idempotency_key=worker_finished_key(run.id, [worker.id]),
+    )
+    async with deps.sessionmaker.begin() as db:
+        row = await arm_worker_finished(db, request, run_id=run.id, worker_ids=[worker.id], now=now)
+    assert row is not None
+    claimed = await claim_wake(deps.sessionmaker, idempotency_key=row.idempotency_key, now=now)
+    assert claimed is not None
+    assert await start_wake(deps.sessionmaker, claimed, now=now)
+    async with deps.sessionmaker() as db:
+        row = await get_continuation(db, idempotency_key=row.idempotency_key)
+    assert row is not None and row.started_at is not None
+    return row, worker
+
+
+@asynccontextmanager
+async def wake_frame(value):
+    deps, prepared, _, _, origin, _, _, _ = value
+    async with deps.sessionmaker.begin() as db:
+        intent = await turn_card_intents.create_turn_card_intent(
+            db,
+            tenant_id=origin.tenant_id,
+            platform="discord",
+            channel_id=origin.parent_channel_id,
+            thread_id=origin.thread_id,
+            turn_token=uuid4(),
+        )
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=origin.tenant_id,
+        account_id=origin.account_id,
+        platform="discord",
+        parent_channel_id=origin.parent_channel_id,
+        thread_id=origin.thread_id,
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+    ) as current:
+        yield intent, current
+
+
+async def test_started_completion_carries_original_run_across_two_real_turn_frames(root_turn):
+    deps, prepared, grants, intent, seed, scope, _, transport = root_turn
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=seed.tenant_id,
+        account_id=seed.account_id,
+        platform="discord",
+        parent_channel_id=seed.parent_channel_id,
+        thread_id=seed.thread_id,
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+        keep_fleet_root=True,
+    ) as origin:
+        grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
+        root_turn = (*root_turn[:4], origin, *root_turn[5:])
+        await run_root_input(root_turn)
+        original, _ = await read_frozen_root(
+            deps, scope, origin_id=origin.id, now=datetime.now(UTC)
+        )
+    async with deps.sessionmaker() as db:
+        retained = await turn_origins.get_active_origin(
+            db,
+            origin_id=origin.id,
+            tenant_id=origin.tenant_id,
+            account_id=origin.account_id,
+            platform="discord",
+            now=datetime.now(UTC),
+        )
+    assert retained is not None and retained.expires_at == original.limits.deadline
+    async with deps.sessionmaker.begin() as db:
+        assert not await turn_card_intents.retire_turn_card_intent(
+            db,
+            id=intent.id,
+            expected_message_id=None,
+            keep_fleet_root=True,
+        )
+
+    async def no_new_authority(_grant, _source):
+        raise AssertionError("A completion must not reload grants")
+
+    value = (replace(deps, fleet_root_grants=no_new_authority), *root_turn[1:])
+    previous = None
+    for ordinal in (0, 1):
+        row, worker = await completion_claim(value, ordinal=ordinal, reviewer_of=previous)
+        async with wake_frame(value) as (current_intent, current_origin):
+            await run_root_input(value, intent_id=current_intent.id, completion=row)
+            carried, _ = await read_frozen_root(
+                deps,
+                scope,
+                origin_id=current_origin.id,
+                run_id=original.fleet.run_id,
+                now=datetime.now(UTC),
+            )
+            assert carried == original
+        by_card, _ = await read_frozen_root(
+            deps,
+            scope,
+            intent_id=current_intent.id,
+            run_id=original.fleet.run_id,
+            now=datetime.now(UTC),
+        )
+        assert by_card == original
+        async with deps.sessionmaker() as db:
+            assert (
+                await turn_origins.get_active_origin(
+                    db,
+                    origin_id=current_origin.id,
+                    tenant_id=origin.tenant_id,
+                    account_id=origin.account_id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+                is None
+            )
+        previous = worker.id
+    async with deps.sessionmaker() as db:
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == origin.tenant_id)
+            )
+            == 1
+        )
+    assert sum(r.method == "POST" and r.path.endswith("/events") for r in transport.requests) == 3
+    assert sum(r.method == "POST" and r.path == "/v1/sessions" for r in transport.requests) == 1
+    async with deps.sessionmaker() as db:
+        records = (
+            await db.scalars(select(MuxOperation).where(MuxOperation.tenant_id == origin.tenant_id))
+        ).all()
+    locators = [r.record["result"] for r in records if "root_origin_id" in r.record["result"]]
+    assert len(locators) == 2 and all("permissions" not in r for r in locators)
+    assert all(r["run_id"] == str(original.fleet.run_id) for r in locators)
+
+
+@pytest.mark.parametrize(
+    "change", ["unstarted", "owner", "attempt", "start", "expired", "account", "tenant", "session"]
+)
+async def test_completion_claim_refuses_before_input_or_root_reservation(root_turn, change):
+    from daimon.core._models import TaskContinuation
+    from sqlalchemy import update
+
+    deps, prepared, _, _, _, scope, binding, transport = root_turn
+    await run_root_input(root_turn)
+    row, _ = await completion_claim(root_turn)
+    value = root_turn
+    if change == "unstarted":
+        row = row.model_copy(update={"started_at": None})
+    elif change == "owner":
+        row = row.model_copy(update={"lease_owner": "different-claim"})
+    elif change == "attempt":
+        row = row.model_copy(update={"attempts": row.attempts + 1})
+    elif change == "start":
+        row = row.model_copy(update={"started_at": row.started_at + timedelta(seconds=1)})
+    elif change == "expired":
+        async with deps.sessionmaker.begin() as db:
+            await db.execute(
+                update(TaskContinuation)
+                .where(TaskContinuation.id == row.id)
+                .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+    elif change == "account":
+        row = row.model_copy(update={"requester_account_id": uuid4()})
+    elif change == "tenant":
+        row = row.model_copy(update={"tenant_id": uuid4()})
+    else:
+        value = (deps, replace(prepared, ma_session_id="another-session"), *root_turn[2:])
+    before = sum(r.method == "POST" for r in transport.requests)
+    async with wake_frame(value) as (intent, origin):
+        from daimon.core.continuity.wakes import WorkerFinishedRootChanged
+        from daimon.core.turn.runtime_manifest import resume_prepared_root
+
+        persistence = TurnPersistence(
+            deps.state_store, binding, scope, operation_key=f"wake:{row.id}"
+        )
+
+        async def attempt():
+            with persistence.activate():
+                await resume_prepared_root(
+                    deps, value[1], row, intent_id=intent.id, now=lambda: datetime.now(UTC)
+                )
+
+        expected = (
+            WorkerSpecRefused
+            if change in {"unstarted", "account", "tenant"}
+            else WorkerFinishedRootChanged
+        )
+        with pytest.raises(expected):
+            await persistence.run(attempt)
+        async with deps.sessionmaker() as db:
+            assert await mux_state.get_fleet_root_operation(db, scope, origin_id=origin.id) is None
+    assert sum(r.method == "POST" for r in transport.requests) == before
+    async with deps.sessionmaker() as db:
+        assert await db.scalar(
+            select(func.count()).select_from(FleetRun).where(FleetRun.tenant_id == row.tenant_id)
+        ) == (0 if change == "tenant" else 1)
+
+
+@pytest.mark.parametrize("status", ["running", "collecting", "cancelled", "failed", "completed"])
+async def test_retained_root_readers_follow_later_run_transitions(root_turn, status):
+    deps, prepared, grants, intent, seed, scope, _, transport = root_turn
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=seed.tenant_id,
+        account_id=seed.account_id,
+        platform="discord",
+        parent_channel_id=seed.parent_channel_id,
+        thread_id=seed.thread_id,
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+        keep_fleet_root=True,
+    ) as origin:
+        grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
+        value = (*root_turn[:4], origin, *root_turn[5:])
+        await run_root_input(value)
+        original, _ = await read_frozen_root(
+            deps, scope, intent_id=intent.id, now=datetime.now(UTC)
+        )
+    # End the run only AFTER the original frame has retained its live context.
+    async with deps.sessionmaker.begin() as db:
+        assert not await turn_card_intents.retire_turn_card_intent(
+            db, id=intent.id, expected_message_id=None, keep_fleet_root=True
+        )
+    row, _ = await completion_claim(value)
+    async with wake_frame(value) as (current_intent, current):
+        await run_root_input(value, intent_id=current_intent.id, completion=row)
+        run, _ = await fleet.run_status(
+            deps.sessionmaker, tenant_id=origin.tenant_id, run_id=original.fleet.run_id
+        )
+        if status == "completed":
+            run = await fleet.set_run_status(
+                deps.sessionmaker,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                expected_version=run.version,
+                status="collecting",
+            )
+        if status != "running":
+            await fleet.set_run_status(
+                deps.sessionmaker,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                expected_version=run.version,
+                status=status,
+            )
+        async with deps.sessionmaker() as db:
+            assert (
+                await turn_origins.get_active_origin(
+                    db,
+                    origin_id=origin.id,
+                    tenant_id=origin.tenant_id,
+                    account_id=origin.account_id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+                is not None
+            )
+            card = await turn_card_intents.get_turn_card_intent(db, id=intent.id)
+            assert card is not None and card.status in ("prepared", "posted")
+        requests = tuple(transport.requests)
+        for selector in (
+            {"origin_id": origin.id},
+            {"intent_id": intent.id},
+            {"origin_id": current.id},
+            {"intent_id": current_intent.id},
+        ):
+            if status in ("running", "collecting"):
+                parent, _ = await read_frozen_root(deps, scope, **selector, now=datetime.now(UTC))
+                assert parent == original
+            else:
+                with pytest.raises(WorkerSpecRefused, match="stale"):
+                    await read_frozen_root(deps, scope, **selector, now=datetime.now(UTC))
+        assert tuple(transport.requests) == requests
+
+
+@pytest.mark.parametrize("terminal", ["cancelled", "failed", "completed", "expired"])
+async def test_original_context_and_card_are_not_retained_for_a_closed_run(root_turn, terminal):
+    from sqlalchemy import update
+
+    deps, prepared, grants, intent, seed, scope, _, _ = root_turn
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=seed.tenant_id,
+        account_id=seed.account_id,
+        platform="discord",
+        parent_channel_id=seed.parent_channel_id,
+        thread_id=seed.thread_id,
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+        keep_fleet_root=True,
+    ) as origin:
+        grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
+        value = (*root_turn[:4], origin, *root_turn[5:])
+        await run_root_input(value)
+        parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+        run, _ = await fleet.run_status(
+            deps.sessionmaker, tenant_id=origin.tenant_id, run_id=parent.fleet.run_id
+        )
+        if terminal == "expired":
+            async with deps.sessionmaker.begin() as db:
+                await db.execute(
+                    update(FleetRun)
+                    .where(FleetRun.id == run.id)
+                    .values(deadline_at=datetime.now(UTC))
+                )
+        else:
+            if terminal == "completed":
+                run = await fleet.set_run_status(
+                    deps.sessionmaker,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    expected_version=run.version,
+                    status="collecting",
+                )
+            await fleet.set_run_status(
+                deps.sessionmaker,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                expected_version=run.version,
+                status=terminal,
+            )
+        async with deps.sessionmaker.begin() as db:
+            assert await turn_card_intents.retire_turn_card_intent(
+                db, id=intent.id, expected_message_id=None, keep_fleet_root=True
+            )
+    async with deps.sessionmaker() as db:
+        assert (
+            await turn_origins.get_active_origin(
+                db,
+                origin_id=origin.id,
+                tenant_id=origin.tenant_id,
+                account_id=origin.account_id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+            is None
+        )
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(
+            deps, scope, origin_id=origin.id, run_id=run.id, now=datetime.now(UTC)
+        )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "pending",
+        "outcome_unknown",
+        "cycle",
+        "run",
+        "binding",
+        "scope",
+        "retired_intent",
+        "original_deleted",
+        "requested_run",
+    ],
+)
+async def test_resume_reader_refuses_uncertain_or_conflicting_locators(root_turn, fault):
+    import copy
+
+    from sqlalchemy import update
+
+    deps, _, _, _, original_origin, scope, _, transport = root_turn
+    await run_root_input(root_turn)
+    row, _ = await completion_claim(root_turn)
+    async with wake_frame(root_turn) as (intent, current):
+        await run_root_input(root_turn, intent_id=intent.id, completion=row)
+        retained, _ = await read_frozen_root(
+            deps, scope, origin_id=current.id, now=datetime.now(UTC)
+        )
+        async with deps.sessionmaker.begin() as db:
+            key = f"fleet_root:{current.id}:root:0"
+            operation = await db.scalar(
+                select(MuxOperation).where(
+                    MuxOperation.tenant_id == current.tenant_id, MuxOperation.key == key
+                )
+            )
+            body = copy.deepcopy(operation.record)
+            if fault in {"pending", "outcome_unknown"}:
+                body["operation"]["status"] = fault
+                await db.execute(
+                    update(MuxOperation)
+                    .where(
+                        (MuxOperation.tenant_id == operation.tenant_id)
+                        & (MuxOperation.account_id == operation.account_id)
+                        & (MuxOperation.key == operation.key)
+                    )
+                    .values(status=fault, record=body)
+                )
+            elif fault == "retired_intent":
+                assert await turn_card_intents.retire_turn_card_intent(
+                    db, id=intent.id, expected_message_id=None
+                )
+            elif fault == "original_deleted":
+                await turn_origins.delete_origin(db, origin_id=original_origin.id)
+            elif fault != "requested_run":
+                result = body["result"]
+                if fault == "cycle":
+                    result["root_origin_id"] = str(current.id)
+                elif fault == "run":
+                    result["run_id"] = str(uuid4())
+                elif fault == "binding":
+                    result["binding"]["generation"] += 1
+                else:
+                    result["scope"]["account_id"] = str(uuid4())
+                await db.execute(
+                    update(MuxOperation)
+                    .where(
+                        (MuxOperation.tenant_id == operation.tenant_id)
+                        & (MuxOperation.account_id == operation.account_id)
+                        & (MuxOperation.key == operation.key)
+                    )
+                    .values(record=body)
+                )
+        before = len(transport.requests)
+        with pytest.raises((WorkerSpecRefused, ScopeViolation)):
+            await read_frozen_root(
+                deps,
+                scope,
+                origin_id=current.id,
+                run_id=uuid4() if fault == "requested_run" else retained.fleet.run_id,
+                now=datetime.now(UTC),
+            )
+        assert len(transport.requests) == before
+
+
+async def test_original_run_selected_even_with_a_newer_root_on_the_same_binding(root_turn):
+    deps, prepared, grants, intent, origin, scope, _, _ = root_turn
+    await run_root_input(root_turn)
+    original, _ = await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
+    row, _ = await completion_claim(root_turn)
+    async with wake_frame(root_turn) as (new_intent, new_origin):
+        grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=new_origin.id))
+        await run_root_input(root_turn, intent_id=new_intent.id)
+        latest, _ = await read_frozen_root(
+            deps, scope, origin_id=new_origin.id, now=datetime.now(UTC)
+        )
+        assert latest.fleet.run_id != original.fleet.run_id
+
+        async def no_copy(*args):
+            raise AssertionError("continuation may not load fresh authority")
+
+        value = (replace(deps, fleet_root_grants=no_copy), *root_turn[1:])
+        async with wake_frame(value) as (continuation_intent, continuation_origin):
+            await run_root_input(value, intent_id=continuation_intent.id, completion=row)
+            carried, _ = await read_frozen_root(
+                deps,
+                scope,
+                origin_id=continuation_origin.id,
+                run_id=original.fleet.run_id,
+                now=datetime.now(UTC),
+            )
+            assert carried == original
+
+
+async def test_retention_never_extends_existing_database_expiry(root_turn):
+    from daimon.core._models import TurnOrigin
+    from sqlalchemy import update
+
+    deps, _, _, _, origin, _, _, _ = root_turn
+    await run_root_input(root_turn)
+    earlier = datetime.now(UTC) + timedelta(seconds=30)
+    async with deps.sessionmaker.begin() as db:
+        await db.execute(
+            update(TurnOrigin).where(TurnOrigin.id == origin.id).values(expires_at=earlier)
+        )
+        await turn_origins.delete_origin(
+            db, origin_id=origin.id, retain_until=earlier + timedelta(hours=1)
+        )
+    async with deps.sessionmaker() as db:
+        assert (
+            await db.scalar(select(TurnOrigin.expires_at).where(TurnOrigin.id == origin.id))
+            == earlier
+        )

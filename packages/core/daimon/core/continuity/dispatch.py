@@ -27,6 +27,7 @@ from daimon.core.continuity.wakes import (
     WAKE_RETRY_DELAY,
     WAKE_UNAVAILABLE_DELAY,
     WakeClaim,
+    WorkerFinishedRootChanged,
     busy_retry_at,
     claim_wake,
     list_dispatchable_wakes,
@@ -36,6 +37,7 @@ from daimon.core.continuity.wakes import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
+from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.errors import (
     AdmissionDenied,
@@ -244,6 +246,15 @@ async def dispatch_pending_continuations(
         if not await start_wake(sessionmaker, claim, now=now()):
             continue  # Another dispatcher took the row over while this one decided.
         try:
+            if row.reason == "worker_finished":
+                async with sessionmaker() as db:
+                    started_row = await get_continuation(db, idempotency_key=row.idempotency_key)
+                if started_row is None or (started_row.lease_owner, started_row.attempts) != (
+                    claim.owner,
+                    claim.attempts,
+                ):
+                    raise WorkerFinishedRootChanged("Completion claim changed before resume")
+                row = started_row
             if run_decision is not None:
                 await run_decision(row, decision)
             else:

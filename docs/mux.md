@@ -2744,3 +2744,20 @@ same transaction. Pending/claimed rows become cancelled and their lease metadata
 is cleared; delivered/skipped records remain unchanged. Stale claim writes
 cannot revive scheduling. This does not interrupt native work or release
 money. Other runs, roots and wake reasons retain their scheduling.
+Fleet completion turns carry the actual claimed and started durable wake row to
+the normal prepared-turn runner. They retain a locator in the existing root
+operation, referencing the exact original processed root and run rather than
+creating another run or reloading grants. Authenticated tools verify the current
+live origin; cards use their genuine current intent. Both resolve the same
+one-hop association and recheck original scope, source, native binding, account,
+policy and finite deadline. Unknown receipts and conflicting claims refuse.
+
+Opted-in original root origins and mapped card intents are retained at exit
+only while their exact run is active and unexpired. Original origin expiry is
+capped to its existing expiry and the original deadline. Wake origins keep their
+normal execution lifetime. The frozen-root reader rechecks durable run state on
+every resolution: only running or collecting runs retain execution authority.
+Completing, failing or cancelling a run after its original turn exits invalidates
+both original and completion-locator readers even if bounded origin/card records
+remain. Removing those audit records at run end is a separate lifecycle owner
+unit. Ordinary turns and disabled lifecycle calls retain their existing behavior.
