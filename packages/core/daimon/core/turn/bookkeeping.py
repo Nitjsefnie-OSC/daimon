@@ -5,12 +5,17 @@ and transport error handling. Store and provider calls are injected so each
 adapter keeps its existing failure policy.
 """
 
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Protocol
 from uuid import UUID
 
 from daimon.core.stores.domain import ThreadSessionRow
-from daimon.core.stores.thread_sessions import mark_dead
+from daimon.core.stores.thread_sessions import (
+    clear_active_turn,
+    clear_active_turn_if_message_id,
+    mark_dead,
+)
+from daimon.core.turn.running import RunningTurns
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -34,6 +39,31 @@ async def clear_turn_markers(
     """Clear touched mappings in the caller's transaction and iteration order."""
     for mapping_id in ids:
         await clear(session, id=mapping_id)
+
+
+async def release_turn_markers(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    running_turns: RunningTurns,
+    markers: Mapping[UUID, str | None],
+) -> None:
+    """Clear a finished turn's thread markers, each in its own transaction.
+
+    A marker with an expected message id is cleared only while it still names
+    that message; one with None is cleared unconditionally. A turn unwinding
+    from the shutdown drain's cancel keeps every marker: its session is still
+    running, and the next process's orphan sweep recovers it through them.
+    """
+    if running_turns.is_drain_cancel():
+        return
+    for mapping_id, expected_message_id in markers.items():
+        async with sessionmaker() as session:
+            if expected_message_id is None:
+                await clear_active_turn(session, id=mapping_id)
+            else:
+                await clear_active_turn_if_message_id(
+                    session, id=mapping_id, expected_message_id=expected_message_id
+                )
+            await session.commit()
 
 
 async def recover_orphan_marker(

@@ -113,12 +113,12 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.domain import Role, WizardSessionRow
 from daimon.core.stores.tenants import get_turn_cap
 from daimon.core.stores.thread_sessions import (
-    clear_active_turn_if_message_id,
     mark_turn_active,
     update_watermark,
 )
 from daimon.core.stores.wizard_session import try_claim_submit
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
@@ -801,19 +801,9 @@ async def run_wizard_submit_turn_observed(
                 final_message_id = lifecycle_holder[0].final_message_id
                 if final_message_id is not None:
                     marker_ids[outcome.mapping_id] = final_message_id
-            # A shutdown cancelled this turn mid-run: its MA session is still
-            # going. The marker stays for the next process's orphan sweep, which
-            # delivers a finished answer or interrupts the session.
-            if bot._keeps_turn_for_recovery():  # pyright: ignore[reportPrivateUsage]  # the drain's shared rule
-                marker_ids.clear()
-            for marker_id, expected_message_id in marker_ids.items():
-                async with bot.runtime.sessionmaker() as marker_session:
-                    await clear_active_turn_if_message_id(
-                        marker_session,
-                        id=marker_id,
-                        expected_message_id=expected_message_id,
-                    )
-                    await marker_session.commit()
+            await release_turn_markers(
+                bot.runtime.sessionmaker, bot.runtime.turn_deps.running_turns, marker_ids
+            )
             if outcome is not None:
                 await retire_terminal_turn_card(
                     bot.runtime.sessionmaker,

@@ -421,7 +421,7 @@ async def reply_to_dm(
         history = [{"role": turn.role, "text": turn.text} for turn in turns]
         return answer
     except asyncio.CancelledError:
-        if bound and deps.running_turns.shutting_down:
+        if bound and deps.running_turns.is_drain_cancel():
             await _settle_shutdown_cancelled_dm(deps, conversation)
         raise
     finally:
