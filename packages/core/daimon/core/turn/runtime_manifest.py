@@ -125,15 +125,56 @@ def fixed_plan_origin_allowed(origin: str | None) -> bool:
     return origin == "channel"
 
 
+async def capture_preparation_source(request: ProviderPreparationRequest) -> BackendAgent:
+    """Capture source facts; the existing proof and materializer validate them."""
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.sessions import project_session_resources
+
+    source = request.source
+    if source is None:
+        source = await load_backend_agent(
+            request.deps.anthropic,
+            request.deps.sessionmaker,
+            tenant_id=request.tenant_id,
+            agent_name=(request.admission.agent.metadata or {}).get(
+                MA_METADATA_KEY_NAME, request.admission.config.agent_name
+            )
+            or "",
+            actual_agent=request.admission.agent,
+        )
+    return await project_session_resources(
+        source,
+        agent=request.admission.agent,
+        environment=request.admission.environment,
+        session_factory=request.deps.sessionmaker,
+        tenant_id=request.tenant_id,
+        agent_uuid=source.agent_id,
+        account_id=(
+            None if request.admission.shared_owner is not None else request.admission.account_id
+        ),
+        resource_scope=request.scope,
+        memory_read_only=request.admission.memory_read_only,
+        fernet=request.deps.fernet,
+        channel_skills=request.admission.channel_skills,
+        tool_safety=request.deps.tool_safety,
+        asks_before_publishing=request.admission.asks_before_publishing,
+        mcp_settings=request.deps.mcp,
+        agent_github_app=request.deps.agent_github_app,
+        is_external=request.admission.is_external,
+        hide_personal_for=request.admission.shared_owner,
+        slack_turn_context_id=request.admission.slack_turn_context_id,
+        private_dm_id=request.admission.private_dm_id,
+        origin_seal_ids=request.admission.origin_seal_ids,
+    )
+
+
 async def read_preparation_counterpart(
     request: ProviderPreparationRequest,
 ) -> ProviderPreparationRequest:
     """Capture complete source intent and refuse every unproved preservation obligation."""
-    from daimon.core.channel_backend import load_backend_agent
-    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.errors import TurnError
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.sessions import project_session_resources
     from daimon.core.turn.ceiling import remaining_s, turn_deadline
     from daimon.core.turn.errors import AdmissionDenied
     from mux.errors import UnsupportedCapability
@@ -164,47 +205,9 @@ async def read_preparation_counterpart(
         ),
     )
 
-    async def capture() -> BackendAgent:
-        source = request.source
-        if source is None:
-            source = await load_backend_agent(
-                request.deps.anthropic,
-                request.deps.sessionmaker,
-                tenant_id=request.tenant_id,
-                agent_name=(request.admission.agent.metadata or {}).get(
-                    MA_METADATA_KEY_NAME, request.admission.config.agent_name
-                )
-                or "",
-                actual_agent=request.admission.agent,
-            )
-        return await project_session_resources(
-            source,
-            agent=request.admission.agent,
-            environment=request.admission.environment,
-            session_factory=request.deps.sessionmaker,
-            tenant_id=request.tenant_id,
-            agent_uuid=source.agent_id,
-            account_id=(
-                None if request.admission.shared_owner is not None else request.admission.account_id
-            ),
-            resource_scope=request.scope,
-            memory_read_only=request.admission.memory_read_only,
-            fernet=request.deps.fernet,
-            channel_skills=request.admission.channel_skills,
-            tool_safety=request.deps.tool_safety,
-            asks_before_publishing=request.admission.asks_before_publishing,
-            mcp_settings=request.deps.mcp,
-            agent_github_app=request.deps.agent_github_app,
-            is_external=request.admission.is_external,
-            hide_personal_for=request.admission.shared_owner,
-            slack_turn_context_id=request.admission.slack_turn_context_id,
-            private_dm_id=request.admission.private_dm_id,
-            origin_seal_ids=request.admission.origin_seal_ids,
-        )
-
     try:
         timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
-        source = await asyncio.wait_for(capture(), timeout=timeout)
+        source = await asyncio.wait_for(capture_preparation_source(request), timeout=timeout)
         if (
             source.tenant_id != request.tenant_id
             or source.agent_id
@@ -337,7 +340,9 @@ async def read_preparation_counterpart(
             runtime.read_agent_counterpart(selected), timeout=timeout
         )
         timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
-        current_source = await asyncio.wait_for(capture(), timeout=timeout)
+        current_source = await asyncio.wait_for(
+            capture_preparation_source(request), timeout=timeout
+        )
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)

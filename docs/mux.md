@@ -2498,3 +2498,5 @@ financial guard and set `retry_failed=False`. An acknowledged native resource is
 restored from its real receipt; an unknown or refused attempt never creates again.
 The result seam selects only complete, authoritative journal messages accepted by
 the worker driver and calls the existing fleet result writer under that lease.
+
+Source facts are captured through the same preparation request for preservation proof and worker resource composition. Capture does not grant execution or allocation; the existing proof and materializer validate the captured identity and obligations.

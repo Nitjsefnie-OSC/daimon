@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Verify worker resource publication against its existing native mutation receipt, captured source and scoped catalog before native readback.
 
+- Reuse the existing source capture across worker preservation and resource composition.
+
+- Reuse the fenced turn mutation owner for unbound private worker slots and publish accepted worker results from their durable journal.
 - Resolve canonical workers through the current backend policy and preserve their full specs through scoped, single-attempt agent creation.
 
 - Allow fleet worker specs to declare closed resource drops, narrow their grants, remove sandbox execution tools, and record the declarations in existing scoped audits.
