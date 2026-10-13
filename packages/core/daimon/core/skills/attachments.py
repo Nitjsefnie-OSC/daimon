@@ -33,6 +33,7 @@ from daimon.core.stores.channel_skills import (
     remove_skill_from_every_channel,
 )
 from daimon.core.stores.domain import ChannelSkillRow
+from daimon.core.stores.user_skills import delete_user_skills_for_skill_id
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -94,7 +95,7 @@ class GuardedDelete:
     deleted: bool
     """False when the skill is still attached and `detach` was not asked for."""
     attachments: SkillAttachments
-    """What was found under the lock: refused on, or detached before deleting."""
+    """What the final check found: refused on, or detached before deleting."""
 
 
 async def delete_skill_unless_attached(
@@ -109,7 +110,8 @@ async def delete_skill_unless_attached(
 
     Runs in `session`'s open transaction: checks again, detaches (channel
     rows are deleted on `session`, so they commit with it), then deletes every
-    version and the skill.
+    version and the skill, and forgets every saved upload or sync of it, so
+    re-adding the same content creates a new skill instead of re-pinning this id.
 
     `own_agent_ids` are agents whose pin the caller is retiring with the skill
     (a skill sync's orphan on the agent being synced): their pins are detached
@@ -126,6 +128,7 @@ async def delete_skill_unless_attached(
         await _detach_agents(client, skill_id=skill_id, attachments=attachments)
         await remove_skill_from_every_channel(session, skill_id=skill_id)
     await delete_skill_and_versions(client, skill_id)
+    await delete_user_skills_for_skill_id(session, anthropic_id=skill_id)
     return GuardedDelete(deleted=True, attachments=attachments)
 
 

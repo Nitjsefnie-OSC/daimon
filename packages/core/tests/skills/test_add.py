@@ -196,6 +196,45 @@ async def test_re_adding_pushes_a_version_only_when_the_content_changed(
     assert "tools" not in fake.updates[0], "an agent with the base toolset keeps its tools"
 
 
+async def test_re_adding_a_deleted_skill_uploads_a_new_one_instead_of_its_old_id(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A completed delete forgets the upload, so identical content never re-pins the gone id."""
+    from daimon.core.skills.attachments import delete_skill_unless_attached
+
+    tenant = await make_tenant(db_session)
+    fake = _FakeMA(agent=ma_agent(id="ag_1", name="agent", tenant_id=tenant.id, tools=[_TOOLSET]))
+    first = await _add(fake, db_session_factory, tenant.id)
+    fake.agent = ma_agent(
+        id="ag_1",
+        name="agent",
+        tenant_id=tenant.id,
+        tools=[_TOOLSET],
+        skills=[{"type": "custom", "skill_id": first.skill_id, "version": "1"}],
+    )
+    router = fake.router()
+    router.add("GET", r"/v1/skills/[^/]+/versions", lambda _r, _m: list_response([]))
+
+    def delete(_r: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        fake.skills = [skill for skill in fake.skills if skill["id"] != match["id"]]
+        fake.agent = ma_agent(id="ag_1", name="agent", tenant_id=tenant.id, tools=[_TOOLSET])
+        return httpx.Response(200, json={"id": match["id"], "type": "skill_deleted"})
+
+    router.add("DELETE", r"/v1/skills/(?P<id>[^/]+)", delete)
+    async with db_session_factory() as session, session.begin():
+        outcome = await delete_skill_unless_attached(
+            build_fake_anthropic(router.dispatch), session, skill_id=first.skill_id, detach=True
+        )
+    assert outcome.deleted
+
+    again = await _add(fake, db_session_factory, tenant.id)
+
+    assert again.action == "created" and len(fake.created_titles) == 2, (
+        "a new skill, not the old id"
+    )
+    assert fake.updates[-1]["skills"] == [{"type": "custom", "skill_id": again.skill_id}]
+
+
 async def test_a_skill_from_the_agents_skill_repo_is_not_replaced(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

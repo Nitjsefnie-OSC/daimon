@@ -37,7 +37,7 @@ from daimon.core.memory_resource import (
     READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS,
     SHARED_ONLY_MEMORY_INSTRUCTIONS,
 )
-from daimon.core.sessions import create_session
+from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import agent_github_binding as github_binding_store
 from daimon.core.stores import agent_repo_binding as repo_binding_store
@@ -188,6 +188,25 @@ async def test_create_session_names_a_deleted_agent_skill() -> None:
     assert '"skill_01PBRj"' in message and "qa-fork uses" in message
     assert "remove_skill" in message
     assert "couldn't accept the request" not in message
+
+
+async def test_an_isolated_session_for_a_deleted_skill_says_to_re_publish_the_report() -> None:
+    """A report reader stranded on a deleted skill gets the repair, not a bare 400."""
+    client = build_fake_anthropic_http(_unresolved_skill_400("skill_gone", "1"))
+
+    with pytest.raises(SkillUnavailable) as refused:
+        await create_isolated_session(
+            client,
+            agent=_make_agent(),
+            environment=_make_env(),
+            account_id=None,
+            tenant_id=None,
+            resources=[{"type": "file", "file_id": "file_1", "mount_path": "/bundle.tar.gz"}],
+        )
+
+    message = str(refused.value)
+    assert '"skill_gone"' in message
+    assert "Ask the report's publisher to re-publish" in message
 
 
 async def test_create_session_names_a_deleted_channel_skill_from_its_rule(

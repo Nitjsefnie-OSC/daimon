@@ -73,8 +73,22 @@ def skill_unavailable(
     )
 
 
+def report_skill_unavailable(skill_id: str) -> SkillUnavailable:
+    """The error for a report reader whose copied skill is gone: only re-publishing repairs it.
+
+    A report reader's agent is re-derived from its source when the report is
+    re-published, without the deleted skill. The report host matches on
+    "Ask the report's publisher to re-publish", so keep that wording.
+    """
+    return SkillUnavailable(
+        f'This report\'s agent uses the skill "{skill_id}", which no longer exists, so it '
+        "can't answer. Ask the report's publisher to re-publish it."
+    )
+
+
 __all__ = [
     "SkillUnavailable",
+    "report_skill_unavailable",
     "skill_unavailable",
     "unresolved_skill_id",
 ]

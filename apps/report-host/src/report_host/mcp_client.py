@@ -47,6 +47,8 @@ from mcp.client.streamable_http import streamable_http_client
 log = logging.getLogger(__name__)
 
 _BUNDLE_EXPIRED_TEXT = "bundle expired; re-upload"
+# daimon's copy when the report's agent pins a skill that was since deleted.
+_SKILL_GONE_TEXT = "Ask the report's publisher to re-publish"
 
 
 def _flatten_first[ExcT: BaseException](group: BaseExceptionGroup[ExcT]) -> ExcT:
@@ -74,6 +76,10 @@ class SeamUnauthorizedError(SeamError):
 
 class BundleExpiredError(SeamError):
     """The bundle's underlying Files API object is gone; re-push the archive."""
+
+
+class SkillGoneError(SeamError):
+    """The report's agent uses a deleted skill; only re-publishing the report repairs it."""
 
 
 @dataclass(frozen=True)
@@ -173,6 +179,8 @@ def _decode_tool_result(tool: str, result: mcp_types.CallToolResult) -> dict[str
         text = _first_text(result)
         if _BUNDLE_EXPIRED_TEXT in text:
             raise BundleExpiredError(text)
+        if _SKILL_GONE_TEXT in text:
+            raise SkillGoneError(text)
         raise SeamError(f"{tool}: {text}")
     structured = result.structuredContent
     if isinstance(structured, dict):
