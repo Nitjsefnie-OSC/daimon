@@ -9,7 +9,7 @@ from uuid import UUID
 from daimon.core._models import AccountingOutbox, TenantLedger, TurnOutcome, UsageObservation
 from daimon.core.context_prompt import TurnContext
 from daimon.core.fleet import FleetRun, worker_slot
-from daimon.core.stores import fleet, mux_state
+from daimon.core.stores import fleet, mux_state, read_persisted_columns
 from daimon.core.stores.domain import TenantLedgerRow
 from mux.contracts.resources import ProviderBinding
 from mux.state.store import binding_slot
@@ -77,7 +77,7 @@ async def read_fleet_accounting_revisions(
         result: list[FleetWorkerAccountingRows] = []
         for worker in workers:
             slot = worker_slot(run, worker)
-            binding = await mux_state.get_binding(session, slot)
+            binding = await mux_state.get_binding(session, slot, read_persisted=True)
             issue = None if worker.binding_id is not None else "binding_not_accepted"
             rows = None
             if binding is None:
@@ -122,11 +122,11 @@ async def read_accounting_revisions(
 async def _read_accounting_revisions(
     session: AsyncSession, *, tenant_id: UUID, binding: ProviderBinding
 ) -> UsageAccountingRows:
-    current = await mux_state.get_binding(session, binding_slot(binding))
-    revision_rows = await session.execute(
+    revision_rows = await read_persisted_columns(
+        session,
         select(UsageObservation.observation_id, UsageObservation.revision, UsageObservation.applied)
         .where(UsageObservation.tenant_id == tenant_id, UsageObservation.binding_id == binding.id)
-        .order_by(UsageObservation.observation_id, UsageObservation.revision)
+        .order_by(UsageObservation.observation_id, UsageObservation.revision),
     )
     revisions: list[AppliedUsage] = []
     for identity, revision, body in revision_rows:
@@ -138,7 +138,9 @@ async def _read_accounting_revisions(
         ) or (value.observation.id, value.observation.revision) != (identity, revision):
             raise ValueError("durable usage row identity mismatch")
         revisions.append(value)
-    rows = await session.execute(
+    current = await mux_state.get_binding(session, binding_slot(binding), read_persisted=True)
+    rows = await read_persisted_columns(
+        session,
         select(
             AccountingOutbox.observation_id,
             AccountingOutbox.revision,
@@ -146,7 +148,7 @@ async def _read_accounting_revisions(
             AccountingOutbox.applied_at,
         )
         .where(AccountingOutbox.tenant_id == tenant_id, AccountingOutbox.binding_id == binding.id)
-        .order_by(AccountingOutbox.observation_id, AccountingOutbox.revision)
+        .order_by(AccountingOutbox.observation_id, AccountingOutbox.revision),
     )
     outbox: list[AccountingRevision] = []
     for identity, revision, body, applied_at in rows:
@@ -165,13 +167,16 @@ async def _read_accounting_revisions(
     }
     ledger = (
         tuple(
-            TenantLedgerRow.model_validate(row, from_attributes=True)
-            for row in await session.scalars(
-                select(TenantLedger).where(
-                    TenantLedger.tenant_id == tenant_id,
-                    TenantLedger.idempotency_key.in_(keys),
+            TenantLedgerRow.model_validate(dict(row))
+            for row in (
+                await read_persisted_columns(
+                    session,
+                    select(TenantLedger).where(
+                        TenantLedger.tenant_id == tenant_id,
+                        TenantLedger.idempotency_key.in_(keys),
+                    ),
                 )
-            )
+            ).mappings()
         )
         if keys
         else ()

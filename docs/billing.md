@@ -1064,6 +1064,11 @@ alone is not proof of complete final usage or permission to release an admitted 
 reads one exact durable run and its private worker bindings in the caller's coherent
 read-only transaction. It returns original usage revisions, outbox settlement facts,
 customer ledger identities and persisted worker exposure without repricing or writes.
+Fleet and per-binding accounting reads use `stores.read_persisted_columns` to
+project authoritative database columns, including after a Core update. It refuses
+effective persistent dirty/deleted state in tables the query reads, including
+subqueries, with `UnflushedReadState`. Pending new objects, reverted assignments
+and unrelated dirty tables remain unflushed. No caller state is overwritten.
 Reserved exposure already contains observed debits; the two must not be added.
 Unavailable or unaccepted bindings remain explicit gaps; a missing row never implies
 zero spend. Reused root-session history is excluded. These product facts do not prove
