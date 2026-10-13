@@ -104,3 +104,13 @@ closed, and active fleets expose only the reviewed collected summary.
 Replacement capture passes canonical stored attribution to the shared
 `record_turn_post` owner; its timeout, transaction and failure logging also
 apply to recovered controls.
+
+With a shared fleet service and explicit trusted root-grant loader installed,
+`build_runtime` binds the card factory to `read_frozen_root` automatically.
+Both real turn callers forward their genuine card intent. The existing Postgres
+state store is shared by turn execution and root lookup. Recovered controls
+resolve the original requester's stored account and retain the canonical host
+scope, then reload the current clicker's subject through the existing role
+readers. Missing or stale authority refuses before a card is sent. Disabled
+fleet settings install no reader, store or grant callback. Native control,
+worker dispatch and wake lifetime remain the shared service's responsibility.

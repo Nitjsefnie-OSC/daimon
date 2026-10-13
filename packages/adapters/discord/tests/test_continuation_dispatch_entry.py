@@ -439,6 +439,18 @@ async def _run_continuation(
         )
 
     assert run_turn.await_args is not None, "the follow-up turn should have run"
+    from daimon.core.stores.turn_card_intents import get_turn_card_intent
+
+    async with db_session_factory() as session:
+        intent = await get_turn_card_intent(
+            session, id=run_turn.await_args.kwargs["turn_card_intent_id"]
+        )
+    assert intent is not None
+    assert (intent.tenant_id, intent.platform, intent.thread_id) == (
+        tenant.id,
+        "discord",
+        str(thread.id),
+    )
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message, tenant.id
