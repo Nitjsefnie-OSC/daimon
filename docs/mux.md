@@ -2445,7 +2445,6 @@ No installed source-preservation positive is claimed by this capture path.
 
 Obligation labels are derived only at the shared preparation boundary from the actual captured definition and resource intent. An empty source baseline still requires implicit memory and an unproved environment; unrelated instruction, tool, attachment and credential labels are not pre-filled. With agent backend capture enabled, existing balance, cap and channel-budget refusals win before source projection and publish no backend revision.
 
-
 ### Declared worker restrictions
 
 Worker specs accept one default-empty `declared_drops` tuple: `memory`, `sandbox`, `skills`, `mcp`, `tools`, `files`, or `repository`. These declarations apply only to authorized fleet derivation; ordinary agent backend changes retain their source-preservation refusals. Unknown/duplicate declarations refuse. Scope, source revision, current policy, budget, protected guidance, seals and readonly ceilings still apply. Inherited declarations cannot be cleared.
@@ -2465,9 +2464,7 @@ Retained session resources, unsupported environment policies and custom host
 functions refuse. Seals, shared ownership, publishing restrictions and transfer
 remain admission constraints; dropping memory leaves the admission's readonly
 ceiling intact. Ordinary agent switches without a resolved worker remain
-refused. These provider checks complement the shared source and resource proof,
-whose completion is required before fleet execution is available.
-
+refused.
 
 The shared worker preparation proof captures the authorized source through the
 existing session resource composer. A canonical resolved worker can discharge
@@ -2476,13 +2473,19 @@ instructions, publication policy, credentials and opaque private resources are
 still obligations. The proof checks root scope, source identity/version, derived
 permissions and deadline, reads the complete native counterpart, then re-reads
 resource intent to reject drift before handing that exact plan to preparation.
-Existing agent switches without a resolved worker remain refused.
+Existing agent switches without a resolved worker remain refused. Configured
+caller MCP credentials also remain obligations, so these workers refuse in a
+host configuration requiring them until a credential materializer exists.
 
-A restricted Gemini worker with declared losses can use the checked native
-agent, remote empty environment and no execution tools. Readonly remains on the
-admission even when its memory mount is explicitly removed. OpenAI hosted
-readback is component coverage; ordinary legacy-source environment preservation
-and no-sandbox first-input consumption remain refused. Neither readback nor a
-resolved worker digest substitutes for fresh fleet/budget admission, which the
-headless worker driver must obtain before native execution. All switches remain
-default off; the legacy and channel paths keep their existing behavior.
+Native readback does not grant fleet execution authority: the headless caller
+must use the canonical resolver output and obtain fresh fleet/budget admission
+before native execution. Ordinary OpenAI legacy-source environment preservation
+remains refused. All switches remain default off; the legacy and channel paths
+keep their existing behavior.
+
+Restricted worker preparation uses the earlier of the caller's turn deadline and
+the canonical worker deadline. A shorter caller bound is valid. The same bound
+travels with the preparation request through source capture, counterpart readback,
+source recapture and native preparation. Expiry is checked before successful proof
+and prepared-turn handoffs; exhausted authority uses the existing ceiling refusal.
+The headless caller must pass that bound to the existing turn runner as well.

@@ -43,13 +43,22 @@ TURN_CEILING_S: float = 45.0 * 60.0
 _MIN_REMAINING_S: float = 0.001
 
 
-def turn_deadline(*, now: datetime, ceiling_s: float = TURN_CEILING_S) -> datetime:
-    """The wall-clock instant a turn started at `now` must finish by."""
-    return now + timedelta(seconds=ceiling_s)
+def turn_deadline(
+    *,
+    now: datetime,
+    ceiling_s: float = TURN_CEILING_S,
+    deadline: datetime | None = None,
+    authority_deadline: datetime | None = None,
+) -> datetime:
+    """Use the caller's bound or the default, capped by retained authority."""
+    bound = deadline if deadline is not None else now + timedelta(seconds=ceiling_s)
+    return min(bound, authority_deadline) if authority_deadline is not None else bound
 
 
-def remaining_s(deadline: datetime, *, now: datetime) -> float:
-    """Seconds left until `deadline`, clamped to a small positive floor.
+def remaining_s(deadline: datetime, *, now: datetime, refuse_expired: bool = False) -> float:
+    """Seconds left until `deadline`, optionally refusing exhausted authority.
+
+    The default keeps the existing positive-floor behavior.
 
     `asyncio.wait_for` requires a positive timeout -- zero or a negative
     value raises `ValueError` before the wrapped coroutine gets a chance to
@@ -57,6 +66,8 @@ def remaining_s(deadline: datetime, *, now: datetime) -> float:
     deadline still produces a legal timeout, one that fires at the wrapped
     coroutine's first await point rather than crashing the caller outright.
     """
+    if refuse_expired and now >= deadline:
+        raise ceiling_error()
     return max((deadline - now).total_seconds(), _MIN_REMAINING_S)
 
 

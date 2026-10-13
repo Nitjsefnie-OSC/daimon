@@ -643,6 +643,7 @@ async def test_complete_declared_worker_proof_consumes_actual_native_counterpart
 ):
     request, runtime, owned, transport = explicit_worker_request
     selected = await read_preparation_counterpart(request)
+    assert selected.deadline == min(request.deadline, request.worker.limits.deadline)
     assert selected.worker == request.worker
     assert selected.source.resource_scope == request.scope
     assert selected.source.memory_required is True
@@ -848,7 +849,12 @@ async def test_explicit_drops_do_not_discharge_unproved_obligations(
         await read_preparation_counterpart(request)
     from mux.errors import UnsupportedCapability
 
-    if failure not in {"native_drift", "scope", "flag_off"}:
+    if failure == "expired":
+        from daimon.core.errors import TurnError
+
+        assert isinstance(refused.value.__cause__, TurnError)
+        assert refused.value.__cause__.kind == "ceiling"
+    elif failure not in {"native_drift", "scope", "flag_off"}:
         assert isinstance(refused.value.__cause__, UnsupportedCapability)
         expected = {
             "sandbox": "environment",
@@ -1025,3 +1031,219 @@ async def test_worker_cannot_bypass_source_proof_through_channel_origin(
             worker=request.worker,
         )
     assert not owned.wire.requests and not transport.requests
+
+
+async def _bind_worker(request, **kwargs):
+    return await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=True,
+        deadline=request.deadline,
+        now=request.now,
+        worker=request.worker,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("entry", ["proof", "registered"])
+async def test_worker_readback_cannot_outlive_its_shorter_authority(
+    explicit_worker_request, monkeypatch, entry
+):
+    from datetime import timedelta
+
+    from daimon.core.errors import TurnError
+    from daimon.core.turn import prepare as preparation
+
+    request, runtime, owned, transport = explicit_worker_request
+    clock = [request.now()]
+    bound = request.worker.limits.deadline
+    assert bound < request.deadline
+    prepared_callbacks = []
+    preparer_calls = []
+    readback_bounds = []
+
+    async def slow_readback(selected):
+        readback_bounds.append(selected.deadline)
+        result = await runtime.read_agent_counterpart(selected)
+        clock[0] = bound + timedelta(seconds=1)
+        assert clock[0] < request.deadline
+        return result
+
+    async def forbidden(selected):
+        preparer_calls.append(selected)
+        raise AssertionError("expired proof reached native preparation")
+
+    async def on_prepared(prepared):
+        prepared_callbacks.append(prepared)
+
+    profile = request.admission.backend_revision.profile
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, forbidden)
+    request = replace(
+        request,
+        now=lambda: clock[0],
+        deps=replace(
+            request.deps,
+            turn_runtimes={profile: replace(runtime, read_agent_counterpart=slow_readback)},
+        ),
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        if entry == "proof":
+            await read_preparation_counterpart(request)
+        else:
+            await _bind_worker(request, _on_prepared=on_prepared)
+    assert isinstance(refused.value.__cause__, TurnError)
+    assert refused.value.__cause__.kind == "ceiling"
+    assert readback_bounds == [bound]
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert preparer_calls == [] and prepared_callbacks == [] and transport.requests == []
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_stricter_caller_bound_reaches_the_registered_preparer(
+    explicit_worker_request, monkeypatch
+):
+    from datetime import timedelta
+
+    from daimon.core.turn import prepare as preparation
+
+    request, runtime, owned, transport = explicit_worker_request
+    original_worker = request.worker
+    bound = request.now() + timedelta(seconds=10)
+    assert bound < original_worker.limits.deadline
+    profile = request.admission.backend_revision.profile
+    assert preparation.ensure_channel_runtime(
+        profile, ready=lambda: profile in preparation._PROVIDER_PREPARATIONS
+    )
+    prepare = preparation._PROVIDER_PREPARATIONS[profile]
+    seen = []
+
+    async def bounded_preparation(selected):
+        assert selected.deadline == bound
+        assert selected.worker == original_worker
+        seen.append(selected)
+        return await prepare(selected)
+
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, bounded_preparation)
+    selected = await read_preparation_counterpart(replace(request, deadline=bound))
+    assert selected.deadline == bound and selected.worker == original_worker
+    prepared = await _bind_worker(replace(request, deadline=bound))
+    assert prepared.backend is not None and len(seen) == 1
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_hanging_final_source_capture_is_bounded_and_cancelled(
+    explicit_worker_request, monkeypatch
+):
+    import asyncio
+    from datetime import timedelta
+
+    from daimon.core import sessions
+
+    request, runtime, owned, transport = explicit_worker_request
+    clock = [request.now()]
+    bound = request.worker.limits.deadline
+
+    async def readback(selected):
+        result = await runtime.read_agent_counterpart(selected)
+        clock[0] = bound - timedelta(seconds=0.05)
+        return result
+
+    request = replace(
+        request,
+        now=lambda: clock[0],
+        deps=replace(
+            request.deps,
+            turn_runtimes={
+                request.admission.backend_revision.profile: replace(
+                    runtime, read_agent_counterpart=readback
+                )
+            },
+        ),
+    )
+    capture = sessions.project_session_resources
+    calls = []
+    cancelled = []
+
+    async def hanging_capture(*args, **kwargs):
+        calls.append(None)
+        if len(calls) == 1:
+            return await capture(*args, **kwargs)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(sessions, "project_session_resources", hanging_capture)
+    with pytest.raises(AdmissionDenied) as refused:
+        await asyncio.wait_for(read_preparation_counterpart(request), timeout=1)
+    assert isinstance(refused.value.__cause__, TimeoutError)
+    assert len(calls) == 2 and cancelled == [True]
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("stage", ["capture", "preparation", "callback"])
+async def test_expiry_is_rechecked_before_successful_worker_handoff(
+    explicit_worker_request, monkeypatch, stage
+):
+    from datetime import timedelta
+
+    from daimon.core import sessions
+    from daimon.core.errors import TurnError
+    from daimon.core.turn import prepare as preparation
+
+    request, _, owned, transport = explicit_worker_request
+    clock = [request.now()]
+    bound = request.worker.limits.deadline
+    request = replace(request, now=lambda: clock[0])
+    profile = request.admission.backend_revision.profile
+    assert preparation.ensure_channel_runtime(
+        profile, ready=lambda: profile in preparation._PROVIDER_PREPARATIONS
+    )
+    prepare = preparation._PROVIDER_PREPARATIONS[profile]
+    capture = sessions.project_session_resources
+    capture_calls = []
+    preparation_calls = []
+    callbacks = []
+
+    async def timed_capture(*args, **kwargs):
+        result = await capture(*args, **kwargs)
+        capture_calls.append(None)
+        if stage == "capture" and len(capture_calls) == 2:
+            clock[0] = bound + timedelta(seconds=1)
+        return result
+
+    async def timed_prepare(selected):
+        assert selected.deadline == bound
+        preparation_calls.append(selected)
+        result = await prepare(selected)
+        if stage == "preparation":
+            clock[0] = bound + timedelta(seconds=1)
+        return result
+
+    async def on_prepared(prepared):
+        callbacks.append(prepared)
+        if stage == "callback":
+            clock[0] = bound + timedelta(seconds=1)
+
+    monkeypatch.setattr(sessions, "project_session_resources", timed_capture)
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, timed_prepare)
+    with pytest.raises((AdmissionDenied, TurnError)) as refused:
+        await _bind_worker(request, _on_prepared=on_prepared)
+    error = refused.value
+    if isinstance(error, AdmissionDenied):
+        error = error.__cause__
+    assert isinstance(error, TurnError) and error.kind == "ceiling"
+    assert len(preparation_calls) == (stage != "capture")
+    assert len(callbacks) == (stage == "callback")
+    assert owned.wire.requests and all(r.method == "GET" for r in owned.wire.requests)
+    assert not transport.requests

@@ -131,9 +131,10 @@ async def read_preparation_counterpart(
     """Capture complete source intent and refuse every unproved preservation obligation."""
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.errors import TurnError
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.sessions import project_session_resources
-    from daimon.core.turn.ceiling import remaining_s
+    from daimon.core.turn.ceiling import remaining_s, turn_deadline
     from daimon.core.turn.errors import AdmissionDenied
     from mux.errors import UnsupportedCapability
 
@@ -151,6 +152,17 @@ async def read_preparation_counterpart(
         or request.scope.is_legacy_host_authorized
     ):
         raise AdmissionDenied(reason="backend_unsupported")
+
+    request = replace(
+        request,
+        deadline=turn_deadline(
+            now=request.now(),
+            deadline=request.deadline,
+            authority_deadline=request.worker.limits.deadline
+            if request.worker is not None
+            else None,
+        ),
+    )
 
     async def capture() -> BackendAgent:
         source = request.source
@@ -191,9 +203,8 @@ async def read_preparation_counterpart(
         )
 
     try:
-        source = await asyncio.wait_for(
-            capture(), timeout=remaining_s(request.deadline, now=request.now())
-        )
+        timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+        source = await asyncio.wait_for(capture(), timeout=timeout)
         if (
             source.tenant_id != request.tenant_id
             or source.agent_id
@@ -233,8 +244,6 @@ async def read_preparation_counterpart(
                 or worker.permissions.resources != worker.resources
                 or worker.permissions.environment != worker.environment
                 or worker.permissions.limits != worker.limits
-                or worker.limits.deadline > request.deadline
-                or worker.limits.deadline <= request.now()
                 or worker.permissions.subject.is_admin
                 or (request.admission.memory_read_only and not worker.permissions.memory_read_only)
                 or not request.admission.origin_seal_ids <= worker.permissions.seal_ids
@@ -323,14 +332,17 @@ async def read_preparation_counterpart(
         runtime = selected.deps.turn_runtimes.get(revision.profile)
         if runtime is None or runtime.read_agent_counterpart is None:
             raise UnsupportedCapability(("native_counterpart",), revision.profile)
+        timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         counterpart = await asyncio.wait_for(
-            runtime.read_agent_counterpart(selected),
-            timeout=remaining_s(request.deadline, now=request.now()),
+            runtime.read_agent_counterpart(selected), timeout=timeout
         )
-        if target is None or counterpart.agent.spec != target or await capture() != source:
+        timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+        current_source = await asyncio.wait_for(capture(), timeout=timeout)
+        remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+        if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
         return replace(selected, counterpart=counterpart)
-    except UnsupportedCapability as error:
+    except (UnsupportedCapability, TimeoutError, TurnError) as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception:
         raise AdmissionDenied(reason="backend_unsupported") from None

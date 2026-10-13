@@ -965,11 +965,19 @@ async def bind_session_impl(
         )
 
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+    if worker is not None:
+        effective_deadline = turn_deadline(
+            now=now(), deadline=effective_deadline, authority_deadline=worker.limits.deadline
+        )
 
     async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
         result = await preparing
+        if worker is not None:
+            remaining_s(effective_deadline, now=now(), refuse_expired=True)
         if _on_prepared is not None:
             await _on_prepared(result)
+        if worker is not None:
+            remaining_s(effective_deadline, now=now(), refuse_expired=True)
         return result
 
     profile = _admitted_profile(admission)
@@ -1027,6 +1035,8 @@ async def bind_session_impl(
                 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 
                 selected = await read_preparation_counterpart(request)
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
             result = await prepare(selected)
             ref = result.session_ref
             backend = result.backend
@@ -1049,9 +1059,8 @@ async def bind_session_impl(
             return result
 
         try:
-            return await asyncio.wait_for(
-                _complete(_prepare_provider()), timeout=remaining_s(effective_deadline, now=now())
-            )
+            timeout = remaining_s(effective_deadline, now=now(), refuse_expired=worker is not None)
+            return await asyncio.wait_for(_complete(_prepare_provider()), timeout=timeout)
         except TimeoutError as error:
             raise ceiling_error() from error
 
