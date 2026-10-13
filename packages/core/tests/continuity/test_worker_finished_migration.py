@@ -11,19 +11,17 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from daimon.core._models import Base
+from daimon.core._models import Base, TaskContinuation
+from daimon.core.stores import task_continuations as queue
 from daimon.testing.factories import make_account, make_tenant
-from sqlalchemy import Connection, inspect, text
+from sqlalchemy import Connection, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _LEGACY_REASONS = ("task_handoff", "private_input_applied", "timer", "github_access_ready")
 
 
-@pytest.mark.fresh_schema
-async def test_worker_finished_reason_upgrade_downgrade_upgrade(
-    db_session: AsyncSession,
-) -> None:
+def _migration():
     path = Path(__file__).parents[2] / "alembic/versions/0094_worker_finished_wakes.py"
     spec = importlib.util.spec_from_file_location("worker_finished_migration", path)
     assert spec is not None and spec.loader is not None
@@ -32,6 +30,14 @@ async def test_worker_finished_reason_upgrade_downgrade_upgrade(
     assert module.revision == "0094_worker_finished_wakes"
     assert module.down_revision == "0093_fleet_runs"
 
+    return module
+
+
+@pytest.mark.fresh_schema
+async def test_worker_finished_reason_upgrade_downgrade_upgrade(
+    db_session: AsyncSession,
+) -> None:
+    module = _migration()
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     connection = await db_session.connection()
@@ -68,6 +74,12 @@ async def test_worker_finished_reason_upgrade_downgrade_upgrade(
                         "key": uuid.uuid4(),
                     },
                 )
+            sync.execute(
+                text(
+                    "UPDATE task_continuations SET status = 'cancelled' "
+                    "WHERE reason = 'worker_finished'"
+                )
+            )
             module.downgrade()
             assert tuple(
                 sync.scalars(text("SELECT reason FROM task_continuations ORDER BY reason"))
@@ -115,3 +127,88 @@ async def test_worker_finished_reason_upgrade_downgrade_upgrade(
             assert not [diff for diff in differences if "task_continuations" in str(diff)]
 
     await connection.run_sync(cycle)
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize("state", ["pending", "claimed", "started"])
+async def test_downgrade_requires_retirement_and_fences_stale_claim(db_session, state):
+    from datetime import timedelta
+
+    from .test_compatible_readers import NOW, seed
+
+    module = _migration()
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    address = dict(tenant_id=tenant.id, requester_account_id=account.id)
+    worker = await seed(db_session, address, reason="worker_finished")
+    timer = await seed(db_session, address, thread="legacy-thread")
+    if state != "pending":
+        assert (
+            await queue.claim_wake_row(
+                db_session,
+                idempotency_key=worker,
+                owner="dispatcher",
+                now=NOW,
+                lease=timedelta(minutes=1),
+                max_attempts=5,
+            )
+            is not None
+        )
+    if state == "started":
+        assert await queue.start_wake_row(
+            db_session,
+            idempotency_key=worker,
+            owner="dispatcher",
+            now=NOW,
+            lease=timedelta(minutes=1),
+        )
+
+    async def facts():
+        return (
+            await db_session.execute(
+                select(TaskContinuation.__table__).order_by(TaskContinuation.id)
+            )
+        ).all()
+
+    before = await facts()
+    connection = await db_session.connection()
+
+    def attempt(sync):
+        with (
+            Operations.context(MigrationContext.configure(sync)),
+            pytest.raises(RuntimeError, match="Retire active worker-finished"),
+            sync.begin_nested(),
+        ):
+            module.downgrade()
+
+    await connection.run_sync(attempt)
+    assert await facts() == before
+    if state == "pending":
+        assert await queue.cancel_wake_row(db_session, tenant_id=tenant.id, idempotency_key=worker)
+    else:
+        assert await queue.settle_wake_row(
+            db_session,
+            idempotency_key=worker,
+            owner="dispatcher",
+            status="skipped",
+            skip_reason="drained",
+            now=NOW,
+        )
+    legacy = await queue.get_continuation(db_session, idempotency_key=timer)
+
+    def finish(sync):
+        with Operations.context(MigrationContext.configure(sync)):
+            module.downgrade()
+
+    await connection.run_sync(finish)
+    assert await queue.get_continuation(db_session, idempotency_key=worker) is None
+    assert await queue.get_continuation(db_session, idempotency_key=timer) == legacy
+    assert not await queue.start_wake_row(
+        db_session, idempotency_key=worker, owner="dispatcher", now=NOW, lease=timedelta(minutes=1)
+    )
+    assert not await queue.release_wake_row(
+        db_session, idempotency_key=worker, owner="dispatcher", retry_at=NOW
+    )
+    assert not await queue.settle_wake_row(
+        db_session, idempotency_key=worker, owner="dispatcher", status="delivered", now=NOW
+    )

@@ -2792,5 +2792,9 @@ are below this floor; no legacy-vocabulary backport is implied.
 
 Before removing completion-wake schema support, stop fleet publication and
 dispatch, drain native work, and retire pending/claimed scheduling through the
-existing owners. Removing queue rows is not cancellation of native work or a
-refund of usage; those confirmations remain independent requirements.
+existing owners. Read back zero `worker_finished` rows in `pending` or `claimed`
+before starting restore. The reason-check downgrade takes a bounded table lock
+and refuses while any such row remains; refusal rolls back the restore step.
+After retirement, its reason-only deletion and legacy-check restoration can
+succeed. Removing queue rows is not cancellation of native work or a refund of
+usage; those confirmations remain independent requirements.
