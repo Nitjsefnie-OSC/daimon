@@ -488,6 +488,75 @@ async def test_known_implicit_environment_policy_remains_an_explicit_sandbox_los
         "mount.file_native",
         "mount.repository_native",
         "mount.repository_checkout",
+        "value.agent.root.type",
+        "value.agent.model.speed",
+        "value.agent.multiagent.type",
+        "value.agent.roster.type",
+        "value.agent.skills.type",
+        "value.agent.mcp_visible.type",
+        "value.agent.mcp_hidden.type",
+        "value.tools.builtin_root.type",
+        "value.tools.builtin_config.name",
+        "value.tools.builtin_config.type",
+        "value.tools.builtin_default_policy.type",
+        "value.tools.builtin_config_policy.type",
+        "value.tools.custom_root.type",
+        "value.tools.mcp_root.type",
+        "value.tools.mcp_default_policy.type",
+        "value.tools.mcp_config_policy.type",
+        "value.tools.hidden_mcp_root.type",
+        "value.tools.hidden_mcp_default_policy.type",
+        "value.tools.hidden_mcp_config_policy.type",
+        "value.environment.root.type",
+        "value.environment.root.scope",
+        "value.environment.config.type",
+        "value.environment.networking.type",
+        "value.environment.packages.type",
+        "value.mount.file_native.type",
+        "value.mount.repository_native.type",
+        "value.mount.repository_checkout.type",
+        "value.mount.memory_native.type",
+        "value.mount.memory_native.access",
+        "null.mount.memory_native.access",
+        "value.mount.file_binding.kind",
+        "value.mount.file_source.kind",
+        "value.mount.file_reference.provider",
+        "value.mount.repository.kind",
+        "null.agent.root.type",
+        "null.agent.multiagent.type",
+        "null.agent.roster.type",
+        "null.agent.skills.type",
+        "null.agent.mcp_visible.type",
+        "null.agent.mcp_hidden.type",
+        "null.tools.builtin_root.type",
+        "null.tools.builtin_config.name",
+        "null.tools.builtin_config.type",
+        "null.tools.builtin_default_policy.type",
+        "null.tools.builtin_config_policy.type",
+        "null.tools.custom_root.type",
+        "null.tools.mcp_root.type",
+        "null.tools.mcp_default_policy.type",
+        "null.tools.mcp_config_policy.type",
+        "null.tools.hidden_mcp_root.type",
+        "null.tools.hidden_mcp_default_policy.type",
+        "null.tools.hidden_mcp_config_policy.type",
+        "null.environment.root.type",
+        "null.environment.config.type",
+        "null.environment.networking.type",
+        "null.mount.file_native.type",
+        "null.mount.repository_native.type",
+        "null.mount.repository_checkout.type",
+        "null.mount.memory_native.type",
+        "null.mount.file_binding.kind",
+        "null.mount.file_source.kind",
+        "null.mount.file_reference.provider",
+        "null.mount.repository.kind",
+        "missing.agent.root.type",
+        "missing.environment.root.type",
+        "missing.agent.mcp_visible.type",
+        "missing.agent.mcp_hidden.type",
+        "missing.agent.skills.type",
+        "missing.tools.hidden_mcp_root.type",
     ],
 )
 async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_request, surface):
@@ -497,6 +566,7 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
     from anthropic.types.beta import (
         BetaManagedAgentsFileResourceConfig,
         BetaManagedAgentsGitHubRepositoryResourceConfig,
+        BetaManagedAgentsMemoryStoreResourceConfig,
     )
     from daimon.core.turn.runtime_manifest import preview_source_drops
     from mux.contracts.extensions import ExtensionConfig
@@ -513,11 +583,24 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
     before = await service.audit(source.tenant_id)
     policy = {"requires_confirmation": True}
     key = "future_execution_policy"
-    if surface in {"mount.file_native", "mount.repository_native", "mount.repository_checkout"}:
+    value_case = surface.startswith(("value.", "null.", "missing."))
+    omitted = surface.startswith("missing.")
+    if value_case:
+        value_kind, surface = surface.split(".", 1)
+        surface, key = surface.rsplit(".", 1)
+        policy = None if value_kind == "null" else "future_native_kind"
+    if surface in {
+        "mount.file_native",
+        "mount.repository_native",
+        "mount.repository_checkout",
+        "mount.memory_native",
+    }:
         captured = await capture_preparation_source(request, fresh=True)
         payload = (
             {"type": "file", "file_id": "owned-file", "mount_path": "document.txt"}
             if surface == "mount.file_native"
+            else {"type": "memory_store", "memory_store_id": "owned-memory", "access": "read_only"}
+            if surface == "mount.memory_native"
             else {"type": "github_repository", "url": "https://public.invalid/repo"}
         )
         container = payload
@@ -526,11 +609,21 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
             container = payload["checkout"]
         container[key] = policy
         native = (
-            BetaManagedAgentsFileResourceConfig.model_validate(payload)
+            BetaManagedAgentsFileResourceConfig.model_construct(**payload)
+            if surface == "mount.file_native" and value_case
+            else BetaManagedAgentsFileResourceConfig.model_validate(payload)
             if surface == "mount.file_native"
+            else BetaManagedAgentsMemoryStoreResourceConfig.model_construct(**payload)
+            if surface == "mount.memory_native"
+            else BetaManagedAgentsGitHubRepositoryResourceConfig.model_construct(**payload)
+            if value_case
             else BetaManagedAgentsGitHubRepositoryResourceConfig.model_validate(payload)
         )
         raw_native = native.model_dump(mode="json", exclude_unset=True)
+        if surface == "mount.memory_native" and key == "access" and policy is None:
+            from mux.drivers.anthropic.sessions_lifecycle import MemoryMount
+
+            assert MemoryMount.model_validate(raw_native).access is None
         assert (
             raw_native["checkout"][key]
             if surface == "mount.repository_checkout"
@@ -583,7 +676,9 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
         container[key] = policy
         with pytest.raises(ValidationError) as refused:
             schema.model_validate(payload)
-        assert {error["type"] for error in refused.value.errors()} == {"extra_forbidden"}
+        assert {error["type"] for error in refused.value.errors()} == {
+            "literal_error" if value_case else "extra_forbidden"
+        }
         assert await service.current(source) == accepted
         assert await service.audit(source.tenant_id) == before
         assert reads == constructions == targets == []
@@ -600,6 +695,14 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
     container = agent
     if surface == "agent.model":
         container = agent["model"]
+    elif surface in {"agent.multiagent", "agent.roster"}:
+        agent["multiagent"] = {
+            "type": "coordinator",
+            "agents": [{"type": "agent", "id": "owned-agent", "version": 1}],
+        }
+        container = agent["multiagent"]
+        if surface == "agent.roster":
+            container = container["agents"][0]
     elif surface == "agent.skills":
         agent["skills"] = [{"type": "custom", "skill_id": "bundle", "version": "1"}]
         container = agent["skills"][0]
@@ -607,6 +710,18 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
         agent["mcp_servers"] = [
             {"type": "url", "name": "docs", "url": "https://mcp.example.com/docs"}
         ]
+        if value_case:
+            agent["tools"] = [
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "docs",
+                    "configs": [],
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                }
+            ]
         container = agent["mcp_servers"][0]
     if surface.startswith("tools."):
         if surface == "tools.custom_root":
@@ -638,6 +753,8 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
             container = tool["default_config"]
         elif surface.endswith("_config"):
             container = tool["configs"][0]
+        elif surface.endswith("_config_policy"):
+            container = tool["configs"][0]["permission_policy"]
         elif surface.endswith("_policy"):
             container = tool["default_config"]["permission_policy"]
     elif surface.startswith("environment."):
@@ -655,7 +772,14 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
                 container = container["networking"]
             elif surface == "environment.packages":
                 container = container["packages"]
-    container[key] = None if surface.endswith("_null") else policy
+    if omitted:
+        del container[key]
+    else:
+        container[key] = None if surface.endswith("_null") else policy
+        if value_case and surface == "environment.root" and key == "scope" and policy is not None:
+            container[key] = "future_per_session"
+        if value_case and surface == "agent.mcp_hidden" and policy is not None:
+            container[key] = "future_private_url"
     router.routes.clear()
     router.add(
         "GET",
@@ -670,9 +794,10 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
     captured = await capture_preparation_source(request, fresh=True)
     if hidden:
         assert captured.effective_spec.mcp_servers == ()
-        assert not any(
-            extension.value.get("tools") for extension in captured.effective_spec.extensions
-        )
+        if not (value_case and surface.startswith("tools.") and key == "type"):
+            assert not any(
+                extension.value.get("tools") for extension in captured.effective_spec.extensions
+            )
     with pytest.raises(AgentBackendRefused) as preview:
         await service.preview(source, "openai")
     assert preview.value.reason == "source_unavailable"
@@ -729,3 +854,164 @@ async def test_known_hidden_oauth_toolset_keeps_existing_projection(consent_requ
     assert "source_definition" not in classify_source_obligations(captured, None, environment=None)
     quote = await service.preview(source, "openai")
     assert quote.allowed and quote.declared_drops == ("memory", "sandbox")
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "old.agent_policy",
+        "old.agent_null",
+        "old.raw_model",
+        "old.environment_root",
+        "old.environment_config",
+        "old.skill_field",
+        "old.hidden_mcp_field",
+        "old.hidden_mcp_tool",
+        "known.mcp",
+        "known.hidden_mcp",
+        "known.skill",
+        "new.mcp_future",
+        "new.mcp_null",
+        "new.hidden_mcp_future",
+        "new.hidden_mcp_null",
+        "new.skill_future",
+        "new.skill_null",
+    ],
+)
+async def test_raw_source_pipeline_discriminators_keep_public_consent_closed(
+    consent_request, surface
+):
+    from uuid import uuid4
+
+    import httpx
+
+    from ..test_sessions import _record_personal_sign_in
+
+    request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
+        consent_request
+    )
+    agent = request.admission.agent.model_dump(mode="json", exclude_unset=True)
+    environment = request.admission.environment.model_dump(mode="json", exclude_unset=True)
+    unknown = {"requires_confirmation": True}
+    if surface in {"old.agent_policy", "old.agent_null"}:
+        agent["future_execution_policy"] = None if surface.endswith("null") else unknown
+    elif surface == "old.raw_model":
+        agent["model"]["future_execution_policy"] = unknown
+    elif surface.startswith("old.environment"):
+        container = environment if surface.endswith("root") else environment["config"]
+        container["future_execution_policy"] = unknown
+    if "mcp" in surface:
+        kind = (
+            None
+            if surface.endswith("null")
+            else "future_oauth_gateway"
+            if "future" in surface
+            else "url"
+        )
+        agent["mcp_servers"] = [
+            {"type": kind, "name": "docs", "url": "https://mcp.example.com/docs"}
+        ]
+        if surface == "old.hidden_mcp_field":
+            agent["mcp_servers"][0]["future_execution_policy"] = unknown
+        if surface == "old.hidden_mcp_tool":
+            agent["tools"] = [
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "docs",
+                    "configs": [],
+                    "future_execution_policy": {},
+                }
+            ]
+    if "skill" in surface:
+        kind = (
+            None
+            if surface.endswith("null")
+            else "future_secret_catalog"
+            if "future" in surface
+            else "custom"
+        )
+        agent["skills"] = [{"type": kind, "skill_id": "bundle", "version": "1"}]
+        if surface == "old.skill_field":
+            agent["skills"][0]["future_execution_policy"] = unknown
+    if "hidden" in surface:
+        async with request.deps.sessionmaker() as db:
+            await _record_personal_sign_in(
+                db, tenant_id=source.tenant_id, account_id=uuid4(), agent_uuid=source.agent_id
+            )
+    router.routes.clear()
+    router.add(
+        "GET",
+        "/v1/agents/" + request.admission.agent.id,
+        lambda *_: httpx.Response(200, json=agent),
+    )
+    router.add(
+        "GET",
+        "/v1/environments/" + request.admission.environment.id,
+        lambda *_: httpx.Response(200, json=environment),
+    )
+    before = await service.audit(source.tenant_id)
+    captured = await capture_preparation_source(request, fresh=True)
+    assert captured.source.native == agent
+    assert captured.environment.native == environment
+    if surface.startswith("known."):
+        quote = await service.preview(source, "openai")
+        assert quote.allowed
+        assert set(quote.declared_drops) == {"memory", "sandbox"} | (
+            {"skills"} if surface == "known.skill" else {"mcp"} if surface == "known.mcp" else set()
+        )
+    else:
+        with pytest.raises(AgentBackendRefused) as preview:
+            await service.preview(source, "openai")
+        assert preview.value.reason == "source_unavailable"
+        with pytest.raises(AgentBackendRefused) as commit:
+            await service.set_backend(
+                source,
+                "openai",
+                accepted.local,
+                actor,
+                accepted_drops=accepted.declared_drops,
+                expected_preview_digest=accepted.preview_digest,
+            )
+        assert commit.value.reason == "source_unavailable"
+        with pytest.raises(AdmissionDenied) as handoff:
+            await read_preparation_counterpart(request)
+        assert isinstance(handoff.value.__cause__, AgentBackendRefused)
+        assert handoff.value.__cause__.reason == "re_confirm"
+    assert await service.current(source) == accepted
+    assert await service.audit(source.tenant_id) == before
+    assert constructions == targets == []
+    assert reads and all(call.method == "GET" for call in reads)
+
+
+@pytest.mark.parametrize(
+    "surface", ["agent.model.speed", "environment.scope", "environment.packages.type"]
+)
+async def test_schema_supported_null_enum_keeps_existing_consent(consent_request, surface):
+    import httpx
+
+    request, service, source, _, accepted, router, _, constructions, targets, _ = consent_request
+    agent = request.admission.agent.model_dump(mode="json", exclude_unset=True)
+    environment = request.admission.environment.model_dump(mode="json", exclude_unset=True)
+    if surface == "agent.model.speed":
+        agent["model"]["speed"] = None
+    elif surface == "environment.scope":
+        environment["scope"] = None
+    else:
+        environment["config"]["packages"]["type"] = None
+    router.routes.clear()
+    router.add(
+        "GET",
+        "/v1/agents/" + request.admission.agent.id,
+        lambda *_: httpx.Response(200, json=agent),
+    )
+    router.add(
+        "GET",
+        "/v1/environments/" + request.admission.environment.id,
+        lambda *_: httpx.Response(200, json=environment),
+    )
+    before = await service.audit(source.tenant_id)
+    quote = await service.preview(source, "openai")
+    assert quote.allowed and quote.declared_drops == ("memory", "sandbox")
+    assert await service.current(source) == accepted
+    assert await service.audit(source.tenant_id) == before
+    assert constructions == targets == []

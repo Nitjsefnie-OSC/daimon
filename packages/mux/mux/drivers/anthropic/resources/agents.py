@@ -10,7 +10,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import AgentCreateParams
 from anthropic.types.beta.agent_update_params import AgentUpdateParams
-from pydantic import JsonValue, ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
@@ -181,6 +181,14 @@ def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Sco
         "mcp_servers",
         "skills",
     }
+    for name in ("type", "model", "multiagent", "mcp_servers", "skills"):
+        if name == "type" or name in native:
+            try:
+                TypeAdapter(BetaManagedAgentsAgent.model_fields[name].annotation).validate_python(
+                    native.get(name)
+                )
+            except ValidationError:
+                unclassified.add(name)
     try:
         agent_tools(extensions["anthropic.agent_tools"])
     except ValidationError:

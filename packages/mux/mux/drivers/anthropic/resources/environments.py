@@ -12,7 +12,7 @@ from anthropic.types.beta.beta_environment import Config
 from anthropic.types.beta.environment_create_params import EnvironmentCreateParams
 from anthropic.types.beta.environment_list_params import EnvironmentListParams
 from anthropic.types.beta.environment_update_params import EnvironmentUpdateParams
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
@@ -109,6 +109,14 @@ def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scop
         "scope",
         "config",
     }
+    for name in ("type", "scope"):
+        if name == "type" or name in native:
+            try:
+                TypeAdapter(BetaEnvironment.model_fields[name].annotation).validate_python(
+                    native.get(name)
+                )
+            except ValidationError:
+                unclassified.add(name)
     config_value: dict[str, JsonValue] = (
         {} if config is None else {"config": config.model_dump(mode="json", exclude_unset=True)}
     )
