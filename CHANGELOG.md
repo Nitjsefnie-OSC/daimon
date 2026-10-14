@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve retrieved Anthropic builtin tool-config type fields in session overrides while retaining strict native configuration validation.
 - Refresh the turn oracle for pinned main’s pagination, settlement, personal memory, checkpoint archive and terminal card changes, with per-hunk provenance.
+- Separate OpenAI MCP skill-upload runtime tests from the shared skill-upload suite.
+- Keep the complete Managed Agents call inventory in compact JSON below the shared file-size limit, with the unchanged zero-call ratchet outside drivers.
 
 - Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
+- Read exact root billing references through immutable outcomes without summing reused-session history.
 
 - Add a testing-only scoped fleet journal exporter with atomic restricted bundles, verified paired worker generations/failure facts and pointer-bound public review digests, authoritative persisted reads, offline verification and explicit missing owner evidence.
 

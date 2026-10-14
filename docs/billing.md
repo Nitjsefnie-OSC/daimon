@@ -1091,6 +1091,17 @@ zero spend. Reused root-session history is excluded. These product facts do not 
 provider final actuals or connect a fleet run to a separate QA cash receipt. That
 connection needs an actual allocation-owner record, not a role, model or time match.
 
+The same accounting reader accepts `outcome_ids` and the admitted `account_id`
+for exact root attribution. The caller obtains the original outcome UUIDs from
+its counted input operation associations. The query joins the scoped immutable
+outcomes' `usage_refs` to original usage revisions, usage-event rows and ledger
+keys, so reused-session history is excluded. Legacy request spans remain
+usage-event rows; no neutral meter is fabricated. Original debit keys are
+unioned once across mirrored records. Missing outcome or reference associations
+stay pending; replay never substitutes a fresh observer. `attribution_complete`
+certifies only this reference join, not final usage, price, runtime, settlement
+or permission to release a reservation. Existing no-selector reads are unchanged.
+
 
 Fleet monetary interfaces are opt-in host seams; ordinary turns do not call
 them. `channel_budget.admit_fleet_worker` is the single transactional spawn and

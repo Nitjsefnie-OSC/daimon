@@ -21,6 +21,10 @@ def test_ma_call_ratchet() -> None:
     current = inventory.scan(ROOT)
     assert not current["parse_errors"], f"MA inventory has parse errors: {current['parse_errors']}"
     baseline = json.loads(inventory.BASELINE.read_text())
+    assert inventory.BASELINE.stat().st_size <= 500 * 1024, (
+        "The complete MA baseline must fit the shared 500 KiB new-file gate. "
+        "Regenerate with: uv run python scripts/ma_inventory.py --output scripts/ma_inventory.json."
+    )
     assert not baseline["parse_errors"]
     ceiling = len(inventory.outside_driver_calls(baseline))
     assert ceiling <= MAX_OUTSIDE_DRIVERS, (
