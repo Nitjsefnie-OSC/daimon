@@ -8,7 +8,6 @@ recheck. No SDK client or provider configuration is loaded during app startup.
 from __future__ import annotations
 
 import os
-from decimal import Decimal, localcontext
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -18,6 +17,7 @@ from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.pricing import provider_prices
+from daimon.core.sessions import native_session_budget_cents
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -273,16 +273,19 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     if deployment.worker_materialization and request.worker is None:
         raise AdmissionDenied(reason="backend_unsupported")
     spend_limit = deployment.spend_limit_usd_cents
-    worker_budget_requested = False
-    if request.worker is not None and request.worker.limits.native_budget_usd is not None:
-        worker_budget_requested = True
-        request.worker.limits.require_native_dispatch(request.now())
-        with localcontext() as context:
-            context.prec = 80
-            cents = request.worker.limits.native_budget_usd * Decimal(100)
-            if cents != cents.to_integral_value():
-                raise AdmissionDenied(reason="backend_unsupported")
-            requested = int(cents)
+    native_budget_usd = request.native_budget_usd
+    if request.worker is not None and native_budget_usd is not None:
+        raise AdmissionDenied(reason="backend_unsupported")
+    budget = (
+        request.worker.limits.native_budget_usd if request.worker is not None else native_budget_usd
+    )
+    if budget is not None:
+        if request.worker is not None:
+            request.worker.limits.require_native_dispatch(request.now())
+        try:
+            requested = native_session_budget_cents(budget)
+        except ValueError:
+            raise AdmissionDenied(reason="backend_unsupported") from None
         if spend_limit is not None and spend_limit != requested:
             raise AdmissionDenied(reason="backend_unsupported")
         spend_limit = requested
@@ -442,7 +445,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             multi_agent_enabled=False,
             container_size="small",
             spend_limit_usd_cents=spend_limit,
-            require_spend_control_echo=worker_budget_requested,
+            require_spend_control_echo=budget is not None,
         ),
     )
 

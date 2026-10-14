@@ -16,12 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Populate opt-in native fleet admission and usage pricing through the installed runtime callbacks, using the shared dated tariffs.
 - Retain explicit source-loss consent with immutable agent backend revisions and scoped effective configuration associations; legacy revisions remain consent-free.
 - Read retained source-loss authority from persisted columns and refuse dirty or deleted proof state without flushing or replacing caller caches.
+- Preserve Discord orchestration calls without an explicit origin stack; admission still decides denial before any origin is entered.
+
+- Gate failed controlled-session cleanup on verified native ownership and archive at most once in app mode, while preserving ordinary app cleanup and independent token/vault revocation.
 
 - Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
 - Read exact root billing references through immutable outcomes without summing reused-session history.
 - Resolve native tariff identities from provider profiles and check dated validity in UTC.
 
 - Supply immutable dated native Standard token tariffs, retaining unknown actuals when request tiers or infrastructure are incomplete.
+- Add optional paired per-agent root budgets without enabling root funding or counted sends. Prepare native session-budget request validation and bind the actual Discord card/origin identity before preparation only for granted fleet roots.
 
 - Add a testing-only scoped fleet journal exporter with atomic restricted bundles, verified paired worker generations/failure facts and pointer-bound public review digests, authoritative persisted reads, offline verification and explicit missing owner evidence.
 

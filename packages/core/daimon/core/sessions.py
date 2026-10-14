@@ -498,6 +498,20 @@ def _session_metadata(
     return metadata
 
 
+def native_session_budget_cents(value: object) -> int | None:
+    """Compile an explicit positive session budget without decimal rounding."""
+    if value is None:
+        return None
+    if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
+        raise ValueError("native session budget requires positive exact USD cents")
+    with localcontext() as context:
+        context.prec = max(80, len(value.as_tuple().digits) + 2)
+        cents = value * Decimal(100)
+        if cents != cents.to_integral_value():
+            raise ValueError("native session budget requires positive exact USD cents")
+        return int(cents)
+
+
 async def create_session(
     anthropic: AsyncAnthropic,
     *,
@@ -540,6 +554,7 @@ async def create_session(
     model_override: str | None = None,
     resource_source: BackendAgent | None = None,
     worker: ResolvedWorkerSpec | None = None,
+    native_budget_usd: Decimal | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -639,6 +654,15 @@ async def create_session(
 
     On MA failure: ``anthropic.APIError`` propagates uncaught.
     """
+    if worker is not None and native_budget_usd is not None:
+        raise ScopeViolation("session-budget", "root and worker controls cannot be combined")
+    budget_cents = native_session_budget_cents(
+        worker.limits.native_budget_usd if worker is not None else native_budget_usd
+    )
+    if native_budget_usd is not None and (
+        before_create is None or allocation is None or tenant_id is None or account_id is None
+    ):
+        raise ScopeViolation("session-budget", "owned funding and allocation required")
     scope = session_scope(
         tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_session"
     )
@@ -1066,6 +1090,7 @@ async def create_session(
 
         created: BetaManagedAgentsSession | None = None
         owned_created = False
+        observed = None
         try:
             if app_mode:
                 assert (
@@ -1108,16 +1133,11 @@ async def create_session(
                 ),
                 resources=resources if resources else None,
             )
-            if worker is not None and worker.limits.native_budget_usd is not None:
-                with localcontext() as context:
-                    context.prec = 80
-                    cents = worker.limits.native_budget_usd * Decimal(100)
-                    if cents != cents.to_integral_value():
-                        raise ValueError("native session budget requires exact cents")
-                    create.keywords["budget"] = {
-                        "type": "limit",
-                        "max_list_cost": {"amount": str(int(cents)), "currency": "USD"},
-                    }
+            if budget_cents is not None:
+                create.keywords["budget"] = {
+                    "type": "limit",
+                    "max_list_cost": {"amount": str(budget_cents), "currency": "USD"},
+                }
             created = (
                 await allocation(
                     create,
@@ -1128,16 +1148,8 @@ async def create_session(
                 if allocation is not None
                 else await create()
             )
-            if resource_source is not None:
-                assert worker is not None and tenant_id is not None and account_id is not None
-                assert resource_source.memory_store_id is not None
-                assert resource_source.memory_read_only is not None
-                assert (
-                    agent_uuid is not None
-                    and session_factory is not None
-                    and before_create is not None
-                )
-                expected = memory_mount(resource_source.memory_store_id, read_only=memory_read_only)
+            if resource_source is not None or native_budget_usd is not None:
+                assert tenant_id is not None and account_id is not None
                 backend = managed_agents(
                     anthropic, scope=scope, resources=frozenset({("session", created.id)})
                 )
@@ -1163,7 +1175,26 @@ async def create_session(
                     created.model_dump(mode="json").get("budget") != create.keywords["budget"]
                     or observed.get("budget") != create.keywords["budget"]
                 ):
-                    raise ScopeViolation("worker-resources", "native session budget differs")
+                    raise ScopeViolation("session-budget", "native session budget differs")
+                if not owned_created or observed.get("archived_at") is not None:
+                    raise ScopeViolation("session-budget", "native session ownership differs")
+                if native_budget_usd is not None:
+                    assert before_create is not None
+                    await before_create()
+            if resource_source is not None:
+                assert observed is not None
+                native_agent, native_resources = (
+                    observed.get(name) for name in ("agent", "resources")
+                )
+                assert worker is not None and tenant_id is not None and account_id is not None
+                assert resource_source.memory_store_id is not None
+                assert resource_source.memory_read_only is not None
+                assert (
+                    agent_uuid is not None
+                    and session_factory is not None
+                    and before_create is not None
+                )
+                expected = memory_mount(resource_source.memory_store_id, read_only=memory_read_only)
                 scalars = ("id", "model", "system", "version", "multiagent")
                 fields = {*scalars, "tools", "mcp_servers", "skills"}
                 intent = agent.model_dump(mode="json")
@@ -1287,7 +1318,12 @@ async def create_session(
 
                 with single_attempt_mutation():
                     await _archive_orphaned_session(anthropic, session_id=created.id, scope=scope)
-            if created is not None and app_mode:
+            elif (
+                created is not None
+                and app_mode
+                and resource_source is None
+                and native_budget_usd is None
+            ):
                 await archive_session_record(
                     anthropic,
                     created.id,

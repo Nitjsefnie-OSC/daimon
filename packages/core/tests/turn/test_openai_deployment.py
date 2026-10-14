@@ -8,6 +8,7 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -20,6 +21,7 @@ from daimon.core.turn import openai_host
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.openai_deployment import build_openai_runtime
 from daimon.core.turn.openai_host import OpenAIHostRuntime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.outcomes import drain_outcomes
@@ -36,7 +38,7 @@ from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ThreadRef
 from mux.drivers.openai import deployment
-from mux.errors import ScopeViolation
+from mux.errors import ContinuityLost, ScopeViolation
 from mux.state.lease import Slot
 from openai import AsyncOpenAI
 from pydantic import JsonValue, PostgresDsn, SecretStr
@@ -44,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..test_native_tariffs import fixed_source_date as fixed_source_date
 from .test_openai_host import Wire
+from .test_openai_host import composed as composed
 from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission
 
 
@@ -266,6 +269,94 @@ async def test_omitted_native_spend_control_is_preserved(
     assert runtime.controls.require_spend_control_echo is False
     assert runtime.controls.multi_agent_enabled is False
     assert runtime.controls.container_size == "small"
+
+
+@pytest.mark.parametrize("budget", [None, Decimal("0.20")])
+@pytest.mark.parametrize("echo", ["same", "missing", "different"])
+async def test_root_native_budget_compiles_wire_and_requires_exact_echo(
+    application, monkeypatch, tmp_path, budget, echo
+):
+    row = entry()
+    del row["spend_limit_usd_cents"]
+    manifest(monkeypatch, tmp_path / "runtime.json", [row])
+    monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline-only")
+    wire = Wire()
+    wire.expected_spend_limit = 20 if echo == "same" else None if echo == "missing" else 21
+
+    def handle(request):
+        if request.method == "POST" and request.url.path.endswith("/agents/sessions"):
+            body = json.loads(request.content)
+            if budget is None:
+                assert "spend_control" not in body
+            else:
+                assert body["spend_control"] == {"limit": 20}
+            wire.requests.append(request)
+            return httpx.Response(200, json=wire.session())
+        return wire.handle(request)
+
+    monkeypatch.setattr(deployment, "_http_transport", lambda: httpx.MockTransport(handle))
+    runtime = build_openai_runtime(replace(application, native_budget_usd=budget))
+    assert runtime.controls.require_spend_control_echo is (budget is not None)
+    spec = await runtime.session_plan(application)
+    backend = openai_host.driver(runtime, REVISION, SCOPE)
+    acknowledged = await backend.sessions.create(SCOPE, spec, key="root-controlled-create")
+    # Actual host creation persists this acknowledged object before validation.
+    if budget is not None and echo != "same":
+        with pytest.raises(ContinuityLost):
+            backend.sessions.validate_spend_control(acknowledged)
+    else:
+        backend.sessions.validate_spend_control(acknowledged)
+    assert len([call for call in wire.requests if call.method == "POST"]) == 1
+    assert not wire.turns
+
+
+@pytest.mark.parametrize(
+    "budget", [Decimal("0"), Decimal("NaN"), Decimal("0.201"), Decimal("0.20")]
+)
+async def test_root_native_budget_refuses_invalid_or_conflicting_controls_before_key_or_plan(
+    application, monkeypatch, tmp_path, budget
+):
+    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
+    original = os.environ.get
+
+    def forbidden(name, default=None):
+        if name == "N4_OFFLINE_OPENAI_KEY":
+            raise AssertionError("refused native control accessed credentials")
+        return original(name, default)
+
+    monkeypatch.setattr(os.environ, "get", forbidden)
+    with pytest.raises(AdmissionDenied):
+        build_openai_runtime(replace(application, native_budget_usd=budget))
+
+
+async def test_root_budget_refuses_an_existing_unverified_binding_before_native_input(
+    application, composed, monkeypatch, tmp_path
+):
+    request, wire, store, _, runtime = composed
+    first = await openai_host.prepare_openai(request)
+    binding = await store.get_binding(
+        Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+            account_id=SCOPE.account_id,
+        )
+    )
+    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
+    compiled = build_openai_runtime(replace(application, native_budget_usd=Decimal("0.04")))
+    controlled = replace(runtime, controls=compiled.controls)
+    candidate = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: controlled}))
+    calls = len(wire.requests)
+    with pytest.raises(ContinuityLost):
+        await openai_host.prepare_openai(candidate)
+    assert len(wire.requests) == calls and not wire.turns
+    assert (
+        await store.get_binding(
+            Slot(
+                thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+                account_id=SCOPE.account_id,
+            )
+        )
+    ) == binding
+    assert first.session_ref is not None
 
 
 async def test_other_channel_keys_and_plans_are_never_reused(
