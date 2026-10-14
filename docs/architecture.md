@@ -398,16 +398,20 @@ Plain-text mentions are a per-tenant switch (`tenants.plain_text_mentions`,
 off by default, set with the admin-only `set_plain_text_mentions`). Each
 adapter first runs the pure matcher in `daimon.core.name_mentions` on a
 person's channel or thread message: "@" plus a bot name, case-insensitive,
-not after a word character or another "@" and not running on into a word
-character or hyphen; "Name (Suffix)" also matches "@Name". Bots, webhooks,
-DMs and messages that already carry a real mention never match. Only a match
-pays one read of the switch. With it on, Discord continues down the mention
-path (configured name, account name and server nickname), Slack runs the
-`app_mention` handler for the `message` event with the switch in place of the
-mention check, claiming the dedup slot only after making sure the text has no
-real mention (whose own `app_mention` then runs the one turn), and Teams
-(`parse_inbound` marks the message `by_name`; the name is `recipient.name`)
-takes the ordinary `_handle` path with the typed name stripped. Off, nothing
+any whitespace between its words, not after a word character, "@" or "/"
+and not running on into a word character, hyphen, dotted domain or "(";
+"Name (Suffix)" also matches "@Name". A following word does not stop it, so
+bots whose names share a prefix all answer the longer one. Bots, webhooks,
+DMs, messages that already carry a real mention, Slack `<...>` links and
+Teams reply quotes never match. Only a match pays one read of the switch,
+and a failed read counts as off. With it on, Discord continues down the
+mention path (configured name, account name and server nickname), Slack runs
+the `app_mention` handler for the `message` event with the switch, read
+first, in place of the mention check; both events claim the dedup slot only
+after the mention check, so a message with a real mention runs once, through
+its own `app_mention`. Teams (`parse_inbound` marks the message `by_name`; the
+name is `recipient.name`) takes the ordinary `_handle` path with the typed
+name stripped, or gets the too-long notice a mention would. Off, nothing
 changes: a Teams thread reply still goes to participation.
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
