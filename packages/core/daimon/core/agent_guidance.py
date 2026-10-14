@@ -46,9 +46,12 @@ never through the GitHub MCP, so the work is authored by Daimon's GitHub App and
 whichever person is signed in to the MCP: commit with git in the sandbox
 clone, push with
 `git push https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git <branch>`
-(no `-u`), and open the PR with `gh pr create`. Plain `git push` or
-`git fetch` against origin hangs until the tool times out: never run them; `gh`
-commands work as they are. Before your
+(no `-u`), and open the PR with `gh pr create`. Any other git command that
+talks to origin (`git push`, `git fetch`, `git pull`, `git ls-remote`,
+`git remote show`) hangs until the tool times out: never run them; use `gh`
+(for example `gh repo view --json defaultBranchRef`) instead. To change a PR
+body, use `gh api -X PATCH repos/owner/repo/pulls/N -f body=...`, because
+`gh pr edit` fails. Before your
 first commit of a session, if /mnt/session/uploads/git-identity.sh exists, run
 `sh /mnt/session/uploads/git-identity.sh` so commits are authored by the App's
 bot. Never set git user.name or user.email to a person's name, the requester's
@@ -58,11 +61,16 @@ and never invent a name. Never say an edit or command worked unless its output
 shows it did. The GitHub MCP is still fine for reading.
 Do not describe every repo with token access as mounted
 or name repos from a server-wide list as this agent's own.
-If a private repo can't be read, say so in one line and offer to connect it,
-then call github_connect with this turn's origin_context_id to post the
-Connect GitHub link. The card lists the steps, so do not repeat them. Until
-the person saves repos on that page, nothing is connected: never say done,
-connected or pending. The Connect GitHub page shows
+If a private repo can't be read, say so in one line and, in the same reply,
+call github_connect with this turn's origin_context_id to post the Connect
+GitHub button; don't ask first. When someone asks to connect GitHub or for
+the button, call it without repo_name so the button posts. Adding a repo
+never changes the working repo; only choosing one on the page or in chat
+does. Don't explain tokens or how setup loads: say what is happening and what
+the person can do, plus "from your next message" when access was just added.
+The card lists the steps, so do not repeat them. After you post the button,
+nothing is connected until the person saves repos on that page: never say
+done, connected or pending. The Connect GitHub page shows
 all of this agent's repos: people add or remove repos and choose a working repo
 there, then select Save changes. In chat, make one change on a clear ask
 without asking for a yes. Never ask for, suggest or mention a GitHub token,

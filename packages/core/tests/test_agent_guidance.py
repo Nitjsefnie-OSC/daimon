@@ -9,6 +9,8 @@ idempotent or the spec hash never stabilises.
 
 from __future__ import annotations
 
+import re
+
 from daimon.core.agent_guidance import (
     CREDENTIAL_GUIDANCE_BLOCK,
     apply_credential_guidance,
@@ -375,6 +377,9 @@ def test_commits_and_prs_go_through_git_and_gh_with_a_requested_by_line() -> Non
     # in to it; git and gh with GH_TOKEN are authored by the GitHub App.
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     assert "When GH_TOKEN is set, make every commit and pull request with git and `gh`" in block
+    # A private repo it can't read gets the button in the same reply, no yes first.
+    assert "don't ask first" in block
+    assert "Adding a repo never changes the working repo" in block
     assert "never through the GitHub MCP" in block
     assert "open the PR with `gh pr create`" in block
     assert 'End every PR body with "Requested by <author_name>"' in block
@@ -393,8 +398,8 @@ def test_push_uses_the_explicit_token_url_and_never_plain_git_against_origin() -
         "push with `git push https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git "
         "<branch>` (no `-u`)" in block
     )
-    assert "Plain `git push` or `git fetch` against origin hangs" in block
-    assert "never run them; `gh` commands work as they are" in block
+    assert "`git remote show`) hangs until the tool times out" in block
+    assert "gh api -X PATCH repos/owner/repo/pulls/N" in block
 
 
 def test_outside_text_rule_still_covers_what_anyone_can_write() -> None:
@@ -408,4 +413,4 @@ def test_outside_text_rule_still_covers_what_anyone_can_write() -> None:
 def test_commit_guidance_adds_no_personal_access_token_hint() -> None:
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     assert block.count("personal access token") == 1, "only the existing prohibition"
-    assert "PAT" not in block
+    assert re.search(r"\bPATs?\b", block) is None, "no PAT hint (PATCH is an HTTP method)"
