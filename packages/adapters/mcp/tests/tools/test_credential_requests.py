@@ -1088,8 +1088,6 @@ async def test_request_repo_binding_refuses_an_app_mode_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An App-mode agent's repos change through Connect GitHub, never the token form."""
-    from daimon.core._models import AgentGitHubMode
-
     tenant = await make_tenant(db_session)
     await db_session.commit()
     client = _ma_client_with_agents(
@@ -1098,14 +1096,13 @@ async def test_request_repo_binding_refuses_an_app_mode_agent(
     runtime = _runtime(committing_sessionmaker, client=client)
     auth = _auth_identity(tenant_id=tenant.id)
     await make_account(db_session, tenant=tenant, id=auth.account_id)
-    db_session.add(
-        AgentGitHubMode(
-            tenant_id=tenant.id,
-            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_repo"),
-            mode="app",
-        )
-    )
     await db_session.commit()
+    app_agent = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_repo")
+
+    async def _mode(_session: object, *, tenant_id: object, agent_id: object) -> str:
+        return "app" if agent_id == app_agent else "legacy"
+
+    monkeypatch.setattr(_credential_requests_mod, "get_agent_mode", _mode)
     async with committing_sessionmaker.begin() as session:
         origin = await create_origin(
             session,
