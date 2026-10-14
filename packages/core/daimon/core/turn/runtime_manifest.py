@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import replace
 from datetime import datetime
 from functools import partial
@@ -444,7 +444,11 @@ async def run_controlled_preparation(
         with persistence.activate():
             return await preparing
 
-    return await persistence.run(pump)
+    try:
+        return await persistence.run(pump)
+    finally:
+        if isinstance(preparing, Coroutine):
+            preparing.close()
 
 
 def root_claim_check(

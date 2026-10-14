@@ -24,6 +24,7 @@ from daimon.core.turn.runtime_manifest import (
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.receipts import CancelReceipt, Operation, SendReceipt
+from mux.state.store import binding_slot
 from sqlalchemy import delete
 
 from .test_frozen_preparation import revoke
@@ -413,3 +414,28 @@ async def test_two_completion_inputs_use_the_original_root_hold_and_fourth_refus
     async with deps.sessionmaker() as db:
         rows = await mux_state.list_fleet_root_finances(db, tenant_id=UUID(scope.tenant_id))
     assert len(rows) == 1 and rows[0] == after
+
+
+async def test_busy_preallocation_closes_unstarted_native_preparation_without_io(root_turn):
+    from datetime import timedelta
+
+    from mux.state.lease import LeaseBusy
+
+    request = await select_controls(root_turn)
+    store = request.deps.state_store
+    slot = binding_slot(root_turn[6])
+    lease = await store.acquire_lease(
+        slot, holder="other-root", turn_id="other-root", now=request.now(), ttl=timedelta(minutes=5)
+    )
+    preparing = create_ma_session(
+        request.deps, request.admission, tenant_id=request.tenant_id, preparation=request
+    )
+    before = len(root_turn[-1].requests)
+    try:
+        with pytest.raises(LeaseBusy):
+            await run_controlled_preparation(request, preparing)
+    finally:
+        await store.release_lease(lease)
+    assert preparing.cr_frame is None
+    assert len(root_turn[-1].requests) == before
+    assert (await root_record(root_turn)).result["root_finance"]["input_keys"] == []
