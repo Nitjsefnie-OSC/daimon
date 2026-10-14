@@ -6,7 +6,7 @@ the tenant through `usage_recording.record_classifier_usage` from the token
 counts returned here. It runs only for threads whose resolved mode is `on`,
 after the burst of messages has gone quiet and after the balance and cap
 gates, so a deployment that never turns the feature on never pays for it.
-Any error, including malformed output, yields `SILENCE_ON_ERROR`: a
+Any error, including malformed output or a refusal, yields `SILENCE_ON_ERROR`: a
 classifier outage must never turn into a chattier bot.
 """
 
@@ -61,6 +61,9 @@ async def classify(
         response = await anthropic.messages.create(
             model=model,
             max_tokens=_MAX_OUTPUT_TOKENS,
+            # Thinking counts toward max_tokens on models that think by default
+            # (Haiku 5.5); left on, it can use up the cap before any verdict.
+            thinking={"type": "disabled"},
             system=classifier_system_prompt(bot_display_name),
             messages=[{"role": "user", "content": prompt}],
         )
@@ -69,6 +72,8 @@ async def classify(
             output_tokens=response.usage.output_tokens,
             cache_read_input_tokens=response.usage.cache_read_input_tokens or 0,
         )
+        if response.stop_reason == "refusal":
+            raise ValueError("classifier call was refused")
         text = "".join(b.text for b in response.content if isinstance(b, TextBlock))
         return ClassifierOutcome(parse_classifier_response(text), usage)
     except Exception:  # fail-closed boundary: any failure means silence
