@@ -796,6 +796,10 @@ dev = [
     { name = "ruff" },
     { name = "syrupy" },
 ]
+mux-test = [
+    { name = "daimon-mux", extra = ["anthropic", "gemini", "openai"] },
+    { name = "daimon-testing" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -825,6 +829,10 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.6" },
     { name = "ruff", specifier = ">=0.7.0" },
     { name = "syrupy", specifier = ">=5.5.3" },
+]
+mux-test = [
+    { name = "daimon-mux", extras = ["anthropic", "openai", "gemini"], editable = "packages/mux" },
+    { name = "daimon-testing", editable = "packages/testing" },
 ]
 
 [[package]]
