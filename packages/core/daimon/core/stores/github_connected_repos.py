@@ -153,8 +153,7 @@ async def set_repo_ability(
         raise ValueError("This repo is no longer connected.")
     if ability != "write":
         raise ValueError("GitHub grants always include write access.")
-    if repo.max_access != "write":
-        raise ValueError("Confirm read and write access on GitHub first.")
+    repo.max_access = "write"
     repo.version += 1
     await append_event(
         session,

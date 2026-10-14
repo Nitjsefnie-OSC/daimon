@@ -442,12 +442,8 @@ async def stage_grant(
                 f"{agent_name or agent_id} already uses repos from {org}. "
                 "Connect repos from one GitHub org per agent."
             )
-    if authorized.max_access != "write":
-        raise ValueError("GitHub write access is needed to connect this repo.")
     baseline_access = "write"
     ceiling_access = "write"
-    if _ACCESS_RANK[ceiling_access] > _ACCESS_RANK[authorized.max_access]:
-        raise ValueError("ceiling access exceeds repository authorization")
     app_active = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app"
     if is_working_repo:
         working = await session.scalars(
@@ -618,11 +614,7 @@ async def activate_agent(
         authorized = await repo_for_agent(
             session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
         )
-        if (
-            authorized is None
-            or authorized.status != "active"
-            or (_ACCESS_RANK[grant.ceiling_access] > _ACCESS_RANK[authorized.max_access])
-        ):
+        if authorized is None or authorized.status != "active":
             raise ValueError("staged grant is no longer authorized")
         installation = await session.get(GitHubAppInstallation, authorized.installation_id)
         if installation is None or installation.suspended_at is not None:

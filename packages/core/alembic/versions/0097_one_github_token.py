@@ -1,6 +1,6 @@
 """Make existing GitHub grants and pending choices write access.
 
-downgrade: irreversible data normalization
+downgrade: unsupported
 """
 
 from alembic import op
@@ -37,4 +37,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    raise NotImplementedError("Cannot restore prior GitHub access levels")

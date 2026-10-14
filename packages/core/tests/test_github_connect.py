@@ -1411,28 +1411,27 @@ async def test_confirm_records_the_authorizers_permission(db_session: AsyncSessi
     assert repo is not None
     assert repo.authorized_permission == "maintain" and repo.max_access == "write"
 
-    # A later read-level confirmation is refused and leaves the grant unchanged.
-    with pytest.raises(ValueError, match="write access is needed"):
-        await _confirm_repo(
-            db_session,
-            tenant_id,
-            admin_id,
-            github_user_id=99,
-            state="second",
-            max_access="read",
-            permission="read",
-        )
+    # A reader can authorize an App token with read and write access.
+    assert await _confirm_repo(
+        db_session,
+        tenant_id,
+        admin_id,
+        github_user_id=99,
+        state="second",
+        max_access="read",
+        permission="read",
+    )
     repo = await github_access.repo_for_agent(
         db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
     )
     assert repo is not None
     assert repo.max_access == "write"
-    assert (repo.authorized_by_github_user_id, repo.authorized_permission) == (17, "maintain")
+    assert (repo.authorized_by_github_user_id, repo.authorized_permission) == (99, "read")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("permission", ["read", "triage"])
-async def test_confirm_refuses_write_from_a_read_level_authorizer(
+async def test_confirm_allows_app_write_from_a_read_level_authorizer(
     db_session: AsyncSession, permission: str
 ) -> None:
     tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
@@ -1440,16 +1439,20 @@ async def test_confirm_refuses_write_from_a_read_level_authorizer(
     await db_session.flush()
     db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
     await db_session.flush()
-    with pytest.raises(ValueError, match="write access on GitHub"):
-        await _confirm_repo(
-            db_session,
-            tenant_id,
-            admin_id,
-            github_user_id=17,
-            state="denied",
-            max_access="write",
-            permission=permission,
-        )
+    assert await _confirm_repo(
+        db_session,
+        tenant_id,
+        admin_id,
+        github_user_id=17,
+        state="confirmed",
+        max_access="read",
+        permission=permission,
+    )
+    repo = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
+    assert repo is not None
+    assert repo.max_access == "write" and repo.authorized_permission == permission
 
 
 @pytest.mark.asyncio

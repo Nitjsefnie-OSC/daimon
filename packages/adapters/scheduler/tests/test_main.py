@@ -39,7 +39,6 @@ from daimon.adapters.scheduler.main import (
     _usage_sweep_once,  # pyright: ignore[reportPrivateUsage]  # --once usage pass
     _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
 )
-from daimon.core._models import ThreadSession
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet
@@ -50,6 +49,7 @@ from daimon.core.promo_codes import build_promo_code_terms
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.scheduler import run_one_tick
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores import github_issued_tokens, tenant_ledger, tenant_user_caps, usage_events
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
@@ -58,6 +58,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_provision_status
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import (
@@ -433,16 +434,16 @@ async def test_mapped_session_with_only_revoked_token_is_refreshed(
     agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_agent_id)
     session_id = f"mapped-revoked-{uuid.uuid4()}"
     url = "https://github.com/acme/repo"
-    db_session.add(
-        ThreadSession(
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id=session_id,
-            account_id=account.id,
-            ma_session_id=session_id,
-            ma_agent_id=ma_agent_id,
-            status="live",
-            effective_config={
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=session_id,
+        account_id=account.id,
+        ma_session_id=session_id,
+        ma_agent_id=ma_agent_id,
+        effective_config=SessionSnapshot.model_validate(
+            {
                 "ma_agent_id": ma_agent_id,
                 "model_id": "test-model",
                 "system_sha256": None,
@@ -461,8 +462,8 @@ async def test_mapped_session_with_only_revoked_token_is_refreshed(
                 "env_sha256": None,
                 "agent_version": 1,
                 "agent_name": "Agent",
-            },
-        )
+            }
+        ),
     )
     await db_session.flush()
     fernet = build_multifernet((Fernet.generate_key().decode(),))
@@ -525,17 +526,17 @@ async def test_external_live_app_sessions_without_tokens_are_never_rotated(
         )
     mapped_id = f"external-mapped-{uuid.uuid4()}"
     mcp_id = f"external-mcp-{uuid.uuid4()}"
-    db_session.add(
-        ThreadSession(
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id=mapped_id,
-            account_id=account.id,
-            is_external=stored_flag,
-            ma_session_id=mapped_id,
-            ma_agent_id="external-agent",
-            status="live",
-            effective_config={
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=mapped_id,
+        account_id=account.id,
+        is_external=stored_flag,
+        ma_session_id=mapped_id,
+        ma_agent_id="external-agent",
+        effective_config=SessionSnapshot.model_validate(
+            {
                 "ma_agent_id": "external-agent",
                 "model_id": "test-model",
                 "system_sha256": None,
@@ -554,8 +555,8 @@ async def test_external_live_app_sessions_without_tokens_are_never_rotated(
                 "env_sha256": None,
                 "agent_version": 1,
                 "agent_name": "Agent",
-            },
-        )
+            }
+        ),
     )
     await github_issued_tokens.register_app_session_vault(
         db_session,

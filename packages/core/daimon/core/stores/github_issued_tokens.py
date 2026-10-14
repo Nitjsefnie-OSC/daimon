@@ -256,7 +256,7 @@ async def select_stale_tokens(
                      )
                      OR (
                        token.permissions ->> 'contents' = 'write'
-                       AND (grant_row.ceiling_access <> 'write' OR auth_row.max_access <> 'write')
+                       AND grant_row.ceiling_access <> 'write'
                      )
                 )
               )

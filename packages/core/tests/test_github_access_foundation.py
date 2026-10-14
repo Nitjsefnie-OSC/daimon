@@ -95,7 +95,7 @@ def test_group_access_uses_write_for_duplicate_repo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_staged_grants_activate_atomically_and_validate_ceiling(
+async def test_staged_grants_activate_atomically_with_app_write(
     db_session: AsyncSession,
 ) -> None:
     tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
@@ -121,21 +121,6 @@ async def test_staged_grants_activate_atomically_and_validate_ceiling(
         )
     )
     await db_session.flush()
-    with pytest.raises(ValueError, match="write access is needed"):
-        await github_access.stage_grant(
-            db_session,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            repo_id=101,
-            baseline_access="read",
-            ceiling_access="write",
-            granted_by_account_id=None,
-        )
-    authorized = await github_access.repo_for_agent(
-        db_session, tenant_id=tenant_id, repo_id=101, agent_id=agent_id
-    )
-    assert authorized is not None
-    authorized.max_access = "write"
     staged = await github_access.stage_grant(
         db_session,
         tenant_id=tenant_id,
@@ -788,7 +773,9 @@ async def test_mint_uses_repository_ids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSession) -> None:
+async def test_inventory_sweeper_keeps_write_token_for_read_authorizer_until_version_changes(
+    db_session: AsyncSession,
+) -> None:
     tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
     await db_session.flush()
@@ -814,8 +801,8 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
             tenant_id=tenant_id,
             agent_id=agent_id,
             repo_id=101,
-            baseline_access="read",
-            ceiling_access="read",
+            baseline_access="write",
+            ceiling_access="write",
             staged=False,
             is_working_repo=True,
             version=1,
@@ -834,7 +821,7 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
             session_id="session",
             installation_id=909,
             repo_ids=[101],
-            permissions={"contents": "read"},
+            permissions={"contents": "write"},
             grant_versions={"grant:101": 1},
             expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
@@ -845,7 +832,7 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
         session_id="session",
         installation_id=909,
         repo_ids=[101],
-        permissions={"contents": "read"},
+        permissions={"contents": "write"},
         grant_versions={"grant:101": 1, "authorization:101": 1},
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
@@ -897,7 +884,7 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
         session_id="session",
         installation_id=909,
         repo_ids=[101],
-        permissions={"contents": "read"},
+        permissions={"contents": "write"},
         expires_at=row.expires_at,
         grant_versions=row.grant_versions,
         turn_origin_id=origin_id,
@@ -907,7 +894,7 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
     assert event.github_session_id == "session"
     assert event.github_installation_id == 909
     assert event.github_repo_ids == [101]
-    assert event.github_permissions == {"contents": "read"}
+    assert event.github_permissions == {"contents": "write"}
     assert event.github_grant_versions == {"grant:101": 1, "authorization:101": 1}
     assert event.github_turn_origin_id == origin_id
     assert event.github_expires_at == row.expires_at

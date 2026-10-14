@@ -57,13 +57,6 @@ LEVELS: dict[str, dict[str, bool]] = {
     "admin": {"pull": True, "triage": True, "push": True, "maintain": True, "admin": True},
     "none": {},
 }
-EXPECTED_ACCESS = {
-    "read": "read",
-    "triage": "read",
-    "write": "write",
-    "maintain": "write",
-    "admin": "write",
-}
 
 
 def _settings(key: str) -> Settings:
@@ -262,13 +255,7 @@ async def test_picker_offers_every_permission_level_and_counts_hidden(
         _hidden, page = await editor.page()
     choices = _choices(page)
     assert set(choices) == {1, 2, 3, 4, 5, 201}  # `none` repos are not offered
-    assert [choices[i]["data-max-access"] for i in (1, 2, 3, 4, 5)] == [
-        "read",
-        "read",
-        "write",
-        "write",
-        "write",
-    ]
+    assert [choices[i]["data-max-access"] for i in (1, 2, 3, 4, 5)] == ["write"] * 5
     assert choices[201]["data-installation"] == "78"
     assert "3 repos are hidden because your GitHub account has no permission on them" in page
     # One bulk button per installation owner, a live shown count, and a clear button.
@@ -292,7 +279,7 @@ async def test_no_hidden_note_when_every_repo_is_usable(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("level", ["read", "triage", "write", "maintain", "admin"])
 @pytest.mark.parametrize("installation_writes", [True, False])
-async def test_granted_access_is_capped_by_person_and_installation(
+async def test_app_write_grant_requires_installation_write_but_not_person_write(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     level: str,
@@ -302,9 +289,8 @@ async def test_granted_access_is_capped_by_person_and_installation(
     org = _Org(77, 55, "alpha", permissions, [(1, level)])
     async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
         hidden, _page = await editor.page()
-        # Connect GitHub refuses anything below write.
         saved = await editor.save(hidden, repo="1", access_1="write")
-        if EXPECTED_ACCESS[level] != "write" or not installation_writes:
+        if not installation_writes:
             assert saved.status_code == 403
             assert await editor.grants() == {}
             return
@@ -354,7 +340,7 @@ async def test_removing_or_adding_a_repo_with_no_permission_is_refused(
         assert (await editor.save(hidden, repo="1")).status_code == 200
 
 
-def test_repo_confirmation_never_raises_above_person_or_installation() -> None:
+def test_repo_confirmation_uses_app_write_for_read_level_people() -> None:
     def repo(level: github_connect.GitHubPermission) -> oauth_github._Repo:
         return oauth_github._Repo(1, 2, 3, "o/r", level)
 
@@ -368,23 +354,18 @@ def test_repo_confirmation_never_raises_above_person_or_installation() -> None:
             installation_writes={3: installation},
         ).max_access
 
-    # A repo the agent needs at write is raised to write only when the person can write.
-    assert confirm("admin", needs_write=True) == "write"
-    assert confirm("write", needs_write=True) == "write"
-    with pytest.raises(ValueError, match="write access is needed"):
-        confirm("triage", needs_write=True)
-    with pytest.raises(ValueError, match="write access is needed"):
-        confirm("read", needs_write=True)
-    with pytest.raises(ValueError, match="write access is needed"):
+    for level in ("admin", "write", "triage", "read"):
+        assert confirm(level, needs_write=True) == "write"
+    with pytest.raises(ValueError, match="GitHub App needs write access"):
         confirm("admin", needs_write=True, installation=False)
 
 
 @pytest.mark.asyncio
-async def test_read_level_readd_after_admin_write_grant_stays_read(
+async def test_read_level_readd_after_admin_write_grant_stays_write(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After an admin's write grant is removed, a reader re-adding the repo gets read only."""
+    """A reader re-adding a repo receives the App's write grant."""
     org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(1, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
         hidden, _page = await editor.page()
@@ -397,10 +378,10 @@ async def test_read_level_readd_after_admin_write_grant_stays_read(
 
         org.repos[0] = (1, "read")
         hidden, _page = await editor.page()
-        assert (await editor.save(hidden, repo="1", access_1="write")).status_code == 403
-        assert await editor.grants() == {}
+        assert (await editor.save(hidden, repo="1", access_1="write")).status_code == 200
+        assert await editor.grants() == {1: "write"}
         async with editor.sessionmaker() as session:
             [row] = await github_access.list_authorized_repos(
                 session, tenant_id=editor.tenant_id, agent_id=editor.agent_id
             )
-        assert (row.max_access, row.authorized_permission) == ("write", "admin")
+        assert (row.max_access, row.authorized_permission) == ("write", "read")

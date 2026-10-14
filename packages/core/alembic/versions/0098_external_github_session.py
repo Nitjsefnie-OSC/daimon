@@ -1,6 +1,6 @@
 """Keep the external admission finding on live GitHub sessions.
 
-downgrade: drops the stored finding
+downgrade: destructive
 """
 
 from alembic import op

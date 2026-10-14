@@ -81,10 +81,8 @@ class _Repo:
 
     @property
     def max_access(self) -> Literal["read", "write"]:
-        """The most this person may grant an agent on the repo."""
-        if self.permission is None:
-            return "read"
-        return github_connect.permission_max_access(self.permission)
+        """The App grants write on any usable installed repository."""
+        return "write" if self.usable else "read"
 
 
 def _repo_confirmation(
@@ -94,9 +92,9 @@ def _repo_confirmation(
     needs_write: bool,
     installation_writes: Mapping[int, bool],
 ) -> github_connect.RepoConfirmation:
-    """Confirm write access only when both the person and App can grant it."""
-    if repo.max_access != "write" or not installation_writes.get(repo.installation_id, False):
-        raise ValueError("GitHub write access is needed to connect this repo.")
+    """Confirm write access from the App installation for a usable repo."""
+    if not repo.usable or not installation_writes.get(repo.installation_id, False):
+        raise ValueError("The GitHub App needs write access to connect this repo.")
     return github_connect.RepoConfirmation(
         repo_id=repo.id,
         owner_id=repo.owner_id,
@@ -843,15 +841,7 @@ def _agent_editor_page(
                 "so you can't edit it here.</p>"
             )
         if repo.repo_id in needed and needed[repo.repo_id]:
-            parts.append(
-                '<p class="gh-repo-state">Needs read and write to finish setup'
-                + (
-                    "."
-                    if usable[repo.repo_id].max_access == "write" or not editable
-                    else ". Your GitHub permission allows read only, so only read can be added."
-                )
-                + "</p>"
-            )
+            parts.append('<p class="gh-repo-state">Needs read and write to finish setup.</p>')
         if editable:
             parts.append(f'<input type="hidden" name="remove" value="{repo.repo_id}" disabled>')
             if repo in repairable:
@@ -1221,11 +1211,6 @@ def _confirmation_page(
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
                 f'<span class="gh-repo-name">{html.escape(name)}</span>'
                 + (f'<span class="gh-added">{note}</span>' if note else "")
-                + (
-                    '<span class="gh-added">Write access needed on GitHub</span>'
-                    if repo.max_access != "write" and not added
-                    else ""
-                )
                 + "</span></label>"
             )
         parts.append("</div>")
@@ -1950,12 +1935,13 @@ def build_oauth_github_routes(
                 for detail in details
             }
             if any(
-                visible[repo_id].max_access != "write"
-                or not installation_writes.get(visible[repo_id].installation_id, False)
+                not installation_writes.get(visible[repo_id].installation_id, False)
                 for repo_id in selected_ids
             ):
                 return _error(
-                    "GitHub write access is needed to connect these repos.", 403, retry_confirm_url
+                    "The GitHub App needs write access to connect these repos.",
+                    403,
+                    retry_confirm_url,
                 )
             repos = [
                 _repo_confirmation(
@@ -2144,12 +2130,13 @@ def build_oauth_github_routes(
                 for detail in details
             }
             if any(
-                visible[repo_id].max_access != "write"
-                or not installation_writes.get(visible[repo_id].installation_id, False)
+                not installation_writes.get(visible[repo_id].installation_id, False)
                 for repo_id in selected_ids
             ):
                 return _error(
-                    "GitHub write access is needed to connect these repos.", 403, retry_confirm_url
+                    "The GitHub App needs write access to connect these repos.",
+                    403,
+                    retry_confirm_url,
                 )
             repos: list[github_connect.RepoConfirmation] = [
                 _repo_confirmation(

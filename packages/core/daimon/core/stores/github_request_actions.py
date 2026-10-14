@@ -53,8 +53,6 @@ async def approve_connected_request(
     ]
     if any(repo is None for repo in selected):
         raise ValueError("Connect the repo first.")
-    if any(repo is not None and repo.max_access != "write" for repo in selected):
-        raise ValueError("GitHub write access is needed to connect this repo.")
     for repo in selected:
         assert repo is not None
         ceiling: Literal["write"] = "write"
