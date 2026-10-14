@@ -1,5 +1,11 @@
 # Recorded transcript judge
 
+The headless catalog executor loads OpenAI and Gemini replay consumers only
+when executing that selected provider. Anthropic catalog collection and replay
+work without those optional host modules, including the standalone script path.
+`test_catalog_optional_providers.py` checks both import paths and actual
+Anthropic replay with those modules unavailable, in normal and optimized Python.
+
 The [fleet staging QA packet](SECTION-I-STAGING-QA.md) prepares section I7's
 three-backend task, cross-review and Discord summary. It is offline inventory
 only; execution needs a separate staging GO and signed budget envelopes.

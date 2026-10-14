@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refresh the turn oracle for pinned main’s pagination, settlement, personal memory, checkpoint archive and terminal card changes, with per-hunk provenance.
 - Separate OpenAI MCP skill-upload runtime tests from the shared skill-upload suite.
 - Keep the complete Managed Agents call inventory in compact JSON below the shared file-size limit, with the unchanged zero-call ratchet outside drivers.
+- Keep host conformance tests independent of optional provider installations and share their database preflight helper.
+- Load catalog replay hosts only for the selected provider, so Anthropic judge collection and execution do not require optional OpenAI or Gemini host modules.
 
 - Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
 - Read exact root billing references through immutable outcomes without summing reused-session history.

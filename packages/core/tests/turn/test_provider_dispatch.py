@@ -14,11 +14,10 @@ import pytest
 from daimon.core import channel_backend, mux_backend
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime
-from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.scope import DeploymentDefault
 from daimon.core.turn import io as io_module
 from daimon.core.turn import prepare as preparation
 from daimon.core.turn import runtimes as runtime_module
-from daimon.core.turn.admission import Admission
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import LegacyTurnIO, TurnCodecRequest, TurnIO, turn_io
 from daimon.core.turn.persistence import TurnPersistence
@@ -26,11 +25,10 @@ from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, b
 from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionRequester
 from daimon.core.turn.run import _turn_port_kwargs
 from daimon.testing.isolated_sdk import build_async_openai
-from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import deps_for as deps_for
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
-from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
+from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport
@@ -40,19 +38,30 @@ from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-TENANT = uuid.UUID(int=4404)
-ACCOUNT = uuid.UUID(int=4405)
+from .conformance_support import (
+    ACCOUNT as ACCOUNT,
+)
+from .conformance_support import (
+    PROFILE as PROFILE,
+)
+from .conformance_support import (
+    REVISION as REVISION,
+)
+from .conformance_support import (
+    TENANT as TENANT,
+)
+from .conformance_support import (
+    admission as admission,
+)
+from .conformance_support import (
+    record_usage as record_usage,
+)
+
 SCOPE = Scope(
     tenant_id=str(TENANT),
     account_id=str(ACCOUNT),
     principal_id="daimon",
     authorization_id="admitted-turn",
-)
-PROFILE = "openai.persistent_workspace"
-REVISION = ConfigRevision.create(
-    ChannelRef(tenant_id=str(TENANT), platform="slack", channel_id="channel"),
-    1,
-    resolve_default(BackendConfig(backend="openai", profile=PROFILE, model="gpt-6-luna")),
 )
 SESSION = ResourceRef(
     id="native-openai-session",
@@ -77,21 +86,6 @@ async def openai_backend() -> AsyncIterator[OpenAIDriver]:
             journal=MemoryRecoveryJournal(),
             usage_revisions=MemoryUsageRevisions(),
         )
-
-
-def admission() -> Admission:
-    return Admission(
-        account_id=ACCOUNT,
-        agent=ma_agent(id="host-metadata-not-a-provider-agent"),
-        environment=ma_environment(),
-        config=ResolvedConfig(agent_name="test", environment_name="test"),
-        backend_revision=REVISION,
-        backend_revision_origin="channel",
-    )
-
-
-async def record_usage(event: object) -> None:
-    raise AssertionError("dispatch must not bill")
 
 
 def prepared(request: ProviderPreparationRequest, **changes: object) -> PreparedTurn:

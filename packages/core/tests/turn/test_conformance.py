@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import subprocess
 import sys
 import uuid
 from dataclasses import replace
@@ -20,9 +18,7 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn import driver
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.gemini import GeminiTurnIO
 from daimon.core.turn.io import TurnEvent
-from daimon.core.turn.openai_codec import display_event
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.prepare import PreparedTurn
@@ -47,8 +43,15 @@ from mux.state.memory import MemoryStateStore
 from mux.state.store import binding_slot
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from .conformance_support import (
+    ACCOUNT,
+    REVISION,
+    TENANT,
+    admission,
+    record_usage,
+    run_host_fixture_preflight_probe,
+)
 from .conftest import make_status_idle
-from .test_provider_dispatch import ACCOUNT, REVISION, TENANT, admission, record_usage
 
 SCOPE = Scope(
     tenant_id=str(TENANT), account_id=str(ACCOUNT), principal_id="host", authorization_id="offline"
@@ -102,8 +105,12 @@ class OfflineIO:
                 event,
             )
         elif event.native.provider == "openai":
+            from daimon.core.turn.openai_codec import display_event
+
             self.frame = TurnEvent(display_event(event, session_id=event.session_id), event)
         else:
+            from daimon.core.turn.gemini import GeminiTurnIO
+
             backend = SimpleNamespace(
                 capabilities=lambda: SimpleNamespace(profile_id="gemini.inline_reuse")
             )
@@ -699,106 +706,6 @@ async def test_host_fixture_preserves_registered_ci_provisioning(
     async with sessions() as db:
         assert await db.scalar(text("SELECT current_database()")) == physical_database
         assert await db.scalar(text("SELECT current_schema()")) == schema
-
-
-def run_host_fixture_preflight_probe(tmp_path: Path, *, target: str, case: str) -> None:
-    """Run the actual host fixture graph with allocation/connection traps."""
-    plugin = tmp_path / "n4_preflight_probe.py"
-    receipt = tmp_path / "receipt.json"
-    plugin.write_text(
-        """
-import json
-import os
-from pathlib import Path
-import pytest
-import daimon.testing.db as shared
-from sqlalchemy import event
-from sqlalchemy.engine import Engine
-
-counts = {"builds": 0, "connections": 0, "host_setup": 0}
-patch = pytest.MonkeyPatch()
-
-def pytest_sessionstart(session):
-    original = shared.build_test_engine
-    def allocate(*args, **kwargs):
-        counts["builds"] += 1
-        return original(*args, **kwargs)
-    def forbidden_connection(*args, **kwargs):
-        counts["connections"] += 1
-        raise RuntimeError("N4_ACCEPTED_CONFIGURATION_CONNECTION_TRAP")
-    patch.setattr(shared, "build_test_engine", allocate)
-    event.listen(Engine, "do_connect", forbidden_connection)
-    if os.environ["N4_PREFLIGHT_CASE"] == "ci_foreign_schema":
-        patch.setattr(shared, "_new_schema_name",
-                      lambda kind: f"test_w{os.getpid() + 1}_1234abcd")
-
-def pytest_fixture_setup(fixturedef, request):
-    if fixturedef.argname == "host":
-        counts["host_setup"] += 1
-
-def pytest_sessionfinish(session, exitstatus):
-    counts["exitstatus"] = int(exitstatus)
-    Path(os.environ["N4_PREFLIGHT_RECEIPT"]).write_text(json.dumps(counts))
-"""
-    )
-    urls = {
-        "foreign": "postgresql+asyncpg://fixture:fixture@localhost/operator_test",
-        "remote": "postgresql+asyncpg://fixture:fixture@remote.invalid/daimon_test_nc_N4",
-        "query": "postgresql+asyncpg://fixture:fixture@localhost/daimon_test_nc_N4?host=remote.invalid",
-        "contributor": "postgresql+asyncpg://fixture:fixture@localhost/daimon_test",
-        "lane": "postgresql+asyncpg://fixture:fixture@localhost/daimon_test_nc_N4_probe",
-        "ci": "postgresql+asyncpg://fixture:fixture@localhost/daimon_test",
-        "ci_foreign_schema": "postgresql+asyncpg://fixture:fixture@localhost/daimon_test",
-    }
-    # Do not read/copy operator credential values into the child process.
-    env = {key: os.environ[key] for key in ("PATH", "LANG", "TZ") if key in os.environ}
-    env.update(
-        DAIMON_DATABASE__TEST_URL=urls[case],
-        PYTHONPATH=str(tmp_path),
-        N4_PREFLIGHT_CASE=case,
-        N4_PREFLIGHT_RECEIPT=str(receipt),
-    )
-    if case.startswith("ci"):
-        env.update(CI="true", GITHUB_ACTIONS="true")
-    child = subprocess.run(
-        [
-            sys.executable,
-            *(["-O"] if sys.flags.optimize else []),
-            "-m",
-            "pytest",
-            "-q",
-            "--tb=short",
-            "-n",
-            "0",
-            "-p",
-            "n4_preflight_probe",
-            target,
-        ],
-        cwd=Path(__file__).resolve().parents[4],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    observed = json.loads(receipt.read_text())
-    accepted = case in {"lane", "ci"}
-    expected = {"builds": int(accepted), "connections": int(accepted), "host_setup": 0}
-    if {name: observed[name] for name in expected} != expected:
-        raise RuntimeError(f"host fixture reached work before admission: {observed}")
-    if case == "contributor":
-        if child.returncode != 0 or "skipped" not in child.stdout:
-            raise RuntimeError("plain contributor fixture did not skip before allocation")
-    elif child.returncode != 1:
-        raise RuntimeError(f"fixture refusal/trap was not executed: {child.stdout}{child.stderr}")
-    elif accepted and "N4_ACCEPTED_CONFIGURATION_CONNECTION_TRAP" not in child.stdout:
-        raise RuntimeError("accepted lane/registered CI did not reach the deliberate trap")
-    elif not accepted and (
-        "Test hooks require owned local lane engines or registered isolated CI schemas"
-        not in child.stdout
-    ):
-        raise RuntimeError(
-            f"shared preflight refusal was not executed: {child.stdout}{child.stderr}"
-        )
 
 
 @pytest.mark.parametrize(
