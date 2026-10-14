@@ -48,15 +48,17 @@ async def _classify(payload: dict[str, Any], seen: list[dict[str, Any]] | None =
     )
 
 
-async def test_classify_sends_thinking_disabled_and_returns_verdict_with_usage() -> None:
+async def test_classify_sends_low_effort_and_large_cap_and_returns_verdict_with_usage() -> None:
     seen: list[dict[str, Any]] = []
     outcome = await _classify(_reply(_RESPOND), seen)
 
     assert outcome.verdict.decision == "respond", "a well-formed verdict is returned"
     assert outcome.usage is not None and outcome.usage.output_tokens == 9, "usage is reported"
-    assert seen[0]["thinking"] == {"type": "disabled"}, (
-        "thinking counts toward the short output cap, so it must be off"
+    assert seen[0]["output_config"] == {"effort": "low"}, (
+        "low effort keeps thinking rare and was the most accurate setting"
     )
+    assert "thinking" not in seen[0], "thinking stays adaptive (unset)"
+    assert seen[0]["max_tokens"] == 1024, "a 100-token cap truncated the JSON verdict"
 
 
 async def test_classify_fails_closed_to_silence_but_meters_when_model_refuses() -> None:

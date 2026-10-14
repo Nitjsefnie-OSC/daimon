@@ -373,7 +373,7 @@ class ThreadParticipationSettings(BaseModel):
         description=(
             "Model that decides whether a burst of unprompted messages deserves a reply. "
             "One short call per quiet burst; a small, fast model is the point. The call "
-            "runs with thinking disabled, so pick a model that accepts that."
+            "sets effort low, so pick a model that supports the effort parameter."
         ),
     )
 

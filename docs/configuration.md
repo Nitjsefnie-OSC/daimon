@@ -619,8 +619,8 @@ How many earlier thread messages the classifier sees before deciding.
 `str` · optional · default `claude-haiku-5-5`
 
 Model that decides whether a burst of unprompted messages deserves a reply. One short
-call per quiet burst; a small, fast model is the point. The call runs with thinking
-disabled, so pick a model that accepts that.
+call per quiet burst; a small, fast model is the point. The call sets effort low, so
+pick a model that supports the effort parameter.
 
 ## Slack
 

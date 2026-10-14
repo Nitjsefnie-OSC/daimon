@@ -28,7 +28,10 @@ from daimon.core.thread_participation import (
 
 log = structlog.get_logger()
 
-_MAX_OUTPUT_TOKENS = 100
+# A 100-token cap truncated Haiku 5.5's JSON verdict (newer tokenizer, longer
+# reasons), and truncated JSON fails closed to silence. The cap also leaves
+# room for the rare adaptive-thinking episode.
+_MAX_OUTPUT_TOKENS = 1024
 
 
 @dataclass(frozen=True)
@@ -61,9 +64,9 @@ async def classify(
         response = await anthropic.messages.create(
             model=model,
             max_tokens=_MAX_OUTPUT_TOKENS,
-            # Thinking counts toward max_tokens on models that think by default
-            # (Haiku 5.5); left on, it can use up the cap before any verdict.
-            thinking={"type": "disabled"},
+            # Adaptive thinking at low effort judged ambiguous bursts better than
+            # thinking off, and rarely thinks at all.
+            output_config={"effort": "low"},
             system=classifier_system_prompt(bot_display_name),
             messages=[{"role": "user", "content": prompt}],
         )
