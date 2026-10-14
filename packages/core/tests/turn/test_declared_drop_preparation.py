@@ -19,6 +19,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import DEFAULT_MA_CAPABILITIES, ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
     capture_preparation_source,
+    classify_source_obligations,
     prepare_source,
     read_preparation_counterpart,
 )
@@ -303,3 +304,87 @@ async def test_selector_passes_original_consent_to_the_existing_prewrite_proof(
                 == accepted
             )
     assert reads and all(r.method == "GET" for r in reads)
+
+
+@pytest.mark.parametrize("unknown", ["policy", "null_policy", "skill_policy", "mcp_policy"])
+async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(consent_request, unknown):
+    request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
+        consent_request
+    )
+    from anthropic.types.beta import (
+        BetaManagedAgentsCustomSkill,
+        BetaManagedAgentsMCPServerURLDefinition,
+    )
+
+    policy = {"requires_confirmation": True}
+    if unknown in {"policy", "null_policy"}:
+        native = request.admission.agent.model_copy(
+            update={"future_execution_policy": policy if unknown == "policy" else None}
+        )
+        path = "future_execution_policy"
+    elif unknown == "skill_policy":
+        native = request.admission.agent.model_copy(
+            update={
+                "skills": [
+                    BetaManagedAgentsCustomSkill.model_validate(
+                        {
+                            "type": "custom",
+                            "skill_id": "skill",
+                            "version": "1",
+                            "future_execution_policy": policy,
+                        }
+                    )
+                ]
+            }
+        )
+        path = "skills.0.future_execution_policy"
+    else:
+        native = request.admission.agent.model_copy(
+            update={
+                "mcp_servers": [
+                    BetaManagedAgentsMCPServerURLDefinition.model_validate(
+                        {
+                            "type": "url",
+                            "name": "public",
+                            "url": "https://public.invalid/mcp",
+                            "future_execution_policy": policy,
+                        }
+                    )
+                ]
+            }
+        )
+        path = "mcp_servers.0.future_execution_policy"
+    router.routes.clear()
+    router.add_agent(native)
+    router.add_environment(request.admission.environment)
+    captured = await capture_preparation_source(request, fresh=True)
+    extension = next(
+        item
+        for item in captured.effective_spec.extensions
+        if item.namespace == "anthropic.unclassified_source"
+    )
+    assert extension.value == {"fields": [path]}
+    assert "source_definition" in classify_source_obligations(captured, None, environment=None)
+    before = await service.audit(source.tenant_id)
+    with pytest.raises(AgentBackendRefused) as preview:
+        await service.preview(source, "openai")
+    assert preview.value.reason == "source_unavailable"
+    with pytest.raises(AgentBackendRefused) as commit:
+        await service.set_backend(
+            source,
+            "openai",
+            accepted.local,
+            actor,
+            accepted_drops=accepted.declared_drops,
+            expected_preview_digest=accepted.preview_digest,
+        )
+    assert commit.value.reason == "source_unavailable"
+    assert await service.current(source) == accepted
+    assert await service.audit(source.tenant_id) == before
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(request)
+    assert refused.value.reason == "backend_unsupported"
+    assert isinstance(refused.value.__cause__, AgentBackendRefused)
+    assert refused.value.__cause__.reason == "re_confirm"
+    assert not constructions and not targets
+    assert all(call.method == "GET" for call in reads)

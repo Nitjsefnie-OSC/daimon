@@ -34,6 +34,8 @@ from mux.drivers.anthropic.schemas import (
 from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import ScopeViolation, UnsupportedCapability
 
+UNCLASSIFIED_SOURCE_NAMESPACE = "anthropic.unclassified_source"
+
 
 def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
     """Preserve fields-set; a patch null clears while an omitted value preserves."""
@@ -160,6 +162,37 @@ def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Sco
             },
         )
     }
+    # Fields without a neutral meaning remain obligations, never inferred losses.
+    native = cast(dict[str, JsonValue], item.model_dump(mode="json", exclude_unset=True))
+    unclassified = set(native) - {
+        "id",
+        "type",
+        "version",
+        "created_at",
+        "updated_at",
+        "archived_at",
+        "name",
+        "description",
+        "model",
+        "system",
+        "metadata",
+        "multiagent",
+        "tools",
+        "mcp_servers",
+        "skills",
+    }
+    for collection, fields in (
+        ("mcp_servers", {"type", "name", "url"}),
+        ("skills", {"type", "skill_id", "version"}),
+    ):
+        for index, entry in enumerate(cast(list[dict[str, JsonValue]], native.get(collection, []))):
+            unclassified.update(f"{collection}.{index}.{key}" for key in set(entry) - fields)
+    if unclassified:
+        extensions[UNCLASSIFIED_SOURCE_NAMESPACE] = ExtensionConfig(
+            namespace=UNCLASSIFIED_SOURCE_NAMESPACE,
+            version=1,
+            value={"fields": cast(JsonValue, sorted(unclassified))},
+        )
     if item.multiagent is not None:
         extensions["anthropic.multiagent"] = ExtensionConfig(
             namespace="anthropic.multiagent",

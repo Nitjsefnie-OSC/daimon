@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Refuse unclassified native agent fields before cross-backend drop consent or counterpart preparation.
+
 - Separate OpenAI MCP skill-upload runtime tests from the shared skill-upload suite.
 - Keep the complete Managed Agents call inventory in compact JSON below the shared file-size limit, with the unchanged zero-call ratchet outside drivers.
 - Retain explicit source-loss consent with immutable agent backend revisions and scoped effective configuration associations; legacy revisions remain consent-free.
