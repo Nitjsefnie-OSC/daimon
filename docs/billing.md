@@ -1238,3 +1238,17 @@ to the fleet pricing context and their native usage recorders. Default fleet
 startup discovers the callbacks without credentials or provider calls. Missing
 model rows do not reserve worker funds, and supplying a token tariff leaves
 unknown infrastructure and incomplete native counters pending.
+
+Root reservations use their original scoped operation and private thread slot.
+The monetary owner takes the tenant and actor financial fence before reading
+that operation. A replay proves its complete original cash reservation and adds
+no second hold. Missing, undersized, foreign or incomplete reservations refuse.
+Unknown allocation keeps its original hold; a cached native receipt cannot
+replace mutable financial evidence. Worker admission reads the same retained
+root exposure alongside original worker reservations and ledger debits.
+
+The native preparation and counted-send caller is a separate prerequisite.
+Until it is installed, an explicitly budgeted fleet root is refused before
+allocating a session; these reservation primitives do not enable execution or
+certify usage, final spend, or release of unknown holds. Ordinary unbudgeted
+turns keep their existing preparation path.

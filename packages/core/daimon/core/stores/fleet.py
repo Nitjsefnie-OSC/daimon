@@ -763,7 +763,7 @@ async def lock_budget(
     *,
     tenant_id: uuid.UUID,
     actor_id: uuid.UUID,
-    run_id: uuid.UUID,
+    run_id: uuid.UUID | None,
     financial: bool = True,
 ) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
     """Join the caller's financial transaction before any fleet row transition.

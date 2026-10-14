@@ -1167,6 +1167,14 @@ async def bind_session_impl(
             now=now(), deadline=effective_deadline, authority_deadline=worker.limits.deadline
         )
 
+    if worker is None and deps.fleet_enabled:
+        from daimon.core.neutral_resources import WorkerSpecRefused
+        from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+
+        root_grant = await read_agent_fleet_grant(deps, admission, now=now())
+        if root_grant is not None and root_grant.native_root_budget_usd is not None:
+            raise WorkerSpecRefused("native_budget_usd", "unsupported")
+
     async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
         result = await preparing
         try:
