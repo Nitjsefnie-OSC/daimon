@@ -12,7 +12,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core._models import AgentBackendRevisionRecord, Base, ChannelConfigRevision
-from daimon.core.stores import agent_backends, mux_state
+from daimon.core.stores import UnflushedReadState, agent_backends, mux_state
 from daimon.core.stores.domain import CompatibilityPreview
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
@@ -74,6 +74,143 @@ async def test_consent_round_trips_through_the_public_revision_reader(owned):
     assert read.declared_drops == ("memory", "sandbox")
     assert read.drop_consent.source_pin == "a" * 64
     assert read.drop_consent.target_digest == "b" * 64
+
+
+@pytest.mark.parametrize("changed", [None, {"source_pin": "invalid"}])
+async def test_cached_original_cannot_hide_a_persisted_consent_refusal(owned, changed):
+    sessions, channel, agent_id = owned
+    async with sessions.begin() as db:
+        original = await preference(db, channel, agent_id)
+        effective = await mux_state.put_config_revision(
+            db, config(channel), origin="agent", agent_revision=original
+        )
+    async with sessions.begin() as db:
+        cached = await db.scalar(
+            select(AgentBackendRevisionRecord).where(
+                AgentBackendRevisionRecord.agent_id == agent_id,
+                AgentBackendRevisionRecord.local == original.local,
+            )
+        )
+        await db.execute(
+            update(AgentBackendRevisionRecord)
+            .where(
+                AgentBackendRevisionRecord.agent_id == agent_id,
+                AgentBackendRevisionRecord.local == original.local,
+            )
+            .values(drop_consent=changed)
+            .execution_options(synchronize_session=False)
+        )
+        assert cached.drop_consent == consent()
+        assert (
+            await agent_backends.current(db, uuid.UUID(channel.tenant_id), agent_id)
+        ) == original
+        if changed is None:
+            persisted = await agent_backends.current(
+                db, uuid.UUID(channel.tenant_id), agent_id, local=original.local, persisted=True
+            )
+            assert persisted.drop_consent is None
+            refused = ScopeViolation
+        else:
+            with pytest.raises(ValidationError):
+                await agent_backends.current(
+                    db, uuid.UUID(channel.tenant_id), agent_id, local=original.local, persisted=True
+                )
+            refused = ValidationError
+        with pytest.raises(refused):
+            await mux_state.get_config_agent_revision(db, effective, agent_id=agent_id)
+        assert cached.drop_consent == consent() and not db.dirty
+
+
+async def test_dirty_original_cannot_replace_its_persisted_pin_or_autoflush(owned):
+    sessions, channel, agent_id = owned
+    async with sessions.begin() as db:
+        original = await preference(db, channel, agent_id)
+        effective = await mux_state.put_config_revision(
+            db, config(channel), origin="agent", agent_revision=original
+        )
+    async with sessions() as db:
+        cached = await db.scalar(
+            select(AgentBackendRevisionRecord).where(
+                AgentBackendRevisionRecord.agent_id == agent_id
+            )
+        )
+        cached.drop_consent = consent(source="c")
+        with pytest.raises(UnflushedReadState):
+            await mux_state.get_config_agent_revision(db, effective, agent_id=agent_id)
+        with pytest.raises(UnflushedReadState):
+            await agent_backends.current(
+                db, uuid.UUID(channel.tenant_id), agent_id, local=original.local, persisted=True
+            )
+        assert cached in db.dirty and cached.drop_consent == consent(source="c")
+        with db.no_autoflush:
+            assert (
+                await db.scalar(
+                    select(AgentBackendRevisionRecord.drop_consent).where(
+                        AgentBackendRevisionRecord.agent_id == agent_id
+                    )
+                )
+                == consent()
+            )
+        await db.rollback()
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+async def test_effective_dirty_or_deleted_proof_source_is_not_flushed_or_overwritten(
+    owned, deleted
+):
+    sessions, channel, agent_id = owned
+    async with sessions.begin() as db:
+        original = await preference(db, channel, agent_id)
+        effective = await mux_state.put_config_revision(
+            db, config(channel), origin="agent", agent_revision=original
+        )
+    async with sessions() as db:
+        cached = await db.scalar(
+            select(ChannelConfigRevision).where(
+                ChannelConfigRevision.tenant_id == uuid.UUID(channel.tenant_id)
+            )
+        )
+        if deleted:
+            await db.delete(cached)
+        else:
+            cached.agent_backend_ref = [str(uuid.uuid4()), original.local]
+        with pytest.raises(UnflushedReadState):
+            await mux_state.get_config_agent_revision(db, effective, agent_id=agent_id)
+        assert cached in (db.deleted if deleted else db.dirty)
+        with db.no_autoflush:
+            assert await db.scalar(
+                select(ChannelConfigRevision.agent_backend_ref).where(
+                    ChannelConfigRevision.tenant_id == uuid.UUID(channel.tenant_id)
+                )
+            ) == [str(agent_id), original.local]
+        await db.rollback()
+
+
+async def test_persisted_revision_read_keeps_pending_objects_unflushed(owned):
+    sessions, channel, agent_id = owned
+    async with sessions() as db:
+        pending = AgentBackendRevisionRecord(
+            tenant_id=uuid.UUID(channel.tenant_id),
+            agent_id=agent_id,
+            local=1,
+            backend="openai",
+            agent_name="source",
+            preview_digest="preview",
+            digest="pending",
+            previous_local=None,
+            drop_consent=consent(),
+        )
+        db.add(pending)
+        assert (
+            await agent_backends.current(db, uuid.UUID(channel.tenant_id), agent_id, persisted=True)
+            is None
+        )
+        assert pending in db.new
+        assert (
+            await agent_backends.current(db, uuid.UUID(channel.tenant_id), agent_id)
+        ).digest == "pending"
+        assert pending not in db.new
+        await db.rollback()
 
 
 async def test_old_rows_have_no_consent_and_unchanged_serialized_fields(owned):

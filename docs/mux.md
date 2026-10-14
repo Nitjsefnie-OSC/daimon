@@ -2959,3 +2959,9 @@ no ordinary cross-backend execution.
 The migration adds two nullable JSONB columns without changing existing data.
 Downgrade removes consent and its associations; subsequent source-loss execution
 requires fresh confirmation rather than recovering consent from another revision.
+
+Retained consent and its original association are read from persisted columns.
+Cached ORM values cannot hide cleared or malformed consent. Effective dirty or
+deleted proof sources refuse without flushing, refreshing or overwriting caller
+state; pending new objects remain unflushed. Ordinary revision reads retain their
+existing ORM behavior unless the authoritative persisted mode is selected.
