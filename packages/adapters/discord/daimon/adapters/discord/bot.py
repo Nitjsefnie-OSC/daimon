@@ -4147,7 +4147,7 @@ class DaimonBot(commands.Bot):
         guild_id: str,
         tenant_id: uuid.UUID,
         *,
-        origins: contextlib.AsyncExitStack,
+        origins: contextlib.AsyncExitStack | None = None,
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
@@ -4175,6 +4175,22 @@ class DaimonBot(commands.Bot):
         to end its status card, so an error raised past this point is shown
         there (see `_render_turn_error`).
         """
+        if origins is None:
+            async with contextlib.AsyncExitStack() as owned_origins:
+                return await DaimonBot._orchestrate_observed(
+                    self,
+                    message,
+                    guild_id,
+                    tenant_id,
+                    origins=owned_origins,
+                    content_override=content_override,
+                    created_thread_ids=created_thread_ids,
+                    attachments_override=attachments_override,
+                    admitted_message_ids=admitted_message_ids,
+                    query_messages=query_messages,
+                    unprompted=unprompted,
+                    failure_surface=failure_surface,
+                )
         surface = failure_surface if failure_surface is not None else _TurnFailureSurface()
         # Serialize every turn against the boot snapshot, including a turn
         # that arrives before on_ready, so a marker written by this process

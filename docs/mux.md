@@ -2999,3 +2999,8 @@ uncontrolled app-session archive remains the mutually exclusive fallback.
 App-access revocation and cleanup of the session's owned app vault continue
 independently. Cleanup does not erase the allocator's original acknowledgement
 or authorize release of an unknown financial hold.
+
+Discord orchestration callers may omit the origin stack. The existing owner then
+manages its lifetime internally; constructing the stack makes no database or
+provider change. Admission and the queue gate still complete before entering
+the opt-in fleet origin or binding its session.
