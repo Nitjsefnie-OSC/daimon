@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Provider-neutral mux library, optional provider drivers and offline conformance tests. The host runtime remains unchanged; the library does not activate backend selection.
+- Provider-neutral mux library, optional provider drivers and offline conformance tests. The host runtime remains unchanged; the library does not activate backend selection. Shared test helpers retain the current skill and conditional memory-delete routes.
 
 ### Fixed
 
