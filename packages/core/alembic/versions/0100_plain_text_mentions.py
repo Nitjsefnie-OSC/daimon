@@ -8,8 +8,8 @@ downgrade: destructive
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0099_plain_text_mentions"
-down_revision: str | None = "0098_external_github_session"
+revision: str = "0100_plain_text_mentions"
+down_revision: str | None = "0099_merge_main_neutral"
 branch_labels: str | None = None
 depends_on: str | None = None
 
