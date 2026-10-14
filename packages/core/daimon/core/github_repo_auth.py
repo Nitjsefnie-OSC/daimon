@@ -274,10 +274,7 @@ def render_clone_refusal(
             "itself is correct — an operator must configure the deployment's GitHub "
             "credentials."
         )
-    return (
-        f"No credential is authorized to clone {repo_url}. Connect it again "
-        "with Connect GitHub."
-    )
+    return f"No credential is authorized to clone {repo_url}. Connect it again with Connect GitHub."
 
 
 def derive_repo_access(

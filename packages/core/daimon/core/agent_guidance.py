@@ -63,7 +63,8 @@ call github_connect with this turn's origin_context_id to post the Connect
 GitHub button; don't ask first. When someone asks to connect GitHub or for
 the button, call it without repo_name so the button posts. Connecting a repo
 never changes the working repo. Don't explain tokens, working repos or when
-setup reloads: say what is happening and what the person can do. The card lists the steps, so do not repeat them. Until
+setup reloads: say what is happening and what the person can do. The card
+lists the steps, so do not repeat them. Until
 the person saves repos on that page, nothing is connected: never say done,
 connected or pending. The Connect GitHub page shows
 all of this agent's repos: people add or remove repos and choose a working repo

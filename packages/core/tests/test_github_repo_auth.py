@@ -402,7 +402,7 @@ async def test_resolve_clone_token_no_proof_raises_naming_rebind_fix() -> None:
     public-read-only fallback token. The App is genuinely installed (the
     lookup succeeds), a fallback PAT is configured, but the binding recorded
     no proof — resolve_clone_token must raise, and the message must name the
-    actual fix (re-bind with a token), not misdiagnose App coverage."""
+    actual fix (Connect GitHub), not misdiagnose App coverage."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/acme/secret-repo/installation":
@@ -418,7 +418,7 @@ async def test_resolve_clone_token_no_proof_raises_naming_rebind_fix() -> None:
     binding = _make_binding(repo_url="acme/secret-repo", ma_secret_ref="anon:")
     assert binding.proof_kind is None, "this test's premise is a proof-NULL binding"
 
-    with pytest.raises(DaimonError, match="[Rr]e-bind") as exc_info:
+    with pytest.raises(DaimonError, match="Connect GitHub") as exc_info:
         await resolve_clone_token(
             client,
             binding=binding,
@@ -429,8 +429,8 @@ async def test_resolve_clone_token_no_proof_raises_naming_rebind_fix() -> None:
             now=1_000_000,
         )
 
-    assert "token" in str(exc_info.value).lower(), (
-        "the refusal must name the fix (re-bind with a token), not just say no credential exists"
+    assert "token" not in str(exc_info.value).lower(), (
+        "the refusal names Connect GitHub, never a token (GitHub setup is App-only)"
     )
 
 
@@ -524,7 +524,7 @@ async def test_resolve_clone_token_public_proof_no_fallback_names_operator_gap()
     assert "operator" in message.lower(), (
         "the operator-gap copy must say an operator has to configure credentials"
     )
-    assert re.search(r"[Rr]e-bind", message) is None, (
+    assert re.search(r"Connect GitHub", message) is None, (
         "a correctly-bound public repo must never be blamed on the user's binding — "
         "the incident's misdiagnosis, asserted as absent"
     )
@@ -580,7 +580,10 @@ async def test_resolve_clone_token_pat_proof_app_unavailable_keeps_rebind_and_lo
         repo_url="acme/private-repo", ma_secret_ref="inline-pat:agent-1", proof_kind="pat"
     )
 
-    with structlog.testing.capture_logs() as logs, pytest.raises(DaimonError, match="[Rr]e-bind"):
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(DaimonError, match="Connect GitHub"),
+    ):
         await resolve_clone_token(
             client,
             binding=binding,
@@ -617,17 +620,17 @@ def test_render_clone_refusal_names_the_operator_gap_for_a_public_binding_with_n
     assert "operator" in message.lower() and "deployment" in message.lower(), (
         "the operator-gap sentence must name the deployment and the operator"
     )
-    assert re.search(r"[Rr]e-bind", message) is None, (
+    assert re.search(r"Connect GitHub", message) is None, (
         "a correctly-bound public repo must never be blamed on the user's binding"
     )
 
 
 def test_render_clone_refusal_names_the_rebind_fix_for_every_other_row() -> None:
-    """Anything the user can fix is fixed by re-binding with a token that reads the repo."""
+    """Anything the user can fix is fixed by connecting the repo again with Connect GitHub."""
     message = render_clone_refusal(repo_url="acme/secret", proof_kind=None, has_fallback_pat=True)
     assert "acme/secret" in message, "the refusal must name the repo it is about"
-    assert re.search(r"[Rr]e-bind", message) is not None, (
-        "the refusal must name the fix (re-bind with a token) for a binding the user can correct"
+    assert re.search(r"Connect GitHub", message) is not None, (
+        "the refusal must name the fix (Connect GitHub) for a binding the user can correct"
     )
 
 

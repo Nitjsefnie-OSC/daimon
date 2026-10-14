@@ -136,11 +136,9 @@ async def test_connected_repo_is_granted_immediately_in_chat(
         confirmed=True,
     )
     assert write.status == "granted"
-    assert (
-        write.message == (
-            "Agent can now read and change owner/repo from the next message. "
-            "To undo, ask me to remove it."
-        )
+    assert write.message == (
+        "Agent can now read and change owner/repo from the next message. "
+        "To undo, ask me to remove it."
     )
     async with committing_sessionmaker() as session:
         [grant] = await github_access.list_agent_grants(

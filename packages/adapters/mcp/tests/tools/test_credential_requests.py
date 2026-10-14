@@ -1082,6 +1082,64 @@ async def test_request_repo_binding_rejects_unknown_agent(
     assert await _row_count(db_session) == 0, "an unknown agent must create no row"
 
 
+async def test_request_repo_binding_refuses_an_app_mode_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An App-mode agent's repos change through Connect GitHub, never the token form."""
+    from daimon.core._models import AgentGitHubMode
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_repo", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    db_session.add(
+        AgentGitHubMode(
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_repo"),
+            mode="app",
+        )
+    )
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=auth.account_id,
+            platform=auth.platform or "discord",
+            parent_channel_id="C_CRED" if auth.platform == "slack" else "1111",
+            thread_id="1700000000.000001" if auth.platform == "slack" else "222",
+            responder_ma_agent_id="ag_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=auth.role,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9205", posted=posted)
+
+    with pytest.raises(ToolError, match="github_connect"):
+        await _request_repo_binding_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            expected_ma_agent_id="ag_repo",
+            agent_name="daimon",
+            repo_url="https://github.com/clsandoval/daimon-qa-scratch",
+            purpose="binding the QA scratch repo",
+            channel_id="222",
+        )
+    assert posted == {}, "an App-mode agent must get no token form"
+    assert await _row_count(db_session) == 0, "an App-mode agent must create no row"
+
+
 async def test_request_repo_binding_rejects_invalid_repo_url(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,

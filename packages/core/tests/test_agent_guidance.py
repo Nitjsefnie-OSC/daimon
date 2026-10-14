@@ -375,6 +375,9 @@ def test_commits_and_prs_go_through_git_and_gh_with_a_requested_by_line() -> Non
     # in to it; git and gh with GH_TOKEN are authored by the GitHub App.
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     assert "When GH_TOKEN is set, make every commit and pull request with git and `gh`" in block
+    # A private repo it can't read gets the button in the same reply, no yes first.
+    assert "don't ask first" in block
+    assert "Connecting a repo never changes the working repo" in block
     assert "never through the GitHub MCP" in block
     assert "open the PR with `gh pr create`" in block
     assert 'End every PR body with "Requested by <author_name>"' in block
