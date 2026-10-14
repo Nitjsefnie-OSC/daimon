@@ -2823,3 +2823,36 @@ The financial grant ceiling covers workers only. The ordinary orchestrator root
 retains its normal billing and input path; whole-root financial and input
 controls must be installed separately before a fleet live retry.
 Operator policy mutations can verify Discord authority through `core.channel_admins.verify_backend_actor`. It reads the registered guild, current owner/roles/member and existing account binding with bounded requests; unknown or revoked authority refuses. Verification never creates an account, promotes a stored role or saves an authorization token. The mutation owner still checks its policy revision and writes its audit atomically.
+
+### Operator tenant backend policy
+
+`daimon tenants backend-policy` snapshots and changes the backend allowlist
+through the existing policy service. Every invocation verifies the named
+Discord member's current Manage Server, Administrator or guild-owner authority
+using the configured Discord bot token, then resolves that person's existing
+tenant account. There is no admin override or saved authorization. Other
+platforms and missing, malformed or unavailable current authority refuse.
+
+```bash
+daimon tenants backend-policy snapshot discord GUILD --actor-user USER --output before.json
+daimon tenants backend-policy apply discord GUILD --actor-user USER --snapshot before.json --backends anthropic,openai,gemini --dry-run
+daimon tenants backend-policy apply discord GUILD --actor-user USER --snapshot before.json --backends anthropic,openai,gemini --yes
+daimon tenants backend-policy revert discord GUILD --actor-user USER --snapshot before.json --expected-revision APPLIED_REVISION --yes
+```
+
+For writes, the existing backend-selection flags must enable the service.
+The CLI refreshes the admin attestation after confirmation and uses an explicit
+compare-and-set revision. Apply uses the original snapshot revision; revert
+requires the revision returned by the successful apply. Both return JSON
+receipts with the committed owner result and an independent readback. A stale
+revision refuses, including a concurrent change to any other policy field.
+Revert restores only the allowlist and preserves the remaining policy.
+Mutations append the service's scoped security audit in the same transaction.
+
+Snapshot files contain only tenant/workspace identifiers, the backend allowlist
+and policy revision. Creation is exclusive: an existing snapshot is never
+overwritten. Dry-run performs current admin, policy and CAS validation without
+policy or audit writes; snapshot dry-run also creates no file. Current authority
+is required again for rollback. These commands grant no fleet permissions and
+do not make provider calls, allocate native resources or change default chat
+behavior.

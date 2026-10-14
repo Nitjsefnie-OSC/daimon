@@ -710,6 +710,8 @@ class AgentBackendService:
         backends: tuple[Provider, ...],
         expected_revision: str,
         actor: BackendActor,
+        *,
+        dry_run: bool = False,
     ) -> TenantBackendPolicy:
         self._check_actor(tenant_id, actor)
         async with policy_store.policy_write_transaction(
@@ -723,6 +725,8 @@ class AgentBackendService:
             updated = type(policy).model_validate(
                 {**policy.model_dump(), "enabled_backends": backends}
             )
+            if dry_run:
+                return current.model_copy(update={"enabled_backends": updated.enabled_backends})
             await policy_store.set_access_policy(session, tenant_id=tenant_id, policy=updated)
             await security_audit.append_event(
                 session,
