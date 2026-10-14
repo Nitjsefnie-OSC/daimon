@@ -388,3 +388,65 @@ async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(consen
     assert refused.value.__cause__.reason == "re_confirm"
     assert not constructions and not targets
     assert all(call.method == "GET" for call in reads)
+
+
+@pytest.mark.parametrize("unknown", ["root", "null_config", "config"])
+async def test_unclassified_sdk_environment_refuses_consent_and_handoff(consent_request, unknown):
+    request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
+        consent_request
+    )
+    native = request.admission.environment
+    if unknown == "config":
+        native = native.model_copy(
+            update={
+                "config": native.config.model_copy(
+                    update={"future_execution_policy": {"requires_confirmation": True}}
+                )
+            }
+        )
+    else:
+        updates = {"future_execution_policy": {"requires_confirmation": True}}
+        if unknown == "null_config":
+            updates["config"] = None
+        native = native.model_copy(update=updates)
+    router.routes.clear()
+    router.add_agent(request.admission.agent)
+    router.add_environment(native)
+    captured = await capture_preparation_source(request, fresh=True)
+    assert captured.environment.spec.native_config is not None
+    assert "source_definition" in classify_source_obligations(captured, None, environment=None)
+    before = await service.audit(source.tenant_id)
+    with pytest.raises(AgentBackendRefused) as quote:
+        await service.preview(source, "openai")
+    assert quote.value.reason == "source_unavailable"
+    with pytest.raises(AgentBackendRefused) as commit:
+        await service.set_backend(
+            source,
+            "openai",
+            accepted.local,
+            actor,
+            accepted_drops=accepted.declared_drops,
+            expected_preview_digest=accepted.preview_digest,
+        )
+    assert commit.value.reason == "source_unavailable"
+    assert await service.current(source) == accepted
+    assert await service.audit(source.tenant_id) == before
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(request)
+    assert isinstance(refused.value.__cause__, AgentBackendRefused)
+    assert refused.value.__cause__.reason == "re_confirm"
+    assert constructions == targets == []
+    assert all(call.method == "GET" for call in reads)
+
+
+async def test_known_implicit_environment_policy_remains_an_explicit_sandbox_loss(consent_request):
+    request, service, source, _, _, router, _, _, _, _ = consent_request
+    native = request.admission.environment.model_copy(update={"config": {"type": "cloud"}})
+    router.routes.clear()
+    router.add_agent(request.admission.agent)
+    router.add_environment(native)
+    captured = await capture_preparation_source(request, fresh=True)
+    assert captured.environment.spec.native_config is not None
+    assert "source_definition" not in classify_source_obligations(captured, None, environment=None)
+    quote = await service.preview(source, "openai")
+    assert quote.allowed and quote.declared_drops == ("memory", "sandbox")

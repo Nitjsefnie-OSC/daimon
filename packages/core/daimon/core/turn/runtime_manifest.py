@@ -998,7 +998,7 @@ def classify_source_obligations(
         elif extension.namespace == "anthropic.agent_tools":
             try:
                 native = agent_tools(extension)
-                if "tools" not in drops:
+                if target is not None and "tools" not in drops:
                     source_tools = native.intent()
             except ValueError:
                 missing.update(("source_definition", "tools"))
@@ -1091,6 +1091,13 @@ def classify_source_obligations(
             )
         if not retained:
             missing.add("memory")
+    if source.environment is not None and source.environment.spec.native_config is not None:
+        from mux.drivers.anthropic.schemas import EnvironmentConfig
+
+        try:
+            EnvironmentConfig.model_validate(dict(source.environment.spec.native_config.value))
+        except ValueError:
+            missing.add("source_definition")
     # Removing execution is explicit; retaining a source environment requires
     # its complete canonical policy, which native readback must also verify.
     if target is None or not (
