@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Commits and pull requests Daimon makes now show as Daimon's GitHub App, not as a person.** On a pilot, commits and a PR came out under a team member's GitHub account, and nobody could tell whose it would be. Agents in GitHub App mode now commit with git and open PRs with `gh pr create` on the App's repo token instead of the GitHub MCP (where a person's own GitHub sign-in outranks the agent's credential), and put "Requested by <name>" in the PR body. A session that holds an App token also gets `/mnt/session/uploads/git-identity.sh`, which sets the git author and committer to the App's bot (`<app-slug>[bot]`) so commits link to it. A `GIT_AUTHOR_*` or `GIT_COMMITTER_*` key an admin or member has set in the agent's keys still overrides that identity. Agents on a stored per-agent token are unchanged. Sessions already running get the identity when they next start.
 - Provider-neutral mux library, optional provider drivers and offline conformance tests. The host runtime remains unchanged; the library does not activate backend selection. Shared test helpers retain the current skill and conditional memory-delete routes.
 
+### Changed
+
+- **On Discord and Slack, the `Ref` line on a stop or failure notice is now shown only to admins.** It is the last six characters of the request id. Before, everyone saw it; now it appears only when the person whose turn it is holds the admin role there, and it is left out whenever that is not known. Support can still find the failure from the logs, which keep the full request id. Teams is unchanged.
+
 ### Fixed
 
 - **Anyone in a Discord thread can now use its Connect GitHub button**, not only the person who asked. Before, anyone else got "Only @name can use this". Now the link opens privately for whoever clicks; what they can give the agent is capped by their own GitHub permission on each repo, and the person who asked must still manage the agent. The link stays single-use and is not tied to the clicker's own Daimon account.
