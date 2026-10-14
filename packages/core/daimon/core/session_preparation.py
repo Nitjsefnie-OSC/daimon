@@ -99,6 +99,7 @@ from daimon.core.stores.thread_session_lineage import (
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
+    mark_session_external,
     set_budget_channel_stamp,
     update_mutable_fingerprint,
 )
@@ -709,6 +710,10 @@ async def _prepare_session_for_turn_locked(
                 session_account_id=session_account_id,
             )
             return from_fresh(fresh, CONTINUED)
+
+        if admission.is_external and not row.is_external:
+            await mark_session_external(db, id=row.id)
+            row = row.model_copy(update={"is_external": True})
 
         await _heal_lineage(deps, db, row=row)
 

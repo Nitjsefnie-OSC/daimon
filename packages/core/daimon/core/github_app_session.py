@@ -550,8 +550,13 @@ async def finish_app_delivery(
     access: AppSessionAccess,
     provisional_session_id: str,
     session_id: str,
+    grant_guard: tuple[uuid.UUID, uuid.UUID] | None = None,
 ) -> None:
     async with sessionmaker.begin() as session:
+        if grant_guard is not None:
+            await lock_agent_grants(session, tenant_id=grant_guard[0], agent_id=grant_guard[1])
+            if await _access_is_stale(session, access):
+                raise ValueError("GitHub access changed during session delivery")
         await set_session_id(
             session, provisional_session_id=provisional_session_id, session_id=session_id
         )
@@ -582,6 +587,16 @@ async def finish_app_delivery(
             async with sessionmaker.begin() as session:
                 await mark_revoked(session, token_id=issued.token_id)
         raise ValueError("GitHub access changed during session delivery")
+
+
+async def _access_is_stale(session: AsyncSession, access: AppSessionAccess) -> bool:
+    """Limit a grant-locked recheck to this session's replacement tokens."""
+    for token in access.tokens:
+        if await select_stale_tokens(
+            session, include_live_version_bumps=True, token_id=token.token_id
+        ):
+            return True
+    return False
 
 
 async def revoke_session_tokens(
@@ -735,7 +750,7 @@ async def _current_app_access(
     )
 
 
-async def _rotate_live_app_tokens_locked(
+async def _rotate_live_app_tokens_unlocked(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -829,8 +844,12 @@ async def _rotate_live_app_tokens_locked(
                 access=access,
                 provisional_session_id=provisional,
                 session_id=session_id,
+                grant_guard=(tenant_id, agent_id),
             )
             async with sessionmaker.begin() as session:
+                await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
+                if await _access_is_stale(session, access):
+                    raise ValueError("GitHub access changed before token retirement")
                 await mark_session_tokens_superseded(
                     session,
                     session_id=session_id,
@@ -945,20 +964,18 @@ async def rotate_live_app_tokens(
     fernet: MultiFernet,
     active_turn: bool = False,
 ) -> None:
-    """Serialize rotation with grant writes from mint through retirement."""
-    async with sessionmaker.begin() as session:
-        await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
-        await _rotate_live_app_tokens_locked(
-            anthropic,
-            sessionmaker,
-            session_id=session_id,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            account_id=account_id,
-            is_external=is_external,
-            vault_id=vault_id,
-            resource_ids=resource_ids,
-            config=config,
-            fernet=fernet,
-            active_turn=active_turn,
-        )
+    """Rotate without holding a database connection during network calls."""
+    await _rotate_live_app_tokens_unlocked(
+        anthropic,
+        sessionmaker,
+        session_id=session_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=account_id,
+        is_external=is_external,
+        vault_id=vault_id,
+        resource_ids=resource_ids,
+        config=config,
+        fernet=fernet,
+        active_turn=active_turn,
+    )

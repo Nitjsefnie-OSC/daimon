@@ -327,12 +327,13 @@ discord_gateway_handover	GatewayHandover	GatewayBootstrapProgress	clean	439	-	li
 discord_gateway_handover	GatewayHandover	GatewayBootstrapNoWait	violates:AtMostOneHandler	73	-	legacy Old, no bootstrap rule: an empty lease row lets New connect beside Old
 test_session_task_lifecycle	TestSessionTaskLifecycle	Unsafe	violates:NoCleanupDuringTask	6	-	fixture cleanup can race an unjoined Discord bot task
 test_session_task_lifecycle	TestSessionTaskLifecycle	Safe	clean	6	-	bot tasks finish before fixture cleanup
-github_session_token	SessionToken	Safe	clean	42	-	partial delivery and crash keep the pointed-to token live
+github_session_token	SessionToken	Safe	clean	50	-	short decision locks leave mint and swaps unlocked
 github_session_token	SessionToken	Unsafe	violates:LiveSessionHasToken	6	-	old sweep revokes on version bump before replacement
 github_session_token	SessionToken	UnsafePartial	violates:LiveSessionHasToken	13	-	resource swap revokes old token before vault swap
 github_session_token	SessionToken	UnsafePartialCleanup	violates:LiveSessionHasToken	13	-	failed vault update revokes token already installed in a resource
 github_session_token	SessionToken	UnsafeCrash	violates:LiveSessionHasToken	21	-	cleanup revokes a provisionally stored token already in the vault
-github_session_token	SessionToken	UnsafeSweep	violates:LiveSessionHasToken	36	-	stale sweep revokes after rollback restores old token
+github_session_token	SessionToken	UnsafeSweep	violates:LiveSessionHasToken	44	-	stale sweep revokes after rollback restores old token
 github_session_token	SessionToken	UnsafeRemoved	violates:RemovedAccessInvalid	6	-	rollback re-enables removed access
+github_session_token	SessionToken	UnsafeLongLock	violates:NoNetworkUnderLock	5	-	grant lock held across GitHub mint
 github_session_token	GrantInstall	GrantSafe	clean	9	-	transaction lock serializes first grants across installations
 github_session_token	GrantInstall	GrantUnsafe	violates:OneInstallation	31	-	read-then-write first grants race across installations

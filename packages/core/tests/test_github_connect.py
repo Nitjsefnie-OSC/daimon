@@ -2702,7 +2702,7 @@ async def test_active_turn_refresh_proceeds_without_a_rollback_snapshot(
     )
     monkeypatch.setattr(github_app_session, "prepare_app_access", AsyncMock(side_effect=Prepared))
     with pytest.raises(Prepared):
-        await github_app_session._rotate_live_app_tokens_locked(  # pyright: ignore[reportPrivateUsage]
+        await github_app_session._rotate_live_app_tokens_unlocked(  # pyright: ignore[reportPrivateUsage]
             AsyncMock(),
             AsyncMock(),
             session_id="no-snapshot",
@@ -2716,6 +2716,51 @@ async def test_active_turn_refresh_proceeds_without_a_rollback_snapshot(
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
             active_turn=True,
         )
+
+
+async def test_rotation_releases_grant_lock_during_github_network_call(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopMint(Exception):
+        pass
+
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_mint(*_args: object, **_kwargs: object) -> AppSessionAccess:
+        entered.set()
+        await release.wait()
+        raise StopMint
+
+    monkeypatch.setattr(github_app_session, "prepare_app_access", blocked_mint)
+    rotation = asyncio.create_task(
+        github_app_session.rotate_live_app_tokens(
+            AsyncMock(),
+            db_session_factory,
+            session_id="lock-test",
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            is_external=False,
+            vault_id="vault-test",
+            resource_ids={},
+            config=GithubAppSettings(),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        async with db_session_factory.begin() as session:
+            await asyncio.wait_for(
+                github_access.lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id),
+                timeout=2,
+            )
+    finally:
+        release.set()
+    with pytest.raises(StopMint):
+        await rotation
 
 
 async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
