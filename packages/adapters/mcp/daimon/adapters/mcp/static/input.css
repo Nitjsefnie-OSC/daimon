@@ -317,3 +317,46 @@
   .gh-editor-footer-actions .gh-primary { padding: 9px 11px; font-size: 13px; }
   .gh-editor-cancel { display: none; }
 }
+
+/* Connect GitHub page states keep the existing Daimon palette. */
+.gh-status-line{color:var(--foreground);font-size:17px;font-weight:650;margin:10px 0 0}
+.gh-action-line{color:var(--muted-foreground);margin:5px 0 0}
+.gh-flow--picker>.gh-status-line{margin-top:0}
+.gh-flow--picker>.gh-action-line{margin-bottom:20px}
+.gh-flow--status .gh-access-help{width:100%}
+.gh-dialog-copy{display:block;margin:0 24px 8px;font-size:14px}
+.gh-dialog-copy.gh-status-line{font-size:15px}
+.gh-dialog-copy.gh-action-line{margin-bottom:14px}
+.gh-working-select{display:block;width:calc(100% - 48px);margin:0 24px 20px;padding:11px 12px;border:1px solid var(--input);border-radius:8px;background:#fff}
+.gh-picker-connected{display:flex;align-items:center;gap:12px;color:var(--muted-foreground)}
+.gh-picker-connected .web-icon{color:#225e55}
+.gh-picker-connected small{display:block;font-size:12px}
+.gh-picker-choice:has(input:checked){background:var(--accent);border:2px solid #428d7d;border-radius:8px;padding:13px 10px}
+.gh-agent-row,.gh-picker-choice,.gh-status-icon .web-icon{transition:background-color .18s,border-color .18s,opacity .18s,transform .18s}
+.gh-status-icon .web-icon{animation:gh-success-in .25s ease-out both}
+@keyframes gh-success-in{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:scale(1)}}
+.gh-flow--picker .gh-inline-error{padding:10px 16px;background:#fff4f2}
+.gh-dialog-link{line-height:1.5}
+.gh-dialog-footer{position:sticky;bottom:0}
+.gh-editor{padding-bottom:170px}
+.web-main--wide{padding-bottom:190px}
+@media(max-width:600px){
+  .gh-flow--picker>h1{margin-bottom:12px}
+  .gh-dialog-copy{margin-left:20px;margin-right:20px}
+  .gh-working-select{width:calc(100% - 40px);margin-left:20px;margin-right:20px}
+  .gh-repo-dialog{display:flex;flex-direction:column;overflow-y:auto}
+  .gh-repo-dialog:not([open]){display:none}
+  .gh-dialog-choices{min-height:0;max-height:none;flex:1}
+  .gh-dialog-footer{flex:none}
+  .gh-editor{padding-bottom:190px}
+  .web-main--wide{padding-bottom:230px}
+  .gh-row-top{align-items:flex-start;flex-direction:column}
+  .gh-row-actions{flex-wrap:wrap}
+}
+@media(prefers-reduced-motion:reduce){
+  .gh-agent-row,.gh-picker-choice,.gh-status-icon .web-icon{transition:none;animation:none}
+}
+.gh-choice.is-added:has(input:checked){background:#f5f7fa;border-color:var(--border)}
+@media(max-width:600px){
+  .gh-editor .gh-editor-cancel:not([hidden]){display:inline-flex;grid-area:1/2;justify-self:end;align-self:center}
+}
