@@ -394,6 +394,22 @@ stay intact. An isolated transient API failure and shutdown cancellation keep
 the intent active for another recovery attempt. An unprompted turn likewise retains its
 intent when its card delete fails, including an unknown-webhook error.
 
+Plain-text mentions are a per-tenant switch (`tenants.plain_text_mentions`,
+off by default, set with the admin-only `set_plain_text_mentions`). Each
+adapter first runs the pure matcher in `daimon.core.name_mentions` on a
+person's channel or thread message: "@" plus a bot name, case-insensitive,
+not after a word character or another "@" and not running on into a word
+character or hyphen; "Name (Suffix)" also matches "@Name". Bots, webhooks,
+DMs and messages that already carry a real mention never match. Only a match
+pays one read of the switch. With it on, Discord continues down the mention
+path (configured name, account name and server nickname), Slack runs the
+`app_mention` handler for the `message` event with the switch in place of the
+mention check, claiming the dedup slot only after making sure the text has no
+real mention (whose own `app_mention` then runs the one turn), and Teams
+(`parse_inbound` marks the message `by_name`; the name is `recipient.name`)
+takes the ordinary `_handle` path with the typed name stripped. Off, nothing
+changes: a Teams thread reply still goes to participation.
+
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer
 batch; once the thread goes quiet the shared gates in
