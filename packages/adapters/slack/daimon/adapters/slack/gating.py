@@ -35,6 +35,8 @@ _PLAIN_TEXT_MENTION_SUBTYPES = frozenset({"", "file_share", "thread_broadcast"})
 _SLACK_TOKEN = re.compile(r"<[^<>]*>")
 # A quoted line ("> ...", sent as "&gt; ..."): someone else's words, as Teams reply quotes.
 _QUOTE_LINE = re.compile(r"^(?:&gt;|>).*$", re.MULTILINE)
+# A ">>>" block quote runs from its line to the end of the message.
+_BLOCK_QUOTE = re.compile(r"^(?:&gt;|>){3}[\s\S]*", re.MULTILINE)
 
 
 def is_plain_text_mention_event(event: dict[str, Any], *, bot_names: Iterable[str | None]) -> bool:
@@ -51,7 +53,7 @@ def is_plain_text_mention_event(event: dict[str, Any], *, bot_names: Iterable[st
         return False
     if event.get("channel_type") not in ("channel", "group"):
         return False
-    text = _QUOTE_LINE.sub("", str(event.get("text") or ""))
+    text = _QUOTE_LINE.sub("", _BLOCK_QUOTE.sub("", str(event.get("text") or "")))
     return mentions_by_name(_SLACK_TOKEN.sub(" ", text), bot_names)
 
 

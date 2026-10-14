@@ -137,6 +137,7 @@ def _channel_message(**overrides: Any) -> dict[str, Any]:
         {"subtype": "file_share"},
         {"thread_ts": "1.0"},
         {"text": "&gt; ship it\n@daimon agreed?"},
+        {"text": "@daimon agreed?\n&gt;&gt;&gt; ship it"},
     ],
 )
 def test_plain_text_mention_event_admits_a_person_naming_the_bot(
@@ -162,6 +163,8 @@ def test_plain_text_mention_event_admits_a_person_naming_the_bot(
         ({"text": "see <https://example.com|@daimon docs>"}, "a name in a link label"),
         ({"text": "&gt; @daimon ship it\nagreed"}, "a name in a quoted line"),
         ({"text": "> @daimon ship it\nagreed"}, "a name in an unescaped quoted line"),
+        ({"text": "agreed\n&gt;&gt;&gt; ship it\n@daimon too"}, "a name in a block quote"),
+        ({"text": ">>> ship it\n@daimon too"}, "a name in an unescaped block quote"),
     ],
 )
 def test_plain_text_mention_event_rejects(overrides: dict[str, Any], why: str) -> None:
