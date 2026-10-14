@@ -34,12 +34,7 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import (
-    BetaEnvironment,
-    BetaManagedAgentsAgent,
-    BetaManagedAgentsSession,
-    SkillRetrieveResponse,
-)
+from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.testing.ma_models import (
     DEFAULT_MODEL_ID,
@@ -59,7 +54,7 @@ from daimon.testing.ma_models import SessionStatus as SessionStatus
 
 class NotHandled(Exception):
     """Raise from a handler passed to combine_handlers to indicate this handler
-    does not match the request. combine_handlers will try the next handler."""
+    does not match the request. Routers/combine_handlers try the next handler."""
 
 
 # The shared `EMPTY_*` constants and `SessionStatus` live in
@@ -131,7 +126,12 @@ class MARouter:
             match = pattern.fullmatch(request.url.path)
             if match is None:
                 continue
-            return handler(request, match)
+            try:
+                return handler(request, match)
+            except NotHandled:
+                # A path match can still decline a query it does not script.
+                # Keep looking; exhausted routes still fail closed below.
+                continue
         raise AssertionError(
             f"MARouter: no route for {request.method} {request.url.path} "
             f"(registered: {[(m, p.pattern) for m, p, _ in self.routes]})"
@@ -163,19 +163,6 @@ def not_found_response(message: str) -> httpx.Response:
         404,
         json={"type": "error", "error": {"type": "not_found_error", "message": message}},
     )
-
-
-def skill_response(skill_id: str, display_title: str | None = None) -> dict[str, Any]:
-    """A validated `GET /v1/skills/{id}` body for a custom skill."""
-    return SkillRetrieveResponse(
-        id=skill_id,
-        type="skill",
-        source="custom",
-        display_title=display_title or skill_id,
-        latest_version="1",
-        created_at="2026-01-01T00:00:00Z",
-        updated_at="2026-01-01T00:00:00Z",
-    ).model_dump(mode="json")
 
 
 def sse_response(events: list[dict[str, Any]]) -> httpx.Response:
@@ -270,9 +257,19 @@ def build_fake_anthropic(
     combine_handlers / make_fake_ma_handler) and pass it here. The real SDK
     code path runs in full (parameter validation, response parsing).
     """
-    transport = httpx.MockTransport(handler)
-    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    return AsyncAnthropic(api_key="test", http_client=http_client)
+    from anthropic import DEFAULT_TIMEOUT
+    from daimon.testing.isolated_sdk import build_async_anthropic
+
+    # Preserve this builder's SDK defaults while refusing ambient credentials,
+    # signing keys, headers and routes before constructing its HTTP client.
+    return build_async_anthropic(
+        transport=httpx.MockTransport(handler),
+        api_key="test",
+        base_url="https://api.anthropic.com",
+        headers={},
+        max_retries=2,
+        timeout=DEFAULT_TIMEOUT,
+    )
 
 
 def build_stub_anthropic(
@@ -301,11 +298,18 @@ def build_no_retry_anthropic(
     scripted conflict before the code under test can see it. A `MARouter`
     is accepted directly so callers need not spell `.dispatch`.
     """
+    from anthropic import DEFAULT_TIMEOUT
+    from daimon.testing.isolated_sdk import build_async_anthropic
+
     dispatch = handler.dispatch if isinstance(handler, MARouter) else handler
-    http_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(dispatch), base_url="https://api.anthropic.com"
+    return build_async_anthropic(
+        transport=httpx.MockTransport(dispatch),
+        api_key="test",
+        base_url="https://api.anthropic.com",
+        headers={},
+        max_retries=0,
+        timeout=DEFAULT_TIMEOUT,
     )
-    return AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
 
 
 @pytest.fixture
@@ -576,10 +580,6 @@ def make_fake_ma_handler(
         if method == "GET" and path == "/v1/skills":
             return httpx.Response(200, json={"data": [], "next_page": None})
 
-        # GET /v1/skills/{id}/versions — a delete lists versions first
-        if method == "GET" and re.fullmatch(r"/v1/skills/[^/]+/versions", path):
-            return httpx.Response(200, json={"data": [], "has_more": False})
-
         # POST /v1/agents — create
         if method == "POST" and path == "/v1/agents":
             body: dict[str, Any] = json.loads(request.content)
@@ -751,7 +751,7 @@ def make_fake_memory_store_handler(
 
     Raises NotHandled for non-memory paths — compose with other handlers via
     combine_handlers. Covers: store create/retrieve/archive/delete, memory
-    create/list/retrieve/delete. (update/versions endpoints are out of v1 scope.)
+    create/list/retrieve. (update/versions endpoints are out of v1 scope.)
 
     When combining with make_fake_ma_handler (which returns a 404 catch-all),
     pass this handler first to combine_handlers() so requests are tried here before fallthrough.
@@ -801,23 +801,6 @@ def make_fake_memory_store_handler(
             return list_response(data)
 
         m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/memories/(?P<mid>[^/]+)", path)
-        if m and method == "DELETE":
-            sid, mid = m.group("sid"), m.group("mid")
-            expected = request.url.params.get("expected_content_sha256")
-            current = next((x for x in st.memories.get(sid, []) if x["id"] == mid), None)
-            if (
-                expected is not None
-                and current is not None
-                and current.get("content_sha256") != expected
-            ):
-                return httpx.Response(
-                    409, json={"type": "error", "error": {"type": "conflict_error"}}
-                )
-            kept = [x for x in st.memories.get(sid, []) if x["id"] != mid]
-            if len(kept) == len(st.memories.get(sid, [])):
-                return not_found_response("no such memory")
-            st.memories[sid] = kept
-            return httpx.Response(200, json={"id": mid, "type": "memory_deleted"})
         if m and method == "GET":
             sid, mid = m.group("sid"), m.group("mid")
             view = request.url.params.get("view", "basic")

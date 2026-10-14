@@ -1,0 +1,77 @@
+{
+  "scenario_id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE",
+  "source": {
+    "path": "scenarios/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.yaml",
+    "sha256": "ce22c80b0b6a8ec1f580f87ea22861a089ab8bc227feb999ab25bea0dc604199"
+  },
+  "provenance": "authored-sdk-wire",
+  "backend": "gemini",
+  "profile": "gemini.inline_reuse",
+  "model": "gemini-3.8-flash",
+  "session": "qa-session-998aadb0e741be99",
+  "root": "qa-gemini-998aadb0e741be99-turn-1",
+  "request": {
+    "agent": "antigravity-preview-05-2026",
+    "agent_config": {
+      "type": "antigravity",
+      "model": "gemini-3.8-flash"
+    },
+    "environment": {
+      "type": "remote",
+      "sources": []
+    },
+    "input": [
+      {
+        "type": "text",
+        "text": "QA tool-only. Run `true` with bash. Do not write any reply text at all."
+      }
+    ],
+    "background": true,
+    "store": true,
+    "tools": [
+      {
+        "type": "code_execution"
+      }
+    ]
+  },
+  "frames": [
+    {
+      "event_type": "interaction.completed",
+      "event_id": "qa-gemini-998aadb0e741be99-turn-1:end",
+      "interaction": {
+        "id": "qa-gemini-998aadb0e741be99-turn-1",
+        "status": "completed"
+      }
+    }
+  ],
+  "snapshot": {
+    "id": "qa-gemini-998aadb0e741be99-turn-1",
+    "created": "2026-10-10T00:00:00Z",
+    "updated": "2026-10-10T00:00:00Z",
+    "status": "completed",
+    "environment_id": "qa-workspace-998aadb0e741be99",
+    "steps": [
+      {
+        "id": "qa-gemini-998aadb0e741be99-turn-1:tool:0",
+        "type": "code_execution_call",
+        "arguments": {
+          "command": "true"
+        }
+      },
+      {
+        "id": "qa-gemini-998aadb0e741be99-turn-1:tool:0:result",
+        "type": "code_execution_result",
+        "call_id": "qa-gemini-998aadb0e741be99-turn-1:tool:0",
+        "result": "",
+        "is_error": false
+      }
+    ],
+    "usage": {
+      "total_input_tokens": 64,
+      "total_cached_tokens": 16,
+      "total_output_tokens": 8,
+      "total_thought_tokens": 3
+    }
+  },
+  "note": "Explicit code_execution only. No model_output or synthetic final message. Tool result is empty. Authored replay tests host behavior, not remote execution."
+}

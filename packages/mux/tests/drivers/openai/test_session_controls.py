@@ -1,0 +1,392 @@
+"""Current documented Agents controls through the real SDK, without network."""
+
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+from daimon.testing.isolated_sdk import build_async_openai
+from mux.contracts.actions import UserMessage
+from mux.contracts.events import TextPart
+from mux.contracts.ids import Revision
+from mux.contracts.resources import SessionSpec
+from mux.drivers.openai import OpenAIDriver
+from mux.drivers.openai.session_controls import SessionControls
+from mux.drivers.openai.transport import SDKTransport
+from mux.drivers.openai.turn import MemoryRecoveryJournal
+from mux.drivers.openai.usage import MemoryUsageRevisions
+from mux.errors import UnsupportedCapability
+from pydantic import ValidationError
+
+from .conftest import REF, SCOPE, native_session
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{"spend_limit_usd_cents": n} for n in (True, 0, -1, 1.5, "220")]
+    + [{"container_size": "64gb"}, {"limit": 220}],
+)
+def test_invalid_controls_refuse_before_client_or_key_access(value: object) -> None:
+    with pytest.raises(ValidationError):
+        SessionControls.model_validate(value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [None, "small", "medium", "large"])
+@pytest.mark.parametrize("limit", [None, 5, 220])
+async def test_controls_use_native_fields_and_preserve_omitted_defaults(
+    size: str | None, limit: int | None
+) -> None:
+    controls = SessionControls.model_validate(
+        {"container_size": size, "spend_limit_usd_cents": limit}
+    )
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/v1/agents/a":
+            return httpx.Response(200, json={"id": "a", "metadata": {}})
+        assert request.url.path == "/v1/agents/sessions"
+        raw = native_session()
+        if limit is not None:
+            raw["spend_control"] = {"limit": limit}
+        return httpx.Response(200, json=raw)
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=controls,
+        )
+        session = await driver.sessions.create(
+            SCOPE,
+            SessionSpec(
+                agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+                agent_revision=Revision(local=0),
+                config_revision=1,
+                environment=REF.model_copy(update={"kind": "environment", "id": "template"}),
+            ),
+            key="create",
+        )
+    assert session.continuity.workspace == "native_reuse"
+    body = json.loads(seen[-1].content)
+    expected_environment = {"type": "openai_hosted", "environment_template_id": "template"}
+    if size is not None:
+        expected_environment["container_size"] = size
+    expected = {
+        "agent_id": "a",
+        "environment": expected_environment,
+        "metadata": {"mux_tenant": "t", "mux_config_revision": "1"},
+    }
+    if limit is not None:
+        expected["spend_control"] = {"limit": limit}
+    assert body == expected
+    assert seen[-1].headers["OpenAI-Beta"] == "agents=v1"
+    assert seen[-1].headers["Idempotency-Key"] == "create"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hosted_size", [False, True])
+async def test_conversation_only_supports_spend_limit_but_refuses_hosted_size(
+    hosted_size: bool,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"id": "a", "metadata": {}})
+        raw = native_session()
+        raw["environment"] = {"type": "none"}
+        raw["spend_control"] = {"limit": 5}
+        return httpx.Response(200, json=raw)
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            profile_id="openai.conversation_only",
+            session_controls=SessionControls(
+                container_size="small" if hosted_size else None,
+                spend_limit_usd_cents=5,
+            ),
+        )
+        spec = SessionSpec(
+            agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+            agent_revision=Revision(local=0),
+            config_revision=1,
+        )
+        initial = UserMessage(content=(TextPart(text="hello"),))
+        if hosted_size:
+            with pytest.raises(UnsupportedCapability, match="hosted_container_size"):
+                await driver.sessions.create(SCOPE, spec, key="create", initial=initial)
+            assert seen == []
+        else:
+            await driver.sessions.create(SCOPE, spec, key="create", initial=initial)
+            body = json.loads(seen[-1].content)
+            assert body["environment"] == {"type": "none"}
+            assert body["spend_control"] == {"limit": 5}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actual_model", ["gpt-6-luna", "wrong-model", None])
+async def test_explicit_session_model_override_is_verified(actual_model: str | None) -> None:
+    from mux.errors import ContinuityLost
+
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"id": "a", "metadata": {}})
+        raw = native_session()
+        raw["agent"] = {"id": "a", "model": actual_model}
+        return httpx.Response(200, json=raw)
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=SessionControls(model="gpt-6-luna"),
+        )
+        spec = SessionSpec(
+            agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+            agent_revision=Revision(local=0),
+            config_revision=1,
+        )
+        if actual_model == "gpt-6-luna":
+            await driver.sessions.create(SCOPE, spec, key="create")
+        else:
+            with pytest.raises(ContinuityLost, match="model"):
+                await driver.sessions.create(SCOPE, spec, key="create")
+    assert json.loads(seen[-1].content)["agent"] == {"model": "gpt-6-luna"}
+
+
+def test_only_luna_is_an_allowed_session_model_control():
+    for model in ("gpt-6-astra", "gpt-5-nano", "gpt-6-sol", ""):
+        with pytest.raises(ValidationError):
+            SessionControls.model_validate({"model": model})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_enabled", [False, True, None])
+async def test_session_override_disables_and_verifies_delegation(native_enabled):
+    from mux.errors import ProviderError
+
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"id": "a", "metadata": {}, "multi_agent": {"enabled": False}}
+            )
+        raw = native_session()
+        raw["agent"] = {
+            "id": "a",
+            "model": "gpt-6-luna",
+            "multi_agent": {"enabled": native_enabled},
+        }
+        return httpx.Response(200, json=raw)
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=SessionControls(model="gpt-6-luna", multi_agent_enabled=False),
+        )
+        spec = SessionSpec(
+            agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+            agent_revision=Revision(local=0),
+            config_revision=1,
+        )
+        if native_enabled is False:
+            await driver.sessions.create(SCOPE, spec, key="create")
+        else:
+            with pytest.raises(ProviderError) as refused:
+                await driver.sessions.create(SCOPE, spec, key="create")
+            assert refused.value.native_code == "host_delegation_enabled"
+    assert json.loads(seen[-1].content)["agent"] == {
+        "model": "gpt-6-luna",
+        "multi_agent": {"enabled": False},
+    }
+
+
+def test_enabled_delegation_cannot_be_requested_by_host_controls():
+    with pytest.raises(ValidationError):
+        SessionControls.model_validate({"multi_agent_enabled": True})
+
+
+@pytest.mark.asyncio
+async def test_g1_session_shape_omits_optional_spending_control_per_current_reference():
+    """2026-10-10 Agents create reference: spend_control is optional USD cents.
+
+    Source: /api/reference/python/resources/beta/subresources/agents/subresources/
+    sessions/methods/create; hashed lane snapshot 2026-10-10T070515Z lines24213+.
+    The documented minimum is strictly positive, with no higher numeric minimum.
+    Our project rejected this optional field (HTTP400 param=spend_control), so
+    G1 omits it rather than guessing a new amount or a different wire shape.
+    """
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"id": "a", "metadata": {}, "multi_agent": {"enabled": False}}
+            )
+        raw = native_session()
+        raw["agent"] = {"id": "a", "model": "gpt-6-luna", "multi_agent": {"enabled": False}}
+        return httpx.Response(200, json=raw)
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, identity: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=SessionControls(
+                model="gpt-6-luna", multi_agent_enabled=False, container_size="small"
+            ),
+        )
+        await driver.sessions.create(
+            SCOPE,
+            SessionSpec(
+                agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+                agent_revision=Revision(local=0),
+                config_revision=1,
+            ),
+            key="g1-optional-spend",
+        )
+    assert [(request.method, request.url.path) for request in seen] == [
+        ("GET", "/v1/agents/a"),
+        ("POST", "/v1/agents/sessions"),
+    ]
+    assert json.loads(seen[-1].content) == {
+        "agent_id": "a",
+        "agent": {"model": "gpt-6-luna", "multi_agent": {"enabled": False}},
+        "environment": {"type": "openai_hosted", "container_size": "small"},
+        "metadata": {"mux_tenant": "t", "mux_config_revision": "1"},
+    }
+    assert seen[-1].headers["OpenAI-Beta"] == "agents=v1"
+    assert seen[-1].headers["Idempotency-Key"] == "g1-optional-spend"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_echo", [False, True])
+@pytest.mark.parametrize("echo", [None, True, "5", 5.0, 6, 5])
+async def test_worker_echo_admission_preserves_ordinary_deployment_caps(require_echo, echo):
+    from mux.errors import ContinuityLost
+
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        if request.url.path == "/v1/agents/a":
+            return httpx.Response(200, json={"id": "a", "metadata": {}})
+        raw = native_session()
+        if echo is not None:
+            raw["spend_control"] = {"limit": echo}
+        return httpx.Response(200, json=raw)
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=SessionControls(
+                spend_limit_usd_cents=5, require_spend_control_echo=require_echo
+            ),
+        )
+        session = await driver.sessions.create(
+            SCOPE,
+            SessionSpec(
+                agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+                agent_revision=Revision(local=0),
+                config_revision=1,
+            ),
+            key="create",
+        )
+        assert session.state == ("provisioning" if require_echo else "idle")
+        if not require_echo:
+            assert session.native is None
+        valid = type(echo) is int and echo == 5
+        if require_echo and not valid:
+            with pytest.raises(ContinuityLost, match="spend control"):
+                driver.sessions.validate_spend_control(session)
+            with pytest.raises(ContinuityLost, match="spend control"):
+                await driver.sessions.retrieve(SCOPE, session.ref)
+        else:
+            driver.sessions.validate_spend_control(session)
+            retrieved = await driver.sessions.retrieve(SCOPE, session.ref)
+            assert retrieved.state == "idle"
+    posted = [request for request in seen if request.method == "POST"]
+    assert len(posted) == 1
+    assert json.loads(posted[0].content) == {
+        "agent_id": "a",
+        "environment": {"type": "openai_hosted"},
+        "metadata": {"mux_tenant": "t", "mux_config_revision": "1"},
+        "spend_control": {"limit": 5},
+    }
+
+
+@pytest.mark.parametrize("cap", [None, 4])
+@pytest.mark.parametrize("explicit_false", [False, True])
+def test_ordinary_control_serialization_preserves_prior_policy_identity(cap, explicit_false):
+    from mux.state.operations import request_digest
+
+    prior = {
+        "model": "gpt-6-luna",
+        "multi_agent_enabled": False,
+        "container_size": "small",
+        "spend_limit_usd_cents": cap,
+    }
+    value = {**prior, **({"require_spend_control_echo": False} if explicit_false else {})}
+    controls = SessionControls.model_validate(value)
+    assert controls.model_dump() == prior
+    assert controls.model_dump(mode="json") == prior
+    assert json.loads(controls.model_dump_json()) == prior
+    assert request_digest(controls.model_dump(mode="json")) == request_digest(prior)
+    strict = controls.model_copy(update={"require_spend_control_echo": True})
+    assert strict.model_dump(mode="json") == {**prior, "require_spend_control_echo": True}
+    assert request_digest(strict.model_dump(mode="json")) != request_digest(prior)
