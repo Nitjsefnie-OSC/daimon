@@ -42,6 +42,7 @@ from daimon.core._models import (
     TurnCardIntent,
     UsageObservation,
 )
+from daimon.core.stores import read_persisted_columns
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope
@@ -254,25 +255,37 @@ async def thread_has_caller_sessions(
 # Bindings
 
 
-async def _binding(session: AsyncSession, binding_id: str, generation: int) -> BindingContract:
-    body = await session.scalar(
-        select(ProviderBinding.binding).where(
-            ProviderBinding.binding_id == binding_id, ProviderBinding.generation == generation
-        )
+async def _binding(
+    session: AsyncSession, binding_id: str, generation: int, *, read_persisted: bool = False
+) -> BindingContract:
+    statement = select(ProviderBinding.binding).where(
+        ProviderBinding.binding_id == binding_id, ProviderBinding.generation == generation
+    )
+    body = (
+        (await read_persisted_columns(session, statement)).scalar_one_or_none()
+        if read_persisted
+        else await session.scalar(statement)
     )
     assert body is not None, f"binding {binding_id} lost generation {generation}"
     return BindingContract.model_validate(body)
 
 
-async def get_binding(session: AsyncSession, slot: Slot) -> BindingContract | None:
+async def get_binding(
+    session: AsyncSession, slot: Slot, *, read_persisted: bool = False
+) -> BindingContract | None:
+    statement = select(ProviderBindingSlot.binding_id, ProviderBindingSlot.generation).where(
+        *_where_slot(ProviderBindingSlot, slot)
+    )
     row = (
-        await session.execute(
-            select(ProviderBindingSlot.binding_id, ProviderBindingSlot.generation).where(
-                *_where_slot(ProviderBindingSlot, slot)
-            )
-        )
+        await read_persisted_columns(session, statement)
+        if read_persisted
+        else await session.execute(statement)
     ).one_or_none()
-    return await _binding(session, row.binding_id, row.generation) if row else None
+    return (
+        await _binding(session, row.binding_id, row.generation, read_persisted=read_persisted)
+        if row
+        else None
+    )
 
 
 async def put_binding(

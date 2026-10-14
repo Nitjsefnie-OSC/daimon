@@ -40,9 +40,9 @@ from daimon.core.fleet import (
     check_result,
     worker_slot,
 )
-from daimon.core.stores import mux_state, task_continuations, tenant_ledger
+from daimon.core.stores import mux_state, read_persisted_columns, task_continuations, tenant_ledger
 from pydantic import JsonValue
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import Row, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -83,7 +83,7 @@ def _amount(value: Decimal) -> Decimal:
     return value
 
 
-def _run(row: FleetRunRow) -> FleetRun:
+def _run(row: FleetRunRow | Row[Any]) -> FleetRun:
     return FleetRun(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -104,7 +104,7 @@ def _run(row: FleetRunRow) -> FleetRun:
     )
 
 
-def _worker(row: FleetWorkerRow) -> FleetWorker:
+def _worker(row: FleetWorkerRow | Row[Any]) -> FleetWorker:
     result = (
         ResultPointer(
             session_id=row.result_session_id,
@@ -655,17 +655,22 @@ async def run_status(
             FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id
         )
         run = (
-            await session.execute(query.with_for_update() if for_update else query)
-        ).scalar_one_or_none()
+            (await session.execute(query.with_for_update())).scalar_one_or_none()
+            if for_update
+            else (await read_persisted_columns(session, query)).one_or_none()
+        )
         if run is None:
             raise FleetConflict(f"no fleet run {run_id} in this tenant")
+        worker_query = (
+            select(FleetWorkerRow)
+            .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.run_id == run_id)
+            .order_by(FleetWorkerRow.ordinal)
+        )
         workers = (
-            await session.execute(
-                select(FleetWorkerRow)
-                .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.run_id == run_id)
-                .order_by(FleetWorkerRow.ordinal)
-            )
-        ).scalars()
+            (await session.execute(worker_query)).scalars()
+            if for_update
+            else (await read_persisted_columns(session, worker_query)).all()
+        )
         return _run(run), tuple(_worker(worker) for worker in workers)
 
 

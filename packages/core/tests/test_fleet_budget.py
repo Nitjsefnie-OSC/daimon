@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from daimon.core._models import FleetRun, FleetWorker, ProviderBindingSlot, TenantLedger
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.authz import AgentRef, FleetFacts, Place, Subject
@@ -20,6 +21,7 @@ from daimon.core.fleet import FleetConflict, worker_slot
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions, resolve_worker_spec
 from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.stores import (
+    UnflushedReadState,
     channel_budgets,
     fleet,
     mux_state,
@@ -27,6 +29,11 @@ from daimon.core.stores import (
     tenant_ledger,
     tenants,
 )
+from daimon.core.stores.turn_usage import (
+    read_accounting_revisions,
+    read_fleet_accounting_revisions,
+)
+from daimon.core.usage_delegation import HostUsageBinding, read_delegated_usage
 from daimon.testing.factories import make_account, make_tenant
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import (
@@ -38,7 +45,7 @@ from mux.contracts.resources import (
 )
 from mux.contracts.usage import UsageObservation
 from mux.profiles import backend_selection, get_profile
-from sqlalchemy import text
+from sqlalchemy import delete, event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 POLICY = TenantAccessPolicy(enabled_backends=("anthropic", "openai", "gemini"))
@@ -338,7 +345,9 @@ async def read(sm, parent, worker, *, prices=None):
         )[worker.id]
 
 
-async def usage(sm, parent, run, worker, *, inputs=100, outputs=None, revision=1):
+async def usage(
+    sm, parent, run, worker, *, inputs=100, outputs=None, revision=1, infrastructure=None
+):
     provider = parent.spec.model.provider
     binding = ProviderBinding(
         id=f"worker-{worker.id}",
@@ -387,11 +396,380 @@ async def usage(sm, parent, run, worker, *, inputs=100, outputs=None, revision=1
             provider_price=tariffs(parent)[(provider, parent.spec.model.id)]
             if provider != "anthropic"
             else None,
-            infrastructure_usd=None,
+            infrastructure_usd=infrastructure,
             billing_grain=value.grain,
             channel_id=run.channel_id,
         )
     return value
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+async def test_run_accounting_reader_retains_original_revisions_and_only_owned_debits(sm, provider):
+    parent, run = await setup(sm, provider=provider)
+    worker = await add(sm, parent)
+    await reserve(sm, parent, worker)
+    values = [
+        await usage(
+            sm,
+            parent,
+            run,
+            worker,
+            inputs=inputs,
+            outputs=outputs,
+            revision=revision,
+            infrastructure=Decimal(0),
+        )
+        for revision, inputs, outputs in [(1, 100, 10), (2, 200, 20), (3, 150, 15)]
+    ]
+    claimed = await fleet.claim_worker(
+        sm, tenant_id=run.tenant_id, run_id=run.id, worker_id=worker.id, cap=8
+    )
+    assert claimed is not None
+    await fleet.mark_running(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=worker.id,
+        expected_version=claimed.version,
+        binding_id=f"worker-{worker.id}",
+    )
+    other_parent, other_run = await next_run(sm, parent, run)
+    other_worker = await add(sm, other_parent)
+    await usage(sm, other_parent, other_run, other_worker, outputs=10, infrastructure=Decimal(0))
+    async with sm.begin() as db:
+        before = await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)
+        graph = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+    async with sm.begin() as db:
+        await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        with localcontext() as arithmetic:
+            arithmetic.prec = 2
+            report = await read_fleet_accounting_revisions(
+                db, tenant_id=run.tenant_id, run_id=run.id
+            )
+    assert report.run == graph[0]
+    assert len(report.workers) == 1
+    member = report.workers[0]
+    assert member.worker_id == worker.id and member.worker_version == graph[1][0].version
+    assert member.issue is None and member.reserved_usd == Decimal(1)
+    assert member.rows is not None
+    assert tuple(row.observation for row in member.rows.revisions) == tuple(values)
+    assert all(row.settled for row in member.rows.outbox)
+    assert len(member.rows.ledger) == 3
+    with localcontext() as arithmetic:
+        arithmetic.prec = 80
+        debit = -sum((row.delta_usd for row in member.rows.ledger), Decimal(0))
+    assert debit == Decimal(".000450")
+    assert {row.id for row in member.rows.ledger} <= {row.id for row in before}
+    assert all(str(other_worker.id) not in row.idempotency_key for row in member.rows.ledger)
+    async with sm.begin() as db:
+        after = await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)
+        assert before == after
+        assert graph == await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+    if member.issue is not None or debit != Decimal(".000450") or before != after:
+        raise RuntimeError("run accounting lost original exact money or mutated its source")
+
+
+@pytest.mark.parametrize("fault", ["tenant", "run"])
+async def test_run_accounting_refuses_unknown_scope_before_binding_reads(sm, monkeypatch, fault):
+    parent, run = await setup(sm)
+    await add(sm, parent)
+
+    async def forbidden(*args, **kwargs):
+        raise RuntimeError("unknown run reached an accounting binding")
+
+    monkeypatch.setattr(mux_state, "get_binding", forbidden)
+    async with sm.begin() as db:
+        with pytest.raises(FleetConflict):
+            await read_fleet_accounting_revisions(
+                db,
+                tenant_id=uuid4() if fault == "tenant" else run.tenant_id,
+                run_id=uuid4() if fault == "run" else run.id,
+            )
+
+
+async def test_run_accounting_preserves_unknown_usage_and_unaccepted_binding(sm):
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    await reserve(sm, parent, worker)
+    async with sm.begin() as db:
+        report = await read_fleet_accounting_revisions(db, tenant_id=run.tenant_id, run_id=run.id)
+    member = report.workers[0]
+    assert member.rows is None and member.issue == "binding_not_accepted"
+    assert member.reserved_usd == Decimal(1)
+    value = await usage(sm, parent, run, worker, inputs=100, outputs=None)
+    async with sm.begin() as db:
+        report = await read_fleet_accounting_revisions(db, tenant_id=run.tenant_id, run_id=run.id)
+    member = report.workers[0]
+    assert member.issue == "binding_not_accepted" and member.rows is not None
+    assert member.rows.revisions[0].observation == value
+    assert member.rows.revisions[0].observation.output_tokens is None
+    assert member.rows.ledger == () and not member.rows.outbox[0].settled
+    assert member.reserved_usd == Decimal(1)
+
+
+async def test_run_accounting_refuses_a_swapped_accepted_binding(sm):
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    await usage(sm, parent, run, worker)
+    claimed = await fleet.claim_worker(
+        sm, tenant_id=run.tenant_id, run_id=run.id, worker_id=worker.id, cap=8
+    )
+    assert claimed is not None
+    await fleet.mark_running(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=worker.id,
+        expected_version=claimed.version,
+        binding_id="foreign-binding",
+    )
+    async with sm.begin() as db:
+        with pytest.raises(ValueError, match="differs from its worker"):
+            await read_fleet_accounting_revisions(db, tenant_id=run.tenant_id, run_id=run.id)
+
+
+@pytest.mark.parametrize("reader", ["fleet", "binding", "delegated"])
+async def test_run_accounting_does_not_flush_caller_changes(sm, reader):
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    value = await usage(sm, parent, run, worker, outputs=10, infrastructure=Decimal(0))
+    async with sm() as db, db.begin():
+        await db.execute(text("SET TRANSACTION READ ONLY"))
+        rows = (
+            (await read_fleet_accounting_revisions(db, tenant_id=run.tenant_id, run_id=run.id))
+            .workers[0]
+            .rows
+        )
+        if rows is None or rows.binding is None:
+            raise RuntimeError("test requires an original private worker binding")
+        pending = TenantLedger(
+            tenant_id=run.tenant_id,
+            delta_usd=Decimal(1),
+            reason="trial_credit",
+            idempotency_key="must-not-flush",
+        )
+        db.add(pending)
+        if reader == "fleet":
+            await read_fleet_accounting_revisions(db, tenant_id=run.tenant_id, run_id=run.id)
+        elif reader == "binding":
+            await read_accounting_revisions(db, tenant_id=run.tenant_id, binding=rows.binding)
+        else:
+            await read_delegated_usage(
+                db,
+                scope=parent.fleet.scope,
+                bindings=(HostUsageBinding(rows.binding, value.session),),
+                prices=tariffs(parent),
+            )
+        if pending not in db.new or not db.autoflush:
+            raise RuntimeError("read flushed or reconfigured caller session")
+        await db.rollback()
+
+
+@pytest.mark.parametrize("reader", ["fleet", "binding", "delegated"])
+@pytest.mark.parametrize("kind", ["exposure", "ledger"])
+@pytest.mark.parametrize("deleted", [False, True])
+@pytest.mark.parametrize("autoflush", [False, True])
+@pytest.mark.parametrize("readonly", [False, True])
+async def test_run_accounting_scopes_unflushed_persistent_state(
+    sm, reader, kind, deleted, autoflush, readonly
+):
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    await reserve(sm, parent, worker)
+    value = await usage(sm, parent, run, worker, outputs=10, infrastructure=Decimal(0))
+    async with sm() as db, db.begin():
+        await db.execute(
+            text(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                + (", READ ONLY" if readonly else "")
+            )
+        )
+        original = await read_fleet_accounting_revisions(db, tenant_id=run.tenant_id, run_id=run.id)
+        rows = original.workers[0].rows
+        if (
+            original.run.reserved_usd != Decimal(1)
+            or original.workers[0].reserved_usd != Decimal(1)
+            or rows is None
+            or rows.binding is None
+            or tuple(row.delta_usd for row in rows.ledger) != (Decimal("-.000300"),)
+        ):
+            raise RuntimeError("test requires genuine funded exposure and an original debit")
+        if kind == "exposure":
+            affected = [await db.get(FleetRun, run.id), await db.get(FleetWorker, worker.id)]
+        else:
+            affected = [await db.get(TenantLedger, rows.ledger[0].id)]
+        with db.no_autoflush:
+            for row in affected:
+                if row is None:
+                    raise RuntimeError("persisted financial source is unavailable")
+                if deleted:
+                    await db.delete(row)
+                elif kind == "exposure":
+                    row.reserved_usd = Decimal(0)
+                else:
+                    row.delta_usd = Decimal(0)
+        db.autoflush = autoflush
+
+        def forbid_flush(*args):
+            raise RuntimeError("persisted read triggered an ORM flush")
+
+        event.listen(db.sync_session, "before_flush", forbid_flush)
+
+        async def collect():
+            if reader == "fleet":
+                return await read_fleet_accounting_revisions(
+                    db, tenant_id=run.tenant_id, run_id=run.id
+                )
+            elif reader == "binding":
+                return await read_accounting_revisions(
+                    db, tenant_id=run.tenant_id, binding=rows.binding
+                )
+            else:
+                return await read_delegated_usage(
+                    db,
+                    scope=parent.fleet.scope,
+                    bindings=(HostUsageBinding(rows.binding, value.session),),
+                    prices=tariffs(parent),
+                )
+
+        if kind == "exposure" and reader != "fleet":
+            await collect()  # This reader does not read fleet exposure tables.
+        else:
+            with pytest.raises(UnflushedReadState, match="unflushed (update|delete) on"):
+                await collect()
+        if not all(row in (db.deleted if deleted else db.dirty) for row in affected):
+            raise RuntimeError("financial read changed the caller's persistent state")
+        if db.autoflush is not autoflush:
+            raise RuntimeError("persisted read changed caller autoflush")
+        await db.rollback()
+    async with sm.begin() as db:
+        if original != await read_fleet_accounting_revisions(
+            db, tenant_id=run.tenant_id, run_id=run.id
+        ):
+            raise RuntimeError("financial read changed the original persisted facts")
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize(
+    ("reader", "kind"),
+    [("fleet", "exposure"), ("fleet", "ledger"), ("binding", "ledger"), ("delegated", "ledger")],
+)
+async def test_run_accounting_reads_core_updates_without_overwriting_clean_cache(
+    sm, external, reader, kind
+):
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    await reserve(sm, parent, worker)
+    value = await usage(sm, parent, run, worker, outputs=10, infrastructure=Decimal(0))
+    async with sm() as db:
+        async with db.begin():
+            original = await read_fleet_accounting_revisions(
+                db, tenant_id=run.tenant_id, run_id=run.id
+            )
+            rows = original.workers[0].rows
+            if rows is None or rows.binding is None or len(rows.ledger) != 1:
+                raise RuntimeError("test requires a genuine original debit")
+            if kind == "exposure":
+                cached = [await db.get(FleetRun, run.id), await db.get(FleetWorker, worker.id)]
+                changes = [("fleet_run", run.id), ("fleet_worker", worker.id)]
+                field, expected = "reserved_usd", Decimal(2)
+            else:
+                cached = [await db.get(TenantLedger, rows.ledger[0].id)]
+                changes = [("tenant_ledger", rows.ledger[0].id)]
+                field, expected = "delta_usd", Decimal("-.000700")
+            before = tuple(getattr(row, field) for row in cached)
+
+            async def update_source(writer):
+                for table, identity in changes:
+                    await writer.execute(
+                        text(f"UPDATE {table} SET {field}=:amount WHERE id=:id"),
+                        {"amount": expected, "id": identity},
+                    )
+
+            async def collect():
+                def forbid_flush(*args):
+                    raise RuntimeError("persisted read triggered an ORM flush")
+
+                event.listen(db.sync_session, "before_flush", forbid_flush)
+                if reader == "fleet":
+                    report = await read_fleet_accounting_revisions(
+                        db, tenant_id=run.tenant_id, run_id=run.id
+                    )
+                    if kind == "exposure":
+                        observed = (report.run.reserved_usd, report.workers[0].reserved_usd)
+                    else:
+                        if report.workers[0].rows is None:
+                            raise RuntimeError("financial read lost the original binding")
+                        observed = tuple(row.delta_usd for row in report.workers[0].rows.ledger)
+                elif reader == "binding":
+                    report = await read_accounting_revisions(
+                        db, tenant_id=run.tenant_id, binding=rows.binding
+                    )
+                    observed = tuple(row.delta_usd for row in report.ledger)
+                else:
+                    report = await read_delegated_usage(
+                        db,
+                        scope=parent.fleet.scope,
+                        bindings=(HostUsageBinding(rows.binding, value.session),),
+                        prices=tariffs(parent),
+                    )
+                    observed = (-report.ledger_debit_usd,)
+                if observed != (expected,) * len(cached):
+                    raise RuntimeError("financial read returned stale cached money")
+                if tuple(getattr(row, field) for row in cached) != before or db.dirty:
+                    raise RuntimeError("financial read overwrote caller cache")
+
+            if not external:
+                await update_source(db)
+                await collect()
+                await db.rollback()
+                return
+        async with sm.begin() as writer:
+            await update_source(writer)
+        async with db.begin():
+            await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            await collect()
+    async with sm.begin() as verifier:
+        for table, identity in changes:
+            actual = await verifier.scalar(
+                text(f"SELECT {field} FROM {table} WHERE id=:id"), {"id": identity}
+            )
+            if actual != expected:
+                raise RuntimeError("financial read changed the persisted Core update")
+
+
+async def test_run_accounting_missing_accepted_slot_remains_unknown_with_hold(sm):
+    parent, run = await setup(sm)
+    worker, binding = await bound_worker(sm, parent, run)
+    async with sm.begin() as db:
+        await db.execute(
+            delete(ProviderBindingSlot).where(ProviderBindingSlot.binding_id == binding.id)
+        )
+    async with sm.begin() as db:
+        await db.execute(text("SET TRANSACTION READ ONLY"))
+        report = await read_fleet_accounting_revisions(db, tenant_id=run.tenant_id, run_id=run.id)
+    member = report.workers[0]
+    assert member.worker_id == worker.id and member.binding_id == binding.id
+    assert member.rows is None and member.issue == "binding_unavailable"
+    assert member.reserved_usd == report.run.reserved_usd == Decimal(1)
+
+
+async def test_run_accounting_refuses_binding_change_during_read(sm, monkeypatch):
+    parent, run = await setup(sm)
+    await bound_worker(sm, parent, run)
+    original = mux_state.get_binding
+    calls = 0
+
+    async def changing(session, slot, **kwargs):
+        nonlocal calls
+        binding = await original(session, slot, **kwargs)
+        calls += 1
+        if calls == 2 and binding is not None:
+            return binding.model_copy(update={"generation": binding.generation + 1})
+        return binding
+
+    monkeypatch.setattr(mux_state, "get_binding", changing)
+    async with sm.begin() as db:
+        with pytest.raises(ValueError, match="changed during capture"):
+            await read_fleet_accounting_revisions(db, tenant_id=run.tenant_id, run_id=run.id)
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
