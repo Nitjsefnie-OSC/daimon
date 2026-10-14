@@ -7324,3 +7324,42 @@ async def test_an_app_mention_without_the_bot_token_leaves_the_typed_name_its_tu
     await app._handle_app_mention(message, team_id="T_PLAIN_STRAY", by_name=True)  # pyright: ignore[reportPrivateUsage]
 
     assert turns == ["message"], "the stray app_mention must not take the message's dedup slot"
+
+
+async def test_typed_bot_name_with_the_switch_off_reads_nothing_else(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Off, the switch is the only read: no protection lookup for an ordinary message."""
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_CHEAP", enabled=False
+    )
+    protection = AsyncMock()
+    with patch("daimon.adapters.slack.app.protection_state", protection):
+        await app._handle_app_mention(  # pyright: ignore[reportPrivateUsage]
+            _named_message("1000000504.000001"), team_id="T_PLAIN_CHEAP", by_name=True
+        )
+    protection.assert_not_awaited()
+    assert turns == [], "nothing must run with the switch off"
+
+
+async def test_a_failed_switch_read_drops_the_typed_bot_name_quietly(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A failed read is logged and treated as off, never as the boundary's error post."""
+    from sqlalchemy.exc import OperationalError
+
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_FAIL", enabled=True
+    )
+    failing = AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone")))
+    with (
+        patch("daimon.adapters.slack.app.get_plain_text_mentions", failing),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await app._handle_app_mention(  # pyright: ignore[reportPrivateUsage]
+            _named_message("1000000505.000001"), team_id="T_PLAIN_FAIL", by_name=True
+        )
+    assert turns == [], "an unreadable switch must run nothing"
+    assert "plain_text_mention.lookup_failed" in [entry["event"] for entry in logs], (
+        "the failure must be logged"
+    )

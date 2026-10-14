@@ -1412,6 +1412,15 @@ class SlackApp:
             log.debug("slack.event_dropped.duplicate", team_id=team_id, event_ts=event_ts)
         return is_new
 
+    async def _plain_text_mentions_on(self, tenant_id: uuid.UUID) -> bool:
+        """Read the tenant's switch for a message that already names the bot as text."""
+        try:
+            return await get_plain_text_mentions(self.runtime.sessionmaker, tenant_id=tenant_id)
+        except SQLAlchemyError as exc:
+            # A failed read leaves the message unaddressed, as with the switch off.
+            log.warning("plain_text_mention.lookup_failed", error_type=type(exc).__name__)
+            return False
+
     async def _handle_app_mention(
         self,
         event: dict[str, Any],
@@ -1431,6 +1440,7 @@ class SlackApp:
         The cap is fetched before these gates so no await splits the queue
         check from its thread claim. Gate order (strict):
         1. Draining check (fast path — no I/O).
+        1a. BY NAME: the plain-text switch; off or unreadable drops silently.
         1b. MAY POST: the access-policy protection state; anything but
             unprotected returns silently, before any other I/O can fail.
         2. TOKEN RESOLVE: get_slack_bot_token; drop on None.
@@ -1454,12 +1464,17 @@ class SlackApp:
             # replacement instance — this is inherent to ack-first + drain.
             return
 
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        # Most named messages meet a switch that is off: one read, then nothing.
+        # It posts nothing, so the may-post rule below still holds.
+        if by_name and not await self._plain_text_mentions_on(tenant_id):
+            return
+
         await self._wait_for_orphan_recovery()
 
         channel: str = event.get("channel") or ""
         event_ts: str = event.get("event_ts") or event.get("ts") or ""
         client: AsyncWebClient | None = None
-        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
         # (0) MAY POST — decided FIRST, before dedup, the token read or any
         # notice, and never raises. A protected channel, or one whose
@@ -1481,11 +1496,6 @@ class SlackApp:
             return
 
         try:
-            if by_name and not await get_plain_text_mentions(
-                self.runtime.sessionmaker, tenant_id=tenant_id
-            ):
-                return
-
             # (2) TOKEN RESOLVE — token-existence = tenant liveness.
             async with self.runtime.sessionmaker() as s:
                 row = await get_slack_bot_token(s, team_id=team_id)
