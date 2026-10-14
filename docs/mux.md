@@ -3012,3 +3012,22 @@ readback fixtures in `packages/core/tests/turn/native_counterpart_support.py`.
 selects Gemini and reuses the same readback assertions. Provider implementations
 are imported when their factory is selected, so OpenAI coverage also runs without
 the Gemini host installed. Existing cross-provider runtime tests retain both selections.
+
+The backend service may receive a trusted complete source-capture callback. Its
+preview derives losses through the existing worker source-preservation rule and
+includes the exact losses, source pin and target digest in the confirmation
+digest. A switch must accept exactly that tuple. Credentials, instructions,
+unknown obligations and publishing approval cannot be discarded. Missing source
+or publishing context refuses. Clear removes consent; revert rechecks the original
+consent against a fresh capture, and fleet-grant changes carry the current consent.
+
+Turn preparation reads the original accepted revision through the effective
+configuration association, never through the latest preference. It freshly reads
+and projects the source, derives the target again, and supplies that canonical
+target to the existing lazy runtime factory before construction. Native readback
+still must prove the counterpart matches, followed by another fresh source read.
+Source drift requires confirmation again. Provider and adapter owners supply their
+runtime and trusted capture implementations separately; no-consent execution
+retains its existing refusal and all feature defaults remain unchanged.
+
+Cross-backend source consent refuses unclassified native agent and environment fields, including unknown skill, MCP, tool and environment-config policy fields. Original native definitions are validated before requester filtering, including required discriminator presence, supported discriminator values and environment visibility scope. Hidden MCP attachments cannot erase unknown or invalid control fields. These remain nondroppable source-definition obligations even when all supported attachment losses are explicitly confirmed. Schema-supported omission and null values retain their existing meanings.

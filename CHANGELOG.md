@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep OpenAI native counterpart tests independent of Gemini host imports while retaining both providers’ readback coverage through shared fixtures.
 
 - Isolate the fleet runtime lifecycle test from installed provider tariff discovery.
+- Refuse unclassified native agent fields before cross-backend drop consent or counterpart preparation.
+- Refuse unclassified native agent and environment fields before cross-backend drop consent or counterpart preparation.
+- Refuse unclassified native agent, tool and environment fields before cross-backend drop consent or counterpart preparation, including caller-hidden MCP toolsets.
+- Refuse unclassified native agent, tool and environment fields or unsupported discriminator/context values before cross-backend drop consent or counterpart preparation, including caller-hidden MCP toolsets.
 
 - Separate OpenAI MCP skill-upload runtime tests from the shared skill-upload suite.
 - Keep the complete Managed Agents call inventory in compact JSON below the shared file-size limit, with the unchanged zero-call ratchet outside drivers.
@@ -28,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve Discord orchestration calls without an explicit origin stack; admission still decides denial before any origin is entered.
 
 - Gate failed controlled-session cleanup on verified native ownership and archive at most once in app mode, while preserving ordinary app cleanup and independent token/vault revocation.
+- Require exact preview confirmation for supported source losses and revalidate the original scoped source and canonical target before cross-backend preparation.
 
 - Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
 - Read exact root billing references through immutable outcomes without summing reused-session history.
