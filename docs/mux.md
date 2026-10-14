@@ -3006,3 +3006,9 @@ provider change. Admission and the queue gate still complete before entering
 the opt-in fleet origin or binding its session.
 
 Offline host conformance keeps shared database, auth and outcome controls independent of optional provider codecs. Provider wake and prepared-pump controls live in separate OpenAI and Gemini test modules and retain the same shared case assertions.
+The native counterpart tests share their owned database, SDK transport and
+readback fixtures in `packages/core/tests/turn/native_counterpart_support.py`.
+`test_native_counterpart.py` selects only OpenAI; `test_native_counterpart_gemini.py`
+selects Gemini and reuses the same readback assertions. Provider implementations
+are imported when their factory is selected, so OpenAI coverage also runs without
+the Gemini host installed. Existing cross-provider runtime tests retain both selections.

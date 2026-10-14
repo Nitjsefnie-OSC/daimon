@@ -22,22 +22,22 @@ from mux.drivers.openai.transport import SDKTransport
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     application as application,
 )
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     clean_sdk_environment as clean_sdk_environment,
 )
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     db_preflight as db_preflight,
 )
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     owned as owned,
 )
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     owned_database_preflight as owned_database_preflight,
 )
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     provider as provider,
 )
 from .test_openai_host import Wire as OpenAIWire

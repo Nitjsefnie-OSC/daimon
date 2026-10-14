@@ -39,16 +39,16 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..test_fleet_permissions import POLICY, parent
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     Owned,
 )
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     db_preflight as db_preflight,
 )
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     owned as owned,
 )
-from .test_native_counterpart import (
+from .native_counterpart_support import (
     owned_database_preflight as owned_database_preflight,
 )
 from .test_openai_deployment import application as application
