@@ -1,0 +1,556 @@
+"""The operator confirms the real source preview, never a guessed loss list."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from io import StringIO
+
+import httpx
+import pytest
+import typer
+from daimon.adapters.cli.commands.agents import agents_backend_change
+from daimon.core.authz import Subject
+from daimon.core.channel_backend import BackendActor, load_backend_agent, make_backend_service
+from daimon.core.config import Settings
+from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import security_audit
+from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
+from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.factories import make_tenant
+from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.pytest_plugin import db_preflight as db_preflight
+from rich.console import Console
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from ..harness import build_cli_runtime
+
+pytestmark = pytest.mark.no_cli_local_seed
+
+
+@pytest.fixture
+async def operator(db_preflight, db_nullpool_engine, db_clean, request):
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    try:
+        require_owned_sessionmaker(sessions)
+    except ValueError:
+        pytest.skip("This proof requires an owned database or isolated CI")
+    async with sessions.begin() as db:
+        platform = getattr(request, "param", "cli")
+        tenant = await make_tenant(
+            db, platform=platform, workspace_id="2001" if platform == "discord" else "local"
+        )
+        principal = await get_or_create_cli_principal(db, tenant_id=tenant.id, os_user="operator")
+    settings = Settings.model_validate(
+        {
+            "database": {"url": str(db_nullpool_engine.url)},
+            "anthropic": {"api_key": "offline-owned"},
+            "cli": {"local_user": "operator"},
+            "turn": {"path": "mux", "channel_backends": True, "agent_backends": True},
+        }
+    )
+    agent = ma_agent(tenant_id=tenant.id, name="Research")
+    agent.metadata["daimon_name"] = "Research"
+    environment = ma_environment(tenant_id=tenant.id)
+    environment.metadata["daimon_name"] = "Workspace"
+    router, requests = MARouter(), []
+    router.add(
+        "GET",
+        rf"/v1/agents/{agent.id}",
+        lambda *_: httpx.Response(200, json=agent.model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        rf"/v1/environments/{environment.id}",
+        lambda *_: httpx.Response(200, json=environment.model_dump(mode="json")),
+    )
+    router.add("GET", r"/v1/agents", lambda *_: list_response([agent.model_dump(mode="json")]))
+    router.add(
+        "GET", r"/v1/environments", lambda *_: list_response([environment.model_dump(mode="json")])
+    )
+
+    def transport(request):
+        requests.append(request)
+        return router.dispatch(request)
+
+    async with build_fake_anthropic(transport) as client:
+        rt = replace(
+            build_cli_runtime(sessions, anthropic=client, settings=settings),
+            deployment_default=DeploymentDefault(
+                agent_name="Research", environment_name="Workspace"
+            ),
+        )
+        service = make_backend_service(sessions, settings.turn)
+        actor = BackendActor(tenant.id, principal.account_id, Subject(is_admin=True))
+        policy = await service.tenant_policy(tenant.id)
+        await service.set_tenant_allowlist(
+            tenant.id, ("anthropic", "openai", "gemini"), policy.revision, actor
+        )
+        yield rt, tenant, agent, environment, requests
+
+
+async def run(operator, **options):
+    rt, *_ = operator
+    output = StringIO()
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=output, width=240),
+        name="Research",
+        backend="openai",
+        yes=True,
+        as_json=False,
+        **options,
+    )
+    return output.getvalue()
+
+
+async def revisions(operator):
+    rt, tenant, *_ = operator
+    source = await load_backend_agent(
+        rt.anthropic, rt.sessionmaker, tenant_id=tenant.id, agent_name="Research"
+    )
+    return await make_backend_service(rt.sessionmaker, rt.settings.turn).current(source)
+
+
+@pytest.mark.parametrize(
+    "accepted",
+    [
+        None,
+        "",
+        "memory",
+        "sandbox",
+        "memory,sandbox,files",
+        "memory,memory,sandbox",
+        "credentials",
+        "*",
+        "Memory,sandbox",
+    ],
+)
+async def test_yes_never_substitutes_for_exact_drop_acceptance(operator, accepted):
+    with pytest.raises(typer.BadParameter, match="memory,sandbox"):
+        await run(operator, accept_drops=accepted)
+    assert await revisions(operator) is None
+    assert all(r.method == "GET" for r in operator[-1])
+
+
+@pytest.mark.parametrize("backend", ["openai", "gemini"])
+async def test_actual_source_gets_and_exact_consent_reach_cas_readback(operator, backend):
+    rt, tenant, agent, _, requests = operator
+    output = StringIO()
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=output, width=240),
+        name="Research",
+        backend=backend,
+        yes=True,
+        as_json=True,
+        accept_drops=" sandbox , memory ",
+    )
+    result = json.loads(output.getvalue())
+    assert result["preview"]["drop_consent"]["declared_drops"] == ["memory", "sandbox"]
+    revision = await revisions(operator)
+    assert revision.backend == backend and revision.declared_drops == ("memory", "sandbox")
+    async with rt.sessionmaker() as db:
+        rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_backend")
+    assert rows[-1].reason == "completed; declared_drops=memory,sandbox"
+    assert sum(r.url.path == f"/v1/agents/{agent.id}" for r in requests) >= 4
+    assert all(r.method == "GET" for r in requests)
+
+
+@pytest.mark.parametrize("accepted", [None, "memory,sandbox", "*", "credentials"])
+async def test_dry_run_returns_before_confirmation_and_writer_even_with_yes(operator, accepted):
+    text = await run(operator, accept_drops=accepted, dry_run=True)
+    assert "Won't be available on openai: memory, sandbox" in text
+    assert await revisions(operator) is None
+
+
+async def test_json_dry_run_needs_no_yes_or_drop_consent(operator):
+    rt, *_ = operator
+    output = StringIO()
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=output),
+        name="Research",
+        backend="openai",
+        yes=False,
+        as_json=True,
+        dry_run=True,
+    )
+    assert json.loads(output.getvalue())["drop_consent"]["declared_drops"] == ["memory", "sandbox"]
+    assert await revisions(operator) is None
+
+
+async def test_same_category_source_drift_refuses_before_any_revision(operator, monkeypatch):
+    from daimon.adapters.cli.commands import agents
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    def changed(*args, **kwargs):
+        operator[2].system = "Changed instructions, with the same capability categories"
+
+    monkeypatch.setattr(agents, "confirm_or_abort", changed)
+    with pytest.raises(AgentBackendRefused, match="stale preview"):
+        await run(operator, accept_drops="memory,sandbox")
+    assert await revisions(operator) is None
+    assert all(r.method == "GET" for r in operator[-1])
+
+
+async def test_cancelled_confirmation_does_not_change_the_setting(operator, monkeypatch):
+    from daimon.adapters.cli.commands import agents
+
+    def cancelled(*args, **kwargs):
+        raise typer.Abort()
+
+    monkeypatch.setattr(agents, "confirm_or_abort", cancelled)
+    with pytest.raises(typer.Abort):
+        await run(operator, accept_drops="memory,sandbox")
+    assert await revisions(operator) is None
+
+
+async def test_revert_restores_the_real_previous_setting_through_the_owner(operator):
+    rt, *_ = operator
+    await run(operator, accept_drops="memory,sandbox")
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend="gemini",
+        yes=True,
+        as_json=False,
+        accept_drops="memory,sandbox",
+    )
+    before = await revisions(operator)
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        revert=True,
+    )
+    restored = await revisions(operator)
+    assert restored.backend == "openai" and restored.local == before.local + 1
+    assert restored.previous_local == before.local
+    assert restored.declared_drops == ("memory", "sandbox")
+
+
+async def test_revert_drift_and_missing_history_are_owner_refusals(operator):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    rt, _, native, *_ = operator
+    with pytest.raises(AgentBackendRefused, match="no previous revision"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            backend=None,
+            yes=True,
+            as_json=False,
+            revert=True,
+        )
+    await run(operator, accept_drops="memory,sandbox")
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend="gemini",
+        yes=True,
+        as_json=False,
+        accept_drops="memory,sandbox",
+    )
+    before = await revisions(operator)
+    native.system = "The source changed since the retained consent"
+    with pytest.raises(AgentBackendRefused, match="re confirm"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            backend=None,
+            yes=True,
+            as_json=False,
+            revert=True,
+        )
+    assert await revisions(operator) == before
+
+
+async def capture(operator, **changes):
+    from daimon.core.authz import Place
+    from daimon.core.scope import ScopeContext
+    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.turn.deps import build_turn_deps
+
+    rt, tenant, *_ = operator
+    async with rt.sessionmaker() as db:
+        principal = await get_or_create_cli_principal(db, tenant_id=tenant.id, os_user="operator")
+    source = await load_backend_agent(
+        rt.anthropic, rt.sessionmaker, tenant_id=tenant.id, agent_name="Research"
+    )
+    deps = build_turn_deps(
+        rt.settings,
+        rt.anthropic,
+        rt.sessionmaker,
+        deployment_default=rt.deployment_default,
+        resolver_cache=rt.resolver_cache,
+        billing_config=None,
+    )
+    args = dict(
+        context=ScopeContext(tenant_id=tenant.id, account_id=principal.account_id, platform="cli"),
+        subject=Subject(is_admin=True),
+        place=Place(),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
+        external_user_id=principal.os_user,
+    )
+    args.update(changes)
+    return await capture_backend_source(deps, source, **args)
+
+
+@pytest.mark.parametrize("private", ["slack_turn_context_id", "private_dm_id"])
+async def test_actual_private_resource_intent_never_disappears_into_a_droppable_category(
+    operator, private
+):
+    import uuid
+
+    from daimon.core.turn.runtime_manifest import preview_source_drops
+    from mux.contracts.ids import ModelRef
+    from mux.errors import UnsupportedCapability
+
+    baseline = await capture(operator)
+    assert not any(r.kind == "native" for r in baseline.resource_requirements)
+    captured = await capture(
+        operator, **{private: uuid.uuid4() if private == "slack_turn_context_id" else "owned-dm"}
+    )
+    assert any(
+        r.id == "caller-resources" and r.kind == "native" for r in captured.resource_requirements
+    )
+    with pytest.raises(UnsupportedCapability):
+        preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
+
+
+@pytest.mark.parametrize("missing", ["target", "environment"])
+async def test_unknown_target_or_environment_refuses_without_default_provisioning(
+    operator, missing
+):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    rt, *_ = operator
+    settings = rt.deployment_default.model_copy(
+        update={"agent_name" if missing == "target" else "environment_name": "Unknown"}
+    )
+    changed = (replace(rt, deployment_default=settings), *operator[1:])
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await run(changed, accept_drops="memory,sandbox")
+    assert await revisions(operator) is None
+    assert all(r.method == "GET" for r in operator[-1])
+
+
+async def test_unresolved_host_place_and_foreign_account_are_typed_refusals(operator):
+    import uuid
+
+    from daimon.core.authz import Place
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.scope import ScopeContext
+
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await capture(operator, place=Place(category_unresolved=True))
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await capture(
+            operator,
+            context=ScopeContext(tenant_id=operator[1].id, account_id=uuid.uuid4(), platform="cli"),
+        )
+    assert await revisions(operator) is None
+
+
+async def test_flag_off_refuses_before_source_or_dependency_construction(operator):
+    from daimon.core.config import TurnSettings
+    from daimon.core.errors import StoreError
+
+    rt, *rest = operator
+    rt = replace(rt, settings=rt.settings.model_copy(update={"turn": TurnSettings()}))
+    operator[-1].clear()
+    with pytest.raises(StoreError, match="disabled"):
+        await run((rt, *rest), accept_drops="memory,sandbox")
+    assert not operator[-1]
+
+
+async def test_real_default_settings_have_no_inactive_app_obligation_but_active_app_stays_hard(
+    operator,
+):
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.github_access import activate_agent, get_agent_mode
+    from daimon.core.turn.runtime_manifest import preview_source_drops
+    from mux.contracts.ids import ModelRef
+    from mux.errors import UnsupportedCapability
+
+    rt, tenant, native, *_ = operator
+    assert rt.settings.github_app is not None
+    assert rt.settings.github_app.app_id is None and rt.settings.github_app.private_key is None
+    before = await capture(operator)
+    assert not any(r.kind == "native" for r in before.resource_requirements)
+    identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=native.id)
+    async with rt.sessionmaker.begin() as db:
+        await activate_agent(db, tenant_id=tenant.id, agent_id=identity, changed_by_account_id=None)
+        assert await get_agent_mode(db, tenant_id=tenant.id, agent_id=identity) == "app"
+    active = await capture(operator)
+    assert any(
+        resource.id == "caller-resources" and resource.kind == "native"
+        for resource in active.resource_requirements
+    )
+    with pytest.raises(UnsupportedCapability):
+        preview_source_drops(active, ModelRef(provider="openai", id="gpt-6-luna"))
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await run(operator, accept_drops="memory,sandbox")
+    assert await revisions(operator) is None
+    assert all(r.method == "GET" for r in operator[-1])
+
+
+async def test_real_encrypted_key_remains_nondroppable_without_any_secret_read(
+    operator, monkeypatch
+):
+    from cryptography.fernet import Fernet
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_files
+
+    rt, tenant, native, *_ = operator
+    async with rt.sessionmaker.begin() as db:
+        db.info["crypto_keys"] = (Fernet.generate_key().decode(),)
+        await agent_files.put_agent_file(
+            db,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=native.id),
+            key="OWNED_API_KEY",
+            content="offline-owned-credential",
+            set_by_account_id=None,
+        )
+
+    async def forbidden_read(*args, **kwargs):
+        pytest.fail("A switch preview must not resolve a secret")
+
+    monkeypatch.setattr(agent_files, "get_agent_file", forbidden_read)
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await run(operator, accept_drops="memory,sandbox")
+    assert await revisions(operator) is None
+
+
+@pytest.mark.parametrize("fault", ["timeout", "not_found", "foreign_environment", "archived"])
+async def test_actual_sdk_unreadable_or_foreign_source_is_a_typed_refusal(operator, fault):
+    import uuid
+
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    rt, _, agent, environment, requests = operator
+
+    def broken(request):
+        if request.url.path == f"/v1/agents/{agent.id}" and fault == "timeout":
+            raise httpx.ReadTimeout("offline timeout", request=request)
+        if request.url.path == f"/v1/agents/{agent.id}" and fault == "not_found":
+            return httpx.Response(
+                404,
+                json={"type": "error", "error": {"type": "not_found_error", "message": "missing"}},
+            )
+        if request.url.path == f"/v1/environments/{environment.id}":
+            data = environment.model_dump(mode="json")
+            if fault == "foreign_environment":
+                data["metadata"]["daimon_tenant"] = str(uuid.uuid4())
+            elif fault == "archived":
+                data["archived_at"] = "2026-10-14T00:00:00Z"
+            return httpx.Response(200, json=data)
+        if request.url.path == "/v1/agents":
+            return list_response([agent.model_dump(mode="json")])
+        if request.url.path == "/v1/environments":
+            return list_response([environment.model_dump(mode="json")])
+        if request.url.path == f"/v1/agents/{agent.id}":
+            return httpx.Response(200, json=agent.model_dump(mode="json"))
+        pytest.fail("Unexpected request")
+
+    async with build_fake_anthropic(broken) as client:
+        changed = (replace(rt, anthropic=client), *operator[1:])
+        with pytest.raises(AgentBackendRefused, match="source unavailable"):
+            await run(changed, accept_drops="memory,sandbox")
+    assert await revisions(operator) is None
+
+
+@pytest.mark.parametrize("operator", ["discord"], indirect=True)
+async def test_cli_guild_selection_uses_its_real_local_operator_principal(operator):
+    from daimon.adapters.cli.tenant import TenantSelector
+
+    rt, tenant, *_ = operator
+    # An explicit tenant selection exercises the same CLI-principal convention;
+    # it must not create or promote a Discord platform principal.
+    await run(operator, accept_drops="memory,sandbox", selector=TenantSelector(guild_id="2001"))
+    assert (await revisions(operator)).declared_drops == ("memory", "sandbox")
+
+
+async def test_default_denial_observation_keeps_the_real_external_user_id(operator):
+    from datetime import UTC, datetime
+
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores import access_policy
+    from daimon.core.stores.domain import Role
+    from daimon.core.turn.admission import admit
+    from daimon.core.turn.deps import build_turn_deps
+    from daimon.core.turn.errors import AdmissionDenied
+
+    rt, tenant, *_ = operator
+    async with rt.sessionmaker.begin() as db:
+        await access_policy.set_access_policy(
+            db, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("allowed-human",))
+        )
+    deps = build_turn_deps(
+        rt.settings,
+        rt.anthropic,
+        rt.sessionmaker,
+        deployment_default=rt.deployment_default,
+        resolver_cache=rt.resolver_cache,
+        billing_config=None,
+    )
+    deps = replace(deps, turn_path=None, channel_backends=False, agent_backends=False)
+    decisions = []
+    operator[-1].clear()
+    with pytest.raises(AdmissionDenied):
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="denied-human",
+            channel_id="900",
+            now=datetime.now(UTC),
+            role=Role.USER,
+            observer=decisions.append,
+        )
+    assert len(decisions) == 1 and decisions[0].external_user_id == "denied-human"
+    assert decisions[0].reason == "invoker_not_allowed"
+    assert not operator[-1]
+
+
+async def test_missing_actual_cli_observation_label_is_a_typed_refusal(operator):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await capture(operator, external_user_id=None)
+    assert await revisions(operator) is None
+
+
+def test_disabled_revert_command_refuses_before_runtime_construction(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    import click
+    from daimon.adapters.cli.commands import agents
+    from daimon.core.config import TurnSettings
+    from daimon.core.errors import StoreError
+
+    monkeypatch.setattr(agents, "load_settings", lambda: SimpleNamespace(turn=TurnSettings()))
+
+    def forbidden_runtime(*args, **kwargs):
+        pytest.fail("A disabled new command must not construct a runtime")
+
+    monkeypatch.setattr(agents, "build_runtime", forbidden_runtime)
+    monkeypatch.setattr(agents, "run_cli", lambda work, **kwargs: asyncio.run(work))
+    with pytest.raises(StoreError, match="disabled"):
+        agents.agents_backend_revert_command(typer.Context(click.Command("backend")), "Research")

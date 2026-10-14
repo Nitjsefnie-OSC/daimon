@@ -2984,3 +2984,25 @@ runtime and trusted capture implementations separately; no-consent execution
 retains its existing refusal and all feature defaults remain unchanged.
 
 Cross-backend source consent refuses unclassified native agent and environment fields, including unknown skill, MCP, tool and environment-config policy fields. Original native definitions are validated before requester filtering, including required discriminator presence, supported discriminator values and environment visibility scope. Hidden MCP attachments cannot erase unknown or invalid control fields. These remain nondroppable source-definition obligations even when all supported attachment losses are explicitly confirmed. Schema-supported omission and null values retain their existing meanings.
+
+### Preview and accept backend losses from the CLI
+
+With model backend selection enabled, `daimon agents backend set Research openai
+--dry-run` prints the server-derived preview without confirming or changing a
+setting. `--json --dry-run` needs no `--yes`. Applying a preview that declares
+losses requires `--accept-drops` with exactly its comma-separated categories;
+`--yes` only skips the interactive question. Unknown, duplicate, incomplete or
+additional categories refuse. Order and delimiter whitespace use the existing
+consent domain's normalization. Prices remain list-price previews.
+
+The preview reads the actual configured agent and environment and the current
+account, publishing, memory and resource policy. It never provisions defaults,
+resolves credential values or starts a provider session. Missing or foreign
+context, an unrelated configuration target, credentials, private resources and
+unknown source obligations remain refusals. The explicit feature-off path stays
+cold. A setting applies to new threads; existing threads retain their backend.
+
+`daimon agents backend revert Research` previews the actual preceding retained
+setting and applies the existing revision compare-and-set. Source drift requires
+confirmation again; revert does not restore historical fleet grants. `--dry-run`
+on revert is read-only. Clearing still uses the existing explicit clear operation.
