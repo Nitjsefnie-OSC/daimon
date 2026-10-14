@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Any, cast
 
@@ -468,3 +469,11 @@ def test_a_typed_multi_word_name_with_an_html_no_break_space_is_by_name() -> Non
     payload = reply | {"recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon Bot"}}
     inbound = _parse(payload)
     assert isinstance(inbound, TeamsInbound) and inbound.by_name, "the entity must read as a space"
+
+
+def test_many_unclosed_blockquote_tags_parse_in_linear_time() -> None:
+    """`[^>]*` in the tag pattern made 60 KB of unclosed "<blockquote" take seconds."""
+    text = "@daimon " + "<blockquote " * (100_000 // 12)
+    started = time.perf_counter()
+    _parse(_to_named_bot(make_channel_activity(mention_bot=False, text=text)))
+    assert time.perf_counter() - started < 1.0, "the typed-text scan must stay linear"

@@ -46,7 +46,8 @@ MAX_INBOUND_MESSAGE_BYTES = 16 * 1024
 GENERAL_CHANNEL = "General"
 # Where a quote sits in the text; its sender and preview ride in a `quotedReply` entity.
 _QUOTED = re.compile(r'<quoted\s+messageId="([^"]*)"\s*/>')
-_BLOCKQUOTE_TAG = re.compile(r"<(/?)blockquote\b([^>]*)>", re.IGNORECASE)
+# `[^<>]`, not `[^>]`: many unclosed "<blockquote" tags would otherwise scan quadratically.
+_BLOCKQUOTE_TAG = re.compile(r"<(/?)blockquote\b([^<>]*)>", re.IGNORECASE)
 _REPLY_ITEMTYPE = re.compile(r'itemtype\s*=\s*"[^"]*schema\.skype\.com/reply"', re.IGNORECASE)
 
 
@@ -222,6 +223,8 @@ def _typed_text(text: str) -> str:
     A blockquote reply carries the quoted message in `text`, so a quote of
     someone's "@Daimon" would otherwise read as this sender naming the bot.
     """
+    if "@" not in text and "&" not in text:
+        return text  # no "@", typed or as an entity: nothing to match
     kept: list[str] = []
     start = depth = 0
     for tag in _BLOCKQUOTE_TAG.finditer(text):
