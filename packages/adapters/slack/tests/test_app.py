@@ -6983,8 +6983,9 @@ async def test_handle_app_mention_auth_test_failure_drops_without_raising(
 ) -> None:
     """A failing auth.test on cold-cache resolution drops the event: nothing
     raises, no turn runs, and no error reply is posted, since whether the event
-    addressed the bot is unknown. Dedup has not claimed the event yet, so
-    Slack's retry still runs the turn."""
+    addressed the bot is unknown. The handler acks first, so Slack does not
+    retry; a second delivery of the same event still runs the turn, which shows
+    the failed attempt claimed no dedup slot."""
     team_id = "T_APP_AUTH_FAIL"
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
@@ -7047,7 +7048,7 @@ async def test_handle_app_mention_auth_test_failure_drops_without_raising(
         mock.post("https://slack.com/api/auth.test", payload={"ok": True, "user_id": "U_BOT"})
         await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
     assert orchestrate_calls == [{"event_ts": event["event_ts"]}], (
-        "the retry must run the turn: the failed attempt claimed no dedup slot"
+        "the same event must still run: the failed attempt claimed no dedup slot"
     )
 
 
