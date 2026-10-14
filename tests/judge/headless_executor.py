@@ -100,9 +100,7 @@ if __package__:
         step_gaps,
     )
     from .discord_catalog_surface import bind_discord_text
-    from .gemini_catalog_replay import execute_gemini_turns
     from .headless_output import HeadlessOutput, capture_headless_return
-    from .openai_catalog_replay import execute_openai_turns
     from .platform_catalog_surface import (
         CatalogLifecycle,
         bind_platform_text,
@@ -140,9 +138,7 @@ else:
         step_gaps,
     )
     from discord_catalog_surface import bind_discord_text
-    from gemini_catalog_replay import execute_gemini_turns
     from headless_output import HeadlessOutput, capture_headless_return
-    from openai_catalog_replay import execute_openai_turns
     from platform_catalog_surface import (
         CatalogLifecycle,
         bind_platform_text,
@@ -1155,6 +1151,11 @@ async def execute_openai_cell(
     platform_surfaces: tuple[PlatformSurfaceCapture, ...] = ()
     rendered: tuple[str, ...] = ()
     requests = 0
+    if __package__:
+        from .openai_catalog_replay import execute_openai_turns
+    else:
+        from openai_catalog_replay import execute_openai_turns
+
     capture = await execute_openai_turns(
         plan,
         scenario,
@@ -1237,6 +1238,11 @@ async def execute_gemini_cell(
     platform_surfaces: tuple[PlatformSurfaceCapture, ...] = ()
     rendered: tuple[str, ...] = ()
     requests = 0
+    if __package__:
+        from .gemini_catalog_replay import execute_gemini_turns
+    else:
+        from gemini_catalog_replay import execute_gemini_turns
+
     capture = await execute_gemini_turns(
         plan,
         scenario,
