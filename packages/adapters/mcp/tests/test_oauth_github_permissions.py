@@ -257,7 +257,8 @@ async def test_picker_offers_every_permission_level_and_counts_hidden(
     assert set(choices) == {1, 2, 3, 4, 5, 201}  # `none` repos are not offered
     assert [choices[i]["data-max-access"] for i in (1, 2, 3, 4, 5)] == ["write"] * 5
     assert choices[201]["data-installation"] == "78"
-    assert "3 repos are hidden because your GitHub account has no permission on them" in page
+    assert "hidden because your GitHub account" not in page
+    assert "Missing a repo? Add it to the Daimon GitHub App on GitHub." in page
     # One bulk button per installation owner, a live shown count, and a clear button.
     assert "Everything in alpha</button>" in page and "Everything in beta</button>" in page
     assert 'id="select-shown"' in page and "Select all 6 shown" in page
