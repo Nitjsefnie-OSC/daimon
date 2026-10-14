@@ -868,6 +868,37 @@ an existing tag only when it points to the same tested digest. If the tag points
 elsewhere or the registry cannot be checked, the deploy fails. New tags are
 created without replacing or deleting existing tags.
 
+### Staging migration maintenance
+
+An operator can dispatch `deploy.yml` from `main` with `environment=staging`,
+`sha` set to the expected deployed full commit, and `downgrade_revision` set to
+`0098_external_github_session`. An empty downgrade input keeps the ordinary
+deploy path. Maintenance runs only on dispatch, uses the existing staging
+GitHub environment and OIDC deploy service account, and serializes with staging
+deploys. Production targets and unrecognized restore plans are refused.
+
+The executor uses the immutable image from that commit's successful CI migration
+receipt and the existing staging migration job's Secret Manager bindings. It
+bypasses the application entrypoint and never reads or logs `/etc/daimon`.
+Before job creation it resolves database secret aliases from the execution
+template to the staging project, refuses foreign secret and Cloud SQL bindings,
+and removes unrelated aliases, volumes and mounts.
+Book a drained staging window first. The proof locks writers, refuses active
+completion wakes, executes the full neutral-branch downgrade, compares the
+restored schema to the accepted baseline and original main-column row hashes,
+then re-upgrades and compares again. It commits only when the complete schema
+and all original data match. Any failure rolls back the transaction, retaining
+neutral evidence and claims. If a downgrade would discard neutral evidence,
+maintenance refuses until its owner supplies an export/drain plan; it never
+clears rows to manufacture a successful comparison. This is a round-trip gate,
+not permission to leave an old deployment running or retire active work.
+
+The artifact contains only commit/head identifiers, hashes and row counts;
+database URLs, secret values and row contents stay inside the executor. The
+temporary Cloud Run job is removed afterward. Existing staging protection
+rules apply; configuring those rules and service-account IAM remains an
+operator responsibility. No maintenance job runs on push or reusable deploy.
+
 ## Worker shutdown during deployment
 
 For worker compose files, set `stop_grace_period: 90s` on Discord, Slack,

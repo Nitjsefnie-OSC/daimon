@@ -51,12 +51,120 @@ on:
           - staging
           - production
       sha:
-        description: "Full 40-char commit SHA to deploy"
+        description: "Full 40-char SHA to deploy, or expected deployed head for maintenance"
         required: true
+        type: string
+      downgrade_revision:
+        description: "Staging maintenance only: restore revision (empty means normal deploy)"
+        required: false
+        default: ""
         type: string
 
 jobs:
+  staging-maintenance:
+    name: Staging migration round trip
+    if: github.event_name == 'workflow_dispatch' && inputs.downgrade_revision != ''
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    concurrency:
+      group: deploy-gcp-staging
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      REPO: ${{ vars.GCP_AR_REPO }}
+      EXPECTED_SHA: ${{ inputs.sha }}
+      DOWNGRADE_REVISION: ${{ inputs.downgrade_revision }}
+      REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_AR_REPO }}
+      JOB_NAME: staging-daimon-maintenance-${{ github.run_id }}-${{ github.run_attempt }}
+      DEPLOY_SA: ${{ vars.GCP_DEPLOY_SA }}
+    steps:
+      - name: Refuse non-staging or unpinned maintenance before authentication
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          test "$DISPATCH_REF" = refs/heads/main
+          test "$ENVIRONMENT" = staging
+          test "$PROJECT_ID" = pymc-daimon-staging
+          test "$REPO" = staging-daimon
+          [[ "$DEPLOY_SA" == *@pymc-daimon-staging.iam.gserviceaccount.com ]]
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$DOWNGRADE_REVISION" = 0098_external_github_session
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          skip_install: true
+      - name: Prepare isolated job from the exact CI image and secret references
+        id: manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+          gcloud run jobs describe "$REPO-migrate" --project "$PROJECT_ID" --region "$REGION" \
+            --format=json > "$RUNNER_TEMP/maintenance-source.json"
+          gcloud sql instances list --project "$PROJECT_ID" \
+            --format='json(connectionName,ipAddresses)' > "$RUNNER_TEMP/maintenance-databases.json"
+          python3 scripts/ci/staging_maintenance.py manifest \
+            "$RUNNER_TEMP/maintenance-source.json" "$RUNNER_TEMP/maintenance-job.json" \
+            "$RUNNER_TEMP/maintenance-databases.json"
+      - name: Create isolated staging maintenance executor
+        id: create
+        run: |
+          gcloud run jobs replace "$RUNNER_TEMP/maintenance-job.json" \
+            --project "$PROJECT_ID" --region "$REGION" --quiet > /dev/null
+      - name: Execute floor-guarded downgrade and re-upgrade proof
+        run: |
+          if ! gcloud run jobs execute "$JOB_NAME" --project "$PROJECT_ID" --region "$REGION" \
+            --wait > "$RUNNER_TEMP/maintenance-execution.log" 2>&1; then
+            echo "Staging maintenance failed; secret-bearing diagnostics remain restricted." >&2
+            exit 1
+          fi
+      - name: Retain only the schema and seed fingerprint receipt
+        run: |
+          gcloud logging read \
+            "resource.type=cloud_run_job AND resource.labels.job_name=$JOB_NAME" \
+            --project "$PROJECT_ID" --format=json > "$RUNNER_TEMP/maintenance-log.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          prefix = 'STAGING_MAINTENANCE_RESULT '
+          receipts = [json.loads(row['textPayload'][len(prefix):])
+                      for row in json.loads((root/'maintenance-log.json').read_text())
+                      if row.get('textPayload', '').startswith(prefix)]
+          assert len(receipts) == 1 and receipts[0]['success'] is True
+          assert receipts[0]['expected_sha'] == os.environ['EXPECTED_SHA']
+          assert receipts[0]['committed'] is True
+          (root/'maintenance-receipt.json').write_text(json.dumps(receipts[0], sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staging-maintenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/maintenance-receipt.json
+          if-no-files-found: error
+      - name: Remove the isolated executor
+        if: always() && steps.create.outcome == 'success'
+        run: |
+          gcloud run jobs delete "$JOB_NAME" --project "$PROJECT_ID" --region "$REGION" \
+            --quiet > /dev/null
+
   deploy:
+    if: inputs.downgrade_revision == ''
     name: Deploy to GCP (${{ inputs.environment }})
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
