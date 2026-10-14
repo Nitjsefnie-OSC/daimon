@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
 from uuid import UUID
 
 from daimon.core.errors import TurnError
@@ -108,9 +108,11 @@ class _ResumedRoot(BaseModel):
 
 async def _root_context(
     deps: TurnDeps,
-    root: _FrozenRoot,
+    root: _FrozenRoot | None,
     *,
     now: datetime,
+    intent_id: UUID | None = None,
+    drain: bool = False,
     resumed: _ResumedRoot | None = None,
     execution_origin: bool = False,
 ) -> TenantAccessPolicy:
@@ -120,32 +122,52 @@ async def _root_context(
     from daimon.core.stores.accounts import get_account_with_tenant
     from mux.state.operations import request_digest
 
-    parent, binding = root.permissions, root.binding
-    facts, scope = parent.fleet, parent.fleet.scope
-    if parent.agent_id is None:
-        raise WorkerSpecRefused("origin", "stale")
-    value = await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
-        UUID(scope.tenant_id), parent.agent_id, now=now
-    )
-    if (
-        value is None
-        or value.epoch != root.grant_epoch
-        or request_digest(value.model_dump(mode="json")) != root.grant_digest
-    ):
-        raise WorkerSpecRefused("origin", "stale")
+    parent = root.permissions if root is not None else None
+    facts = parent.fleet if parent is not None else None
+    if root is None:
+        from daimon.core.turn.persistence import current_persistence
+        from daimon.core.turn_origin import current_origin_id
+
+        active = current_persistence.get()
+        origin_id = current_origin_id.get()
+        if (
+            active is None
+            or origin_id is None
+            or intent_id is None
+            or not active.source_agent_id
+            or active.session_ref is None
+            or active.fleet_capture
+        ):
+            raise WorkerSpecRefused("origin", "unbound")
+        binding, scope, source_id = active.binding, active.scope, active.source_agent_id
+        active.check_session(scope, active.session_ref)
+    else:
+        assert parent is not None and facts is not None
+        binding, scope = root.binding, facts.scope
+        origin_id, intent_id = root.origin_id, root.intent_id
+        if (
+            parent.agent_id is None
+            or len(parent.source_agents) != 1
+            or root.grant_epoch is None
+            or root.grant_epoch <= 0
+            or not root.grant_digest
+        ):
+            raise WorkerSpecRefused("origin", "stale")
+        source_id = parent.source_agents[0].id
     async with deps.sessionmaker() as db:
         origin = await turn_origins.get_active_origin(
             db,
-            origin_id=root.origin_id,
+            origin_id=origin_id,
             tenant_id=UUID(scope.tenant_id),
-            account_id=facts.account_id,
+            account_id=UUID(scope.account_id),
             platform=binding.thread.channel.platform,
             now=now,
         )
-        intent = await turn_card_intents.get_turn_card_intent(db, id=root.intent_id)
-        account = await get_account_with_tenant(db, account_id=facts.account_id)
+        intent = await turn_card_intents.get_turn_card_intent(db, id=intent_id)
+        account = await get_account_with_tenant(db, account_id=UUID(scope.account_id))
         policy = await load_access_policy(db, tenant_id=UUID(scope.tenant_id))
         if resumed is not None:
+            assert root is not None and parent is not None and facts is not None
             execution_intent = await turn_card_intents.get_turn_card_intent(
                 db, id=resumed.intent_id
             )
@@ -154,7 +176,7 @@ async def _root_context(
                     db,
                     origin_id=resumed.origin_id,
                     tenant_id=UUID(scope.tenant_id),
-                    account_id=facts.account_id,
+                    account_id=UUID(scope.account_id),
                     platform=binding.thread.channel.platform,
                     now=now,
                 )
@@ -198,30 +220,61 @@ async def _root_context(
     if not (origin and intent and account and deps.state_store):
         raise WorkerSpecRefused("origin", "stale")
     if (
-        facts.depth != 0
-        or len(parent.source_agents) != 1
-        or not facts.enabled
-        or not facts.active
-        or facts.origin_id != root.origin_id
-        or str(facts.account_id) != scope.account_id
-        or facts.root != binding.thread
-        or binding.legacy_account_id != scope.account_id
-        or origin.responder_ma_agent_id != parent.source_agents[0].id
-        or origin.parent_channel_id != facts.root.channel.channel_id
-        or origin.thread_id != facts.root.thread_id
+        binding.legacy_account_id != scope.account_id
+        or origin.responder_ma_agent_id != source_id
+        or origin.parent_channel_id != binding.thread.channel.channel_id
+        or origin.thread_id != binding.thread.thread_id
         or origin.is_external
         or (account.tenant_id, account.platform) != (origin.tenant_id, origin.platform)
-        or account.platform_user_id != parent.subject.platform_user_id
         or account.is_external
         or intent.tenant_id != origin.tenant_id
         or intent.platform != origin.platform
         or intent.channel_id != origin.parent_channel_id
         or intent.thread_id != origin.thread_id
         or intent.status not in ("prepared", "posted")
-        or parent.limits.deadline <= now
         or await deps.state_store.get_binding(binding_slot(binding)) != binding
     ):
         raise WorkerSpecRefused("origin", "stale")
+    if parent is not None:
+        assert facts is not None and root is not None
+        if (
+            facts.depth != 0
+            or not facts.enabled
+            or not facts.active
+            or facts.origin_id != root.origin_id
+            or str(facts.account_id) != scope.account_id
+            or facts.root != binding.thread
+            or account.platform_user_id != parent.subject.platform_user_id
+            or (not drain and parent.limits.deadline <= now)
+        ):
+            raise WorkerSpecRefused("origin", "stale")
+    if parent is None or not drain:
+        from daimon.core.channel_backend import AgentBackendRefused
+        from daimon.core.ma_identity import derive_agent_uuid
+
+        agent_id = (
+            parent.agent_id
+            if parent is not None
+            else derive_agent_uuid(tenant_id=UUID(scope.tenant_id), ma_agent_id=source_id)
+        )
+        assert agent_id is not None
+        try:
+            value = await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
+                UUID(scope.tenant_id), agent_id, now=now
+            )
+        except AgentBackendRefused:
+            raise WorkerSpecRefused("origin", "unsupported") from None
+        if parent is None:
+            if value is not None or origin.is_setup:
+                raise WorkerSpecRefused("origin", "unbound")
+        else:
+            assert root is not None
+            if (
+                value is None
+                or value.epoch != root.grant_epoch
+                or request_digest(value.model_dump(mode="json")) != root.grant_digest
+            ):
+                raise WorkerSpecRefused("origin", "stale")
     return policy
 
 
@@ -493,6 +546,7 @@ async def _read_frozen_root(
     origin_id: UUID | None = None,
     run_id: UUID | None = None,
     now: datetime,
+    drain: bool = False,
 ) -> tuple[_FrozenRoot, TenantAccessPolicy]:
     """Load one exact retained root, with its original finite authority and current policy."""
     from daimon.core.stores import fleet, mux_state
@@ -543,6 +597,7 @@ async def _read_frozen_root(
         now=now,
         resumed=resumed,
         execution_origin=origin_id is not None,
+        drain=drain,
     )
     selected = parent.fleet.run_id
     if run_id is not None and selected != run_id:
@@ -565,6 +620,7 @@ async def _read_frozen_root(
     return root, policy
 
 
+@overload
 async def read_frozen_root(
     deps: TurnDeps,
     scope: Scope,
@@ -573,9 +629,55 @@ async def read_frozen_root(
     origin_id: UUID | None = None,
     run_id: UUID | None = None,
     now: datetime,
-) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+    drain: bool = False,
+    allow_absent: Literal[False] = False,
+) -> tuple[WorkerPermissions, TenantAccessPolicy]: ...
+
+
+@overload
+async def read_frozen_root(
+    deps: TurnDeps,
+    scope: Scope,
+    *,
+    intent_id: UUID | None = None,
+    origin_id: UUID | None = None,
+    run_id: UUID | None = None,
+    now: datetime,
+    drain: bool = False,
+    allow_absent: Literal[True],
+) -> tuple[WorkerPermissions, TenantAccessPolicy] | None: ...
+
+
+async def read_frozen_root(
+    deps: TurnDeps,
+    scope: Scope,
+    *,
+    intent_id: UUID | None = None,
+    origin_id: UUID | None = None,
+    run_id: UUID | None = None,
+    now: datetime,
+    drain: bool = False,
+    allow_absent: bool = False,
+) -> tuple[WorkerPermissions, TenantAccessPolicy] | None:
+    if allow_absent and intent_id is not None and origin_id is None and run_id is None:
+        from daimon.core.stores import mux_state
+        from daimon.core.turn.persistence import current_persistence
+
+        active = current_persistence.get()
+        if active is not None and (
+            active.scope.tenant_id,
+            active.scope.account_id,
+            active.scope.principal_id,
+        ) == (scope.tenant_id, scope.account_id, scope.principal_id):
+            async with deps.sessionmaker() as db:
+                record = await mux_state.get_fleet_root_operation(
+                    db, scope, intent_id=intent_id, check_intent_owner=True
+                )
+            if record is None:
+                await _root_context(deps, None, intent_id=intent_id, now=now)
+                return None
     root, policy = await _read_frozen_root(
-        deps, scope, intent_id=intent_id, origin_id=origin_id, run_id=run_id, now=now
+        deps, scope, intent_id=intent_id, origin_id=origin_id, run_id=run_id, now=now, drain=drain
     )
     return root.permissions, policy
 

@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2673,
+  "files_scanned": 2674,
   "parse_errors": [],
   "calls": [
     {
@@ -11405,7 +11405,7 @@
     },
     {
       "file": "packages/adapters/mcp/daimon/adapters/mcp/server.py",
-      "line": 21,
+      "line": 22,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic",

@@ -523,8 +523,13 @@ async def get_fleet_root_operation(
     run_id: uuid.UUID | None = None,
     request_digest: str | None = None,
     slot: Slot | None = None,
+    check_intent_owner: bool = False,
 ) -> OperationRecord | None:
     """Read or durably reserve the exact root association before run creation."""
+    if check_intent_owner and (
+        intent_id is None or (origin_id, run_id, request_digest) != (None, None, None)
+    ):
+        raise ValueError("intent-only root read required")
     query = select(MuxOperation).where(
         MuxOperation.tenant_id == _tenant(scope.tenant_id),
         MuxOperation.key.startswith("fleet_root:"),
@@ -581,7 +586,8 @@ async def get_fleet_root_operation(
         raise ValueError("exactly one root selector required")
     if origin_id is not None:
         return await get_operation(session, scope, f"fleet_root:{origin_id}:root:0")
-    query = query.where(MuxOperation.account_id == scope.account_id)
+    if not check_intent_owner:
+        query = query.where(MuxOperation.account_id == scope.account_id)
     body = (await session.scalars(query)).one_or_none()
     if body is None:
         return None

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from importlib.metadata import entry_points
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from daimon.core.mux_backend import TurnRuntime
@@ -13,6 +14,7 @@ from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
 
 if TYPE_CHECKING:
+    from daimon.core.pricing import ProviderPrice
     from daimon.core.turn.prepare import ProviderPreparationRequest
 
 RuntimeFactory = Callable[["ProviderPreparationRequest"], TurnRuntime]
@@ -44,6 +46,7 @@ DeploymentLoader = Callable[[str], tuple[RuntimeDeployment, ...]]
 class _RuntimeRegistration:
     factory: RuntimeFactory
     authorizations: DeploymentLoader | None = None
+    tariffs: Callable[[], Mapping[tuple[str, str], ProviderPrice]] | None = None
 
 
 _RUNTIME_FACTORIES: dict[str, _RuntimeRegistration] = {}
@@ -54,6 +57,7 @@ def register_channel_runtime(
     factory: RuntimeFactory,
     *,
     authorizations: DeploymentLoader | None = None,
+    tariffs: Callable[[], Mapping[tuple[str, str], ProviderPrice]] | None = None,
     fallback: bool = False,
 ) -> None:
     """Register a constructor; provider defaults preserve explicit host overrides."""
@@ -63,7 +67,7 @@ def register_channel_runtime(
         if fallback:
             return
         raise ValueError(f"channel runtime already registered: {profile}")
-    _RUNTIME_FACTORIES[profile] = _RuntimeRegistration(factory, authorizations)
+    _RUNTIME_FACTORIES[profile] = _RuntimeRegistration(factory, authorizations, tariffs)
 
 
 def ensure_channel_runtime(profile: str, *, ready: Callable[[], bool] | None = None) -> bool:
@@ -97,6 +101,20 @@ def authorized_channel_deployments(profile: str, tenant_id: str) -> tuple[Runtim
     if read is None:
         raise UnsupportedCapability(("host_deployment_authorization",), profile)
     return read(tenant_id)
+
+
+def channel_runtime_prices() -> Mapping[tuple[str, str], ProviderPrice]:
+    """Read code-owned tariffs without constructing runtimes or loading credentials."""
+    for registration in entry_points(group="daimon.turn_runtimes"):
+        ensure_channel_runtime(registration.name)
+    prices: dict[tuple[str, str], ProviderPrice] = {}
+    for profile, registration in _RUNTIME_FACTORIES.items():
+        if registration.tariffs is not None:
+            for key, rate in registration.tariffs().items():
+                if key in prices and prices[key] != rate:
+                    raise UnsupportedCapability(("conflicting_runtime_price",), profile)
+                prices[key] = rate
+    return MappingProxyType(prices)
 
 
 def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:

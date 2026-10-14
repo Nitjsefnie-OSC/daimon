@@ -10,12 +10,17 @@ Per `guideline:architecture` "Functional core, imperative shell".
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, localcontext
+from types import MappingProxyType
 from typing import Protocol
 
+from mux.contracts.config import ResolvedBackend
+from mux.contracts.ids import ModelRef
 from mux.contracts.usage import UsageObservation
+from mux.profiles import get_profile
 
 
 class LegacyUsage(Protocol):
@@ -487,3 +492,28 @@ def _list_rate_text(rates: ModelRates | ProviderPrice) -> str:
         f"input {amount(rates.input)}, output {amount(rates.output)}, "
         f"cache-read {amount(rates.cache_read)}, cache-write {amount(rates.cache_write)}"
     )
+
+
+def resolved_worker_prices(
+    choices: Sequence[tuple[ResolvedBackend, ModelRef]],
+    *,
+    native_prices: Mapping[tuple[str, str], ProviderPrice],
+) -> Mapping[tuple[str, str], ModelRates | ProviderPrice]:
+    """Resolve host-owned tariffs; missing prices stay missing for admission.
+
+    This context grants no model authority and proves no final provider bill.
+    Native rates come from the registered preparation owners, never tool input.
+    Financial validation remains in the shared admission producer.
+    """
+    prices: dict[tuple[str, str], ModelRates | ProviderPrice] = {}
+    for selection, model in choices:
+        profile = get_profile(selection.profile)
+        key = (model.provider, model.id)
+        rate = (
+            native_prices.get(key)
+            if profile.accounting_mode.settles_natively
+            else MODEL_PRICING.get(model.id)
+        )
+        if rate is not None:
+            prices[key] = rate
+    return MappingProxyType(prices)

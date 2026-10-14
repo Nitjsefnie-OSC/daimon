@@ -262,7 +262,7 @@ class DiscordFleetCardFactory:
             intent_id: uuid.UUID | None,
             run_id: uuid.UUID | None,
             interaction: discord.Interaction | None,
-        ) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+        ) -> tuple[WorkerPermissions, TenantAccessPolicy] | None:
             from daimon.adapters.discord.checks import channel_admin_caller
 
             if intent_id is None or (interaction is not None and run_id is None):
@@ -291,7 +291,7 @@ class DiscordFleetCardFactory:
                             caller=channel_admin_caller(interaction.user),
                         )
                     )
-                parent, policy = await read_frozen_root(
+                result = await read_frozen_root(
                     deps,
                     resource_scope(
                         tenant_id=str(tenant_id),
@@ -301,7 +301,12 @@ class DiscordFleetCardFactory:
                     intent_id=intent_id,
                     run_id=run_id,
                     now=datetime.now(UTC),
+                    drain=True,
+                    allow_absent=True,
                 )
+                if result is None:
+                    return None
+                parent, policy = result
                 if parent.subject.platform_user_id != str(requester_id):
                     raise FleetRefused("foreign_run")
                 return replace(parent, subject=subject), policy

@@ -647,7 +647,7 @@ class HostFleetPorts:
         self,
         sessions: async_sessionmaker[AsyncSession],
         *,
-        prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
+        prices: Mapping[tuple[str, str], ModelRates | ProviderPrice] | None = None,
         markup: Decimal,
         dispatch: Callable[
             [WorkerPermissions, FleetWorker, ResolvedWorkerSpec, Event | None], Awaitable[None]
@@ -662,6 +662,17 @@ class HostFleetPorts:
         | None = None,
         pool: WorkerPool | None = None,
     ) -> None:
+        if prices is None:
+            from types import MappingProxyType
+
+            from daimon.core.pricing import MODEL_PRICING
+            from daimon.core.turn.runtimes import channel_runtime_prices
+            from mux.profiles import MANAGED_AGENTS
+
+            prices = MappingProxyType(
+                {(MANAGED_AGENTS.provider, model): rate for model, rate in MODEL_PRICING.items()}
+                | dict(channel_runtime_prices())
+            )
         self.sessions, self.prices, self.markup = sessions, prices, markup
         self._deps = deps
         if preparation is None and deps is not None and deps.fleet_enabled and pool is not None:
@@ -917,8 +928,11 @@ class HostFleetPorts:
         reviewer_of: uuid.UUID | None,
         reviewed_result: Event | None,
     ) -> tuple[FleetRun, FleetWorker]:
+        from types import MappingProxyType
+
         from daimon.core.channel_budget import admit_fleet_worker
         from daimon.core.fleet import FleetConflict
+        from daimon.core.pricing import ProviderPrice, resolved_worker_prices
         from daimon.core.stores import access_policy, fleet, mux_state
         from mux.errors import OperationConflict
         from mux.state.operations import request_digest
@@ -927,6 +941,19 @@ class HostFleetPorts:
             raise FleetRefused("prerequisites_unavailable")
         if (reviewer_of is None) != (reviewed_result is None):
             raise FleetRefused("review_evidence_invalid")
+        self.prices = MappingProxyType(
+            dict(self.prices)
+            | dict(
+                resolved_worker_prices(
+                    ((resolved.backend, resolved.spec.model),),
+                    native_prices={
+                        key: rate
+                        for key, rate in self.prices.items()
+                        if isinstance(rate, ProviderPrice)
+                    },
+                )
+            )
+        )
         scope = parent.fleet.scope
         tenant_id = uuid.UUID(scope.tenant_id)
         key = f"fleet:{run_id}:admit:{operation_key}"
@@ -1095,6 +1122,7 @@ class HostFleetPorts:
                 origin_id=parent.fleet.origin_id,
                 run_id=run.id,
                 now=datetime.now(UTC),
+                drain=True,
             )
         except (WorkerSpecRefused, ScopeViolation, fleet.FleetConflict):
             raise FleetRefused("wait_unavailable") from None
