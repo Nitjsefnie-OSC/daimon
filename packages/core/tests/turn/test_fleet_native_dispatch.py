@@ -148,6 +148,21 @@ async def test_root_request_derivation_reaches_real_fresh_or_clone_worker(worker
     assert all(call.method == "GET" for call in transport.requests)
 
 
+async def test_derived_worker_request_carries_neither_target_spec_nor_root_native_budget(
+    worker_root,
+):
+    """A worker never receives the root's pending consent target or its native
+
+    budget control: both are root-only state and neither is ever an authority
+    token a worker could present to widen its own scope.
+    """
+    request, root, _row, resolved, *_ = worker_root
+    laden = replace(request, target_spec=resolved.spec, native_budget_usd=Decimal("5"))
+    derived = await laden.for_worker(root, resolved)
+    assert derived.target_spec is None
+    assert derived.native_budget_usd is None
+
+
 @pytest.mark.parametrize(
     "fault", ("subject", "place", "scope", "pin", "expired", "stale", "disabled", "slow")
 )

@@ -329,6 +329,7 @@ class ProviderPreparationRequest:
                 ),
                 worker=worker,
                 target_spec=None,
+                native_budget_usd=None,
                 scope=worker.permissions.fleet.scope,
                 deadline=bound,
             )
