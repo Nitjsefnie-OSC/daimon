@@ -689,6 +689,7 @@ async def agents_backend_change(
             slack_turn_context_id=None,
             private_dm_id=None,
             external_user_id=principal.os_user,
+            explicit_target_name=name,
         ),
     )
     agent = await channel_backend.load_backend_agent(

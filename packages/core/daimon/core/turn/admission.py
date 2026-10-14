@@ -1198,6 +1198,7 @@ async def capture_backend_source(
     slack_turn_context_id: uuid.UUID | None,
     private_dm_id: str | None,
     external_user_id: str | None = None,
+    explicit_target_name: str | None = None,
 ) -> BackendAgent:
     """Read the actual target's source in a verified host context, without admitting a turn."""
     from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
@@ -1227,6 +1228,21 @@ async def capture_backend_source(
                 and subject.platform_user_id != account.platform_user_id
             ):
                 raise channel_backend.AgentBackendRefused("source_unavailable")
+            if explicit_target_name is not None:
+                if (
+                    context.platform != "cli"
+                    or context.channel_id is not None
+                    or context.thread_id is not None
+                    or is_dm
+                    or source.name != explicit_target_name
+                ):
+                    raise channel_backend.AgentBackendRefused("source_unavailable")
+                config = config.model_copy(
+                    update={
+                        "configuration_target_name": explicit_target_name,
+                        "configuration_target_ma_agent_id": source.source.ref.id,
+                    }
+                )
             if config.configuration_target_name is not None:
                 target_matches = (
                     config.configuration_target_name == source.name
@@ -1252,6 +1268,14 @@ async def capture_backend_source(
                 authorization_id="backend-preview",
             )
             actual = await retrieve_agent(deps.anthropic, source.source.ref.id, scope=scope)
+            if explicit_target_name is not None:
+                await channel_backend.load_backend_agent(
+                    deps.anthropic,
+                    deps.sessionmaker,
+                    tenant_id=context.tenant_id,
+                    agent_name=explicit_target_name,
+                    actual_agent=actual,
+                )
             environment = await find_environment_by_daimon_tag(
                 deps.anthropic,
                 tenant_id=context.tenant_id,

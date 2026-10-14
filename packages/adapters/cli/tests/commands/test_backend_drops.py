@@ -159,6 +159,130 @@ async def test_actual_source_gets_and_exact_consent_reach_cas_readback(operator,
     assert all(r.method == "GET" for r in requests)
 
 
+@pytest.mark.parametrize("backend", ["openai", "gemini"])
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_public_cli_can_switch_a_named_nondefault_agent_without_rerouting(
+    operator, backend, dry_run
+):
+    from daimon.core.scope import ScopeContext
+    from daimon.core.stores.scoped_config_read import resolve
+
+    rt, tenant, _, _, requests = operator
+    rt = replace(
+        rt,
+        deployment_default=rt.deployment_default.model_copy(update={"agent_name": "OtherDefault"}),
+    )
+    changed = (rt, *operator[1:])
+    output = StringIO()
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=output, width=240),
+        name="Research",
+        backend=backend,
+        yes=not dry_run,
+        as_json=True,
+        accept_drops="memory,sandbox",
+        dry_run=dry_run,
+    )
+    result = json.loads(output.getvalue())
+    preview = result if dry_run else result["preview"]
+    assert preview["drop_consent"]["declared_drops"] == ["memory", "sandbox"]
+    current = await revisions(changed)
+    if dry_run:
+        assert current is None
+    else:
+        assert current.backend == backend and current.declared_drops == ("memory", "sandbox")
+    async with rt.sessionmaker() as db:
+        config = await resolve(
+            db,
+            context=ScopeContext(tenant_id=tenant.id, platform="cli"),
+            default=rt.deployment_default,
+        )
+    assert config.agent_name == "OtherDefault" and config.configuration_target_name is None
+    assert all(request.method == "GET" for request in requests)
+
+
+async def test_nonexplicit_capture_still_requires_the_resolved_responder(operator):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    rt, *_ = operator
+    rt = replace(
+        rt,
+        deployment_default=rt.deployment_default.model_copy(update={"agent_name": "OtherDefault"}),
+    )
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await capture((rt, *operator[1:]))
+    assert await revisions(operator) is None
+
+
+@pytest.mark.parametrize("fault", ["wrong_name", "chat", "bound_channel", "bound_thread", "dm"])
+async def test_explicit_cli_target_cannot_override_a_chat_or_mismatched_target(operator, fault):
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.scope import ScopeContext
+    from daimon.core.stores.identity import get_or_create_cli_principal
+
+    rt, tenant, *_ = operator
+    async with rt.sessionmaker() as db:
+        principal = await get_or_create_cli_principal(db, tenant_id=tenant.id, os_user="operator")
+    context = ScopeContext(
+        tenant_id=tenant.id,
+        account_id=principal.account_id,
+        platform="discord" if fault == "chat" else "cli",
+        channel_id="bound" if fault == "bound_channel" else None,
+        thread_id="bound" if fault == "bound_thread" else None,
+    )
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await capture(
+            operator,
+            context=context,
+            explicit_target_name="OtherDefault" if fault == "wrong_name" else "Research",
+            is_dm=fault == "dm",
+        )
+    assert await revisions(operator) is None
+
+
+@pytest.mark.parametrize("operator", ["discord"], indirect=True)
+@pytest.mark.parametrize("binding", ["valid", "wrong_name", "wrong_id"])
+async def test_nonexplicit_chat_capture_keeps_the_stored_configuration_target_pair(
+    operator, binding
+):
+    from daimon.core.authz import Place
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.scope import ScopeContext
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    rt, tenant, native, *_ = operator
+    async with rt.sessionmaker.begin() as db:
+        principal = await get_or_create_cli_principal(db, tenant_id=tenant.id, os_user="operator")
+        await create_binding(
+            db,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="parent",
+            thread_id="thread",
+            responder_ma_agent_id="other-responder",
+            responder_name="OtherDefault",
+            configuration_target_name="OtherTarget" if binding == "wrong_name" else "Research",
+            configuration_target_ma_agent_id="other-target" if binding == "wrong_id" else native.id,
+        )
+    options = dict(
+        context=ScopeContext(
+            tenant_id=tenant.id,
+            account_id=principal.account_id,
+            platform="discord",
+            channel_id="parent",
+            thread_id="thread",
+        ),
+        place=Place(channel_id="thread", parent_channel_id="parent"),
+    )
+    if binding == "valid":
+        assert (await capture(operator, **options)).name == "Research"
+    else:
+        with pytest.raises(AgentBackendRefused, match="source unavailable"):
+            await capture(operator, **options)
+    assert await revisions(operator) is None
+
+
 @pytest.mark.parametrize("accepted", [None, "memory,sandbox", "*", "credentials"])
 async def test_dry_run_returns_before_confirmation_and_writer_even_with_yes(operator, accepted):
     text = await run(operator, accept_drops=accepted, dry_run=True)
@@ -477,12 +601,22 @@ async def test_unknown_target_or_environment_refuses_without_default_provisionin
     from daimon.core.channel_backend import AgentBackendRefused
 
     rt, *_ = operator
-    settings = rt.deployment_default.model_copy(
-        update={"agent_name" if missing == "target" else "environment_name": "Unknown"}
-    )
-    changed = (replace(rt, deployment_default=settings), *operator[1:])
-    with pytest.raises(AgentBackendRefused, match="source unavailable"):
-        await run(changed, accept_drops="memory,sandbox")
+    if missing == "target":
+        with pytest.raises(AgentBackendRefused, match="agent not found"):
+            await agents_backend_change(
+                rt=rt,
+                console=Console(file=StringIO()),
+                name="Unknown",
+                backend="openai",
+                yes=True,
+                as_json=False,
+                accept_drops="memory,sandbox",
+            )
+    else:
+        settings = rt.deployment_default.model_copy(update={"environment_name": "Unknown"})
+        changed = (replace(rt, deployment_default=settings), *operator[1:])
+        with pytest.raises(AgentBackendRefused, match="source unavailable"):
+            await run(changed, accept_drops="memory,sandbox")
     assert await revisions(operator) is None
     assert all(r.method == "GET" for r in operator[-1])
 
@@ -590,7 +724,18 @@ async def test_real_encrypted_key_remains_nondroppable_without_any_secret_read(
     assert await revisions(operator) is None
 
 
-@pytest.mark.parametrize("fault", ["timeout", "not_found", "foreign_environment", "archived"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "timeout",
+        "not_found",
+        "foreign_environment",
+        "archived",
+        "foreign_agent",
+        "renamed_agent",
+        "archived_agent",
+    ],
+)
 async def test_actual_sdk_unreadable_or_foreign_source_is_a_typed_refusal(operator, fault):
     import uuid
 
@@ -618,13 +763,44 @@ async def test_actual_sdk_unreadable_or_foreign_source_is_a_typed_refusal(operat
         if request.url.path == "/v1/environments":
             return list_response([environment.model_dump(mode="json")])
         if request.url.path == f"/v1/agents/{agent.id}":
-            return httpx.Response(200, json=agent.model_dump(mode="json"))
+            data = agent.model_dump(mode="json")
+            if fault == "foreign_agent":
+                data["metadata"]["daimon_tenant"] = str(uuid.uuid4())
+            elif fault == "renamed_agent":
+                data["metadata"]["daimon_name"] = "OtherDefault"
+            elif fault == "archived_agent":
+                data["archived_at"] = "2026-10-14T00:00:00Z"
+            return httpx.Response(200, json=data)
         pytest.fail("Unexpected request")
 
     async with build_fake_anthropic(broken) as client:
         changed = (replace(rt, anthropic=client), *operator[1:])
-        with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        reason = (
+            "agent not found"
+            if fault in ("renamed_agent", "archived_agent")
+            else "source unavailable"
+        )
+        with pytest.raises(AgentBackendRefused, match=reason):
             await run(changed, accept_drops="memory,sandbox")
+    assert await revisions(operator) is None
+
+
+@pytest.mark.parametrize("field", ["tenant_id", "agent_id"])
+async def test_public_cli_refuses_a_captured_identity_mismatch(operator, monkeypatch, field):
+    import uuid
+
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.turn import runtime_manifest
+
+    original = runtime_manifest.capture_preparation_source
+
+    async def mismatched(*args, **kwargs):
+        captured = await original(*args, **kwargs)
+        return captured.model_copy(update={field: uuid.uuid4()})
+
+    monkeypatch.setattr(runtime_manifest, "capture_preparation_source", mismatched)
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await run(operator, accept_drops="memory,sandbox")
     assert await revisions(operator) is None
 
 
