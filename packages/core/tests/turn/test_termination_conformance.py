@@ -29,8 +29,13 @@ from mux.errors import ScopeViolation
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from .test_conformance import run_host_fixture_preflight_probe
-from .test_provider_dispatch import ACCOUNT, TENANT, admission, record_usage
+from .conformance_support import (
+    ACCOUNT,
+    TENANT,
+    admission,
+    record_usage,
+    run_host_fixture_preflight_probe,
+)
 
 SCOPE = Scope(
     tenant_id=str(TENANT), account_id=str(ACCOUNT), principal_id="host", authorization_id="offline"
