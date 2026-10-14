@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 TENANT = UUID(int=7)
 ACCOUNT = UUID(int=8)
 AGENT = UUID(int=9)
-NOW = datetime.now(UTC)
 
 
 class Transaction:
@@ -57,6 +56,7 @@ class TrackingTransport(ScriptedTransport):
 
 
 def mapped() -> tokens.LiveAppSession:
+    now = datetime.now(UTC)
     snapshot = SessionSnapshot(
         ma_agent_id="agent1",
         model_id="model",
@@ -85,18 +85,19 @@ def mapped() -> tokens.LiveAppSession:
             ma_session_id="session1",
             watermark_message_id=None,
             status="live",
-            created_at=NOW,
-            updated_at=NOW,
+            created_at=now,
+            updated_at=now,
             effective_config=snapshot,
         ),
         agent_id=AGENT,
-        expires_at=NOW,
+        expires_at=now,
         has_linked_requester=True,
         permissions_by_repo={},
     )
 
 
 def mcp(*, erased: bool = False) -> tokens.LiveMcpAppSession:
+    now = datetime.now(UTC)
     return tokens.LiveMcpAppSession(
         session_id="session1",
         tenant_id=TENANT,
@@ -105,9 +106,9 @@ def mcp(*, erased: bool = False) -> tokens.LiveMcpAppSession:
         account_id=None if erased else ACCOUNT,
         repo_urls=("old",),
         repo_resource_ids={},
-        expires_at=NOW,
+        expires_at=now,
         permissions_by_repo={},
-        last_started_at=NOW,
+        last_started_at=now,
     )
 
 
