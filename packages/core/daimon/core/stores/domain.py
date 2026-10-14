@@ -1105,6 +1105,7 @@ class BackendAgent(_Facts):
     resource_generations: tuple[tuple[str, datetime], ...] = Field(
         default=(), exclude=True, repr=False
     )
+    asks_before_publishing: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
     memory_required: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
     memory_store_id: str | None = Field(default=None, exclude=True, repr=False)
     memory_read_only: bool | None = Field(default=None, strict=True, exclude=True, repr=False)

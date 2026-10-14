@@ -1,0 +1,305 @@
+"""Original consent binds actual scoped source reads to one prepared target."""
+
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from daimon.core.channel_backend import (
+    AgentBackendRefused,
+    AgentBackendService,
+    resolve_turn_backend,
+)
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import TurnRuntime
+from daimon.core.scope import ResolvedConfig
+from daimon.core.stores import mux_state
+from daimon.core.stores.neutral_catalog import AgentRevision
+from daimon.core.turn.admission import Admission
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.prepare import DEFAULT_MA_CAPABILITIES, ProviderPreparationRequest
+from daimon.core.turn.runtime_manifest import (
+    capture_preparation_source,
+    prepare_source,
+    read_preparation_counterpart,
+)
+from daimon.core.turn.runtimes import scope_channel_runtimes
+from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import deps_for
+from mux.contracts.config import ConfigRevision
+from mux.contracts.ids import ChannelRef, ResourceRef, Revision, Scope
+from mux.contracts.resources import Agent
+from mux.profiles import backend_selection
+
+from ..test_agent_backend import enable
+from ..test_agent_backend import owned as owned
+
+
+@pytest.fixture
+async def consent_request(owned):
+    _, identity, actor, sessions = owned
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    native = ma_agent(tenant_id=identity.tenant_id, system="Authoritative source instructions")
+    environment = ma_environment(tenant_id=identity.tenant_id)
+    router, reads, constructions, counterpart_reads = MARouter(), [], [], []
+    router.add_agent(native)
+    router.add_environment(environment)
+
+    def transport(request):
+        reads.append(request)
+        return router.dispatch(request)
+
+    async with build_fake_anthropic(transport) as client:
+        revision = ConfigRevision.create(
+            ChannelRef(tenant_id=str(identity.tenant_id), platform="slack", channel_id="channel"),
+            1,
+            backend_selection("openai"),
+        )
+        admitted = Admission(
+            account_id=actor.account_id,
+            agent=native,
+            environment=environment,
+            config=ResolvedConfig(agent_name="test-agent", environment_name="test-env"),
+            backend_revision=revision,
+            backend_revision_origin="agent",
+        )
+        request = ProviderPreparationRequest(
+            deps=replace(deps_for(client, sessions), agent_backends=True, channel_backends=True),
+            admission=admitted,
+            scope=Scope(
+                tenant_id=str(identity.tenant_id),
+                account_id=str(actor.account_id),
+                principal_id="caller",
+                authorization_id="admitted",
+            ),
+            tenant_id=identity.tenant_id,
+            platform="slack",
+            external_user_id="caller",
+            thread_id="thread",
+            session_account_id=actor.account_id,
+            reuse_existing=True,
+            capabilities=DEFAULT_MA_CAPABILITIES,
+            transfer=None,
+            deadline=now + timedelta(seconds=30),
+            now=lambda: now,
+        )
+        source = await capture_preparation_source(request, fresh=True)
+        assert source.agent_id == derive_agent_uuid(
+            tenant_id=identity.tenant_id, ma_agent_id=native.id
+        )
+
+        async def capture(agent):
+            assert agent.agent_id == source.agent_id
+            return await capture_preparation_source(request, fresh=True)
+
+        service = AgentBackendService(sessions, enabled=True, capture_source=capture)
+        await enable(service, source, actor)
+        quote = await service.preview(source, "openai")
+        accepted = await service.set_backend(
+            source,
+            "openai",
+            0,
+            actor,
+            accepted_drops=quote.declared_drops,
+            expected_preview_digest=quote.digest,
+        )
+        async with sessions.begin() as db:
+            await mux_state.put_config_revision(
+                db, revision, origin="agent", agent_revision=accepted
+            )
+
+        def construct(selected):
+            constructions.append(selected)
+
+            async def read(actual):
+                counterpart_reads.append(actual)
+                return AgentRevision(
+                    catalog_id="original-counterpart",
+                    local_revision=1,
+                    principal_id="host",
+                    agent=Agent(
+                        ref=ResourceRef(
+                            id="native-counterpart",
+                            kind="agent",
+                            provider="openai",
+                            account_scope_id="project",
+                            tenant_id=request.scope.tenant_id,
+                            account_id=request.scope.account_id,
+                        ),
+                        revision=Revision(local=1),
+                        created_at=now,
+                        spec=actual.target_spec,
+                    ),
+                )
+
+            return TurnRuntime(
+                transport_factory=lambda *args: None,
+                journal=object(),
+                usage_store=object(),
+                read_agent_counterpart=read,
+            )
+
+        request, lookup = scope_channel_runtimes(
+            replace(request, deps=replace(request.deps, turn_runtime_factory=construct))
+        )
+        reads.clear()
+        yield (
+            request,
+            service,
+            source,
+            actor,
+            accepted,
+            router,
+            reads,
+            constructions,
+            counterpart_reads,
+            lookup,
+        )
+
+
+async def test_real_preparation_uses_original_consent_after_latest_setting_changes(consent_request):
+    request, service, source, actor, accepted, _, reads, constructions, targets, lookup = (
+        consent_request
+    )
+    await service.clear_backend(source, accepted.local, actor)
+    selected = await read_preparation_counterpart(request)
+    assert selected.worker is None
+    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert selected.target_spec.system.startswith("Authoritative source instructions\n\n")
+    assert selected.verified_counterpart == selected.counterpart
+    assert len(constructions) == len(targets) == 1
+    assert constructions[0].target_spec == selected.target_spec
+    assert constructions[0].source == selected.source
+    assert (
+        selected.deps.turn_runtimes[request.admission.backend_revision.profile] is lookup.resolved
+    )
+    assert [(r.method, r.url.path) for r in reads] == [
+        ("GET", "/v1/agents/ag_test"),
+        ("GET", "/v1/environments/env_test"),
+        ("GET", "/v1/agents/ag_test"),
+        ("GET", "/v1/environments/env_test"),
+    ]
+
+
+@pytest.mark.parametrize("change", ["system", "version", "publishing"])
+async def test_real_source_drift_refuses_before_target_runtime(consent_request, change):
+    request, _, _, _, _, router, reads, constructions, targets, _ = consent_request
+    if change == "publishing":
+        request = replace(
+            request, admission=replace(request.admission, asks_before_publishing=True)
+        )
+    else:
+        native = request.admission.agent.model_copy(
+            update={change: "Changed" if change == "system" else 2}
+        )
+        router.routes.clear()
+        router.add_agent(native)
+        router.add_environment(request.admission.environment)
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(request)
+    assert refused.value.reason == "backend_unsupported"
+    assert not constructions and not targets
+    assert all(r.method == "GET" for r in reads)
+    if change != "publishing":
+        assert isinstance(refused.value.__cause__, AgentBackendRefused)
+        assert refused.value.__cause__.reason == "re_confirm"
+
+
+async def test_a_caller_target_cannot_replace_the_confirmed_target(consent_request):
+    request, _, _, _, accepted, _, _, _, _, _ = consent_request
+    original = await prepare_source(request)
+    selected = await prepare_source(
+        replace(request, target_spec=original.target_spec.model_copy(update={"system": "Forged"}))
+    )
+    assert selected.target_spec == original.target_spec
+    assert selected.target_spec.declared_drops == accepted.declared_drops
+
+
+async def test_source_drift_during_counterpart_read_requires_reconfirmation(consent_request):
+    request, _, _, _, _, router, reads, constructions, targets, _ = consent_request
+    construct = request.deps.turn_runtime_factory
+
+    def drifting(selected):
+        runtime = construct(selected)
+
+        async def read(actual):
+            result = await runtime.read_agent_counterpart(actual)
+            router.routes.clear()
+            router.add_agent(
+                request.admission.agent.model_copy(update={"system": "Changed after proof"})
+            )
+            router.add_environment(request.admission.environment)
+            return result
+
+        return replace(runtime, read_agent_counterpart=read)
+
+    request, _ = scope_channel_runtimes(
+        replace(
+            request, deps=replace(request.deps, turn_runtimes={}, turn_runtime_factory=drifting)
+        )
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(request)
+    assert isinstance(refused.value.__cause__, AgentBackendRefused)
+    assert refused.value.__cause__.reason == "re_confirm"
+    assert len(constructions) == len(targets) == 1
+    assert len(reads) == 4 and all(r.method == "GET" for r in reads)
+
+
+async def test_expired_request_has_zero_native_source_or_target_reads(consent_request):
+    request, _, _, _, _, _, reads, constructions, targets, _ = consent_request
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(replace(request, deadline=request.now()))
+    assert reads == constructions == targets == []
+
+
+@pytest.mark.parametrize("drift", [False, True])
+async def test_selector_passes_original_consent_to_the_existing_prewrite_proof(
+    consent_request, drift
+):
+    request, _, source, _, accepted, router, reads, _, _, _ = consent_request
+    channel = request.admission.backend_revision.channel.model_copy(update={"channel_id": "new"})
+    checks = []
+
+    async def validate(selection, origin, retained, *, agent_revision):
+        assert origin == "agent" and agent_revision == accepted
+        revision = retained or ConfigRevision.create(channel, 1, selection)
+        selected = await prepare_source(
+            replace(
+                request,
+                admission=replace(
+                    request.admission,
+                    backend_revision=revision,
+                    backend_agent_revision=agent_revision,
+                ),
+            )
+        )
+        checks.append(selected)
+
+    if drift:
+        router.routes.clear()
+        router.add_agent(request.admission.agent.model_copy(update={"system": "Changed source"}))
+        router.add_environment(request.admission.environment)
+        with pytest.raises(AgentBackendRefused, match="re confirm"):
+            async with request.deps.sessionmaker.begin() as db:
+                await resolve_turn_backend(
+                    db, channel, source, enabled=True, validate_origin=validate
+                )
+        async with request.deps.sessionmaker() as db:
+            assert await mux_state.get_config_revision(db, channel, 1) is None
+        assert checks == []
+    else:
+        async with request.deps.sessionmaker.begin() as db:
+            revision, shared, origin = await resolve_turn_backend(
+                db, channel, source, enabled=True, validate_origin=validate
+            )
+        assert not shared and origin == "agent"
+        assert len(checks) == 2 and all(
+            value.target_spec.declared_drops == accepted.declared_drops for value in checks
+        )
+        async with request.deps.sessionmaker() as db:
+            assert (
+                await mux_state.get_config_agent_revision(db, revision, agent_id=source.agent_id)
+                == accepted
+            )
+    assert reads and all(r.method == "GET" for r in reads)

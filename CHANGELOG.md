@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve Discord orchestration calls without an explicit origin stack; admission still decides denial before any origin is entered.
 
 - Gate failed controlled-session cleanup on verified native ownership and archive at most once in app mode, while preserving ordinary app cleanup and independent token/vault revocation.
+- Require exact preview confirmation for supported source losses and revalidate the original scoped source and canonical target before cross-backend preparation.
 
 - Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
 - Read exact root billing references through immutable outcomes without summing reused-session history.
