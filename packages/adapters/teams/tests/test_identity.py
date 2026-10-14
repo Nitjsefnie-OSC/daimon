@@ -19,6 +19,7 @@ from daimon.adapters.teams.identity import (
     foreign_tenant,
     live_tenant_id,
     parse_inbound,
+    strip_typed_name,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -469,6 +470,16 @@ def test_a_typed_multi_word_name_with_an_html_no_break_space_is_by_name() -> Non
     payload = reply | {"recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon Bot"}}
     inbound = _parse(payload)
     assert isinstance(inbound, TeamsInbound) and inbound.by_name, "the entity must read as a space"
+    assert strip_typed_name(inbound.text, inbound.bot_name) == "<p>hi</p>", (
+        "the name the match read must also leave the turn text"
+    )
+
+
+def test_strip_typed_name_keeps_markup_entities_encoded() -> None:
+    """Decoding `&lt;` would turn escaped text into markup."""
+    assert strip_typed_name("@Daimon &lt;b&gt; &amp; x", "Daimon") == "&lt;b&gt; &amp; x", (
+        "only non-markup entities may decode"
+    )
 
 
 def test_many_unclosed_blockquote_tags_parse_in_linear_time() -> None:

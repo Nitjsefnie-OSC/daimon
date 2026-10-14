@@ -55,6 +55,7 @@ from daimon.adapters.teams.identity import (
     canonical_uuid,
     live_tenant_id,
     parse_inbound,
+    strip_typed_name,
 )
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import (
@@ -95,7 +96,6 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.name_mentions import strip_name_mentions
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.permissions import home_of
@@ -566,7 +566,7 @@ class TeamsApp:
     async def _route_by_name(self, inbound: TeamsInbound) -> None:
         """A typed "@<bot name>": a mention with the tenant's switch on, else as before."""
         if await self._plain_text_mentions_on():
-            text = strip_name_mentions(inbound.text, (inbound.bot_name,))
+            text = strip_typed_name(inbound.text, inbound.bot_name)
             await self._handle(
                 dataclasses.replace(inbound, text=text, by_name=False, unprompted=False)
             )

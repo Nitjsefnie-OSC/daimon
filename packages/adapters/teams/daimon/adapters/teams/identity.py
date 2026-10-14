@@ -29,7 +29,7 @@ from typing import Literal
 
 from daimon.adapters.teams.attachments import InboundFile, parse_attachments
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.name_mentions import mentions_by_name
+from daimon.core.name_mentions import mentions_by_name, strip_name_mentions
 from daimon.core.stores.tenants import get_tenant
 from microsoft_teams.api import Account, MessageActivity
 from microsoft_teams.api.activities.utils import StripMentionsTextOptions, strip_mentions_text
@@ -48,6 +48,7 @@ GENERAL_CHANNEL = "General"
 _QUOTED = re.compile(r'<quoted\s+messageId="([^"]*)"\s*/>')
 # `[^<>]`, not `[^>]`: many unclosed "<blockquote" tags would otherwise scan quadratically.
 _BLOCKQUOTE_TAG = re.compile(r"<(/?)blockquote\b([^<>]*)>", re.IGNORECASE)
+_ENTITY = re.compile(r"&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]*);", re.IGNORECASE)
 _REPLY_ITEMTYPE = re.compile(r'itemtype\s*=\s*"[^"]*schema\.skype\.com/reply"', re.IGNORECASE)
 
 
@@ -239,6 +240,19 @@ def _typed_text(text: str) -> str:
     if not depth:
         kept.append(text[start:])
     return html.unescape("".join(kept))
+
+
+def strip_typed_name(text: str, name: str | None) -> str:
+    """`text` without the typed "@<name>", its entities read as `_typed_text` reads them.
+
+    Markup entities stay encoded; the rest decode, so "@Daimon&nbsp;Bot" goes too.
+    """
+
+    def decode(entity: re.Match[str]) -> str:
+        char = html.unescape(entity[0])
+        return entity[0] if char in ("<", ">", "&") else char
+
+    return strip_name_mentions(_ENTITY.sub(decode, text), (name,))
 
 
 def _is_from_person(activity: MessageActivity) -> bool:
