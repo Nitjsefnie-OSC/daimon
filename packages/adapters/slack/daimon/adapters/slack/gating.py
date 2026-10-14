@@ -31,6 +31,8 @@ def mentions_bot(event: dict[str, Any], *, bot_user_id: str) -> bool:
 # A plain post, one with files attached, or a thread reply also sent to the
 # channel; edits, joins and every other subtype are not a request.
 _PLAIN_TEXT_MENTION_SUBTYPES = frozenset({"", "file_share", "thread_broadcast"})
+# Slack wraps links and real mentions in <...>; a name inside one is not typed.
+_SLACK_TOKEN = re.compile(r"<[^<>]*>")
 
 
 def is_plain_text_mention_event(event: dict[str, Any], *, bot_names: Iterable[str | None]) -> bool:
@@ -47,7 +49,7 @@ def is_plain_text_mention_event(event: dict[str, Any], *, bot_names: Iterable[st
         return False
     if event.get("channel_type") not in ("channel", "group"):
         return False
-    return mentions_by_name(str(event.get("text") or ""), bot_names)
+    return mentions_by_name(_SLACK_TOKEN.sub(" ", str(event.get("text") or "")), bot_names)
 
 
 def is_slack_connect_external(event: dict[str, Any], *, team_id: str) -> bool:

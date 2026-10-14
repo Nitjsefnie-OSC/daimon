@@ -152,6 +152,8 @@ def test_plain_text_mention_event_admits_a_person_naming_the_bot(
         ({"user": None}, "a message without a user"),
         ({"subtype": "message_changed"}, "an edit"),
         ({"text": "Daimon, what changed?"}, "the name without an @"),
+        ({"text": "see <https://example.com/u?name=@daimon>"}, "a name inside a link"),
+        ({"text": "see <https://example.com|@daimon docs>"}, "a name in a link label"),
     ],
 )
 def test_plain_text_mention_event_rejects(overrides: dict[str, Any], why: str) -> None:
