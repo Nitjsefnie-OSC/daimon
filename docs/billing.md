@@ -1250,8 +1250,18 @@ Unknown allocation keeps its original hold; a cached native receipt cannot
 replace mutable financial evidence. Worker admission reads the same retained
 root exposure alongside original worker reservations and ledger debits.
 
-The native preparation and counted-send caller is a separate prerequisite.
-Until it is installed, an explicitly budgeted fleet root is refused before
-allocating a session; these reservation primitives do not enable execution or
-certify usage, final spend, or release of unknown holds. Ordinary unbudgeted
-turns keep their existing preparation path.
+Explicitly budgeted private fleet roots select their finite native controls
+before session compilation and reserve cash before allocation. Unsupported
+native controls refuse. Distinct one-event input claims spend the root's
+retained allowance atomically with the existing send claim; a replay does not
+consume another input. The first active turn observer is retained with that
+input, including an explicit missing association when no observer exists.
+Completion wakes use the original root operation and reservation.
+
+Allocation preserves the caller's authorization guard. New claims recheck the
+current grant and original funding; revocation or exhausted cash blocks new
+inputs. Stop, archive and recovery interrupts remain available to drain work.
+A controlled root never silently falls back to an uncontrolled replacement.
+Unknown allocation keeps its original ACK and cash hold; this does not certify
+usage, final spend, or release of unknown holds. Ordinary unbudgeted turns keep
+their existing preparation path.

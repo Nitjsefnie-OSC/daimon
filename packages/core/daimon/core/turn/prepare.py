@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
 
 import anthropic as anthropic_pkg
 import structlog
@@ -95,6 +95,7 @@ from mux.contracts.resources import Agent, AgentSpec, SessionSpec
 from mux.drivers.anthropic.sessions_lifecycle import SessionCreateRequest, SessionReads
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
@@ -213,6 +214,9 @@ class ProviderPreparationRequest:
     worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
     native_budget_usd: Decimal | None = field(default=None, kw_only=True, compare=False, repr=False)
     target_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
+    root_controls: dict[str, JsonValue] | None = field(
+        default=None, kw_only=True, compare=False, repr=False
+    )
     before_native: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
@@ -330,6 +334,7 @@ class ProviderPreparationRequest:
                 worker=worker,
                 target_spec=None,
                 native_budget_usd=None,
+                root_controls=None,
                 scope=worker.permissions.fleet.scope,
                 deadline=bound,
             )
@@ -425,6 +430,10 @@ class CreatedSession:
     seal_ids: frozenset[str] = frozenset()
 
 
+class _NativeBudgetArgs(TypedDict):
+    native_budget_usd: NotRequired[Decimal]
+
+
 async def create_ma_session(
     deps: TurnDeps,
     admission: Admission,
@@ -462,14 +471,26 @@ async def create_ma_session(
         persistence = current_persistence.get()
         worker, source = preparation.worker, preparation.source
         if (
-            worker is None
-            or source is None
+            (worker is None and preparation.root_controls is None)
             or preparation.before_native is None
             or persistence is None
             or preparation.deps is not deps
             or preparation.admission != admission
-            or source.resource_scope != preparation.scope
-            or preparation.scope != worker.permissions.fleet.scope
+            or (
+                worker is not None
+                and (
+                    source is None
+                    or source.resource_scope != preparation.scope
+                    or preparation.scope != worker.permissions.fleet.scope
+                )
+            )
+            or preparation.scope
+            != admitted_session_scope(
+                admission,
+                tenant_id=tenant_id,
+                session_id="preparation",
+                prepared=worker.permissions.fleet.scope if worker is not None else None,
+            )
             or persistence.store is not deps.state_store
             or preparation.tenant_id != tenant_id
         ):
@@ -533,16 +554,22 @@ async def create_ma_session(
     async def allocate(
         call: Callable[[], Awaitable[BetaManagedAgentsSession]], wire: SessionCreateRequest
     ) -> BetaManagedAgentsSession:
-        assert preparation is not None and preparation.worker is not None
-        assert persistence is not None
-        assert preparation.source is not None and preparation.source.source is not None
+        assert preparation is not None and persistence is not None
         return await persistence.mutate(
             None,
             "session_create",
             {
                 "scope": preparation.scope.model_dump(mode="json"),
-                "worker": preparation.worker.digest,
-                "source": preparation.source.source.model_dump(mode="json"),
+                **(
+                    {
+                        "worker": preparation.worker.digest,
+                        "source": preparation.source.source.model_dump(mode="json"),
+                    }
+                    if preparation.worker is not None
+                    and preparation.source is not None
+                    and preparation.source.source is not None
+                    else {"root_controls": preparation.root_controls}
+                ),
                 "create": wire.model_dump(mode="json"),
             },
             lambda _key: call(),
@@ -560,6 +587,9 @@ async def create_ma_session(
     async with deps.sessionmaker() as session:
         github_mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
+    native_controls: _NativeBudgetArgs = {}
+    if preparation is not None and preparation.native_budget_usd is not None:
+        native_controls["native_budget_usd"] = preparation.native_budget_usd
     ma_session = await create_session(
         deps.anthropic,
         agent=admission.agent,
@@ -591,8 +621,11 @@ async def create_ma_session(
         origin_seal_ids=frozenset(seal),
         before_create=fence,
         channel_skills=admission.channel_skills,
-        resource_source=preparation.source if preparation is not None else None,
+        resource_source=preparation.source
+        if preparation is not None and preparation.worker is not None
+        else None,
         worker=preparation.worker if preparation is not None else None,
+        **native_controls,
         allocation=allocate if preparation is not None else None,
     )
 
@@ -716,6 +749,7 @@ async def create_fresh_session(
     predecessor_id: uuid.UUID | None = None,
     transfer_file_id: str | None = None,
     transfer_kind: TransferKind | None = None,
+    preparation: ProviderPreparationRequest | None = None,
 ) -> FreshSession:
     """Create a brand-new MA session and commit its `thread_sessions` row.
 
@@ -743,6 +777,7 @@ async def create_fresh_session(
         tenant_id=tenant_id,
         extra_resources=extra_resources,
         predecessor_session_id=predecessor_session_id,
+        **({"preparation": preparation} if preparation is not None else {}),
     )
     async with deps.sessionmaker() as session:
         fresh = await insert_mapping(
@@ -1173,60 +1208,6 @@ async def bind_session_impl(
             now=now(), deadline=effective_deadline, authority_deadline=worker.limits.deadline
         )
 
-    if worker is None and deps.fleet_enabled:
-        from daimon.core.neutral_resources import WorkerSpecRefused
-        from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
-
-        root_grant = await read_agent_fleet_grant(deps, admission, now=now())
-        if root_grant is not None and root_grant.native_root_budget_usd is not None:
-            raise WorkerSpecRefused("native_budget_usd", "unsupported")
-
-    async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
-        result = await preparing
-        try:
-            if deps.fleet_enabled and worker is None:
-                from daimon.core.turn.runtime_manifest import (
-                    capture_preparation_source,
-                    read_agent_fleet_grant,
-                )
-
-                if await read_agent_fleet_grant(deps, result.admission, now=now()) is not None:
-                    root_scope = admitted_session_scope(
-                        result.admission,
-                        tenant_id=tenant_id,
-                        session_id=result.ma_session_id,
-                        prepared=result._scope,  # pyright: ignore[reportPrivateUsage]
-                    )
-                    root_request = ProviderPreparationRequest(
-                        deps,
-                        result.admission,
-                        root_scope,
-                        tenant_id,
-                        platform,
-                        external_user_id,
-                        thread_id,
-                        session_account_id,
-                        reuse_existing,
-                        capabilities,
-                        transfer,
-                        effective_deadline,
-                        now,
-                    )
-                    source = await capture_preparation_source(root_request)
-                    remaining_s(effective_deadline, now=now(), refuse_expired=True)
-                    result = replace(result, _source=source, _preparation=root_request)
-            if worker is not None:
-                remaining_s(effective_deadline, now=now(), refuse_expired=True)
-            if _on_prepared is not None:
-                await _on_prepared(result)
-            if worker is not None:
-                remaining_s(effective_deadline, now=now(), refuse_expired=True)
-            return result
-        except BaseException:
-            if worker is not None and _on_orphan is not None:
-                await _on_orphan(result)
-            raise
-
     profile = _admitted_profile(admission)
     if worker is not None and admission.backend_revision_origin != "agent":
         raise AdmissionDenied(reason="backend_unsupported")
@@ -1255,6 +1236,46 @@ async def bind_session_impl(
         worker=worker,
         before_native=before_native,
     )
+    from daimon.core.turn.runtime_manifest import (
+        prepare_controlled_root,
+        run_controlled_preparation,
+    )
+
+    request = await prepare_controlled_root(request, turn_card_intent_id)
+    deps, effective_deadline = request.deps, request.deadline
+
+    async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
+        result = await run_controlled_preparation(request, preparing)
+        try:
+            if deps.fleet_enabled and worker is None:
+                from daimon.core.turn.runtime_manifest import (
+                    capture_preparation_source,
+                    read_agent_fleet_grant,
+                )
+
+                if await read_agent_fleet_grant(deps, result.admission, now=now()) is not None:
+                    root_scope = admitted_session_scope(
+                        result.admission,
+                        tenant_id=tenant_id,
+                        session_id=result.ma_session_id,
+                        prepared=result._scope,  # pyright: ignore[reportPrivateUsage]
+                    )
+                    root_request = replace(request, admission=result.admission, scope=root_scope)
+                    source = await capture_preparation_source(root_request)
+                    remaining_s(effective_deadline, now=now(), refuse_expired=True)
+                    result = replace(result, _source=source, _preparation=root_request)
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+            if _on_prepared is not None:
+                await _on_prepared(result)
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+            return result
+        except BaseException:
+            if worker is not None and _on_orphan is not None:
+                await _on_orphan(result)
+            raise
+
     if profile != "anthropic.managed_agents":
         if (deps.turn_path or load_turn_settings().path) != "mux":
             raise AdmissionDenied(reason="backend_unsupported")
@@ -1495,7 +1516,11 @@ async def bind_session_impl(
             current,
             ops=SessionOps(
                 read_live_row=get_live_thread_session,
-                create_fresh=create_fresh_session,
+                create_fresh=(
+                    functools.partial(create_fresh_session, preparation=request)
+                    if request.native_budget_usd is not None
+                    else create_fresh_session
+                ),
                 bind_record=bind_recorder,
             ),
             tenant_id=tenant_id,

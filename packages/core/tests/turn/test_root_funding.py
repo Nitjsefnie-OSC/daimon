@@ -278,7 +278,7 @@ async def test_dirty_financial_inventory_refuses_without_flushing(root_turn):
 
 
 @pytest.mark.parametrize("path", ["mux", "legacy"])
-async def test_budgeted_root_is_typed_refused_without_activation_or_native_effect(root_turn, path):
+async def test_unsupported_root_preparation_refuses_without_native_effect(root_turn, path):
     from dataclasses import replace
     from datetime import UTC, datetime
 
@@ -316,7 +316,7 @@ async def test_budgeted_root_is_typed_refused_without_activation_or_native_effec
             reuse_existing=False,
             turn_card_intent_id=intent.id,
         )
-    assert denied.value.field == "native_budget_usd"
+    assert denied.value.field == ("native_budget_usd" if path == "legacy" else "origin")
     assert len(transport.requests) == before
     async with deps.sessionmaker() as db:
         assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
