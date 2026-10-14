@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Isolate the fleet runtime lifecycle test from installed provider tariff discovery.
 - Refuse unclassified native agent fields before cross-backend drop consent or counterpart preparation.
+- Refuse unclassified native agent and environment fields before cross-backend drop consent or counterpart preparation.
 
 - Separate OpenAI MCP skill-upload runtime tests from the shared skill-upload suite.
 - Keep the complete Managed Agents call inventory in compact JSON below the shared file-size limit, with the unchanged zero-call ratchet outside drivers.

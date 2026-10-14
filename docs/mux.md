@@ -3030,4 +3030,4 @@ Source drift requires confirmation again. Provider and adapter owners supply the
 runtime and trusted capture implementations separately; no-consent execution
 retains its existing refusal and all feature defaults remain unchanged.
 
-Cross-backend source consent refuses unclassified native agent fields, including unknown skill and MCP policy fields. These remain nondroppable source-definition obligations even when all supported attachment losses are explicitly confirmed.
+Cross-backend source consent refuses unclassified native agent and environment fields, including unknown skill, MCP and environment-config policy fields. These remain nondroppable source-definition obligations even when all supported attachment losses are explicitly confirmed.
