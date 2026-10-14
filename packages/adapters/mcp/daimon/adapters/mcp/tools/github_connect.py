@@ -313,7 +313,8 @@ async def _github_connect_impl(
                             message=(
                                 f"{agent.name} can now "
                                 f"{'read and change' if ability == 'write' else 'read'} "
-                                f"{repo.repo_full_name}. To undo, ask me to remove it."
+                                f"{repo.repo_full_name} from the next message. "
+                                "To undo, ask me to remove it."
                             ),
                         )
         intent_id: uuid.UUID | None = None

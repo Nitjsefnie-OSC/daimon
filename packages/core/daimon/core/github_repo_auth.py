@@ -275,8 +275,8 @@ def render_clone_refusal(
             "credentials."
         )
     return (
-        f"No credential is authorized to clone {repo_url}. Re-bind this repo "
-        "with a GitHub token that can read it, using request_repo_binding."
+        f"No credential is authorized to clone {repo_url}. Connect it again "
+        "with Connect GitHub."
     )
 
 

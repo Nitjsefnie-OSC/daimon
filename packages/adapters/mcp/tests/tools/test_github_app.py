@@ -35,6 +35,7 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
+    GithubAppSettings,
     GithubSettings,
     Settings,
 )
@@ -75,6 +76,7 @@ def _runtime(
     *,
     with_discord: bool = True,
     app_slug: str | None = "acme-daimon",
+    github_app_slug: str | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> McpRuntime:
     settings = Settings(
@@ -82,6 +84,7 @@ def _runtime(
         anthropic=AnthropicSettings(api_key=SecretStr("k")),
         discord=DiscordSettings(bot_token=SecretStr("test-bot-token")) if with_discord else None,
         github=GithubSettings(app_slug=app_slug),
+        github_app=GithubAppSettings(app_slug=github_app_slug),
     )
     return McpRuntime(
         session_factory=session_factory or MagicMock(),  # type: ignore[arg-type]
@@ -377,6 +380,24 @@ async def test_post_app_install_link_rejects_missing_platform_user_id(
             runtime, auth, channel_id="222", purpose="reading a private repo"
         )
     assert captured == [], "a rejected call with no platform-bound identity must post nothing"
+
+
+async def test_post_app_install_link_uses_the_github_app_slug_when_the_legacy_one_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A deployment configured only for App mode still posts the install link."""
+    runtime = _runtime(
+        session_factory=db_session_factory, app_slug=None, github_app_slug="acme-app"
+    )
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9302", posted=posted)
+
+    result = await _post_app_install_link_impl(
+        runtime, _auth_identity(), channel_id="222", purpose="reading a private repo"
+    )
+
+    assert result.install_url == "https://github.com/apps/acme-app/installations/new"
 
 
 # ---------------------------------------------------------------------------

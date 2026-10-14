@@ -62,8 +62,8 @@ class GitHubTokenProvider:
                     "agent's working repo does not supply an account-only call's token."
                 )
             raise NoBindingError(
-                "No GitHub access is bound for this agent. Use request_repo_binding "
-                "to collect a token privately for the target agent. A GitHub App "
-                "installation alone does not supply this CLI token."
+                "No GitHub access is bound for this agent. Call github_connect to "
+                "post the Connect GitHub button. A GitHub App installation alone "
+                "does not supply this CLI token."
             )
         return token
