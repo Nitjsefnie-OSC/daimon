@@ -28,6 +28,7 @@ from typing import Literal
 
 from daimon.adapters.teams.attachments import InboundFile, parse_attachments
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.name_mentions import mentions_by_name
 from daimon.core.stores.tenants import get_tenant
 from microsoft_teams.api import Account, MessageActivity
 from microsoft_teams.api.activities.utils import StripMentionsTextOptions, strip_mentions_text
@@ -69,6 +70,10 @@ class TeamsInbound:
     id; `team_group_id` its Entra group id, when the activity carries it.
     `unprompted` marks a thread reply nobody addressed to the bot: it may only
     enter organic thread participation, never the mention path.
+    `by_name` marks a channel post or thread reply by a person that typed
+    "@<bot name>" without a real mention: the handler reads the tenant's
+    plain-text switch and treats it as a mention when on, as `unprompted`
+    says otherwise (a thread reply) or ignores it (a root post).
     `composed_ids` are the earlier queued messages folded into this one.
     `timestamp` is when it was sent (ISO 8601); the channel and team names
     come from the activity, General's filled in. `is_external` marks a sender
@@ -90,6 +95,7 @@ class TeamsInbound:
     team_id: str | None = None
     team_group_id: str | None = None
     unprompted: bool = False
+    by_name: bool = False
     user_name: str | None = None
     composed_ids: tuple[str, ...] = ()
     timestamp: str | None = None
@@ -202,14 +208,20 @@ def render_quotes(text: str, quotes: Mapping[str, QuotedReplyData]) -> str:
     return _QUOTED.sub(describe, text)
 
 
+def _is_from_person(activity: MessageActivity) -> bool:
+    sender = activity.from_
+    return not (
+        sender.id.startswith("28:") or sender.role == "bot" or sender.id == activity.recipient.id
+    )
+
+
 def _is_thread_reply_by_person(activity: MessageActivity) -> bool:
     """A human's reply under a channel post: what organic participation may screen.
 
     Root posts stay mention-only, and bots (the bot itself included) never
     qualify: the mention path is the only automation entry point, as on Discord.
     """
-    sender = activity.from_
-    if sender.id.startswith("28:") or sender.role == "bot" or sender.id == activity.recipient.id:
+    if not _is_from_person(activity):
         return False
     _, _, root = activity.conversation.id.partition(";messageid=")
     return bool(root) and root != activity.id
@@ -231,7 +243,14 @@ def parse_inbound(
     if kind not in ("personal", "channel"):
         return Refusal(DENIED)
     addressed = kind != "channel" or activity.is_recipient_mentioned() or quotes_bot(activity)
-    if not addressed and not _is_thread_reply_by_person(activity):
+    thread_reply = not addressed and _is_thread_reply_by_person(activity)
+    # Typed text, not a mention: whether it counts is the tenant's switch, read later.
+    by_name = (
+        not addressed
+        and _is_from_person(activity)
+        and mentions_by_name(activity.text or "", (activity.recipient.name,))
+    )
+    if not addressed and not thread_reply and not by_name:
         return Refusal(None)  # Channel chatter the bot was not asked about.
 
     tenant = canonical_uuid(configured_tenant)
@@ -297,7 +316,8 @@ def parse_inbound(
         files=files,
         team_id=team.id if team is not None else None,
         team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,
-        unprompted=not addressed,
+        unprompted=thread_reply,
+        by_name=by_name,
         user_name=activity.from_.name,
         timestamp=activity.timestamp.isoformat() if activity.timestamp else None,
         channel_name=channel_name,

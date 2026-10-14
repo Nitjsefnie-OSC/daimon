@@ -95,6 +95,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.name_mentions import strip_name_mentions
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.permissions import home_of
@@ -102,7 +103,7 @@ from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import Role, TaskContinuationRow, TurnCardIntentRow
 from daimon.core.stores.teams_installations import list_teams_installations
-from daimon.core.stores.tenants import get_tenant, get_turn_cap
+from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     get_live_thread_session,
@@ -535,6 +536,9 @@ class TeamsApp:
                         reason=type(exc).__name__,
                     )
             return
+        if parsed.by_name:
+            self.spawn(self._route_by_name(parsed), name="teams.by-name")
+            return
         if parsed.unprompted:
             if self.runtime.settings.thread_participation.mode is ParticipationMode.DISABLED:
                 log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
@@ -542,6 +546,22 @@ class TeamsApp:
             self.spawn(self._observe(parsed), name="teams.participation")
             return
         self.spawn(self._handle(parsed), name="teams.turn")
+
+    async def _route_by_name(self, inbound: TeamsInbound) -> None:
+        """A typed "@<bot name>": a mention with the tenant's switch on, else as before."""
+        if await get_plain_text_mentions(self.runtime.sessionmaker, tenant_id=self._tenant_id):
+            log.info("plain_text_mention.accepted", conversation_type="channel")
+            text = strip_name_mentions(inbound.text, (inbound.bot_name,))
+            await self._handle(
+                dataclasses.replace(inbound, text=text, by_name=False, unprompted=False)
+            )
+            return
+        # Off: a root post stays unanswered and a thread reply is screened as before.
+        if (
+            inbound.unprompted
+            and self.runtime.settings.thread_participation.mode is not ParticipationMode.DISABLED
+        ):
+            await self._observe(dataclasses.replace(inbound, by_name=False))
 
     def start_wizard_turn(self, inbound: TeamsInbound) -> None:
         """Run a submitted form's turn on the ordinary path, as a message would."""

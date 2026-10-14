@@ -123,6 +123,64 @@ def test_a_mentioned_thread_reply_is_not_unprompted() -> None:
     assert isinstance(inbound, TeamsInbound) and not inbound.unprompted
 
 
+def _to_named_bot(payload: dict[str, object]) -> dict[str, object]:
+    """Teams names the bot on `recipient`; the typed-name match reads it there."""
+    return payload | {"recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon"}}
+
+
+def test_a_root_post_typing_the_bot_name_is_marked_by_name() -> None:
+    """A typed "@daimon" on a new post is no longer silent: the handler reads the switch."""
+    root = make_channel_activity(
+        mention_bot=False, conversation_id=CHANNEL_ID, text="@daimon summarise the week"
+    )
+    inbound = _parse(_to_named_bot(root))
+    assert isinstance(inbound, TeamsInbound), "a root post naming the bot must be parsed"
+    assert inbound.by_name and not inbound.unprompted, (
+        "by name only: a root post is never a participation candidate"
+    )
+    assert inbound.text == "@daimon summarise the week", (
+        "the name stays until the switch is known, so 'off' changes nothing"
+    )
+
+
+def test_a_thread_reply_typing_the_bot_name_is_by_name_and_unprompted() -> None:
+    """Off, the reply is screened as before; on, it is a mention."""
+    reply = make_channel_activity(mention_bot=False, text="thanks @DAIMON, and now?")
+    inbound = _parse(_to_named_bot(reply))
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.by_name and inbound.unprompted, "both outcomes stay open for the handler"
+
+
+def test_a_real_mention_with_the_typed_name_is_an_ordinary_mention() -> None:
+    """A message with both forms is addressed already; the typed name adds nothing."""
+    inbound = _parse(_to_named_bot(make_channel_activity(text="@daimon please look")))
+    assert isinstance(inbound, TeamsInbound)
+    assert not inbound.by_name and not inbound.unprompted, "one ordinary mention"
+
+
+def test_a_personal_chat_typing_the_bot_name_is_unchanged() -> None:
+    """1:1 chats need no mention, so the typed name marks nothing."""
+    inbound = _parse(_to_named_bot(make_message_activity(text="@daimon hi")))
+    assert isinstance(inbound, TeamsInbound) and not inbound.by_name, "DMs are unchanged"
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        {"id": BOT_ACCOUNT_ID},
+        {"id": "28:another-bot", "aadObjectId": AAD_OBJECT_ID},
+        {"id": "29:someone", "aadObjectId": AAD_OBJECT_ID, "role": "bot"},
+    ],
+)
+def test_bots_typing_the_bot_name_are_ignored(sender: dict[str, object]) -> None:
+    """The bot's own answers and other bots never start a turn by name."""
+    payload = _to_named_bot(
+        make_channel_activity(mention_bot=False, conversation_id=CHANNEL_ID, text="@daimon loop")
+    )
+    payload["from"] = sender
+    assert _parse(payload) == Refusal(None), "a bot naming the bot must stay silent"
+
+
 @pytest.mark.parametrize(
     "sender",
     [
