@@ -1518,6 +1518,28 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
     client = build_stub_anthropic()
     monkeypatch.setattr(runtime_module, "AsyncAnthropic", lambda **kwargs: client)
     prices = {("anthropic", model): rate for model, rate in MODEL_PRICING.items()}
+    from datetime import date
+
+    from daimon.core.pricing import ProviderPrice
+    from daimon.core.turn import runtimes as runtime_registry
+
+    native = ProviderPrice(
+        "openai", "gpt-6-luna", date(2026, 10, 12), Decimal("1"), Decimal("2"), Decimal("0.5")
+    )
+    tariff_reads = []
+
+    def no_native_client(request):
+        raise AssertionError("bootstrap must not construct a foreign provider client")
+
+    def tariffs():
+        tariff_reads.append("read")
+        return {("openai", "gpt-6-luna"): native}
+
+    monkeypatch.setattr(runtime_registry, "_RUNTIME_FACTORIES", {})
+    runtime_registry.register_channel_runtime(
+        "openai.persistent_workspace", no_native_client, tariffs=tariffs
+    )
+    expected = prices | {("openai", "gpt-6-luna"): native}
     events = []
     engines = []
     build = runtime_module.build_engine
@@ -1573,7 +1595,7 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
             owner = runtime.fleet_card_factory._service._owner()
             assert isinstance(owner, HostFleetPorts)
             assert owner.sessions is runtime.sessionmaker
-            assert owner.prices is prices if supplied_prices else dict(owner.prices) == prices
+            assert owner.prices is prices if supplied_prices else dict(owner.prices) == expected
             assert owner.markup == settings.billing.markup
             assert owner._deps is runtime.turn_deps
             assert owner._pool._tenant_cap == settings.fleet.max_concurrent_workers_per_tenant
@@ -1583,6 +1605,7 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
             assert runtime.fleet_card_factory is None
             assert runtime.turn_deps.state_store is None
         assert not events
+        assert tariff_reads == (["read"] if enabled and not supplied_prices else [])
     assert events == (["fleet"] if enabled else []) + [
         "outcomes",
         "notices",
