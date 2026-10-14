@@ -8,9 +8,12 @@ mention. The adapters run this regex before any I/O, so only a matching
 message pays the read of the flag.
 
 Matching is case-insensitive and Unicode-aware. The "@" must not follow a
-word character or another "@" (so ``me@daimon.example`` never matches) and
-the name must not run on into a word character or hyphen ("@Daimonic",
-"@Daimon-dev"). Code spans and blocks are not special: a name inside
+word character, "@" or "/" (``me@daimon.example``, ``https://example.com/@daimon``),
+and the name must not run on into a word character, a hyphen, a dotted domain
+or a "(" ("@Daimonic", "@Daimon-dev", "@daimon.example.com", "@Daimon (Staging)"
+for a bot named "Daimon"). A following word is prose ("@Daimon please"), so
+bots whose names share a prefix ("Daimon", "Daimon Helper") all answer
+"@Daimon Helper". Code spans and blocks are not special: a name inside
 backticks still matches, which keeps the rule one sentence long for admins.
 """
 
@@ -44,7 +47,7 @@ def name_variants(names: Iterable[str | None]) -> tuple[str, ...]:
 @lru_cache(maxsize=64)
 def _pattern(variants: tuple[str, ...]) -> re.Pattern[str]:
     alternation = "|".join(re.escape(variant) for variant in variants)
-    return re.compile(rf"(?<![\w@])@(?:{alternation})(?![\w-])", re.IGNORECASE)
+    return re.compile(rf"(?<![\w@/])@(?:{alternation})(?![\w-]|\.\w|\s*\()", re.IGNORECASE)
 
 
 def mentions_by_name(text: str, names: Iterable[str | None]) -> bool:

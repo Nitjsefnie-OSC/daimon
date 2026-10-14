@@ -32,11 +32,21 @@ def test_mentions_by_name_matches_case_insensitive_name_token(text: str) -> None
         "@Daimon-dev is another bot",
         "@Daim",
         "",
+        "@Daimon (Staging) is the other deployment",
+        "see https://example.com/@daimon",
+        "write to @daimon.example.com",
     ],
 )
 def test_mentions_by_name_rejects_near_misses(text: str) -> None:
-    """Emails, longer words, hyphenated names and bare names never match."""
+    """Emails, URLs, domains, longer words and longer names never match."""
     assert not mentions_by_name(text, ["Daimon"]), f"{text!r} must not count as a mention"
+
+
+def test_mentions_by_name_lets_a_following_word_through() -> None:
+    """A word after the name is prose, so a bot named by a prefix answers too."""
+    assert mentions_by_name("@Daimon Helper, go", ["Daimon"]), (
+        "'@Daimon please' must match, so '@Daimon Helper' does as well"
+    )
 
 
 def test_mentions_by_name_is_false_without_names() -> None:
