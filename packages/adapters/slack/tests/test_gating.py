@@ -131,7 +131,13 @@ def _channel_message(**overrides: Any) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     "overrides",
-    [{}, {"channel_type": "group"}, {"subtype": "file_share"}, {"thread_ts": "1.0"}],
+    [
+        {},
+        {"channel_type": "group"},
+        {"subtype": "file_share"},
+        {"thread_ts": "1.0"},
+        {"text": "&gt; ship it\n@daimon agreed?"},
+    ],
 )
 def test_plain_text_mention_event_admits_a_person_naming_the_bot(
     overrides: dict[str, Any],
@@ -154,6 +160,8 @@ def test_plain_text_mention_event_admits_a_person_naming_the_bot(
         ({"text": "Daimon, what changed?"}, "the name without an @"),
         ({"text": "see <https://example.com/u?name=@daimon>"}, "a name inside a link"),
         ({"text": "see <https://example.com|@daimon docs>"}, "a name in a link label"),
+        ({"text": "&gt; @daimon ship it\nagreed"}, "a name in a quoted line"),
+        ({"text": "> @daimon ship it\nagreed"}, "a name in an unescaped quoted line"),
     ],
 )
 def test_plain_text_mention_event_rejects(overrides: dict[str, Any], why: str) -> None:
