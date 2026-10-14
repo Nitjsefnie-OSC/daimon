@@ -208,6 +208,146 @@ async def test_cancelled_confirmation_does_not_change_the_setting(operator, monk
     assert await revisions(operator) is None
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_first_switch_revert_restores_default_or_only_previews_it(
+    operator, monkeypatch, dry_run
+):
+    from daimon.adapters.cli.commands import agents
+
+    rt, tenant, *_ = operator
+    await run(operator, accept_drops="memory,sandbox")
+    before = await revisions(operator)
+    assert before.local == 1 and before.previous_local is None
+    async with rt.sessionmaker() as db:
+        audit_before = await security_audit.list_events(
+            db, tenant_id=tenant.id, tool_name="agent_backend"
+        )
+    if dry_run:
+
+        def unexpected_confirmation(*args, **kwargs):
+            pytest.fail("A revert dry-run must return before confirmation")
+
+        monkeypatch.setattr(agents, "confirm_or_abort", unexpected_confirmation)
+    output = StringIO()
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=output, width=240),
+        name="Research",
+        backend=None,
+        yes=not dry_run,
+        as_json=True,
+        revert=True,
+        dry_run=dry_run,
+    )
+    result = json.loads(output.getvalue())
+    restored = await revisions(operator)
+    async with rt.sessionmaker() as db:
+        audit_after = await security_audit.list_events(
+            db, tenant_id=tenant.id, tool_name="agent_backend"
+        )
+    if dry_run:
+        assert result["target_backend"] == "anthropic"
+        assert restored == before and audit_after == audit_before
+    else:
+        assert result["backend"] is None and result["revision"] == before.local + 1
+        assert restored.backend is None and restored.previous_local == before.local
+        assert restored.declared_drops == () and restored.drop_consent is None
+        assert len(audit_after) == len(audit_before) + 1
+    assert all(request.method == "GET" for request in operator[-1])
+
+
+async def test_first_switch_revert_keeps_fresh_source_digest_guard(operator, monkeypatch):
+    from daimon.adapters.cli.commands import agents
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    rt, _, native, *_ = operator
+    await run(operator, accept_drops="memory,sandbox")
+    before = await revisions(operator)
+
+    def changed(*args, **kwargs):
+        native.system = "Source changed while confirming the first revert"
+
+    monkeypatch.setattr(agents, "confirm_or_abort", changed)
+    with pytest.raises(AgentBackendRefused, match="stale preview"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            backend=None,
+            yes=True,
+            as_json=False,
+            revert=True,
+        )
+    assert await revisions(operator) == before
+
+
+async def test_first_switch_revert_keeps_owner_revision_cas(operator, monkeypatch):
+    from daimon.core.channel_backend import AgentBackendRefused, AgentBackendService
+
+    rt, *_ = operator
+    await run(operator, accept_drops="memory,sandbox")
+    before = await revisions(operator)
+    original = AgentBackendService.revert
+
+    async def concurrent_clear(self, agent, actor, **options):
+        await self.clear_backend(
+            agent,
+            options["expected_revision"],
+            actor,
+            expected_preview_digest=options["expected_preview_digest"],
+        )
+        return await original(self, agent, actor, **options)
+
+    monkeypatch.setattr(AgentBackendService, "revert", concurrent_clear)
+    with pytest.raises(AgentBackendRefused, match="stale revision"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            backend=None,
+            yes=True,
+            as_json=False,
+            revert=True,
+        )
+    raced = await revisions(operator)
+    assert raced.local == before.local + 1 and raced.backend is None
+
+
+async def test_revert_refuses_an_explicitly_referenced_missing_revision(operator, monkeypatch):
+    from daimon.core.channel_backend import AgentBackendRefused, AgentBackendService
+
+    rt, *_ = operator
+    await run(operator, accept_drops="memory,sandbox")
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend="gemini",
+        yes=True,
+        as_json=False,
+        accept_drops="memory,sandbox",
+    )
+    before = await revisions(operator)
+    assert before.previous_local is not None
+
+    async def missing(self, agent, local):
+        assert local == before.previous_local
+        return None
+
+    monkeypatch.setattr(AgentBackendService, "revision", missing)
+    with pytest.raises(AgentBackendRefused, match="no previous revision"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            backend=None,
+            yes=True,
+            as_json=False,
+            revert=True,
+        )
+    assert await revisions(operator) == before
+
+
 async def test_revert_restores_the_real_previous_setting_through_the_owner(operator):
     rt, *_ = operator
     await run(operator, accept_drops="memory,sandbox")

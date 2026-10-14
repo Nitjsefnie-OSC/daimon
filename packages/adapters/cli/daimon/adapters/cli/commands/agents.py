@@ -696,12 +696,14 @@ async def agents_backend_change(
     )
     current_revision = await service.current(agent) if revert else None
     if revert:
-        if current_revision is None or current_revision.previous_local is None:
+        if current_revision is None:
             raise channel_backend.AgentBackendRefused("no_previous_revision")
-        previous = await service.revision(agent, current_revision.previous_local)
-        if previous is None:
-            raise channel_backend.AgentBackendRefused("no_previous_revision")
-        target = previous.backend
+        target = None
+        if current_revision.previous_local is not None:
+            previous = await service.revision(agent, current_revision.previous_local)
+            if previous is None:
+                raise channel_backend.AgentBackendRefused("no_previous_revision")
+            target = previous.backend
     preview = await service.preview(agent, target)
     preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
     if not as_json:
