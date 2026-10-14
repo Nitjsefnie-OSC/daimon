@@ -18,7 +18,6 @@ from daimon.core.neutral_resources import (
     AgentFleetGrant,
     WorkerPermissions,
     WorkerSpecRefused,
-    freeze_root_permissions,
     resolve_worker_spec,
 )
 from daimon.core.turn.admission import Admission
@@ -277,7 +276,6 @@ async def freeze_prepared_root(
         return
     persistence, origin_id = current_persistence.get(), current_origin_id.get()
     grant, source = prepared.admission.grant, prepared._source  # pyright: ignore[reportPrivateUsage]
-    loader = deps.fleet_root_grants
     if not (persistence and origin_id and grant and source):
         raise WorkerSpecRefused("origin", "unbound")
     scope, binding = persistence.scope, persistence.binding
@@ -298,34 +296,32 @@ async def freeze_prepared_root(
         raise WorkerSpecRefused("origin", "unbound")
     async with deps.sessionmaker() as db:
         policy = await load_access_policy(db, tenant_id=grant.tenant_id)
-    permissions = (
-        freeze_root_permissions(
-            await loader(grant, source), source, admission=grant, policy=policy, now=now()
-        )
-        if loader is not None
-        else fleet_root_permissions(
-            source,
-            grant,
-            value,
-            fleet=FleetFacts(
-                scope=scope,
-                root=binding.thread,
-                origin_id=origin_id,
-                account_id=prepared.admission.account_id,
-                run_id=uuid4(),
-                place=grant.run_place,
-                enabled=True,
-                active=True,
-            ),
-            policy=policy,
-            now=now(),
-            seal_ids=prepared.admission.origin_seal_ids,
-        )
+    if deps.fleet_root_grants is not None:
+        raise WorkerSpecRefused("origin", "unsupported")
+    permissions = fleet_root_permissions(
+        source,
+        grant,
+        value,
+        fleet=FleetFacts(
+            scope=scope,
+            root=binding.thread,
+            origin_id=origin_id,
+            account_id=prepared.admission.account_id,
+            run_id=uuid4(),
+            place=grant.run_place,
+            enabled=True,
+            active=True,
+        ),
+        policy=policy,
+        now=now(),
+        seal_ids=prepared.admission.origin_seal_ids,
     )
-    deadline = min(request.deadline, value.expires_at, permissions.limits.deadline)
-    budget = min(value.limits.budget_usd, permissions.limits.budget_usd)
-    limits = permissions.limits.model_copy(update={"deadline": deadline, "budget_usd": budget})
-    permissions = replace(permissions, limits=limits)
+    permissions = replace(
+        permissions,
+        limits=permissions.limits.model_copy(
+            update={"deadline": min(request.deadline, permissions.limits.deadline)}
+        ),
+    )
     environment = source_environment_record(prepared.admission.environment, scope)
     root = _FrozenRoot(
         intent_id=intent_id,

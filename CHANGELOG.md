@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep fleet outcome exports free of private worker specs and opaque native data while preserving result bindings and known failures.
 - Keep fleet outcome exports free of private worker specs and opaque native data while preserving result bindings and independently validated failure facts.
 - Retain finite, revocable per-agent fleet grants through the existing backend preference CAS and audit owner; backend changes preserve the current grant without restoring historical authority.
-- Prepare fleet workers from the current per-agent grant and exact retained root facts; refuse revoked authority and source drift. Keep the original request deadline and current grant budget in the retained worker ceiling.
+- Prepare fleet workers from the current per-agent grant and exact retained root facts; refuse revoked authority and source drift. Keep the original request deadline and current grant ceilings in retained worker authority; refuse installed permission loaders before allocation.
 
 - Compose finite per-agent fleet grants with captured, scoped source permissions through the existing worker normalization and resource-obligation checks.
 

@@ -2671,7 +2671,7 @@ does not derive authority from balance, pricing, mutable agent names or tool
 requests, and does not reserve funds or activate a run.
 
 
-Fleet roots are projected only when fleet orchestration is enabled and the host installs an explicit `TurnDeps.fleet_root_grants` loader. The loader supplies finite operator grants through the existing `WorkerPermissions` contract; tool bodies, cards, tenant balances and current model prices cannot supply them. Session preparation retains its scoped source capture privately. Before native input, the real turn joins its genuine card intent, active origin, original requester and accepted private binding under the existing lease, then uses `freeze_root_permissions` and the existing fleet/operation owners to retain one immutable root. Turns without a root intent, including ordinary turns with the loader installed, keep their normal input path. Missing prerequisites refuse; unconfigured turns perform no new capture or persistence.
+Fleet roots are projected only when fleet orchestration is enabled and the actual admitted agent has a current DB fleet grant. The captured-source constructor supplies finite authority through the existing `WorkerPermissions` contract; installed `TurnDeps.fleet_root_grants` loaders are refused when a grant exists. Tool bodies, cards, tenant balances and current model prices cannot supply authority. Session preparation retains its scoped source capture privately. Before native input, the real turn joins its genuine card intent, active origin, original requester and accepted private binding under the existing lease, then uses `freeze_root_permissions` and the existing fleet/operation owners to retain one immutable root. Turns without a root intent, including ordinary turns with the loader installed, keep their normal input path. Missing prerequisites refuse; unconfigured turns perform no new capture or persistence.
 
 `read_frozen_root` in `daimon.core.turn.runtime_manifest` takes the original scope and exactly one selector: the genuine card `intent_id` or verified native `origin_id`. A captured `run_id`, when provided, must match. Cards and authenticated tools consume the same record and fresh policy; recovered controls must provide their captured run. The lookup preserves the original scope principal and finite bounds, checks the current origin, intent, requester, binding and run, and refuses stale or foreign associations. Fresh read authorization cannot enlarge or replace the frozen authority. This seam does not install an operator grant policy or certify a live deployment.
 
@@ -2896,9 +2896,10 @@ current per-agent grant. A missing grant leaves ordinary root input unchanged.
 Revocation or replacement invalidates retained roots by their pinned epoch and
 grant digest. The frozen worker deadline is the minimum of the original request
 bound, grant expiry and finite permission duration; reconstruction cannot extend
-that bound. The retained worker budget is the minimum of the current grant and
-requested permission budget, including trusted loader overrides. The worker
-request reader joins the exact original run, origin,
+that bound. Worker budget, model choices and request ceilings come only from the current
+DB grant through the captured-source permission constructor. An installed
+permission loader is refused before allocation when a DB grant exists; loader
+narrowing is not supported. The worker request reader joins the exact original run, origin,
 account, binding, source revision and current policy; it refuses missing or
 legacy preparation facts and source or environment drift. It retains neutral
 facts, never SDK clients, transports, credential values or accounting callbacks.

@@ -125,31 +125,11 @@ async def test_stricter_caller_deadline_is_preserved(root_turn):
 
 async def default_source_turn(root_turn):
     from daimon.core.neutral_resources import AgentFleetGrant
-    from daimon.core.sessions import project_session_resources
-    from daimon.core.stores import agent_memory_stores
     from mux.contracts.ids import ModelRef
     from mux.profiles import backend_selection
 
     deps, prepared, _, intent, _, scope, _, transport = root_turn
     source = prepared._source
-    async with deps.sessionmaker.begin() as db:
-        await agent_memory_stores.insert_memory_store(
-            db,
-            tenant_id=source.tenant_id,
-            agent_id=source.agent_id,
-            memory_store_id="warm-root-memory",
-        )
-    source = await project_session_resources(
-        source,
-        agent=prepared.admission.agent,
-        environment=prepared.admission.environment,
-        session_factory=deps.sessionmaker,
-        tenant_id=source.tenant_id,
-        agent_uuid=source.agent_id,
-        account_id=prepared.admission.account_id,
-        resource_scope=scope,
-        memory_read_only=True,
-    )
     service = AgentBackendService(deps.sessionmaker, enabled=True)
     current = await service.read_fleet_grant(
         source.tenant_id, source.agent_id, now=datetime.now(UTC)
@@ -217,8 +197,12 @@ async def test_no_grant_keeps_uncaptured_ordinary_root_without_new_effects(root_
     deps, prepared, _, intent, _, scope, _, transport = root_turn
     await revoke(root_turn)
     before = len(transport.requests)
+
+    async def loader(_grant, _source):
+        raise AssertionError("ordinary input must not invoke a permission loader")
+
     value = (
-        replace(deps, fleet_root_grants=None),
+        replace(deps, fleet_root_grants=loader),
         replace(prepared, _source=None, _preparation=None),
         *root_turn[2:],
     )
@@ -453,15 +437,14 @@ async def test_after_source_await_refuses_before_environment_read(root_turn, cha
     ]
 
 
-@pytest.mark.parametrize("mode", ["default", "trusted_loader"])
-async def test_original_short_request_bound_survives_freeze_and_default_reader(root_turn, mode):
+async def test_original_short_request_bound_survives_freeze_and_default_reader(root_turn):
     from decimal import Decimal
 
     from daimon.core.fleet_orchestration import HostFleetPorts
     from daimon.core.stores import fleet
     from daimon.core.stores.fleet import WorkerPool
 
-    value = (await default_source_turn(root_turn))[0] if mode == "default" else root_turn
+    value = (await default_source_turn(root_turn))[0]
     deps, prepared, _, intent, _, scope, _, transport = value
     original = datetime.now(UTC) + timedelta(seconds=5)
     prepared = replace(prepared, _preparation=replace(prepared._preparation, deadline=original))
@@ -495,12 +478,11 @@ async def test_original_short_request_bound_survives_freeze_and_default_reader(r
         await ports.close()
 
 
-@pytest.mark.parametrize("mode", ["default", "trusted_loader"])
-async def test_expired_original_request_cannot_allocate_or_publish_authority(root_turn, mode):
+async def test_expired_original_request_cannot_allocate_or_publish_authority(root_turn):
     from daimon.core._models import FleetRun, MuxOperation
     from sqlalchemy import func, select
 
-    value = (await default_source_turn(root_turn))[0] if mode == "default" else root_turn
+    value = (await default_source_turn(root_turn))[0]
     deps, prepared, *_ = value
     prepared = replace(
         prepared,
@@ -554,7 +536,9 @@ async def test_expired_original_request_cannot_allocate_or_publish_authority(roo
 async def test_real_grant_bounds_trusted_loader_worker_budget(root_turn, requested):
     from decimal import Decimal
 
-    from daimon.core.stores import fleet
+    from daimon.core._models import FleetRun
+    from daimon.core.stores import mux_state
+    from sqlalchemy import func, select
 
     deps, prepared, grants, intent, _, scope, _, transport = root_turn
     service = AgentBackendService(deps.sessionmaker, enabled=True)
@@ -565,21 +549,164 @@ async def test_real_grant_bounds_trusted_loader_worker_budget(root_turn, request
     grants[0] = replace(
         grants[0], limits=grants[0].limits.model_copy(update={"budget_usd": Decimal(requested)})
     )
+
+    async def loader(_grant, _source):
+        return grants[0]
+
+    deps = replace(deps, fleet_root_grants=loader)
     before = len(transport.requests)
-    await freeze(root_turn)
-    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
-    expected = min(Decimal(requested), current.limits.budget_usd)
-    run, _ = await fleet.run_status(
-        deps.sessionmaker, tenant_id=prepared._source.tenant_id, run_id=parent.fleet.run_id
-    )
-    assert parent.limits.budget_usd == run.total_budget_usd == expected
-    assert parent.subject == prepared.admission.grant.subject and not parent.subject.is_admin
-    request = await read_frozen_preparation(
-        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
-    )
-    assert request.source.source.ref == parent.source_agents[0]
-    assert all(item.method == "GET" for item in transport.requests[before:])
+    with pytest.raises(WorkerSpecRefused, match="origin: unsupported"):
+        await freeze((deps, prepared, *root_turn[2:]))
+    assert len(transport.requests) == before
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == prepared._source.tenant_id)
+            )
+            == 0
+        )
     unchanged = await service.read_fleet_grant(
         prepared._source.tenant_id, prepared._source.agent_id, now=datetime.now(UTC)
     )
     assert unchanged == current
+
+
+@pytest.mark.parametrize("dimension", ["duration", "max_turns", "model", "narrower"])
+async def test_installed_loader_cannot_publish_authority_from_evaluator_probe(root_turn, dimension):
+    from decimal import Decimal
+
+    from daimon.core._models import FleetRun, MuxOperation
+    from daimon.core.neutral_resources import AgentFleetGrant
+    from mux.contracts.ids import ModelRef
+    from sqlalchemy import func, select
+
+    deps, prepared, grants, intent, _, scope, _, transport = root_turn
+    source = prepared._source
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    now = datetime.now(UTC)
+    current = await service.read_fleet_grant(source.tenant_id, source.agent_id, now=now)
+    assert current is not None
+    if dimension == "duration":
+        far = now + timedelta(minutes=40)
+        value = AgentFleetGrant.model_validate(
+            current.model_dump() | {"limits": current.limits.model_copy(update={"deadline": far})}
+        )
+        actor = BackendActor(
+            source.tenant_id, prepared.admission.account_id, Subject(is_admin=True)
+        )
+        preview = await service.preview_fleet_grant(source, value, now=now)
+        await service.set_fleet_grant(
+            source,
+            value,
+            preview.setting_revision,
+            actor,
+            expected_preview_digest=preview.digest,
+            now=now,
+        )
+        grants[0] = replace(grants[0], limits=grants[0].limits.model_copy(update={"deadline": far}))
+        prepared = replace(prepared, _preparation=replace(prepared._preparation, deadline=far))
+    elif dimension == "max_turns":
+        grants[0] = replace(grants[0], limits=grants[0].limits.model_copy(update={"max_turns": 40}))
+    elif dimension == "model":
+        from mux.profiles import backend_selection
+
+        model = ModelRef(provider="openai", id="gpt-6-luna")
+        grants[0] = replace(
+            grants[0],
+            spec=grants[0].spec.model_copy(
+                update={
+                    "model": model,
+                    "declared_drops": ("memory", "sandbox", "tools"),
+                }
+            ),
+            backend_grants=(backend_selection("openai").model_copy(update={"model": model.id}),),
+            models=(model,),
+            resources=(),
+            environment=None,
+        )
+    else:
+        grants[0] = replace(
+            grants[0],
+            limits=grants[0].limits.model_copy(
+                update={
+                    "max_turns": 1,
+                    "budget_usd": Decimal("0.5"),
+                    "deadline": now + timedelta(seconds=5),
+                }
+            ),
+        )
+    called = False
+
+    async def loader(_grant, _source):
+        nonlocal called
+        called = True
+        return grants[0]
+
+    deps = replace(deps, fleet_root_grants=loader)
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused) as refused:
+        await freeze((deps, prepared, grants, *root_turn[3:]))
+    assert (refused.value.field, refused.value.reason) == ("origin", "unsupported")
+    assert not called and len(transport.requests) == before
+    async with deps.sessionmaker() as db:
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == source.tenant_id)
+            )
+            == 0
+        )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(MuxOperation)
+                .where(MuxOperation.tenant_id == source.tenant_id)
+            )
+            == 0
+        )
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+
+
+async def test_default_grant_duration_and_turn_count_bound_the_frozen_run(root_turn):
+    from daimon.core.neutral_resources import AgentFleetGrant
+    from daimon.core.stores import fleet
+
+    deps, prepared, _, intent, _, scope, _, transport = root_turn
+    source = prepared._source
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    now = datetime.now(UTC)
+    far = now + timedelta(minutes=40)
+    current = await service.read_fleet_grant(source.tenant_id, source.agent_id, now=now)
+    value = AgentFleetGrant.model_validate(
+        current.model_dump()
+        | {
+            "limits": current.limits.model_copy(update={"deadline": far}),
+        }
+    )
+    actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
+    preview = await service.preview_fleet_grant(source, value, now=now)
+    await service.set_fleet_grant(
+        source,
+        value,
+        preview.setting_revision,
+        actor,
+        expected_preview_digest=preview.digest,
+        now=now,
+    )
+    prepared = replace(prepared, _preparation=replace(prepared._preparation, deadline=far))
+    before = len(transport.requests)
+    await freeze((deps, prepared, *root_turn[2:]))
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    run, _ = await fleet.run_status(
+        deps.sessionmaker, tenant_id=source.tenant_id, run_id=parent.fleet.run_id
+    )
+    assert parent.limits.deadline == run.deadline_at
+    assert 0 < (parent.limits.deadline - now).total_seconds() <= 125
+    assert parent.limits.max_turns == current.limits.max_turns == 4
+    assert parent.backend_grants == current.backends and parent.models == current.models
+    assert len(transport.requests) == before
