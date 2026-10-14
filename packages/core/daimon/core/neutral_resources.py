@@ -15,7 +15,7 @@ import zipfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
@@ -57,6 +57,7 @@ from daimon.core.stores.neutral_catalog import (
 )
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
+from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.ports import Agents, ManagedAgents
 from mux.contracts.profile import SUPPORTED, Capability, Profile
@@ -72,7 +73,12 @@ from mux.contracts.resources import (
     ToolSpec,
 )
 from mux.errors import InvalidConfig, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles import get_profile, native_agent_tools, neutral_catalog_profile_for
+from mux.profiles import (
+    MANAGED_AGENTS,
+    get_profile,
+    native_agent_tools,
+    neutral_catalog_profile_for,
+)
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
@@ -1146,6 +1152,103 @@ def _worker_environment(requested: EnvironmentSpec | None, granted: EnvironmentS
         )
     ):
         raise WorkerSpecRefused("sandbox", "not_subset")
+
+
+def fleet_root_permissions(
+    source: BackendAgent,
+    admission: AdmissionGrant,
+    grant: AgentFleetGrant,
+    *,
+    fleet: FleetFacts,
+    policy: TenantAccessPolicy,
+    now: datetime,
+    seal_ids: frozenset[str] = frozenset(),
+) -> WorkerPermissions:
+    """Compose captured source; caller joins origin/binding and rechecks grant epoch."""
+    from daimon.core.memory_resource import memory_mount
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+    from mux.drivers.anthropic.schemas import agent_tools
+
+    if now.utcoffset() is None:
+        raise WorkerSpecRefused("deadline", "unsupported")
+    try:
+        grant = AgentFleetGrant.model_validate(grant.model_dump())
+    except ValueError:
+        raise WorkerSpecRefused("budget", "unsupported") from None
+    if grant.epoch <= 0 or grant.expires_at <= now:
+        raise WorkerSpecRefused("origin", "stale")
+    actual, effective, environment = source.source, source.effective_spec, source.environment
+    if (
+        actual is None
+        or effective is None
+        or environment is None
+        or environment.native is None
+        or environment.lifecycle != "active"
+        or environment.archived_at is not None
+        or environment.ref.kind != "environment"
+        or environment.ref.provider != actual.ref.provider
+        or environment.ref.account_scope_id != actual.ref.account_scope_id
+        or (environment.ref.tenant_id, environment.ref.account_id)
+        != (fleet.scope.tenant_id, fleet.scope.account_id)
+    ):
+        raise WorkerSpecRefused("origin", "unbound")
+    tools = effective.tools
+    try:
+        for extension in effective.extensions or ():
+            if extension.namespace == f"{MANAGED_AGENTS.provider}.agent_tools":
+                tools = agent_tools(extension).intent()
+    except ValueError:
+        raise WorkerSpecRefused("tools", "unsupported") from None
+    # The complete capture remains the input to the existing obligation classifier.
+    spec = effective.model_copy(update={"extensions": None, "tools": tools})
+    resources = source.resource_requirements
+    read_only = source.memory_read_only is not False
+    if source.memory_store_id is not None:
+        mount = cast(JsonValue, memory_mount(source.memory_store_id, read_only=read_only))
+        resources += (
+            ResourceBinding(
+                id=source.memory_store_id,
+                kind="native",
+                resource=actual.ref.model_copy(
+                    update={
+                        "kind": "memory_store",
+                        "id": source.memory_store_id,
+                        "account_id": fleet.scope.account_id,
+                    }
+                ),
+                native=ExtensionConfig(
+                    namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
+                    version=1,
+                    value={"resource": mount},
+                ),
+            ),
+        )
+    duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
+    deadline = min(grant.expires_at, now + timedelta(seconds=duration))
+    limits = grant.limits.model_copy(update={"deadline": deadline})
+    return freeze_root_permissions(
+        WorkerPermissions(
+            fleet=fleet,
+            subject=admission.subject,
+            agent=admission.agent,
+            spec=spec,
+            base_system=spec.system or "",
+            backend_grants=grant.backends,
+            models=grant.models,
+            limits=limits,
+            resources=resources,
+            environment=environment.spec,
+            source_agents=(actual.ref,),
+            source_revisions=((actual.ref, actual.revision),),
+            seal_ids=seal_ids,
+            memory_read_only=read_only,
+            agent_id=source.agent_id,
+        ),
+        source,
+        admission=admission,
+        policy=policy,
+        now=now,
+    )
 
 
 def freeze_root_permissions(

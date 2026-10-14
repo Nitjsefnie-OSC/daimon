@@ -1363,7 +1363,9 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
         lambda url, **kwargs: build_test_engine(url, db_schema, **kwargs),
     )
     async with runtime_module.build_runtime(
-        settings, fleet_service=shared, fleet_root_grants=deps.fleet_root_grants
+        settings,
+        fleet_service=shared,
+        fleet_parent_loader=DiscordFleetCardFactory.from_runtime(shared, deps)._resolve,
     ) as runtime:
         assert runtime.turn_deps.fleet_root_grants is deps.fleet_root_grants
         assert isinstance(runtime.fleet_card_factory, DiscordFleetCardFactory)

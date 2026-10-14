@@ -2671,7 +2671,7 @@ does not derive authority from balance, pricing, mutable agent names or tool
 requests, and does not reserve funds or activate a run.
 
 
-Fleet roots are projected only when fleet orchestration is enabled and the host installs an explicit `TurnDeps.fleet_root_grants` loader. The loader supplies finite operator grants through the existing `WorkerPermissions` contract; tool bodies, cards, tenant balances and current model prices cannot supply them. Session preparation retains its scoped source capture privately. Before native input, the real turn joins its genuine card intent, active origin, original requester and accepted private binding under the existing lease, then uses `freeze_root_permissions` and the existing fleet/operation owners to retain one immutable root. Turns without a root intent, including ordinary turns with the loader installed, keep their normal input path. Missing prerequisites refuse; unconfigured turns perform no new capture or persistence.
+Fleet roots are projected only when fleet orchestration is enabled and the actual admitted agent has a current DB fleet grant. The captured-source constructor supplies finite authority through the existing `WorkerPermissions` contract; installed `TurnDeps.fleet_root_grants` loaders are refused when a grant exists. Tool bodies, cards, tenant balances and current model prices cannot supply authority. Session preparation retains its scoped source capture privately. Before native input, the real turn joins its genuine card intent, active origin, original requester and accepted private binding under the existing lease, then uses `freeze_root_permissions` and the existing fleet/operation owners to retain one immutable root. Turns without a root intent, including ordinary turns with the loader installed, keep their normal input path. Missing prerequisites refuse; unconfigured turns perform no new capture or persistence.
 
 `read_frozen_root` in `daimon.core.turn.runtime_manifest` takes the original scope and exactly one selector: the genuine card `intent_id` or verified native `origin_id`. A captured `run_id`, when provided, must match. Cards and authenticated tools consume the same record and fresh policy; recovered controls must provide their captured run. The lookup preserves the original scope principal and finite bounds, checks the current origin, intent, requester, binding and run, and refuses stale or foreign associations. Fresh read authorization cannot enlarge or replace the frozen authority. This seam does not install an operator grant policy or certify a live deployment.
 
@@ -2864,3 +2864,47 @@ canonical cohort/key/address validation and snapshot coherence remain exporter
 checks. Reads project persisted columns without flushing or overwriting caller
 objects; effective dirty or deleted state for its source tables is refused by
 the shared store reader. Reading this audit never claims or runs a wake.
+
+## Captured root permission composition
+
+`neutral_resources.fleet_root_permissions` derives the existing `WorkerPermissions`
+from an owner-captured `BackendAgent`, its actual `AdmissionGrant`, a current scoped
+`AgentFleetGrant`, and the caller's joined `FleetFacts`. The caller rechecks the grant
+epoch and expiry around awaited reads and validates the original origin/binding.
+The constructor preserves the exact admitted subject/place/category, source revision,
+environment, seals, and paired backend/model ceilings, including explicit model pins.
+It delegates normalization and source-obligation checking to `freeze_root_permissions`.
+
+The common permission deadline is conservatively bounded by grant expiry and the
+smaller of the finite run/worker durations and the existing turn ceiling.
+Worker budget and request ceilings come
+from the grant's existing `WorkerLimits`; funding remains a separate owner decision.
+The caller retains worker counts, grant epoch, and root-input controls through the
+existing run/context. This constructor does not impose a whole-root financial cap.
+
+Only a captured, already-bound warm memory store can become a mount. It uses the
+existing memory mount codec and exact caller resource scope, with the captured access
+mode; there is no provisioning. The complete source remains available to the existing
+obligation classifier after represented native custom tools are projected. Credentials,
+unsupported MCP/native controls, missing memory, repositories, and opaque requirements
+remain typed refusals. No obligations or declared drops are inferred or filtered.
+This API alone does not install runtime fleet execution or prove main defaults portable.
+
+
+An enabled fleet freezes worker authority from the actual admitted agent's
+current per-agent grant. A missing grant leaves ordinary root input unchanged.
+Revocation or replacement invalidates retained roots by their pinned epoch and
+grant digest. The frozen worker deadline is the minimum of the original request
+bound, grant expiry and finite permission duration; reconstruction cannot extend
+that bound. Worker budget, model choices and request ceilings come only from the current
+DB grant through the captured-source permission constructor. An installed
+permission loader is refused before allocation when a DB grant exists; loader
+narrowing is not supported. The worker request reader joins the exact original run, origin,
+account, binding, source revision and current policy; it refuses missing or
+legacy preparation facts and source or environment drift. It retains neutral
+facts, never SDK clients, transports, credential values or accounting callbacks.
+
+The grant's budget ceiling covers workers only. The ordinary root's requests
+are separate; fleet installation does not establish a whole-root provider bill
+cap. Root financial controls require their own installation before a bounded
+root-and-workers run.

@@ -663,6 +663,9 @@ class HostFleetPorts:
         pool: WorkerPool | None = None,
     ) -> None:
         self.sessions, self.prices, self.markup = sessions, prices, markup
+        self._deps = deps
+        if preparation is None and deps is not None and deps.fleet_enabled and pool is not None:
+            preparation = self._prepare_original
         self._preparation, self._pool = preparation, pool
         self._dispatch = dispatch
         if dispatch is None and preparation is not None and pool is not None:
@@ -672,7 +675,18 @@ class HostFleetPorts:
         self._watches: dict[
             uuid.UUID, tuple[dict[uuid.UUID, asyncio.Event], asyncio.Event, asyncio.Task[None]]
         ] = {}
-        self._deps = deps
+
+    async def _prepare_original(self, parent: WorkerPermissions) -> ProviderPreparationRequest:
+        from daimon.core.turn.runtime_manifest import read_frozen_preparation
+
+        if self._deps is None or not self._deps.fleet_enabled:
+            raise FleetRefused("prerequisites_unavailable")
+        return await read_frozen_preparation(
+            self._deps,
+            parent,
+            deadline=parent.limits.deadline,
+            now=lambda: datetime.now(UTC),
+        )
 
     async def _dispatch_worker(
         self,
