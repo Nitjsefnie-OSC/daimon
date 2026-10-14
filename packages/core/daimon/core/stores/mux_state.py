@@ -759,20 +759,35 @@ async def append_events(
 
 
 async def read_events(
-    session: AsyncSession, session_id: str, *, after: int = -1, limit: int = 1000
+    session: AsyncSession,
+    session_id: str,
+    *,
+    after: int = -1,
+    limit: int = 1000,
+    read_persisted: bool = False,
 ) -> list[Event]:
-    bodies = await session.scalars(
+    statement = (
         select(Journal.event)
         .where(Journal.session_id == session_id, Journal.sequence > after)
         .order_by(Journal.sequence)
         .limit(limit)
     )
+    bodies = (
+        (await read_persisted_columns(session, statement)).scalars()
+        if read_persisted
+        else await session.scalars(statement)
+    )
     return [Event.model_validate(body) for body in bodies]
 
 
-async def projection(session: AsyncSession, session_id: str) -> ProjectionSnapshot | None:
-    body = await session.scalar(
-        select(JournalSession.projection).where(JournalSession.session_id == session_id)
+async def projection(
+    session: AsyncSession, session_id: str, *, read_persisted: bool = False
+) -> ProjectionSnapshot | None:
+    statement = select(JournalSession.projection).where(JournalSession.session_id == session_id)
+    body = (
+        (await read_persisted_columns(session, statement)).scalar_one_or_none()
+        if read_persisted
+        else await session.scalar(statement)
     )
     return ProjectionSnapshot.model_validate(body) if body is not None else None
 
