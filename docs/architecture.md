@@ -400,10 +400,11 @@ adapter first runs the pure matcher in `daimon.core.name_mentions` on a
 person's channel or thread message: "@" plus a bot name, case-insensitive,
 any whitespace between its words, not after a word character, "@" or "/"
 and not running on into a word character, hyphen, dotted domain or "(";
-"Name (Suffix)" also matches "@Name". A following word does not stop it, so
-bots whose names share a prefix all answer the longer one. Bots, webhooks,
-DMs, messages that already carry a real mention, Slack `<...>` links and
-Teams reply quotes never match. Only a match pays one read of the switch,
+"Name (Suffix)" also matches "@Name". The price is that "@Name (urgent)" and
+"@Name.Thanks" are ignored. A following word does not stop it, so bots whose
+names share a prefix all answer the longer one. Bots, webhooks, DMs, messages
+that already carry a real mention, Slack `<...>` links and `>` quote lines,
+and Teams reply quotes never match. Only a match pays one read of the switch,
 and a failed read counts as off. With it on, Discord continues down the
 mention path (configured name, account name and server nickname), Slack runs
 the `app_mention` handler for the `message` event with the switch, read

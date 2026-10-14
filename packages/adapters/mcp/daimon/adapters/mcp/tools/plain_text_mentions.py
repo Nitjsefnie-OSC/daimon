@@ -86,7 +86,9 @@ def register_plain_text_mentions_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         contains your name after "@" as plain text (any case, for example a
         pasted prompt or a mention typed on a phone without picking you from
         the list) is answered as if they had mentioned you. Messages from
-        bots and webhooks never count, and direct messages are unchanged. Off
+        bots and webhooks never count, and direct messages are unchanged. So
+        that suffixes and domains never match, a name followed by "(" or by a
+        dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks"). Off
         by default. Read the returned ``note`` back to the user.
         """
         return await _set_plain_text_mentions_impl(runtime, await _auth(ctx), enabled)

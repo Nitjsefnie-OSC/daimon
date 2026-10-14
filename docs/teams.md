@@ -46,7 +46,9 @@ is supported; government and China clouds use other Bot Framework hosts.
   gets unprompted replies (below). When an admin turned on plain-text
   mentions (`set_plain_text_mentions`), a person's post or reply that types
   `@` and the bot's name without picking it from the list counts as a
-  mention too, the name dropped from the text as an @mention is.
+  mention too, the name dropped from the text as an @mention is. A name
+  followed by "(" or by a dot and a letter is ignored ("@Daimon (urgent)",
+  "@Daimon.Thanks"), as are names inside a reply quote.
 - **Private and shared channels** work like standard ones once the app is in
   them, except that Teams sends the bot only the private channel posts that
   @mention it: there a Reply on a bot message needs a mention too, a typed
