@@ -1,10 +1,10 @@
 """Controlled native roots keep one original hold and count real input claims."""
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -484,3 +484,121 @@ async def test_controlled_recovery_refuses_successor_native_allocation(root_turn
         )
     assert refused.value.field == "native_budget_usd"
     assert transport.requests == transport.requests[:before]
+
+
+async def test_claim_refuses_once_database_clock_passes_prep_deadline(root_turn):
+    """The claim-time deadline recheck (`runtime_manifest.py:477-478`) compares
+    `controls["deadline"]` against the REAL database clock -- a distinct guard
+    from `guard()`'s own `remaining_s`/grant-digest recheck, which both run on
+    the python-side `request.now()`. Hold the grant/epoch/digest fixed and give
+    `request.now()` a fixed reading that never trips `remaining_s`, but pin the
+    prep's own deadline far in the past relative to the database's real wall
+    clock: only the explicit `database_clock(db)` comparison can catch that.
+    """
+    deps, prepared, _, intent, _, scope, binding, transport = root_turn
+    source = prepared._source
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    grant = await service.read_fleet_grant(source.tenant_id, source.agent_id, now=datetime.now(UTC))
+    grant = grant.model_copy(
+        update={"native_root_budget_usd": Decimal("0.03"), "root_cash_budget_usd": Decimal("0.06")}
+    )
+    preview = await service.preview_fleet_grant(source, grant, now=datetime.now(UTC))
+    await service.set_fleet_grant(
+        source,
+        grant,
+        preview.setting_revision,
+        BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True)),
+        expected_preview_digest=preview.digest,
+        now=datetime.now(UTC),
+    )
+    await credit(root_turn)
+    async with deps.sessionmaker.begin() as db:
+        await db.execute(
+            delete(ProviderBindingSlot).where(
+                ProviderBindingSlot.binding_id == binding.id,
+                ProviderBindingSlot.tenant_id == source.tenant_id,
+            )
+        )
+    frozen_now = datetime(2000, 1, 1, tzinfo=UTC)
+    tight_deadline = frozen_now + timedelta(seconds=30)
+    base_request = replace(
+        prepared._preparation,
+        deps=replace(deps, turn_path="mux"),
+        deadline=tight_deadline,
+        now=lambda: frozen_now,
+    )
+    request = await prepare_controlled_root(base_request, intent.id)
+    assert request.root_controls is not None
+    assert request.root_controls["deadline"] == tight_deadline.isoformat()
+
+    await deps.state_store.put_binding(binding, expected_generation=0)
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused) as denied:
+        await send(root_turn, request, "claimed-after-db-deadline")
+    assert (denied.value.field, denied.value.reason) == ("origin", "stale")
+    assert len(transport.requests) == before, "no native POST must escape a stale-deadline refusal"
+    root = await root_record(root_turn)
+    assert root.result["root_finance"]["input_keys"] == []
+    assert root.result["root_finance"]["exposure_usd"] == "0.06"
+
+
+async def test_crash_resumed_claim_retains_first_observer_outcome_without_double_write(root_turn):
+    """First-observer retention and the `if fresh:` write gate around
+    `update_fleet_root_finance` (`runtime_manifest.py:498-513`).
+
+    Simulates a crash/resume: `root_claim_check` already wrote the key's
+    `input_keys`/`input_outcomes` entry for an earlier observer, but the
+    native POST that key corresponds to never confirmed (so nothing short
+    circuits the retry at the `TurnPersistence` layer). Driving a claim for
+    that SAME key with a DIFFERENT current observer active must retain the
+    original outcome untouched and must not duplicate the key or re-debit --
+    only the `if fresh:` gate stops a second write.
+    """
+    deps, prepared, _, _, origin, scope, binding, transport = root_turn
+    request = await select_controls(root_turn)
+    await deps.state_store.put_binding(binding, expected_generation=0)
+
+    operation_key = "crash-resume-key"
+    # `TurnPersistence.mutate` namespaces the claim key it hands `root_claim_check`
+    # as `f"{operation_key}:{kind}:{attempt}"` -- match that so the seeded entry
+    # lines up with the key the resumed `send()` below will actually claim.
+    key = f"{operation_key}:send:0"
+    first_outcome_id = uuid4()
+    original = await root_record(root_turn)
+    finance = original.result["root_finance"]
+    assert finance["input_keys"] == []
+    async with deps.sessionmaker.begin() as db:
+        await mux_state.update_fleet_root_finance(
+            db,
+            scope,
+            origin_id=origin.id,
+            root_finance={
+                **finance,
+                "input_keys": [key],
+                "input_outcomes": {key: str(first_outcome_id)},
+            },
+        )
+    seeded = await root_record(root_turn)
+    assert seeded.result["root_finance"]["input_outcomes"][key] == str(first_outcome_id)
+
+    different_observer = TurnObservation(
+        deps.sessionmaker,
+        UUID(scope.tenant_id),
+        "discord",
+        account_id=UUID(scope.account_id),
+        session_id=prepared.ma_session_id,
+    )
+    assert str(different_observer.id) != str(first_outcome_id)
+
+    before = len(transport.requests)
+    await send(root_turn, request, operation_key, observer=different_observer)
+    posts = [r for r in transport.requests[before:] if r.method == "POST"]
+    assert len(posts) == 1, "the resumed (previously-unconfirmed) native send must still go out"
+
+    record = await root_record(root_turn)
+    finance_after = record.result["root_finance"]
+    assert finance_after["input_keys"] == [key], "resumed claim must not duplicate the counted key"
+    assert finance_after["input_outcomes"] == {key: str(first_outcome_id)}, (
+        "first-observer outcome must survive a resumed claim under a different current observer"
+    )
+    assert finance_after["exposure_usd"] == finance["exposure_usd"], "no extra debit on resume"
