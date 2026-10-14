@@ -230,3 +230,17 @@ async def test_fleet_mutations_carry_consent_without_resurrecting_a_revoked_gran
     )
     assert restored.drop_consent == original.drop_consent
     assert restored.fleet_grant is None
+
+
+async def test_revert_cannot_add_consent_to_an_unconfirmed_original(switching):
+    service, agent, actor, sessions, _, reads = switching
+    legacy = AgentBackendService(sessions, enabled=True)
+    original = await legacy.set_backend(agent, "openai", 0, actor)
+    assert original.drop_consent is None
+    await legacy.clear_backend(agent, original.local, actor)
+    before = await service.audit(agent.tenant_id)
+    with pytest.raises(AgentBackendRefused, match="re confirm"):
+        await service.revert(agent, actor, expected_revision=2)
+    assert len(reads) == 1
+    assert (await service.current(agent)).local == 2
+    assert await service.audit(agent.tenant_id) == before

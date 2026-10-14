@@ -1225,22 +1225,29 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         ):
             async with request.deps.sessionmaker() as session:
-                setting = await mux_state.get_config_agent_revision(
-                    session,
-                    revision,
-                    agent_id=agent_id,
-                )
-                provisional = request.admission.backend_agent_revision
-                if provisional is not None:
-                    if (
-                        await mux_state.get_config_revision(
-                            session, revision.channel, revision.local
-                        )
-                        is None
-                    ):
-                        setting = await agent_backends.current(session, request.tenant_id, agent_id)
-                    if setting != provisional or setting is None or setting.drop_consent is None:
-                        raise AgentBackendRefused("re_confirm")
+                with session.no_autoflush:
+                    setting = await mux_state.get_config_agent_revision(
+                        session,
+                        revision,
+                        agent_id=agent_id,
+                    )
+                    provisional = request.admission.backend_agent_revision
+                    if provisional is not None:
+                        if (
+                            await mux_state.get_config_revision(
+                                session, revision.channel, revision.local
+                            )
+                            is None
+                        ):
+                            setting = await agent_backends.current(
+                                session, request.tenant_id, agent_id, persisted=True
+                            )
+                        if (
+                            setting != provisional
+                            or setting is None
+                            or setting.drop_consent is None
+                        ):
+                            raise AgentBackendRefused("re_confirm")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
     source = await asyncio.wait_for(
         capture_preparation_source(request, fresh=True)
