@@ -13,19 +13,27 @@ import httpx
 import pytest
 from daimon.core._models import FleetRun, MuxOperation
 from daimon.core.authz import Subject, Surface, build_agent_ref
-from daimon.core.channel_backend import load_backend_agent
+from daimon.core.channel_backend import AgentBackendService, BackendActor, load_backend_agent
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.neutral_resources import WorkerSpecRefused
+from daimon.core.neutral_resources import AgentFleetGrant, WorkerSpecRefused, fleet_root_permissions
 from daimon.core.scope import ResolvedConfig
+from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
 from daimon.core.session_ports_compat import create_session_record
 from daimon.core.sessions import project_session_resources
-from daimon.core.stores import access_policy, fleet, mux_state, turn_card_intents, turn_origins
+from daimon.core.stores import (
+    access_policy,
+    agent_memory_stores,
+    fleet,
+    mux_state,
+    turn_card_intents,
+    turn_origins,
+)
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
-from daimon.core.turn.prepare import PreparedTurn
+from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtime_manifest import freeze_prepared_root, read_frozen_root
 from daimon.core.turn_origin import turn_origin
@@ -56,7 +64,7 @@ async def root_turn(db_preflight, db_nullpool_engine):
             db, tenant=tenant, account=account, platform="discord", external_id="requester"
         )
         await access_policy.set_access_policy(db, tenant_id=tenant.id, policy=POLICY)
-    root = parent("openai")
+    root = parent("anthropic")
     scope = resource_scope(
         tenant_id=str(tenant.id), account_id=str(account.id), authorization_id="admitted-turn"
     )
@@ -78,6 +86,11 @@ async def root_turn(db_preflight, db_nullpool_engine):
         "GET",
         r"/v1/agents/root-source",
         lambda request, match: httpx.Response(200, json=native.model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        rf"/v1/environments/{environment.id}",
+        lambda request, match: httpx.Response(200, json=environment.model_dump(mode="json")),
     )
     router.add(
         "POST",
@@ -120,6 +133,13 @@ async def root_turn(db_preflight, db_nullpool_engine):
         captured = await load_backend_agent(
             client, sm, tenant_id=tenant.id, agent_name="root", actual_agent=actual
         )
+        async with sm.begin() as db:
+            await agent_memory_stores.insert_memory_store(
+                db,
+                tenant_id=tenant.id,
+                agent_id=captured.agent_id,
+                memory_store_id="warm-root-memory",
+            )
         captured = await project_session_resources(
             captured,
             agent=actual,
@@ -147,7 +167,7 @@ async def root_turn(db_preflight, db_nullpool_engine):
                 "tools": (),
                 "skills": (),
                 "mcp_servers": (),
-                "declared_drops": ("memory", "sandbox", "tools"),
+                "declared_drops": (),
             }
         )
         subject = Subject(platform_user_id="requester")
@@ -205,8 +225,34 @@ async def root_turn(db_preflight, db_nullpool_engine):
                 source_agents=(captured.source.ref,),
                 source_revisions=((captured.source.ref, captured.source.revision),),
                 limits=root.limits.model_copy(
-                    update={"deadline": datetime.now(UTC) + timedelta(minutes=10)}
+                    update={"deadline": datetime.now(UTC) + timedelta(seconds=120)}
                 ),
+            )
+            grant_service = AgentBackendService(sm, enabled=True)
+            admin = BackendActor(tenant.id, account.id, Subject(is_admin=True))
+            admin_value = AgentFleetGrant(
+                max_workers=8,
+                choices=tuple(
+                    (backend, model)
+                    for backend in root.backend_grants
+                    for model in root.models
+                    if backend.backend == model.provider
+                ),
+                limits=root.limits,
+                max_run_seconds=600,
+                max_worker_seconds=120,
+                max_root_turns=3,
+            )
+            preview = await grant_service.preview_fleet_grant(
+                captured, admin_value, now=datetime.now(UTC)
+            )
+            await grant_service.set_fleet_grant(
+                captured,
+                admin_value,
+                0,
+                admin,
+                expected_preview_digest=preview.digest,
+                now=datetime.now(UTC),
             )
             store = mux_state.PostgresStateStore(sm)
             binding = ProviderBinding(
@@ -220,16 +266,25 @@ async def root_turn(db_preflight, db_nullpool_engine):
                 legacy_account_id=str(account.id),
             )
             await store.put_binding(binding, expected_generation=0)
+            admin_value = await grant_service.read_fleet_grant(
+                tenant.id, captured.agent_id, now=datetime.now(UTC)
+            )
+            assert admin_value is not None
+            root = fleet_root_permissions(
+                captured,
+                grant,
+                admin_value,
+                fleet=root.fleet,
+                policy=POLICY,
+                now=datetime.now(UTC),
+            )
             grants = [root]
-
-            async def load(_grant, _source):
-                return grants[0]
 
             async def record(*, event):
                 return None
 
             deps = replace(
-                deps_for(client, sm), fleet_enabled=True, fleet_root_grants=load, state_store=store
+                deps_for(client, sm), fleet_enabled=True, fleet_root_grants=None, state_store=store
             )
             backend = managed_agents(
                 client, scope=scope, resources=frozenset({("session", acknowledged.id)})
@@ -246,6 +301,21 @@ async def root_turn(db_preflight, db_nullpool_engine):
                 session_ref=resource_ref(backend, "session", acknowledged.id, scope=scope),
                 _scope=scope,
                 _source=captured,
+                _preparation=ProviderPreparationRequest(
+                    deps,
+                    admission,
+                    scope,
+                    tenant.id,
+                    "discord",
+                    "requester",
+                    thread.thread_id,
+                    account.id,
+                    False,
+                    DEFAULT_MA_CAPABILITIES,
+                    None,
+                    root.limits.deadline,
+                    lambda: datetime.now(UTC),
+                ),
             )
             yield deps, prepared, grants, intent, origin, scope, binding, transport
 
@@ -352,7 +422,12 @@ async def test_repeated_root_capture_never_enlarges_stored_operator_grants(root_
     grants[0] = replace(
         grants[0], limits=grants[0].limits.model_copy(update={"budget_usd": Decimal("99")})
     )
-    await freeze(root_turn)
+
+    async def loader(_grant, _source):
+        return grants[0]
+
+    with pytest.raises(WorkerSpecRefused, match="origin: unsupported"):
+        await freeze((replace(deps, fleet_root_grants=loader), *root_turn[1:]))
     retained, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
     assert retained == original and retained.limits.budget_usd == original.limits.budget_usd
 
@@ -425,12 +500,13 @@ async def test_invalid_capture_cannot_commit_a_root_or_dispatch_input(root_turn,
     if fault == "intent":
         intent = intent.model_copy(update={"id": uuid4()})
     elif fault == "origin":
-        grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=uuid4()))
+        async with deps.sessionmaker.begin() as db:
+            await turn_origins.delete_origin(db, origin_id=origin.id)
     elif fault == "scope":
-        grants[0] = replace(
-            grants[0],
-            fleet=replace(
-                grants[0].fleet, scope=scope.model_copy(update={"principal_id": "other"})
+        prepared = replace(
+            prepared,
+            _source=prepared._source.model_copy(
+                update={"resource_scope": scope.model_copy(update={"principal_id": "other"})}
             ),
         )
     elif fault == "source_scope":
@@ -446,7 +522,13 @@ async def test_invalid_capture_cannot_commit_a_root_or_dispatch_input(root_turn,
             expected_generation=1,
         )
     else:
-        grants[0] = replace(grants[0], subject=Subject(platform_user_id="other"))
+        prepared = replace(
+            prepared,
+            admission=replace(
+                prepared.admission,
+                grant=replace(prepared.admission.grant, subject=Subject(platform_user_id="other")),
+            ),
+        )
     with pytest.raises((WorkerSpecRefused, ScopeViolation)):
         await freeze((deps, prepared, grants, intent, origin, scope, binding, transport))
     async with deps.sessionmaker() as db:
@@ -755,10 +837,7 @@ async def another_account_root(value):
                 source_revisions=((source.source.ref, source.source.revision),),
             )
 
-            async def load(_grant, _source):
-                return root
-
-            deps = replace(deps, anthropic=client, fleet_root_grants=load)
+            deps = replace(deps, anthropic=client, fleet_root_grants=None)
             yield deps, prepared, [root], intent, origin, scope, binding, transport
 
 

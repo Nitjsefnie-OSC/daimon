@@ -983,3 +983,57 @@ counts do not bound Managed Agents internal inference, and this local wrapper
 does not automatically attach to a remotely deployed Discord adapter or smoke.
 Those actual request edges must be bound before a live run. No new SDK clients,
 credential loaders, ledger, staging runner or product hooks are installed.
+
+Fleet outcome captures persist `FleetWorkerFacts.from_worker(worker)` through
+the existing `FleetWorkerCapture.worker` field. The projection omits private
+specs and arbitrary contract maps, retains original result pointers, and keeps
+only independently validated review facts with explicit coverage. An invalid
+sibling field never erases a valid finding. Unsupported review data stays
+unverified without hiding a known failure. Recorded results accept unchanged
+normalized text payloads and exclude opaque native records/references; a
+private or binary payload is refused. Genuine in-memory worker/event inputs
+are projected at the boundary; serialized raw worker maps are rejected.
+
+### Scoped fleet evidence export
+
+`python -m daimon.testing.fleet_export capture --tenant-id UUID --run-id UUID
+--attempt-id ATTEMPT --source-sha FULL_SHA --output NEW_DIRECTORY` reads only
+that persisted fleet through the existing core store APIs. The operator supplies
+`DAIMON_DATABASE__URL` through the container's normal configuration; no DSN,
+provider key or admin authority is accepted on the command line. Run it only
+under an authorized export envelope. The database transaction is read-only,
+repeatable read, with a statement timeout and a bounded event inventory.
+The DB reader reuses the stores' authoritative column reads for runs, bindings,
+projections and journal events. Effective dirty/deleted source rows refuse
+before that source is read; pending, unrelated and reverted caller state stays
+unflushed and unchanged. Cached ORM entities never supply exported row facts.
+
+The fixed `export.json` nests the oracle's safe worker facts. Arbitrary worker
+specs and native bodies are excluded. Normalized events share the recorder's
+fixed schema boundary, with tool inputs replaced by its omission sentinel.
+Original result payloads must survive unchanged and pass the existing core
+result validator. Reused root-session turns stay unbound until an immutable
+run-specific input join exists; prior root history is never dumped. Unsafe
+required results refuse publication. Unknown event payloads retain explicit
+metadata-only omissions. Capture checks exact private
+slots, accepted bindings, provider/profile/session identities and source versions.
+Paired worker facts and persistence rows must agree on both version and error
+code before publication and during offline verification, even with fresh hashes.
+The credential audit classifies a public review digest only through its typed
+reviewer-to-original-result binding, including unchanged review JSON and journal
+text. Other free-form hex content remains subject to encoded-content refusal;
+raw, joined and decoded credential checks still apply.
+
+Publication creates one fresh 0700 directory containing 0600 `export.json`,
+`manifest.json` and `SHA256SUMS`, using a Linux atomic no-replace rename. It
+refuses existing destinations, symlinks, unsafe schemas, secrets, source changes,
+truncation and malformed result pointers. `python -m daimon.testing.fleet_export
+verify DIRECTORY` checks the bundle offline, including scope, closed schemas and
+hashes. A hash proves integrity, not authority or successful fleet execution.
+
+This first core exports persistence facts only: native/platform captures, wakes,
+worker outcomes and financial execution joins remain explicit PENDING until
+owner readers are composed. It fabricates no accepted input, terminal, timing,
+financial actual or scenario verdict. Successful capture/verification exits 3
+(PENDING); a refused operation exits 2 with a content-free diagnostic. It cannot
+alone authorize dropping required live evidence before a database downgrade.

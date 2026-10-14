@@ -810,3 +810,21 @@ async def test_negative_markup_legacy_credit_is_still_excluded_from_channel_spen
             == old
             == Decimal("0.000000")
         )
+
+
+async def test_settlement_protocol_comes_from_profile_metadata_not_provider_name(
+    account: Account, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mux.contracts.profile import AccountingMode
+    from mux.profiles import PROFILES, get_profile
+
+    original = get_profile("anthropic.managed_agents")
+    native_policy = original.model_copy(update={"accounting_mode": AccountingMode.NATIVE_TOTALS})
+    monkeypatch.setattr("mux.profiles.PROFILES", {**PROFILES, original.profile_id: native_policy})
+    # Same observation/provider and valid legacy rates, but native settlement
+    # cannot fabricate an exact debit without its dated price/infrastructure.
+    assert not await account.record(observation())
+    usage, ledger = await account.rows()
+    assert not usage and not ledger
+    pending = await account.store.pending_outbox()
+    assert len(pending) == 1 and not pending[0].applied

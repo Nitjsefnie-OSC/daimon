@@ -11,6 +11,7 @@ from daimon.core._models import (
 )
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.ids import Provider
+from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +62,7 @@ async def put_revision(
     previous_local: int | None,
     agent_name: str,
     preview_digest: str,
+    fleet_grant: JsonValue | None = None,
 ) -> AgentBackendRevision:
     row = AgentBackendRevisionRecord(
         tenant_id=tenant_id,
@@ -71,6 +73,7 @@ async def put_revision(
         previous_local=previous_local,
         agent_name=agent_name,
         preview_digest=preview_digest,
+        fleet_grant=fleet_grant,
     )
     session.add(row)
     await session.flush()

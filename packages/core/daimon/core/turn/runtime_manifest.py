@@ -10,15 +10,17 @@ from dataclasses import replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
 from uuid import UUID
 
 from daimon.core.errors import TurnError
 from daimon.core.neutral_resources import (
+    AgentFleetGrant,
     WorkerPermissions,
     WorkerSpecRefused,
-    freeze_root_permissions,
+    resolve_worker_spec,
 )
+from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
@@ -51,6 +53,29 @@ if TYPE_CHECKING:
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
+_ADMISSION_FACTS = {
+    name: TypeAdapter(annotation)
+    for name, annotation in get_type_hints(Admission).items()
+    if name not in ("agent", "environment", "observation", "backend_counterpart")
+}
+
+
+async def read_agent_fleet_grant(
+    deps: TurnDeps, admission: Admission, *, now: datetime
+) -> AgentFleetGrant | None:
+    """Read the current grant for the actual admitted source, without name lookup."""
+    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    if not deps.fleet_enabled:
+        return None
+    if admission.grant is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    return await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
+        admission.grant.tenant_id,
+        derive_agent_uuid(tenant_id=admission.grant.tenant_id, ma_agent_id=admission.agent.id),
+        now=now,
+    )
 
 
 class _FrozenRoot(BaseModel):
@@ -59,6 +84,11 @@ class _FrozenRoot(BaseModel):
     origin_id: UUID
     binding: ProviderBinding
     permissions: WorkerPermissions
+    grant_epoch: int | None = Field(default=None, exclude_if=lambda value: value is None)
+    grant_digest: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    preparation: dict[str, JsonValue] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class _ResumedRoot(BaseModel):
@@ -78,31 +108,66 @@ class _ResumedRoot(BaseModel):
 
 async def _root_context(
     deps: TurnDeps,
-    root: _FrozenRoot,
+    root: _FrozenRoot | None,
     *,
     now: datetime,
+    intent_id: UUID | None = None,
+    drain: bool = False,
     resumed: _ResumedRoot | None = None,
     execution_origin: bool = False,
 ) -> TenantAccessPolicy:
+    from daimon.core.channel_backend import AgentBackendService
     from daimon.core.stores import turn_card_intents, turn_origins
     from daimon.core.stores.access_policy import load_access_policy
     from daimon.core.stores.accounts import get_account_with_tenant
+    from mux.state.operations import request_digest
 
-    parent, binding = root.permissions, root.binding
-    facts, scope = parent.fleet, parent.fleet.scope
+    parent = root.permissions if root is not None else None
+    facts = parent.fleet if parent is not None else None
+    if root is None:
+        from daimon.core.turn.persistence import current_persistence
+        from daimon.core.turn_origin import current_origin_id
+
+        active = current_persistence.get()
+        origin_id = current_origin_id.get()
+        if (
+            active is None
+            or origin_id is None
+            or intent_id is None
+            or not active.source_agent_id
+            or active.session_ref is None
+            or active.fleet_capture
+        ):
+            raise WorkerSpecRefused("origin", "unbound")
+        binding, scope, source_id = active.binding, active.scope, active.source_agent_id
+        active.check_session(scope, active.session_ref)
+    else:
+        assert parent is not None and facts is not None
+        binding, scope = root.binding, facts.scope
+        origin_id, intent_id = root.origin_id, root.intent_id
+        if (
+            parent.agent_id is None
+            or len(parent.source_agents) != 1
+            or root.grant_epoch is None
+            or root.grant_epoch <= 0
+            or not root.grant_digest
+        ):
+            raise WorkerSpecRefused("origin", "stale")
+        source_id = parent.source_agents[0].id
     async with deps.sessionmaker() as db:
         origin = await turn_origins.get_active_origin(
             db,
-            origin_id=root.origin_id,
+            origin_id=origin_id,
             tenant_id=UUID(scope.tenant_id),
-            account_id=facts.account_id,
+            account_id=UUID(scope.account_id),
             platform=binding.thread.channel.platform,
             now=now,
         )
-        intent = await turn_card_intents.get_turn_card_intent(db, id=root.intent_id)
-        account = await get_account_with_tenant(db, account_id=facts.account_id)
+        intent = await turn_card_intents.get_turn_card_intent(db, id=intent_id)
+        account = await get_account_with_tenant(db, account_id=UUID(scope.account_id))
         policy = await load_access_policy(db, tenant_id=UUID(scope.tenant_id))
         if resumed is not None:
+            assert root is not None and parent is not None and facts is not None
             execution_intent = await turn_card_intents.get_turn_card_intent(
                 db, id=resumed.intent_id
             )
@@ -111,7 +176,7 @@ async def _root_context(
                     db,
                     origin_id=resumed.origin_id,
                     tenant_id=UUID(scope.tenant_id),
-                    account_id=facts.account_id,
+                    account_id=UUID(scope.account_id),
                     platform=binding.thread.channel.platform,
                     now=now,
                 )
@@ -155,30 +220,61 @@ async def _root_context(
     if not (origin and intent and account and deps.state_store):
         raise WorkerSpecRefused("origin", "stale")
     if (
-        facts.depth != 0
-        or len(parent.source_agents) != 1
-        or not facts.enabled
-        or not facts.active
-        or facts.origin_id != root.origin_id
-        or str(facts.account_id) != scope.account_id
-        or facts.root != binding.thread
-        or binding.legacy_account_id != scope.account_id
-        or origin.responder_ma_agent_id != parent.source_agents[0].id
-        or origin.parent_channel_id != facts.root.channel.channel_id
-        or origin.thread_id != facts.root.thread_id
+        binding.legacy_account_id != scope.account_id
+        or origin.responder_ma_agent_id != source_id
+        or origin.parent_channel_id != binding.thread.channel.channel_id
+        or origin.thread_id != binding.thread.thread_id
         or origin.is_external
         or (account.tenant_id, account.platform) != (origin.tenant_id, origin.platform)
-        or account.platform_user_id != parent.subject.platform_user_id
         or account.is_external
         or intent.tenant_id != origin.tenant_id
         or intent.platform != origin.platform
         or intent.channel_id != origin.parent_channel_id
         or intent.thread_id != origin.thread_id
         or intent.status not in ("prepared", "posted")
-        or parent.limits.deadline <= now
         or await deps.state_store.get_binding(binding_slot(binding)) != binding
     ):
         raise WorkerSpecRefused("origin", "stale")
+    if parent is not None:
+        assert facts is not None and root is not None
+        if (
+            facts.depth != 0
+            or not facts.enabled
+            or not facts.active
+            or facts.origin_id != root.origin_id
+            or str(facts.account_id) != scope.account_id
+            or facts.root != binding.thread
+            or account.platform_user_id != parent.subject.platform_user_id
+            or (not drain and parent.limits.deadline <= now)
+        ):
+            raise WorkerSpecRefused("origin", "stale")
+    if parent is None or not drain:
+        from daimon.core.channel_backend import AgentBackendRefused
+        from daimon.core.ma_identity import derive_agent_uuid
+
+        agent_id = (
+            parent.agent_id
+            if parent is not None
+            else derive_agent_uuid(tenant_id=UUID(scope.tenant_id), ma_agent_id=source_id)
+        )
+        assert agent_id is not None
+        try:
+            value = await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
+                UUID(scope.tenant_id), agent_id, now=now
+            )
+        except AgentBackendRefused:
+            raise WorkerSpecRefused("origin", "unsupported") from None
+        if parent is None:
+            if value is not None or origin.is_setup:
+                raise WorkerSpecRefused("origin", "unbound")
+        else:
+            assert root is not None
+            if (
+                value is None
+                or value.epoch != root.grant_epoch
+                or request_digest(value.model_dump(mode="json")) != root.grant_digest
+            ):
+                raise WorkerSpecRefused("origin", "stale")
     return policy
 
 
@@ -214,15 +310,26 @@ async def freeze_prepared_root(
     now: Callable[[], datetime],
 ) -> None:
     """Retain the exact host-owned root under its input's existing mutation fence."""
+    from uuid import uuid4
+
+    from daimon.core.authz import FleetFacts
+    from daimon.core.mux_compat import source_environment_record
+    from daimon.core.neutral_resources import fleet_root_permissions
+    from daimon.core.session_compat import MaCapabilities
     from daimon.core.stores import fleet
     from daimon.core.stores.access_policy import load_access_policy
     from daimon.core.turn.persistence import current_persistence
     from daimon.core.turn_origin import current_origin_id
+    from mux.state.operations import request_digest
 
+    value = await read_agent_fleet_grant(deps, prepared.admission, now=now())
+    if value is None:
+        if prepared._source is not None or prepared._preparation is not None:  # pyright: ignore[reportPrivateUsage]
+            raise WorkerSpecRefused("origin", "stale")
+        return
     persistence, origin_id = current_persistence.get(), current_origin_id.get()
     grant, source = prepared.admission.grant, prepared._source  # pyright: ignore[reportPrivateUsage]
-    loader = deps.fleet_root_grants
-    if not (persistence and origin_id and grant and source and loader):
+    if not (persistence and origin_id and grant and source):
         raise WorkerSpecRefused("origin", "unbound")
     scope, binding = persistence.scope, persistence.binding
     if (
@@ -237,17 +344,58 @@ async def freeze_prepared_root(
         != (prepared.admission.backend_revision.local if prepared.admission.backend_revision else 0)
     ):
         raise WorkerSpecRefused("origin", "unbound")
+    request = prepared._preparation  # pyright: ignore[reportPrivateUsage]
+    if request is None or prepared.admission.backend_counterpart is not None:
+        raise WorkerSpecRefused("origin", "unbound")
     async with deps.sessionmaker() as db:
         policy = await load_access_policy(db, tenant_id=grant.tenant_id)
-    permissions = freeze_root_permissions(
-        await loader(grant, source),
+    if deps.fleet_root_grants is not None:
+        raise WorkerSpecRefused("origin", "unsupported")
+    permissions = fleet_root_permissions(
         source,
-        admission=grant,
+        grant,
+        value,
+        fleet=FleetFacts(
+            scope=scope,
+            root=binding.thread,
+            origin_id=origin_id,
+            account_id=prepared.admission.account_id,
+            run_id=uuid4(),
+            place=grant.run_place,
+            enabled=True,
+            active=True,
+        ),
         policy=policy,
         now=now(),
+        seal_ids=prepared.admission.origin_seal_ids,
     )
+    permissions = replace(
+        permissions,
+        limits=permissions.limits.model_copy(
+            update={"deadline": min(request.deadline, permissions.limits.deadline)}
+        ),
+    )
+    environment = source_environment_record(prepared.admission.environment, scope)
     root = _FrozenRoot(
-        intent_id=intent_id, origin_id=origin_id, binding=binding, permissions=permissions
+        intent_id=intent_id,
+        origin_id=origin_id,
+        binding=binding,
+        permissions=permissions,
+        grant_epoch=value.epoch,
+        grant_digest=request_digest(value.model_dump(mode="json")),
+        preparation={
+            "admission": {
+                name: adapter.dump_python(getattr(prepared.admission, name), mode="json")
+                for name, adapter in _ADMISSION_FACTS.items()
+            },
+            "source": source.source.model_dump(mode="json", exclude={"native"}),
+            "environment": environment.model_dump(mode="json", exclude={"native"}),
+            "external_user_id": request.external_user_id,
+            "reuse_existing": request.reuse_existing,
+            "capabilities": TypeAdapter(MaCapabilities).dump_python(
+                request.capabilities, mode="json"
+            ),
+        },
     )
 
     async def validate() -> None:
@@ -267,7 +415,7 @@ async def freeze_prepared_root(
             operation_key=f"fleet_root:{origin_id}",
             total_budget_usd=permissions.limits.budget_usd,
             deadline_at=permissions.limits.deadline,
-            max_workers=deps.fleet_max_workers,
+            max_workers=min(deps.fleet_max_workers, value.max_workers),
             created_by="host",
         )
         await validate()
@@ -390,7 +538,7 @@ async def resume_prepared_root(
     await validate()
 
 
-async def read_frozen_root(
+async def _read_frozen_root(
     deps: TurnDeps,
     scope: Scope,
     *,
@@ -398,7 +546,8 @@ async def read_frozen_root(
     origin_id: UUID | None = None,
     run_id: UUID | None = None,
     now: datetime,
-) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+    drain: bool = False,
+) -> tuple[_FrozenRoot, TenantAccessPolicy]:
     """Load one exact retained root, with its original finite authority and current policy."""
     from daimon.core.stores import fleet, mux_state
 
@@ -448,6 +597,7 @@ async def read_frozen_root(
         now=now,
         resumed=resumed,
         execution_origin=origin_id is not None,
+        drain=drain,
     )
     selected = parent.fleet.run_id
     if run_id is not None and selected != run_id:
@@ -467,7 +617,178 @@ async def read_frozen_root(
         or run.deadline_at != parent.limits.deadline
     ):
         raise WorkerSpecRefused("origin", "stale")
-    return parent, policy
+    return root, policy
+
+
+@overload
+async def read_frozen_root(
+    deps: TurnDeps,
+    scope: Scope,
+    *,
+    intent_id: UUID | None = None,
+    origin_id: UUID | None = None,
+    run_id: UUID | None = None,
+    now: datetime,
+    drain: bool = False,
+    allow_absent: Literal[False] = False,
+) -> tuple[WorkerPermissions, TenantAccessPolicy]: ...
+
+
+@overload
+async def read_frozen_root(
+    deps: TurnDeps,
+    scope: Scope,
+    *,
+    intent_id: UUID | None = None,
+    origin_id: UUID | None = None,
+    run_id: UUID | None = None,
+    now: datetime,
+    drain: bool = False,
+    allow_absent: Literal[True],
+) -> tuple[WorkerPermissions, TenantAccessPolicy] | None: ...
+
+
+async def read_frozen_root(
+    deps: TurnDeps,
+    scope: Scope,
+    *,
+    intent_id: UUID | None = None,
+    origin_id: UUID | None = None,
+    run_id: UUID | None = None,
+    now: datetime,
+    drain: bool = False,
+    allow_absent: bool = False,
+) -> tuple[WorkerPermissions, TenantAccessPolicy] | None:
+    if allow_absent and intent_id is not None and origin_id is None and run_id is None:
+        from daimon.core.stores import mux_state
+        from daimon.core.turn.persistence import current_persistence
+
+        active = current_persistence.get()
+        if active is not None and (
+            active.scope.tenant_id,
+            active.scope.account_id,
+            active.scope.principal_id,
+        ) == (scope.tenant_id, scope.account_id, scope.principal_id):
+            async with deps.sessionmaker() as db:
+                record = await mux_state.get_fleet_root_operation(
+                    db, scope, intent_id=intent_id, check_intent_owner=True
+                )
+            if record is None:
+                await _root_context(deps, None, intent_id=intent_id, now=now)
+                return None
+    root, policy = await _read_frozen_root(
+        deps, scope, intent_id=intent_id, origin_id=origin_id, run_id=run_id, now=now, drain=drain
+    )
+    return root.permissions, policy
+
+
+async def read_frozen_preparation(
+    deps: TurnDeps,
+    parent: WorkerPermissions,
+    *,
+    deadline: datetime,
+    now: Callable[[], datetime],
+) -> ProviderPreparationRequest:
+    """Reconstruct the exact retained root request under the original finite authority."""
+    from daimon.core.mux_compat import (
+        retrieve_environment,
+        sdk_agent,
+        sdk_environment,
+        source_environment_record,
+    )
+    from daimon.core.session_compat import MaCapabilities
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+    from mux.contracts.resources import Agent, Environment
+    from mux.state.operations import request_digest
+
+    root, _ = await _read_frozen_root(
+        deps,
+        parent.fleet.scope,
+        origin_id=parent.fleet.origin_id,
+        run_id=parent.fleet.run_id,
+        now=now(),
+    )
+    if root.permissions != parent or root.preparation is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    bound = min(deadline, parent.limits.deadline)
+    async with asyncio.timeout(remaining_s(bound, now=now(), refuse_expired=True)):
+        try:
+            facts = root.preparation
+            admission_facts = facts["admission"]
+            if not isinstance(admission_facts, dict) or set(admission_facts) != set(
+                _ADMISSION_FACTS
+            ):
+                raise WorkerSpecRefused("origin", "unbound")
+            retained_source = Agent.model_validate_json(json.dumps(facts["source"]))
+            retained_env = Environment.model_validate_json(json.dumps(facts["environment"]))
+            if (
+                (retained_source.ref, retained_source.revision) not in parent.source_revisions
+                or (retained_env.ref.tenant_id, retained_env.ref.account_id)
+                != (parent.fleet.scope.tenant_id, parent.fleet.scope.account_id)
+                or retained_source.native is not None
+                or retained_env.native is not None
+            ):
+                raise WorkerSpecRefused("scope", "unbound")
+            admission = Admission(
+                agent=sdk_agent(retained_source),
+                environment=sdk_environment(retained_env),
+                **{
+                    name: adapter.validate_json(json.dumps(admission_facts[name]))
+                    for name, adapter in _ADMISSION_FACTS.items()
+                },
+            )
+            request = ProviderPreparationRequest(
+                deps,
+                admission,
+                parent.fleet.scope,
+                UUID(parent.fleet.scope.tenant_id),
+                root.binding.thread.channel.platform,
+                TypeAdapter(str).validate_python(facts["external_user_id"]),
+                root.binding.thread.thread_id,
+                parent.fleet.account_id,
+                TypeAdapter(bool).validate_python(facts["reuse_existing"]),
+                TypeAdapter(MaCapabilities).validate_python(facts["capabilities"]),
+                None,
+                bound,
+                now,
+            )
+        except (ValidationError, KeyError):
+            raise WorkerSpecRefused("origin", "unbound") from None
+        request = await request.capture_root(parent, deadline=bound)
+        if (
+            request.source is None
+            or request.source.source is None
+            or request.source.source.spec != retained_source.spec
+        ):
+            raise WorkerSpecRefused("scope", "stale")
+        await _root_context(deps, root, now=now())
+        actual_env = await retrieve_environment(
+            deps.anthropic, retained_env.ref.id, scope=parent.fleet.scope
+        )
+        actual = source_environment_record(actual_env, parent.fleet.scope)
+        if (
+            actual.ref != retained_env.ref
+            or actual.revision != retained_env.revision
+            or actual.lifecycle != "active"
+            or actual.archived_at is not None
+            or request_digest(actual.spec.model_dump(mode="json"))
+            != request_digest(retained_env.spec.model_dump(mode="json"))
+        ):
+            raise WorkerSpecRefused("scope", "stale")
+        request = replace(request, admission=replace(request.admission, environment=actual_env))
+        policy = await _root_context(deps, root, now=now())
+        resolve_worker_spec(
+            parent,
+            parent.spec,
+            policy=policy,
+            now=now(),
+            resources=parent.resources,
+            environment=parent.environment,
+            limits=parent.limits,
+            captured_source=request.source,
+        )
+        remaining_s(bound, now=now(), refuse_expired=True)
+        return request
 
 
 class ProviderRuntimeConfigurationError(RuntimeError):

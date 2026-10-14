@@ -134,14 +134,16 @@ def decode_base64(blob: str) -> bytes | None:
 
 
 def string_fields(
-    value: JsonValue, path: tuple[str, ...] = ()
+    value: JsonValue, path: tuple[str, ...] = (), *, indexed: bool = False
 ) -> Iterator[tuple[tuple[str, ...], str]]:
     if isinstance(value, dict):
         for key, item in value.items():
-            yield from string_fields(item, (*path, key))
+            yield from string_fields(item, (*path, key), indexed=indexed)
     elif isinstance(value, list):
-        for item in value:
-            yield from string_fields(item, (*path, "[]"))
+        for index, item in enumerate(value):
+            yield from string_fields(
+                item, (*path, str(index) if indexed else "[]"), indexed=indexed
+            )
     elif isinstance(value, str):
         yield path, value
 
@@ -245,15 +247,27 @@ class Audit:
                 return True
         return False
 
-    def canonical_text(self, value: str, depth: int = 0) -> str:
+    def canonical_text(
+        self, value: str, depth: int = 0, *, digests: frozenset[str] = frozenset()
+    ) -> str:
         """Decode text leaves before joining; never persist the decoded projection."""
         if depth >= 4:
             raise RecordingError("ambiguous encoded content; tape refused")
         decoded = _ESCAPED.sub(decode_escape, unquote(value))
         if decoded != value:
-            return self.canonical_text(decoded, depth + 1)
+            return self.canonical_text(decoded, depth + 1, digests=digests)
 
         def replace(match: re.Match[str]) -> str:
+            # Only caller-verified digest literals in this leaf have this type.
+            # A digest can span text parts; only its exact hex fragments retain
+            # that type. Arbitrary decoded blobs do not inherit the context.
+            if re.fullmatch(r"[0-9a-f]{40,64}", match[0]) and any(
+                len(digest) in (40, 64)
+                and re.fullmatch(r"[0-9a-f]+", digest)
+                and match[0] in digest
+                for digest in digests
+            ):
+                return match[0]
             blob = self.base64(match[0])
             if blob is None:
                 if len(match[0]) >= 48:
@@ -273,18 +287,31 @@ class Audit:
 
         return _BASE64.sub(replace, value)
 
-    def fragments(self, values: Iterable[JsonValue], depth: int = 0) -> None:
-        parts: list[str] = []
-        fields: dict[tuple[str, ...], list[str]] = {}
-        for value in values:
+    def fragments(
+        self,
+        values: Iterable[JsonValue],
+        depth: int = 0,
+        *,
+        digests: Mapping[int, frozenset[str]] | None = None,
+    ) -> None:
+        """Scan raw and decoded streams; digest context is per input leaf only."""
+        parts: list[tuple[str, frozenset[str]]] = []
+        fields: dict[tuple[str, ...], list[tuple[str, frozenset[str]]]] = {}
+        for index, value in enumerate(values):
             for path, text in string_fields(value):
-                parts.append(text)
-                fields.setdefault(path, []).append(text)
+                context: frozenset[str] = (
+                    digests.get(index, frozenset()) if digests else frozenset()
+                )
+                item = (text, context)
+                parts.append(item)
+                fields.setdefault(path, []).append(item)
         for fragments in (parts, *fields.values()):
-            for projection in (fragments, [self.canonical_text(text) for text in fragments]):
+            for projection in (
+                [text for text, _ in fragments],
+                [self.canonical_text(text, digests=context) for text, context in fragments],
+            ):
                 for separator in ("", "\n"):
-                    joined = separator.join(projection)
-                    if self.sensitive(joined, depth, queries=False):
+                    if self.sensitive(separator.join(projection), depth, queries=False):
                         raise RecordingError("credential survived redaction; tape refused")
 
     def events(self, events: list[JsonValue], depth: int) -> None:
@@ -364,7 +391,8 @@ def _closed_payload(value: object, *, project: bool) -> JsonValue:
     raise RecordingError("event value is outside the fixed normalized schema")
 
 
-def _event(event: object, *, project: bool) -> Event:
+def normalized_event(event: object, *, project: bool) -> Event:
+    """Project or validate one fixed normalized event through the recorder boundary."""
     if not isinstance(event, Event) or event.type not in PAYLOAD_MODELS:
         raise RecordingError("only fixed normalized event types can be recorded")
     try:
@@ -399,7 +427,7 @@ def _normalized_parts(value: JsonValue) -> None:
 def audit_tape(tape: Tape, secrets: tuple[str, ...]) -> None:
     for batch in tape.batches:
         for event in batch.events:
-            _event(event, project=False)
+            normalized_event(event, project=False)
     if len(tape.model_dump_json().encode()) > _MAX_TAPE_BYTES:
         raise RecordingError("normalized tape exceeds size limit")
     scanner = Audit(secrets)
@@ -453,7 +481,7 @@ class Recorder(httpx.AsyncBaseTransport):
                 raise RecordingError("only request metadata can be recorded")
             batch = EventBatch(
                 request=RequestMetadata.model_validate(request.model_dump()),
-                events=tuple(_event(event, project=True) for event in events),
+                events=tuple(normalized_event(event, project=True) for event in events),
             )
             # Defer cross-batch reconstruction until export; never partially save.
             Audit(self.secrets).audit(batch.model_dump(mode="json"))
@@ -538,7 +566,7 @@ class Replay:
         if entry.request != request:
             raise RecordingError("request metadata does not match the recording")
         self.position += 1
-        return tuple(_event(event, project=False) for event in entry.events)
+        return tuple(normalized_event(event, project=False) for event in entry.events)
 
     def finish(self) -> None:
         if self.position != len(self.tape.batches):

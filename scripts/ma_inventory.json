@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2681,
+  "files_scanned": 2699,
   "parse_errors": [],
   "calls": [
     {
@@ -3971,8 +3971,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 718,
-      "end": 718,
+      "line": 726,
+      "end": 726,
       "scope": "test_scoped_source_reuse_projects_actual_sdk_retrieve_without_extra_request",
       "category": "test",
       "resource": "agents.retrieve",
@@ -3984,8 +3984,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 752,
-      "end": 752,
+      "line": 760,
+      "end": 760,
       "scope": "test_scoped_source_reuse_refuses_unbound_or_inactive_source_without_extra_request",
       "category": "test",
       "resource": "agents.retrieve",
@@ -3995,8 +3995,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 813,
-      "end": 813,
+      "line": 821,
+      "end": 821,
       "scope": "test_source_loader_retains_full_sdk_intent_without_serializing_it",
       "category": "test",
       "resource": "agents.retrieve",
@@ -4008,8 +4008,8 @@
     },
     {
       "file": "packages/core/tests/test_agent_backend.py",
-      "line": 850,
-      "end": 850,
+      "line": 858,
+      "end": 858,
       "scope": "test_source_projection_missing_unused_sdk_date_keeps_existing_preview",
       "category": "test",
       "resource": "agents.retrieve",
@@ -11616,7 +11616,7 @@
     },
     {
       "file": "packages/adapters/mcp/daimon/adapters/mcp/server.py",
-      "line": 21,
+      "line": 22,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic",
@@ -13454,7 +13454,7 @@
     },
     {
       "file": "packages/core/daimon/core/channel_backend.py",
-      "line": 30,
+      "line": 31,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -13463,7 +13463,7 @@
     },
     {
       "file": "packages/core/daimon/core/channel_backend.py",
-      "line": 31,
+      "line": 32,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
@@ -14346,15 +14346,6 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 638,
-      "module": "anthropic.types.beta",
-      "names": [
-        "BetaManagedAgentsVault"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/core/daimon/core/mux_compat.py",
       "line": 648,
       "module": "anthropic.types.beta",
       "names": [
@@ -14364,7 +14355,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 660,
+      "line": 658,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsVault"
@@ -14373,7 +14364,16 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 677,
+      "line": 670,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 687,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14382,7 +14382,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 693,
+      "line": 703,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -14391,7 +14391,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 745,
+      "line": 755,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"

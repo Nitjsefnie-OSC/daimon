@@ -2671,7 +2671,7 @@ does not derive authority from balance, pricing, mutable agent names or tool
 requests, and does not reserve funds or activate a run.
 
 
-Fleet roots are projected only when fleet orchestration is enabled and the host installs an explicit `TurnDeps.fleet_root_grants` loader. The loader supplies finite operator grants through the existing `WorkerPermissions` contract; tool bodies, cards, tenant balances and current model prices cannot supply them. Session preparation retains its scoped source capture privately. Before native input, the real turn joins its genuine card intent, active origin, original requester and accepted private binding under the existing lease, then uses `freeze_root_permissions` and the existing fleet/operation owners to retain one immutable root. Turns without a root intent, including ordinary turns with the loader installed, keep their normal input path. Missing prerequisites refuse; unconfigured turns perform no new capture or persistence.
+Fleet roots are projected only when fleet orchestration is enabled and the actual admitted agent has a current DB fleet grant. The captured-source constructor supplies finite authority through the existing `WorkerPermissions` contract; installed `TurnDeps.fleet_root_grants` loaders are refused when a grant exists. Tool bodies, cards, tenant balances and current model prices cannot supply authority. Session preparation retains its scoped source capture privately. Before native input, the real turn joins its genuine card intent, active origin, original requester and accepted private binding under the existing lease, then uses `freeze_root_permissions` and the existing fleet/operation owners to retain one immutable root. Turns without a root intent, including ordinary turns with the loader installed, keep their normal input path. Missing prerequisites refuse; unconfigured turns perform no new capture or persistence.
 
 `read_frozen_root` in `daimon.core.turn.runtime_manifest` takes the original scope and exactly one selector: the genuine card `intent_id` or verified native `origin_id`. A captured `run_id`, when provided, must match. Cards and authenticated tools consume the same record and fresh policy; recovered controls must provide their captured run. The lookup preserves the original scope principal and finite bounds, checks the current origin, intent, requester, binding and run, and refuses stale or foreign associations. Fresh read authorization cannot enlarge or replace the frozen authority. This seam does not install an operator grant policy or certify a live deployment.
 
@@ -2781,3 +2781,166 @@ through its existing locked transition owner, retaining reservations and
 publishing eligible frozen completion wakes. Cleanup allows a concurrent stop
 intent and refuses changed attempts, bindings or native phases. Once allocation
 starts, native-unknown outcomes stay with the existing reconciliation owner.
+The minimum deployed rollback reader is `>= #963`: the completion-aware reader
+with closed SQL reason predicates and fair callback-unavailable deferral.
+It recognizes `worker_finished`; it does not ignore that
+reason. Without an installed completion callback, dispatch releases the row
+without provider input, history fallback or a notice, refunds the claim attempt
+and advances availability. That backoff lets later threads reach the next
+bounded poll batch. Readers that decode unsupported reasons before selection
+are below this floor; no legacy-vocabulary backport is implied.
+
+Before removing completion-wake schema support, stop fleet publication and
+dispatch, drain native work, and retire pending/claimed scheduling through the
+existing owners. Read back zero `worker_finished` rows in `pending` or `claimed`
+before starting restore. The reason-check downgrade takes a bounded table lock
+and refuses while any such row remains; refusal rolls back the restore step.
+After retirement, its reason-only deletion and legacy-check restoration can
+succeed. Removing queue rows is not cancellation of native work or a refund of
+usage; those confirmations remain independent requirements.
+
+Per-agent fleet grants are finite admin settings in the existing immutable
+`agent_backend_revision` lineage. The nullable grant retains exact paired
+backend/profile and model references, worker count, per-run worker authority budget,
+expiry and explicit run/worker/input ceilings. The current admin must confirm a
+fresh preview and setting revision; backend and grant edits share one policy-
+fenced revision insert and security audit transaction. An epoch is the local revision that granted or amended authority.
+Backend set, clear and revert carry the current grant unchanged; grant-only
+appends preserve the backend undo pointer. Revoke appends no grant, and re-grant
+uses a new epoch. A backend revert never restores a historical grant.
+
+Grant reads do not infer funding, prices, source fidelity or a native final-bill
+cap. Missing or expired grants supply no fleet authority; malformed grant data
+is logged without its body and refused by the fleet reader while ordinary
+backend reads remain usable. A backend edit after an invalid grant appends no
+grant, retiring that authority without rewriting the malformed history. Old
+rows have no grant. During a mixed-image
+rollout, an old neutral writer appends no grant and therefore revokes rather
+than broadens authority; re-granting cannot reuse its former epoch. Dropping the
+grant column removes all grants. Runtime construction and admin surfaces are
+separate installation steps; this persistence API alone enables no fleet task.
+The financial grant ceiling covers workers only. The ordinary orchestrator root
+retains its normal billing and input path; whole-root financial and input
+controls must be installed separately before a fleet live retry.
+Operator policy mutations can verify Discord authority through `core.channel_admins.verify_backend_actor`. It reads the registered guild, current owner/roles/member and existing account binding with bounded requests; unknown or revoked authority refuses. Verification never creates an account, promotes a stored role or saves an authorization token. The mutation owner still checks its policy revision and writes its audit atomically.
+
+### Operator tenant backend policy
+
+`daimon tenants backend-policy` snapshots and changes the backend allowlist
+through the existing policy service. Every invocation verifies the named
+Discord member's current Manage Server, Administrator or guild-owner authority
+using the configured Discord bot token, then resolves that person's existing
+tenant account. There is no admin override or saved authorization. Other
+platforms and missing, malformed or unavailable current authority refuse.
+
+```bash
+daimon tenants backend-policy snapshot discord GUILD --actor-user USER --output before.json
+daimon tenants backend-policy apply discord GUILD --actor-user USER --snapshot before.json --backends anthropic,openai,gemini --dry-run
+daimon tenants backend-policy apply discord GUILD --actor-user USER --snapshot before.json --backends anthropic,openai,gemini --yes
+daimon tenants backend-policy revert discord GUILD --actor-user USER --snapshot before.json --expected-revision APPLIED_REVISION --yes
+```
+
+For writes, the existing backend-selection flags must enable the service.
+The CLI refreshes the admin attestation after confirmation and uses an explicit
+compare-and-set revision. Apply uses the original snapshot revision; revert
+requires the revision returned by the successful apply. Both return JSON
+receipts with the committed owner result and an independent readback. A stale
+revision refuses, including a concurrent change to any other policy field.
+Revert restores only the allowlist and preserves the remaining policy.
+Mutations append the service's scoped security audit in the same transaction.
+
+Snapshot files contain only tenant/workspace identifiers, the backend allowlist
+and policy revision. Creation is exclusive: an existing snapshot is never
+overwritten. Dry-run performs current admin, policy and CAS validation without
+policy or audit writes; snapshot dry-run also creates no file. Current authority
+is required again for rollback. These commands grant no fleet permissions and
+do not make provider calls, allocate native resources or change default chat
+behavior.
+The continuation store exposes a read-only tenant/run-scoped completion audit
+reader. It requires an actual owned run, returns all statuses in creation/ID
+order, and matches the literal canonical run prefix before decoding. Malformed
+owned bodies and mismatched roots remain visible for exporter refusal;
+canonical cohort/key/address validation and snapshot coherence remain exporter
+checks. Reads project persisted columns without flushing or overwriting caller
+objects; effective dirty or deleted state for its source tables is refused by
+the shared store reader. Reading this audit never claims or runs a wake.
+
+## Captured root permission composition
+
+`neutral_resources.fleet_root_permissions` derives the existing `WorkerPermissions`
+from an owner-captured `BackendAgent`, its actual `AdmissionGrant`, a current scoped
+`AgentFleetGrant`, and the caller's joined `FleetFacts`. The caller rechecks the grant
+epoch and expiry around awaited reads and validates the original origin/binding.
+The constructor preserves the exact admitted subject/place/category, source revision,
+environment, seals, and paired backend/model ceilings, including explicit model pins.
+It delegates normalization and source-obligation checking to `freeze_root_permissions`.
+
+The common permission deadline is conservatively bounded by grant expiry and the
+smaller of the finite run/worker durations and the existing turn ceiling.
+Worker budget and request ceilings come
+from the grant's existing `WorkerLimits`; funding remains a separate owner decision.
+The caller retains worker counts, grant epoch, and root-input controls through the
+existing run/context. This constructor does not impose a whole-root financial cap.
+
+Only a captured, already-bound warm memory store can become a mount. It uses the
+existing memory mount codec and exact caller resource scope, with the captured access
+mode; there is no provisioning. The complete source remains available to the existing
+obligation classifier after represented native custom tools are projected. Credentials,
+unsupported MCP/native controls, missing memory, repositories, and opaque requirements
+remain typed refusals. No obligations or declared drops are inferred or filtered.
+This API alone does not install runtime fleet execution or prove main defaults portable.
+
+
+An enabled fleet freezes worker authority from the actual admitted agent's
+current per-agent grant. A missing grant leaves ordinary root input unchanged.
+Revocation or replacement invalidates retained roots by their pinned epoch and
+grant digest. The frozen worker deadline is the minimum of the original request
+bound, grant expiry and finite permission duration; reconstruction cannot extend
+that bound. Worker budget, model choices and request ceilings come only from the current
+DB grant through the captured-source permission constructor. An installed
+permission loader is refused before allocation when a DB grant exists; loader
+narrowing is not supported. The worker request reader joins the exact original run, origin,
+account, binding, source revision and current policy; it refuses missing or
+legacy preparation facts and source or environment drift. It retains neutral
+facts, never SDK clients, transports, credential values or accounting callbacks.
+
+The grant's budget ceiling covers workers only. The ordinary root's requests
+are separate; fleet installation does not establish a whole-root provider bill
+cap. Root financial controls require their own installation before a bounded
+root-and-workers run.
+
+
+### Fleet runtime composition and draining
+
+With `DAIMON_FLEET__ENABLED=true`, the ordinary Discord `build_runtime(settings)`
+and MCP `create_mcp_app` factories construct the existing fleet orchestrator,
+worker pool and scoped host ports. They use the process's real sessions, client,
+markup and turn dependencies. No permission loader needs to be injected: root
+preparation uses the current per-agent DB grant. The factories own only what
+they construct, and close fleet work before draining and disposing their existing
+clients and database pools. With the flag off they construct no fleet owner,
+pool, state store or tariff lookup.
+
+The existing runtime registry can supply cold native tariff callbacks without
+constructing a provider client or inspecting credentials or deployment files.
+The host pricing context retains canonical managed-agent rates and every supplied
+native rate. Actual attenuated worker backend/model pairs resolve through the
+pricing owner before financial admission; a new pair does not discard rates for
+prior workers. A missing native tariff remains missing and is refused by financial
+admission. Registering a callback is not proof of a complete provider bill, funding
+or execution authority. Native deployment suppliers must supply matching dated
+request-tier rates; this composition does not invent them.
+
+An ordinary initial card read may return no fleet only after the shared reader
+verifies the current admitted source/session, original origin/account/thread,
+current persisted binding and policy, genuinely absent per-agent grant, and no
+root reservation in any state. A foreign account's reservation on the exact
+intent refuses rather than appearing absent. Ordinary sealed and final responses
+then retain their existing delivery path.
+
+Revocation blocks new inputs and allocation. Scoped Stop, status, wait and
+collection for an already-running root continue under its original frozen epoch;
+they do not refresh authority or permit new worker inputs. Native preparation,
+spawn and resume stay strict, and completed/cancelled/failed roots remain refused.
+Grant ceilings cover workers only. Whole-root financial/input controls are a
+separate prerequisite before any live fleet execution.

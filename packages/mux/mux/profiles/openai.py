@@ -9,12 +9,13 @@ to name it to get it.
 from __future__ import annotations
 
 from mux.contracts.extensions import OPENAI_EXTENSIONS
-from mux.contracts.profile import Profile
+from mux.contracts.profile import AccountingMode, Profile
 
 PERSISTENT_WORKSPACE = Profile(
     provider="openai",
     profile_id="openai.persistent_workspace",
     schema_version="1",
+    accounting_mode=AccountingMode.NATIVE_ROOT_TOTALS,
     sdk_pin="openai>=2.54.0,<3",
     core=True,  # Nine mandatory capabilities have actual-driver evidence; see driver README.
     execution_tool="bash",
@@ -62,6 +63,7 @@ CONVERSATION_ONLY = Profile(
     provider="openai",
     profile_id="openai.conversation_only",
     schema_version="1",
+    accounting_mode=AccountingMode.NATIVE_ROOT_TOTALS,
     sdk_pin="openai>=2.54.0,<3",
     core=False,
     support={

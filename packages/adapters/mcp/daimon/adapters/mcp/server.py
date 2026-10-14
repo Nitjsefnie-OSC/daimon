@@ -10,8 +10,9 @@ any collaborator the caller supplied.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, nullcontext
+from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
@@ -126,6 +127,9 @@ from starlette.types import Scope
 
 if TYPE_CHECKING:
     from daimon.adapters.mcp.tools.fleet import FleetToolService
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.pricing import ModelRates, ProviderPrice
+    from daimon.core.turn.deps import TurnDeps
     from stripe._http_client import HTTPClient as StripeHTTPClient
 
 log = structlog.get_logger(__name__)
@@ -248,6 +252,8 @@ def create_mcp_app(
     billing_config: BillingConfig | None = None,
     stripe_http_client: StripeHTTPClient | None = None,
     fleet_service: FleetToolService | None = None,
+    fleet_prices: Mapping[tuple[str, str], ModelRates | ProviderPrice] | None = None,
+    fleet_deps: TurnDeps | None = None,
 ) -> Starlette:
     """ASGI app factory.
 
@@ -373,6 +379,9 @@ def create_mcp_app(
         ),
     )
 
+    owned_fleet_ports: HostFleetPorts | None = None
+    fleet_turn_deps: TurnDeps | None = None
+
     @asynccontextmanager
     async def audit_lifespan(_server: FastMCP) -> AsyncIterator[None]:
         try:
@@ -388,8 +397,14 @@ def create_mcp_app(
             ):
                 yield
         finally:
-            await identity_middleware.drain_audit()
-            await slack_http.close()
+            try:
+                if owned_fleet_ports is not None:
+                    assert fleet_turn_deps is not None
+                    fleet_turn_deps.running_turns.begin_shutdown()
+                    await owned_fleet_ports.close()
+            finally:
+                await identity_middleware.drain_audit()
+                await slack_http.close()
 
     # Session state is keyed per request (StripSessionIdMiddleware, below) and
     # kept a day: bound it. Nothing needs it past the request.
@@ -465,8 +480,55 @@ def create_mcp_app(
     register_setup_target_tools(mcp, runtime)
     register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
     if effective_settings.fleet.enabled:
-        from daimon.adapters.mcp.tools.fleet import register_fleet_tools
+        from daimon.adapters.mcp.tools.fleet import HostFleetToolService, register_fleet_tools
 
+        if fleet_service is None:
+            from daimon.core.fleet_orchestration import (
+                FleetOrchestrator,
+                FleetRefused,
+                HostFleetPorts,
+            )
+            from daimon.core.ma_resolver import new_resolver_cache
+            from daimon.core.stores.fleet import WorkerPool
+            from daimon.core.stores.mux_state import PostgresStateStore
+            from daimon.core.turn.deps import build_turn_deps
+
+            fleet_turn_deps = fleet_deps
+            if fleet_turn_deps is None:
+                fleet_turn_deps = build_turn_deps(
+                    effective_settings,
+                    effective_anthropic,
+                    effective_sessionmaker,
+                    deployment_default=deployment_default,
+                    resolver_cache=new_resolver_cache(),
+                    billing_config=effective_billing_config,
+                )
+            if (
+                fleet_turn_deps.sessionmaker is not effective_sessionmaker
+                or fleet_turn_deps.anthropic is not effective_anthropic
+                or fleet_turn_deps.markup != effective_settings.billing.markup
+                or not fleet_turn_deps.fleet_enabled
+            ):
+                raise FleetRefused("prerequisites_unavailable")
+            if fleet_turn_deps.state_store is None:
+                fleet_turn_deps = replace(
+                    fleet_turn_deps, state_store=PostgresStateStore(effective_sessionmaker)
+                )
+            owned_fleet_ports = HostFleetPorts(
+                effective_sessionmaker,
+                prices=fleet_prices,
+                markup=fleet_turn_deps.markup,
+                deps=fleet_turn_deps,
+                pool=WorkerPool(
+                    max_concurrent_workers=effective_settings.fleet.max_concurrent_workers,
+                    max_concurrent_workers_per_tenant=(
+                        effective_settings.fleet.max_concurrent_workers_per_tenant
+                    ),
+                ),
+            )
+            fleet_service = HostFleetToolService(
+                FleetOrchestrator(owned_fleet_ports), runtime=runtime, deps=fleet_turn_deps
+            )
         register_fleet_tools(mcp, runtime, enabled=True, service=fleet_service)
     register_github_app_tools(mcp, runtime)
     register_github_connect_tools(mcp, runtime)

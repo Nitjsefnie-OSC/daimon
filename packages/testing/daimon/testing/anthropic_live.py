@@ -495,12 +495,14 @@ class LateUsageEvidenceAudit(Audit):
         super().__init__(secrets)
         self.opaque_hashes = opaque_hashes
 
-    def canonical_text(self, value: str, depth: int = 0) -> str:
+    def canonical_text(
+        self, value: str, depth: int = 0, *, digests: frozenset[str] = frozenset()
+    ) -> str:
         # These exact host-owned pins are opaque identities, never encoded text.
         # Raw/literal scanning still includes them and every other durable field.
         if value in (HOST_CONFIG_SHA256, LEDGER_ID) or value in self.opaque_hashes:
             return value
-        return super().canonical_text(value, depth)
+        return super().canonical_text(value, depth, digests=digests)
 
 
 def audit_late_usage_records(

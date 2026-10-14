@@ -10,9 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve retrieved Anthropic builtin tool-config type fields in session overrides while retaining strict native configuration validation.
 - Refresh the turn oracle for pinned main’s pagination, settlement, personal memory, checkpoint archive and terminal card changes, with per-hunk provenance.
 
+- Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
+
+- Add a testing-only scoped fleet journal exporter with atomic restricted bundles, verified paired worker generations/failure facts and pointer-bound public review digests, authoritative persisted reads, offline verification and explicit missing owner evidence.
+
+- Pin the minimum completion-wake rollback reader and verify the downgrade lock against a concurrent writer.
+- Keep fleet outcome exports free of private worker specs and opaque native data while preserving result bindings and known failures.
+- Keep fleet outcome exports free of private worker specs and opaque native data while preserving result bindings and independently validated failure facts.
+- Retain finite, revocable per-agent fleet grants through the existing backend preference CAS and audit owner; backend changes preserve the current grant without restoring historical authority.
+- Prepare fleet workers from the current per-agent grant and exact retained root facts; refuse revoked authority and source drift. Keep the original request deadline and current grant ceilings in retained worker authority; refuse installed permission loaders before allocation.
+
+- Compose finite per-agent fleet grants with captured, scoped source permissions through the existing worker normalization and resource-obligation checks.
+
+- Retain finite, revocable per-agent fleet grants through one existing backend preference CAS and audit mutation owner; backend changes preserve the current grant without restoring historical authority.
+- Verify current Discord Manage Server authority against the registered guild and existing account before operator policy changes.
+- Add current-admin operator tenant backend policy snapshot, dry-run, apply and CAS rollback through the existing policy and audit owners.
+- Read original accounting revisions and debits for an exact fleet run through its private worker bindings without funding or settlement writes.
+- Refuse cached unflushed persistent state in financial reads while preserving pending new objects without writes.
+
+- Add a tenant/run-scoped completion-wake audit reader that retains every status and settled dispatcher identity, reading persisted columns without flushing or overwriting caller state.
 - Refuse retained fleet-root authority after its original run completes, fails or is cancelled, including completion-turn and authenticated tool readers.
 
 - Resume opted-in fleet completion turns through their exact original frozen run, preserving grants and finite origin/card lifetimes across idle frames.
+- Document and verify the completion-aware wake rollback reader floor and fair callback-unavailable deferral.
+- Verify the completion-aware wake rollback reader floor and refuse schema downgrade until active completion wakes are retired.
 
 - Bind Discord fleet completion wakes to the original session through normal admission, with a fresh root fence before input and no recovery to another session.
 - Add read-only QA resource manifests and independent cleanup readback checks without performing cleanup mutations.
@@ -162,6 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Select Discord legacy event rendering and neutral action cards from the registered profile policy, preserving existing drafts, controls and terminal behavior.
 
 - Route Slack and Teams legacy event rendering and native action callbacks through one declared profile capability, preserving existing adapter behavior.
+- Select accounting settlement from declared profile modes while preserving legacy billing, native pending costs and delegated usage coverage.
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
 - Derive live OpenAI probe authorization from a registered canonical GO pin, matching financial envelope and unused attempt identity instead of fixing one attempt in the runner.

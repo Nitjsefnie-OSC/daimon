@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from mux.contracts.extensions import ANTHROPIC_EXTENSIONS
-from mux.contracts.profile import Profile
+from mux.contracts.profile import AccountingMode, Profile
 
 MANAGED_AGENTS = Profile(
     provider="anthropic",
     profile_id="anthropic.managed_agents",
     schema_version="1",
+    accounting_mode=AccountingMode.REQUEST_SPANS,
     sdk_pin="anthropic>=0.117",
     core=True,
     emits_legacy_events=True,

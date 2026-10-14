@@ -42,6 +42,7 @@ from daimon.core._models import (
     TurnCardIntent,
     UsageObservation,
 )
+from daimon.core.stores import read_persisted_columns
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope
@@ -254,25 +255,37 @@ async def thread_has_caller_sessions(
 # Bindings
 
 
-async def _binding(session: AsyncSession, binding_id: str, generation: int) -> BindingContract:
-    body = await session.scalar(
-        select(ProviderBinding.binding).where(
-            ProviderBinding.binding_id == binding_id, ProviderBinding.generation == generation
-        )
+async def _binding(
+    session: AsyncSession, binding_id: str, generation: int, *, read_persisted: bool = False
+) -> BindingContract:
+    statement = select(ProviderBinding.binding).where(
+        ProviderBinding.binding_id == binding_id, ProviderBinding.generation == generation
+    )
+    body = (
+        (await read_persisted_columns(session, statement)).scalar_one_or_none()
+        if read_persisted
+        else await session.scalar(statement)
     )
     assert body is not None, f"binding {binding_id} lost generation {generation}"
     return BindingContract.model_validate(body)
 
 
-async def get_binding(session: AsyncSession, slot: Slot) -> BindingContract | None:
+async def get_binding(
+    session: AsyncSession, slot: Slot, *, read_persisted: bool = False
+) -> BindingContract | None:
+    statement = select(ProviderBindingSlot.binding_id, ProviderBindingSlot.generation).where(
+        *_where_slot(ProviderBindingSlot, slot)
+    )
     row = (
-        await session.execute(
-            select(ProviderBindingSlot.binding_id, ProviderBindingSlot.generation).where(
-                *_where_slot(ProviderBindingSlot, slot)
-            )
-        )
+        await read_persisted_columns(session, statement)
+        if read_persisted
+        else await session.execute(statement)
     ).one_or_none()
-    return await _binding(session, row.binding_id, row.generation) if row else None
+    return (
+        await _binding(session, row.binding_id, row.generation, read_persisted=read_persisted)
+        if row
+        else None
+    )
 
 
 async def put_binding(
@@ -510,8 +523,13 @@ async def get_fleet_root_operation(
     run_id: uuid.UUID | None = None,
     request_digest: str | None = None,
     slot: Slot | None = None,
+    check_intent_owner: bool = False,
 ) -> OperationRecord | None:
     """Read or durably reserve the exact root association before run creation."""
+    if check_intent_owner and (
+        intent_id is None or (origin_id, run_id, request_digest) != (None, None, None)
+    ):
+        raise ValueError("intent-only root read required")
     query = select(MuxOperation).where(
         MuxOperation.tenant_id == _tenant(scope.tenant_id),
         MuxOperation.key.startswith("fleet_root:"),
@@ -568,7 +586,8 @@ async def get_fleet_root_operation(
         raise ValueError("exactly one root selector required")
     if origin_id is not None:
         return await get_operation(session, scope, f"fleet_root:{origin_id}:root:0")
-    query = query.where(MuxOperation.account_id == scope.account_id)
+    if not check_intent_owner:
+        query = query.where(MuxOperation.account_id == scope.account_id)
     body = (await session.scalars(query)).one_or_none()
     if body is None:
         return None
@@ -746,20 +765,35 @@ async def append_events(
 
 
 async def read_events(
-    session: AsyncSession, session_id: str, *, after: int = -1, limit: int = 1000
+    session: AsyncSession,
+    session_id: str,
+    *,
+    after: int = -1,
+    limit: int = 1000,
+    read_persisted: bool = False,
 ) -> list[Event]:
-    bodies = await session.scalars(
+    statement = (
         select(Journal.event)
         .where(Journal.session_id == session_id, Journal.sequence > after)
         .order_by(Journal.sequence)
         .limit(limit)
     )
+    bodies = (
+        (await read_persisted_columns(session, statement)).scalars()
+        if read_persisted
+        else await session.scalars(statement)
+    )
     return [Event.model_validate(body) for body in bodies]
 
 
-async def projection(session: AsyncSession, session_id: str) -> ProjectionSnapshot | None:
-    body = await session.scalar(
-        select(JournalSession.projection).where(JournalSession.session_id == session_id)
+async def projection(
+    session: AsyncSession, session_id: str, *, read_persisted: bool = False
+) -> ProjectionSnapshot | None:
+    statement = select(JournalSession.projection).where(JournalSession.session_id == session_id)
+    body = (
+        (await read_persisted_columns(session, statement)).scalar_one_or_none()
+        if read_persisted
+        else await session.scalar(statement)
     )
     return ProjectionSnapshot.model_validate(body) if body is not None else None
 

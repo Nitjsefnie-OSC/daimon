@@ -261,14 +261,24 @@ def sdk_environment(record: Environment) -> BetaEnvironment:
     from mux.drivers.anthropic.resources.environments import environment_payload
 
     payload = environment_payload(record.spec)
-    payload.update(
-        {
-            "id": record.ref.id,
-            "type": "environment",
-            "created_at": record.created_at,
-            "updated_at": record.updated_at,
-            "archived_at": record.archived_at,
+    if record.spec.packages is not None:
+        config = dict(cast(Mapping[str, object], payload["config"]))
+        networking = cast(dict[str, object] | None, config.get("networking"))
+        if isinstance(networking, dict) and networking.get("type") == "limited":
+            networking.update(allow_mcp_servers=False, allow_package_managers=False)
+        config["packages"] = {
+            "apt": list(record.spec.packages.get("system", ())),
+            "pip": list(record.spec.packages.get("python", ())),
+            "npm": list(record.spec.packages.get("npm", ())),
+            "cargo": [],
+            "gem": [],
+            "go": [],
         }
+        payload["config"] = config
+    payload.update(
+        id=record.ref.id,
+        type="environment",
+        **record.model_dump(mode="json", include={"created_at", "updated_at", "archived_at"}),
     )
     return BetaEnvironment.model_validate(payload)
 

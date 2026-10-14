@@ -7,17 +7,19 @@ these models before returning (`Row.model_validate(orm, from_attributes=True)`).
 from __future__ import annotations
 
 import enum
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
+import structlog
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.ids import PROVIDERS, Provider, Scope
 from mux.contracts.profile import Capability
 from mux.contracts.resources import Agent, AgentSpec, Environment, ResourceBinding, WorkspaceSource
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -1123,6 +1125,29 @@ class AgentBackendRevision(_Facts):
     digest: str
     previous_local: int | None
     created_at: datetime
+    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
+    fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def _read_fleet_grant(self) -> AgentBackendRevision:
+        if self.fleet_grant is None:
+            return self
+        from daimon.core.neutral_resources import AgentFleetGrant
+
+        try:
+            grant = AgentFleetGrant.model_validate_json(json.dumps(self.fleet_grant))
+            if not 0 < grant.epoch <= self.local:
+                raise ValueError("invalid grant epoch")
+        except ValueError:
+            object.__setattr__(self, "fleet_grant", None)
+            object.__setattr__(self, "fleet_grant_invalid", True)
+            structlog.get_logger(__name__).warning(
+                "fleet.grant_invalid",
+                tenant_id=self.tenant_id,
+                agent_id=self.agent_id,
+                revision=self.local,
+            )
+        return self
 
 
 class CompatibilityPreview(_Facts):
@@ -1138,3 +1163,4 @@ class CompatibilityPreview(_Facts):
     cost_line: str
     allowed: bool
     digest: str
+    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)

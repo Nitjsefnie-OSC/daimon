@@ -625,3 +625,62 @@ print(json.dumps(asyncio.run(prove())))
         "host_bundle_complete": True,
         "explicit_reader_retained": True,
     }
+
+
+def test_registered_tariffs_are_cold_immutable_and_do_not_construct_a_runtime(
+    registry, monkeypatch
+):
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.pricing import ProviderPrice
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("tariff lookup constructed a runtime or read deployment authorization")
+
+    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
+    monkeypatch.setattr(os.environ, "get", forbidden)
+    price = ProviderPrice(
+        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
+    )
+    source = {("openai", "gpt-6-luna"): price}
+    registry.register_channel_runtime(
+        PROFILE, forbidden, authorizations=forbidden, tariffs=lambda: source
+    )
+    context = registry.channel_runtime_prices()
+    assert dict(context) == source
+    source.clear()
+    assert context[("openai", "gpt-6-luna")] is price
+    with pytest.raises(TypeError):
+        context[("openai", "gpt-6-luna")] = price
+
+
+def test_registered_tariffs_never_fabricate_missing_prices(registry, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("tariff lookup constructed a runtime")
+
+    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
+    registry.register_channel_runtime(PROFILE, forbidden)
+    assert dict(registry.channel_runtime_prices()) == {}
+
+
+def test_conflicting_registered_tariffs_refuse_before_runtime_construction(registry, monkeypatch):
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.pricing import ProviderPrice
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("conflicting tariffs constructed a runtime")
+
+    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
+    price = ProviderPrice(
+        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
+    )
+    key = (price.provider, price.model)
+    registry.register_channel_runtime(PROFILE, forbidden, tariffs=lambda: {key: price})
+    registry.register_channel_runtime(
+        "gemini.inline_reuse", forbidden, tariffs=lambda: {key: replace(price, input=Decimal("3"))}
+    )
+    with pytest.raises(UnsupportedCapability, match="conflicting_runtime_price"):
+        registry.channel_runtime_prices()

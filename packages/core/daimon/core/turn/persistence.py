@@ -54,6 +54,9 @@ class TurnPersistence:
         operation_key: str,
         slot: Slot | None = None,
         holder: str | None = None,
+        source_agent_id: str | None = None,
+        session_ref: ResourceRef | None = None,
+        fleet_capture: bool = False,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         ttl: timedelta = timedelta(minutes=5),
         renew_interval_s: float = 60.0,
@@ -80,6 +83,9 @@ class TurnPersistence:
         self._slot = slot
         self.scope = scope
         self.operation_key = operation_key
+        self.source_agent_id = source_agent_id
+        self.session_ref = session_ref
+        self.fleet_capture = fleet_capture
         self._holder = holder or secrets.token_hex(16)
         self._now = now
         self._ttl = ttl

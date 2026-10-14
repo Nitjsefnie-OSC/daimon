@@ -147,6 +147,7 @@ class HostFleetToolService:
         *,
         origin_context_id: uuid.UUID | None = None,
         run_id: uuid.UUID | None = None,
+        drain: bool = False,
     ) -> tuple[WorkerPermissions, TenantAccessPolicy]:
         if self._parent_loader is None and self._deps is None:
             raise ToolError("Fleet orchestration is unavailable: current root is not bound.")
@@ -175,7 +176,12 @@ class HostFleetToolService:
             )
             try:
                 parent, policy = await read_frozen_root(
-                    self._deps, scope, origin_id=origin.id, run_id=run_id, now=datetime.now(UTC)
+                    self._deps,
+                    scope,
+                    origin_id=origin.id,
+                    run_id=run_id,
+                    now=datetime.now(UTC),
+                    drain=drain,
                 )
             except (WorkerSpecRefused, ScopeViolation):
                 raise ToolError("Fleet orchestration refused: root_unavailable.") from None
@@ -259,7 +265,7 @@ class HostFleetToolService:
         self, caller: AuthIdentity, *, run_id: uuid.UUID, origin_context_id: uuid.UUID | None = None
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
-            caller, origin_context_id=origin_context_id, run_id=run_id
+            caller, origin_context_id=origin_context_id, run_id=run_id, drain=True
         )
         return await self._orchestrator.status(parent, policy, run_id=run_id)
 
@@ -274,7 +280,7 @@ class HostFleetToolService:
         origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
-            caller, origin_context_id=origin_context_id, run_id=run_id
+            caller, origin_context_id=origin_context_id, run_id=run_id, drain=True
         )
         return await self._orchestrator.control(
             parent,
@@ -315,7 +321,7 @@ class HostFleetToolService:
         self, caller: AuthIdentity, *, run_id: uuid.UUID, origin_context_id: uuid.UUID | None = None
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
-            caller, origin_context_id=origin_context_id, run_id=run_id
+            caller, origin_context_id=origin_context_id, run_id=run_id, drain=True
         )
         return await self._orchestrator.collect(parent, policy, run_id=run_id)
 

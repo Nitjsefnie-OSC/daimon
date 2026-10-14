@@ -9,6 +9,7 @@ from typing import IO, Self, cast
 import httpx
 from openai import DEFAULT_CONNECTION_LIMITS, DEFAULT_TIMEOUT, AsyncOpenAI
 
+from mux.drivers import isolated_ssl_context
 from mux.drivers.openai.transport import Method, Object, SDKTransport, Transport
 
 _TLS_PROXY_ENV = frozenset(
@@ -58,7 +59,7 @@ def _http_transport() -> httpx.AsyncBaseTransport:
     # Explicit TLS roots and no proxy discovery, including SSL_CERT_FILE/DIR.
     # Preserve SDK connection limits, timeout and redirect policy below.
     return httpx.AsyncHTTPTransport(
-        verify=httpx.create_ssl_context(trust_env=False),
+        verify=isolated_ssl_context(),
         trust_env=False,
         proxy=None,
         limits=DEFAULT_CONNECTION_LIMITS,
