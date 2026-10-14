@@ -161,6 +161,7 @@ async def test_exact_frozen_skill_pair_preserves_missing_resource_edge(
     require(not binding.trace.requests, "missing resource edge called a provider")
 
 
+@pytest.mark.parametrize("binding", ["anthropic"], indirect=True)
 @pytest.mark.parametrize(
     "scenario_id",
     ["QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS", "QA-D7-BIG-WORKSPACE-CHECKPOINT"],
