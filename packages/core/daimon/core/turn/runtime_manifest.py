@@ -294,6 +294,7 @@ async def prepare_controlled_root(
     from daimon.core.config import load_turn_settings
     from daimon.core.stores import mux_state
     from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn.prepare import _admitted_profile  # pyright: ignore[reportPrivateUsage]
     from daimon.core.turn_origin import current_origin_id
     from mux.contracts.ids import ChannelRef, ThreadRef
     from mux.state.lease import Slot
@@ -307,7 +308,10 @@ async def prepare_controlled_root(
     if value is None or value.native_root_budget_usd is None:
         return request
     revision, grant = request.admission.backend_revision, request.admission.grant
-    profile = revision.profile if revision else "anthropic.managed_agents"
+    # Reuse `_admitted_profile`'s own fallback rather than re-stating the
+    # default-backend literal here -- a second site would grow the provider
+    # literal count outside the profile/driver seam (`test_provider_literal_ratchet`).
+    profile = _admitted_profile(request.admission)
     model = revision.model if revision else request.admission.agent.model.id
     origin_id = current_origin_id.get()
     if (

@@ -15,7 +15,8 @@ from daimon.core.neutral_resources import WorkerSpecRefused
 from daimon.core.stores import mux_state
 from daimon.core.turn.outcomes import TurnObservation
 from daimon.core.turn.persistence import TurnPersistence
-from daimon.core.turn.prepare import create_ma_session
+from daimon.core.turn.prepare import PreparedTurn, bind_recorder, create_ma_session
+from daimon.core.turn.run import _replace_dead_session_locked  # pyright: ignore[reportPrivateUsage]
 from daimon.core.turn.runtime_manifest import (
     prepare_controlled_root,
     root_claim_check,
@@ -439,3 +440,47 @@ async def test_busy_preallocation_closes_unstarted_native_preparation_without_io
     assert preparing.cr_frame is None
     assert len(root_turn[-1].requests) == before
     assert (await root_record(root_turn)).result["root_finance"]["input_keys"] == []
+
+
+async def test_controlled_recovery_refuses_successor_native_allocation(root_turn):
+    """A dead native-root-controlled session gets no fresh session/budget.
+
+    `_replace_dead_session_locked` must refuse before touching policy, the
+    advisory lock or `create_ma_session` the moment it sees a preparation
+    carrying `native_budget_usd` -- recovery is a fresh-session mechanism for
+    the ordinary path, not a way to mint a second controlled allocation for
+    one original root hold.
+    """
+    deps, prepared, _, _, _, _, _, transport = root_turn
+    request = await select_controls(root_turn)
+    assert request.native_budget_usd is not None
+    record = bind_recorder(
+        deps,
+        tenant_id=request.tenant_id,
+        external_user_id=request.external_user_id,
+        ma_session_id=prepared.ma_session_id,
+        model_id=prepared.admission.agent.model.id,
+    )
+    controlled = PreparedTurn(
+        admission=prepared.admission,
+        ma_session_id=prepared.ma_session_id,
+        mapping_id=prepared.mapping_id,
+        watermark=None,
+        reused=True,
+        session_account_id=prepared.session_account_id,
+        _record=record,
+        _preparation=request,
+    )
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused) as refused:
+        await _replace_dead_session_locked(
+            deps,
+            controlled,
+            tenant_id=request.tenant_id,
+            platform=request.platform,
+            thread_id=request.thread_id,
+            dead_session_id=prepared.ma_session_id,
+            dead_mapping_id=UUID(int=0),
+        )
+    assert refused.value.field == "native_budget_usd"
+    assert transport.requests == transport.requests[:before]
