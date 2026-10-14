@@ -1165,13 +1165,12 @@ async def get_config_agent_revision(
     session: AsyncSession, revision: ConfigRevision, *, agent_id: uuid.UUID
 ) -> AgentBackendRevision | None:
     """Recover only the immutable consent association retained with this effective revision."""
-    raw = await session.scalar(
-        select(ChannelConfigRevision.agent_backend_ref).where(
-            *_channel_where(revision.channel),
-            ChannelConfigRevision.local == revision.local,
-            ChannelConfigRevision.origin == "agent",
-        )
+    statement = select(ChannelConfigRevision.agent_backend_ref).where(
+        *_channel_where(revision.channel),
+        ChannelConfigRevision.local == revision.local,
+        ChannelConfigRevision.origin == "agent",
     )
+    raw = (await read_persisted_columns(session, statement)).scalar_one_or_none()
     if raw is None:
         return None
     try:
@@ -1185,7 +1184,7 @@ async def get_config_agent_revision(
     if identity != agent_id:
         raise ScopeViolation(revision.channel.channel_id, "foreign agent backend association")
     retained = await agent_backends.current(
-        session, _tenant(revision.channel.tenant_id), identity, local=local
+        session, _tenant(revision.channel.tenant_id), identity, local=local, persisted=True
     )
     if retained is None or retained.drop_consent is None:
         raise ScopeViolation(revision.channel.channel_id, "missing original backend consent")
