@@ -3004,3 +3004,5 @@ Discord orchestration callers may omit the origin stack. The existing owner then
 manages its lifetime internally; constructing the stack makes no database or
 provider change. Admission and the queue gate still complete before entering
 the opt-in fleet origin or binding its session.
+
+Offline host conformance keeps shared database, auth and outcome controls independent of optional provider codecs. Provider wake and prepared-pump controls live in separate OpenAI and Gemini test modules and retain the same shared case assertions.
