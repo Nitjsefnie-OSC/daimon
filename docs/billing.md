@@ -1231,3 +1231,9 @@ remains unknown. Missing cache-write counters also keep exact cost unknown.
 The tariff does not enforce an input cap or convert a token floor into a bill.
 Fast, Batch, Flex, regional and FedRAMP pricing are outside this supplier's
 request-tier contract; a registrar selecting them must refuse this supplier.
+
+The installed OpenAI and Gemini runtime callbacks pass these same price objects
+to the fleet pricing context and their native usage recorders. Default fleet
+startup discovers the callbacks without credentials or provider calls. Missing
+model rows do not reserve worker funds, and supplying a token tariff leaves
+unknown infrastructure and incomplete native counters pending.

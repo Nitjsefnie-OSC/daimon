@@ -6,10 +6,13 @@ import json
 import os
 from datetime import timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Literal
 from uuid import UUID
 
+from daimon.core import pricing
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
@@ -382,7 +385,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             SQLiteFlashAccounting(
                 plan.holds_path, namespace=namespace, hold_usd=plan.hold_usd, cap_usd=plan.cap_usd
             ),
-            {},
+            MappingProxyType(
+                {model: price for (_, model), price in pricing.provider_prices(PROFILE).items()}
+            ),
         ),
     )
 
@@ -396,4 +401,9 @@ def register_runtime() -> None:
     register_turn_backend(PROFILE, compose_gemini_backend, fallback=True)
     register_turn_codec(PROFILE, compose_gemini_codec, fallback=True)
     register_turn_preparation(PROFILE, prepare_gemini_turn, fallback=True)
-    register_channel_runtime(PROFILE, build_gemini_runtime, fallback=True)
+    register_channel_runtime(
+        PROFILE,
+        build_gemini_runtime,
+        tariffs=partial(pricing.provider_prices, PROFILE),
+        fallback=True,
+    )
