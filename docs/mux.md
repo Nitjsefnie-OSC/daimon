@@ -2965,3 +2965,26 @@ Cached ORM values cannot hide cleared or malformed consent. Effective dirty or
 deleted proof sources refuse without flushing, refreshing or overwriting caller
 state; pending new objects remain unflushed. Ordinary revision reads retain their
 existing ORM behavior unless the authoritative persisted mode is selected.
+Per-agent fleet grants can carry `native_root_budget_usd` and
+`root_cash_budget_usd` together through the existing audited preference service.
+Both are optional; omitting them preserves the previous grant encoding. Native
+budget values use the same strict, finite, positive cent precision as worker
+native budgets. Cash values must be strict, finite and positive. The pair is
+separate from `limits`, which continue to govern workers and retain their
+single-input native dispatch restriction.
+
+The session compilers accept an explicit root native budget: Anthropic compiles
+USD cents into its native session budget, while OpenAI compiles cents into
+`spend_control.limit`. Explicit compilation requires exact acknowledgement and
+owned-session readback; a missing or mismatched budget refuses. OpenAI native
+spend-control acceptance remains a live-provider gap: prior attempts were
+rejected, so offline request-shape proofs do not certify provider acceptance.
+No ordinary root selects these new grant values yet. Root funding, distinct-send
+counting and attributed settlement are separate prerequisites for activation.
+The normal request continues to omit the optional budget.
+
+With fleet enabled and an applicable per-agent grant, Discord establishes the
+real card intent and scoped origin before binding and retains the same origin
+through execution. Preparation failure, cancellation and completion release
+that context once. With fleet disabled or no applicable grant, the caller keeps
+its previous preparation arguments and origin timing.

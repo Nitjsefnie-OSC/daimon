@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve native tariff identities from provider profiles and check dated validity in UTC.
 
 - Supply immutable dated native Standard token tariffs, retaining unknown actuals when request tiers or infrastructure are incomplete.
+- Add optional paired per-agent root budgets without enabling root funding or counted sends. Prepare native session-budget request validation and bind the actual Discord card/origin identity before preparation only for granted fleet roots.
 
 - Add a testing-only scoped fleet journal exporter with atomic restricted bundles, verified paired worker generations/failure facts and pointer-bound public review digests, authoritative persisted reads, offline verification and explicit missing owner evidence.
 
