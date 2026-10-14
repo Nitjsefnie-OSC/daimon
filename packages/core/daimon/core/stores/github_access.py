@@ -17,7 +17,7 @@ from daimon.core._models import (
 from daimon.core.stores import agent_repo_binding
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import ColumnElement, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -52,6 +52,20 @@ class AgentGrant(BaseModel):
     granted_by_account_id: uuid.UUID | None
     granted_at: datetime
     version: int
+
+
+class SecondInstallationError(ValueError):
+    """A grant would make one agent use two GitHub installations."""
+
+
+async def lock_agent_grants(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> None:
+    """Serialize grant creation even when the agent has no grant row yet."""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"github-agent-grants:{tenant_id}:{agent_id}"},
+    )
 
 
 def _visible_to(agent_id: uuid.UUID | None) -> ColumnElement[bool]:
@@ -305,6 +319,7 @@ async def remove_agent_repo(
     only is disconnected too, since no other agent may use it; adding it back
     needs a new Connect. A server-wide repo stays connected for other agents.
     """
+    await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     working = await session.get(
         AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True
     )
@@ -396,6 +411,7 @@ async def stage_grant(
     granted_by_account_id: uuid.UUID | None,
     mount_path: str | None = None,
     is_working_repo: bool = False,
+    agent_name: str | None = None,
 ) -> AgentGrant:
     """Stage or update a grant. The caller owns the transaction and authorizes the actor."""
     if _ACCESS_RANK[baseline_access] > _ACCESS_RANK[ceiling_access]:
@@ -404,6 +420,7 @@ async def stage_grant(
         not mount_path.startswith("/workspace/") or ".." in mount_path.split("/")
     ):
         raise ValueError("mount path must be inside /workspace")
+    await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     authorized = await repo_for_agent(
         session, tenant_id=tenant_id, repo_id=repo_id, agent_id=agent_id, for_update=True
     )
@@ -413,6 +430,22 @@ async def stage_grant(
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
     if installation is None or installation.suspended_at is not None:
         raise ValueError("GitHub App installation is not active")
+    for grant in await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id):
+        if grant.repo_id == repo_id:
+            continue
+        other = await repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+        )
+        if other is not None and other.installation_id != authorized.installation_id:
+            org = other.repo_full_name.split("/", 1)[0]
+            raise SecondInstallationError(
+                f"{agent_name or agent_id} already uses repos from {org}. "
+                "Connect repos from one GitHub org per agent."
+            )
+    if authorized.max_access != "write":
+        raise ValueError("GitHub write access is needed to connect this repo.")
+    baseline_access = "write"
+    ceiling_access = "write"
     if _ACCESS_RANK[ceiling_access] > _ACCESS_RANK[authorized.max_access]:
         raise ValueError("ceiling access exceeds repository authorization")
     app_active = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app"
@@ -440,6 +473,14 @@ async def stage_grant(
             granted_at=datetime.now().astimezone(),
         )
         session.add(row)
+    elif (
+        row.baseline_access == baseline_access
+        and row.ceiling_access == ceiling_access
+        and row.staged == (not app_active)
+        and row.mount_path == mount_path
+        and row.is_working_repo == is_working_repo
+    ):
+        return AgentGrant.model_validate(row)
     else:
         row.version += 1
     row.baseline_access = baseline_access
@@ -473,6 +514,7 @@ async def remove_grant(
     repo_id: int,
     changed_by_account_id: uuid.UUID | None = None,
 ) -> bool:
+    await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     row = await session.get(AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True)
     if row is None:
         return False

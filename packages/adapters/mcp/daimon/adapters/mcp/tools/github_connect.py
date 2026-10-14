@@ -269,11 +269,6 @@ async def _github_connect_impl(
                         and (is_admin or repo.scope_agent_id == agent_id)
                     )
                     if grantable:
-                        if required_ability == "write" and repo.max_access != "write":
-                            raise ToolError(
-                                "GitHub confirmed read access only. "
-                                "Ask for write access in Connect GitHub."
-                            )
                         existing = next(
                             (
                                 row
@@ -284,23 +279,21 @@ async def _github_connect_impl(
                             ),
                             None,
                         )
-                        ability: Literal["read", "write"] = (
-                            "write"
-                            if required_ability == "write"
-                            or (existing is not None and existing.ceiling_access == "write")
-                            else "read"
-                        )
-                        await stage_grant(
-                            session,
-                            tenant_id=auth.tenant_id,
-                            agent_id=agent_id,
-                            repo_id=repo.repo_id,
-                            baseline_access=ability,
-                            ceiling_access=ability,
-                            granted_by_account_id=auth.account_id,
-                            mount_path=existing.mount_path if existing else None,
-                            is_working_repo=existing.is_working_repo if existing else False,
-                        )
+                        try:
+                            await stage_grant(
+                                session,
+                                tenant_id=auth.tenant_id,
+                                agent_id=agent_id,
+                                repo_id=repo.repo_id,
+                                baseline_access="write",
+                                ceiling_access="write",
+                                granted_by_account_id=auth.account_id,
+                                mount_path=existing.mount_path if existing else None,
+                                is_working_repo=existing.is_working_repo if existing else False,
+                                agent_name=agent.name,
+                            )
+                        except ValueError as error:
+                            raise ToolError(str(error)) from error
                         if mode == "legacy":
                             await activate_agent(
                                 session,
@@ -311,10 +304,8 @@ async def _github_connect_impl(
                         return ConnectResult(
                             status="granted",
                             message=(
-                                f"{agent.name} can now "
-                                f"{'read and change' if ability == 'write' else 'read'} "
-                                f"{repo.repo_full_name} from the next message. "
-                                "To undo, ask me to remove it."
+                                f"{agent.name} can now read and change {repo.repo_full_name} "
+                                "from the next message. To undo, ask me to remove it."
                             ),
                         )
         intent_id: uuid.UUID | None = None
@@ -427,7 +418,6 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
         requested_work: str | None = None,
         repo_name: str | None = None,
-        required_ability: Literal["read", "write"] = "read",
         confirmed: bool = False,
     ) -> ConnectResult:
         """Give this agent token access to more repos, such as a private GitHub repo.
@@ -443,7 +433,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         when someone only asks to connect GitHub.
         For a clear 'give this agent access to owner/repo', call with repo_name
         right away; don't ask for a yes first. Ask only if the repo or agent is
-        unclear. Use write only if asked. confirmed is ignored. A connected repo is granted
+        unclear. confirmed is ignored. A connected repo is granted
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
@@ -458,6 +448,6 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             expected_ma_agent_id=expected_ma_agent_id,
             requested_work=requested_work,
             repo_name=repo_name,
-            required_ability=required_ability,
+            required_ability="write",
             confirmed=confirmed,
         )

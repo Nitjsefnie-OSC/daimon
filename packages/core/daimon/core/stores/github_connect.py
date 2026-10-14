@@ -511,6 +511,7 @@ async def activate_confirmed_agent(
             granted_by_account_id=invitation.requester_account_id,
             mount_path=existing.mount_path if existing is not None else None,
             is_working_repo=existing.is_working_repo if existing is not None else False,
+            agent_name=invitation.agent_name,
         )
         staged.append(repo)
     if not staged:
@@ -1388,6 +1389,8 @@ async def confirm(
     now = datetime.now(UTC)
     scope = invitation.agent_id
     for repo in repos:
+        if repo.max_access != "write":
+            raise ValueError("GitHub write access is needed to connect this repo.")
         if (
             repo.max_access == "write"
             and repo.authorizer_permission is not None

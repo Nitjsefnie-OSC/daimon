@@ -1598,28 +1598,30 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/v1/vaults/vlt_1/credentials":
             return httpx.Response(200, json={"data": credentials, "has_more": False})
-        writes.append((req.method, req.url.path, json.loads(req.content)))
+        writes.append((req.method, req.url.path, json.loads(req.content) if req.content else {}))
+        if req.method == "DELETE":
+            return httpx.Response(204)
         return httpx.Response(
             200, json=next(item for item in credentials if req.url.path.endswith(item["id"]))
         )
 
     access = AppSessionAccess(
         resources=(),
-        tokens=(AppToken(uuid.uuid4(), "fresh-token", 1, (11,), "read", "GH_TOKEN_OWNER_READ"),),
+        tokens=(AppToken(uuid.uuid4(), "fresh-token", 1, (11,), "write", "GH_TOKEN"),),
         working_token="fresh-token",
     )
     await add_app_credentials(
         _make_client(httpx.MockTransport(handler)), vault_id="vlt_1", access=access
     )
     assert {(method, path) for method, path, _ in writes} == {
-        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_repo"),
+        ("DELETE", "/v1/vaults/vlt_1/credentials/vcrd_repo"),
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_working"),
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_copilot"),
     }
     assert all(
         body["auth"]["secret_value"] == "fresh-token"
         for _, path, body in writes
-        if path.endswith(("vcrd_repo", "vcrd_working"))
+        if path.endswith("vcrd_working")
     )
     assert next(body for _, path, body in writes if path.endswith("vcrd_copilot"))["auth"] == {
         "type": "static_bearer",

@@ -59,7 +59,7 @@ def test_variants_render_branded_slack_card(
     actions = next(block for block in blocks if block["type"] == "actions")
     assert actions["elements"][0]["text"]["text"] == "🔗 Connect GitHub"
     assert actions["elements"][0]["style"] == "primary"
-    assert card.detail == ("Default access: Read and write" if variant != "A" else None)
+    assert card.detail is None
     assert card.footer == ("Only you can see the link." if variant == "B" else None)
     for block in blocks:
         if block["type"] != "actions":

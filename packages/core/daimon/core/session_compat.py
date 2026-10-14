@@ -190,6 +190,7 @@ def decide_session_compatibility(
     capabilities: MaCapabilities,
     now: datetime,
     repo_token_max_age_s: int = 2400,
+    force_app_token_rotation: bool = False,
 ) -> CompatibilityDecision:
     """Reuse, update in place, or replace the session `recorded` describes.
 
@@ -238,7 +239,7 @@ def decide_session_compatibility(
         issued_at = recorded.repo_token_issued_at
         # Installation tokens are recorded with a conservative 55-minute life.
         # Refresh at 40 minutes, leaving 15 minutes for vault propagation.
-        if issued_at is None or now.timestamp() - issued_at >= 2400:
+        if force_app_token_rotation or issued_at is None or now.timestamp() - issued_at >= 2400:
             reasons.append("repo_token_age")
             if capabilities.repo_token_rotatable:
                 ops.append(RotateAppTokens(resource_ids=recorded.repo_resource_ids))

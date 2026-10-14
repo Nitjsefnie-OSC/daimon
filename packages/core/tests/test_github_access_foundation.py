@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import uuid
@@ -43,7 +44,7 @@ from daimon.core.stores.github_removal_notices import (
 from daimon.core.stores.security_audit import append_github_token_event
 from pydantic import SecretStr
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 def test_new_app_settings_are_separate_from_legacy() -> None:
@@ -120,7 +121,7 @@ async def test_staged_grants_activate_atomically_and_validate_ceiling(
         )
     )
     await db_session.flush()
-    with pytest.raises(ValueError, match="exceeds repository authorization"):
+    with pytest.raises(ValueError, match="write access is needed"):
         await github_access.stage_grant(
             db_session,
             tenant_id=tenant_id,
@@ -130,6 +131,11 @@ async def test_staged_grants_activate_atomically_and_validate_ceiling(
             ceiling_access="write",
             granted_by_account_id=None,
         )
+    authorized = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=agent_id
+    )
+    assert authorized is not None
+    authorized.max_access = "write"
     staged = await github_access.stage_grant(
         db_session,
         tenant_id=tenant_id,
@@ -164,7 +170,7 @@ async def test_staged_grants_activate_atomically_and_validate_ceiling(
         granted_by_account_id=None,
         is_working_repo=True,
     )
-    assert not updated.staged and updated.version == 3 and updated.baseline_access == "read"
+    assert not updated.staged and updated.version == 2 and updated.baseline_access == "write"
     await github_access.deactivate_agent(db_session, tenant_id=tenant_id, agent_id=agent_id)
     assert (
         await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
@@ -194,7 +200,7 @@ async def test_copied_agent_identity_starts_without_source_grants(
             owner_id=1,
             installation_id=77,
             repo_full_name="example/repo",
-            max_access="read",
+            max_access="write",
             authorized_by_github_user_id=2,
             status="active",
             version=1,
@@ -219,6 +225,254 @@ async def test_copied_agent_identity_starts_without_source_grants(
         await github_access.list_agent_grants(db_session, tenant_id=tenant_id, agent_id=copied_id)
         == []
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_cannot_grant_second_installation(db_session: AsyncSession) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    for installation_id, repo_id, name in ((71, 101, "first/one"), (72, 102, "second/two")):
+        await github_app_installations.upsert(
+            db_session,
+            installation_id=installation_id,
+            account_login=name.split("/", 1)[0],
+            repo_full_names=[name],
+        )
+        db_session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=repo_id,
+                owner_id=installation_id,
+                installation_id=installation_id,
+                repo_full_name=name,
+                max_access="write",
+                authorized_by_github_user_id=2,
+                status="active",
+                version=1,
+            )
+        )
+    await db_session.flush()
+    await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_id=101,
+        baseline_access="write",
+        ceiling_access="write",
+        granted_by_account_id=None,
+        agent_name="ResearchBot",
+    )
+    with pytest.raises(
+        github_access.SecondInstallationError,
+        match="ResearchBot already uses repos from first. Connect repos from one GitHub org per agent.",
+    ):
+        await github_access.stage_grant(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=102,
+            baseline_access="write",
+            ceiling_access="write",
+            granted_by_account_id=None,
+            agent_name="ResearchBot",
+        )
+
+
+@pytest.mark.asyncio
+async def test_parallel_first_grants_cannot_cross_installations(
+    db_engine: AsyncEngine, db_clean: None
+) -> None:
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    async with factory.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+        await session.flush()
+        for installation_id, repo_id, name in ((71, 101, "first/one"), (72, 102, "second/two")):
+            await github_app_installations.upsert(
+                session,
+                installation_id=installation_id,
+                account_login=name.split("/", 1)[0],
+                repo_full_names=[name],
+            )
+            session.add(
+                TenantGitHubRepo(
+                    tenant_id=tenant_id,
+                    repo_id=repo_id,
+                    owner_id=installation_id,
+                    installation_id=installation_id,
+                    repo_full_name=name,
+                    max_access="write",
+                    authorized_by_github_user_id=2,
+                    status="active",
+                    version=1,
+                )
+            )
+    first_staged = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first() -> None:
+        async with factory.begin() as session:
+            await github_access.stage_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=101,
+                baseline_access="write",
+                ceiling_access="write",
+                granted_by_account_id=None,
+            )
+            first_staged.set()
+            await release_first.wait()
+
+    async def second() -> None:
+        await first_staged.wait()
+        async with factory.begin() as session:
+            await github_access.stage_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=102,
+                baseline_access="write",
+                ceiling_access="write",
+                granted_by_account_id=None,
+            )
+
+    first_task = asyncio.create_task(first())
+    second_task = asyncio.create_task(second())
+    try:
+        await asyncio.wait_for(first_staged.wait(), timeout=5)
+        await asyncio.sleep(0.05)
+        assert not second_task.done()
+    finally:
+        release_first.set()
+        await first_task
+    with pytest.raises(github_access.SecondInstallationError):
+        await second_task
+    async with factory() as session:
+        grants = await github_access.list_agent_grants(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        )
+    assert [grant.repo_id for grant in grants] == [101]
+
+
+@pytest.mark.asyncio
+async def test_crashed_provisional_token_is_not_revoked_before_github_expiry(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    now = datetime.now(UTC)
+    pending = await github_issued_tokens.create_pending(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        session_id="pending:crash-after-vault-swap",
+        installation_id=1,
+        repo_ids=[11],
+        permissions={"contents": "write"},
+        grant_versions={"grant:11": 1, "authorization:11": 1},
+        expires_at=now + timedelta(minutes=55),
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await github_issued_tokens.store_token(
+        db_session, token_id=pending.token_id, token="maybe-in-vault", fernet=fernet
+    )
+    assert (
+        await github_issued_tokens.select_abandoned_pending_tokens(
+            db_session, now=now + timedelta(minutes=3)
+        )
+        == []
+    )
+    assert [
+        row.token_id
+        for row in await github_issued_tokens.select_abandoned_pending_tokens(
+            db_session, now=now + timedelta(minutes=62)
+        )
+    ] == [pending.token_id]
+
+
+@pytest.mark.asyncio
+async def test_sweep_rechecks_restored_token_but_revokes_removed_grant(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    await github_app_installations.upsert(
+        db_session, installation_id=71, account_login="acme", repo_full_names=["acme/repo"]
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=101,
+            owner_id=1,
+            installation_id=71,
+            repo_full_name="acme/repo",
+            max_access="write",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_id=101,
+        baseline_access="write",
+        ceiling_access="write",
+        granted_by_account_id=None,
+    )
+    await github_access.activate_agent(db_session, tenant_id=tenant_id, agent_id=agent_id)
+    [grant] = await github_access.list_agent_grants(
+        db_session, tenant_id=tenant_id, agent_id=agent_id
+    )
+    now = datetime.now(UTC)
+    pending = await github_issued_tokens.create_pending(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        session_id="sweep-race",
+        installation_id=71,
+        repo_ids=[101],
+        permissions={"contents": "write"},
+        grant_versions={"grant:101": grant.version, "authorization:101": 1},
+        expires_at=now + timedelta(minutes=55),
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await github_issued_tokens.store_token(
+        db_session, token_id=pending.token_id, token="still-live", fernet=fernet
+    )
+    await github_issued_tokens.mark_delivered(db_session, token_id=pending.token_id)
+    await github_issued_tokens.mark_session_tokens_superseded(
+        db_session, session_id="sweep-race", except_ids=frozenset(), now=now
+    )
+    assert (
+        await github_issued_tokens.recheck_token_revoke_due(
+            db_session, token_id=pending.token_id, now=now
+        )
+        is not None
+    )
+    await github_issued_tokens.restore_session_tokens(
+        db_session, token_ids=frozenset({pending.token_id})
+    )
+    assert (
+        await github_issued_tokens.recheck_token_revoke_due(
+            db_session, token_id=pending.token_id, now=now
+        )
+        is None
+    )
+    await github_access.remove_grant(
+        db_session, tenant_id=tenant_id, agent_id=agent_id, repo_id=101
+    )
+    checked = await github_issued_tokens.recheck_token_revoke_due(
+        db_session, token_id=pending.token_id, now=now
+    )
+    assert checked is not None and checked[0].token_id == pending.token_id
+    assert not checked[1]
 
 
 @pytest.mark.asyncio
@@ -409,7 +663,7 @@ async def test_mint_revocation_race_revokes_late_github_token(
                 owner_id=1,
                 installation_id=771,
                 repo_full_name="example/repo",
-                max_access="read",
+                max_access="write",
                 authorized_by_github_user_id=2,
                 status="active",
                 version=1,
@@ -606,7 +860,10 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
     grant.version = 2
     await db_session.flush()
     assert [
-        item.token_id for item in await github_issued_tokens.select_stale_tokens(db_session)
+        item.token_id
+        for item in await github_issued_tokens.select_stale_tokens(
+            db_session, include_live_version_bumps=True
+        )
     ] == [row.token_id]
     grant.version = 1
     authorization = await github_access.repo_for_agent(
@@ -616,8 +873,17 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
     authorization.version = 2
     await db_session.flush()
     assert [
-        item.token_id for item in await github_issued_tokens.select_stale_tokens(db_session)
+        item.token_id
+        for item in await github_issued_tokens.select_stale_tokens(
+            db_session, include_live_version_bumps=True
+        )
     ] == [row.token_id]
+    # A delivered token remains usable after a version bump until the vault
+    # receives its replacement. The old sweep revoked it before that swap.
+    await github_issued_tokens.mark_delivered(db_session, token_id=row.token_id)
+    await db_session.flush()
+    assert await github_issued_tokens.select_stale_tokens(db_session) == []
+    assert await github_issued_tokens.session_token_needs_rotation(db_session, session_id="session")
     origin_id = uuid.uuid4()
     event = await append_github_token_event(
         db_session,

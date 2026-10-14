@@ -53,17 +53,11 @@ async def approve_connected_request(
     ]
     if any(repo is None for repo in selected):
         raise ValueError("Connect the repo first.")
-    rank = {"read": 1, "write": 2}
-    if any(
-        repo is not None and rank[repo.max_access] < rank[request.required_ability]
-        for repo in selected
-    ):
-        raise ValueError("GitHub confirmed read only. Review what this agent can do.")
+    if any(repo is not None and repo.max_access != "write" for repo in selected):
+        raise ValueError("GitHub write access is needed to connect this repo.")
     for repo in selected:
         assert repo is not None
-        if request.required_ability not in ("read", "write"):
-            raise ValueError("Requested access is invalid.")
-        ceiling: Literal["read", "write"] = request.required_ability
+        ceiling: Literal["write"] = "write"
         await stage_panel_grant(
             session,
             tenant_id=tenant_id,

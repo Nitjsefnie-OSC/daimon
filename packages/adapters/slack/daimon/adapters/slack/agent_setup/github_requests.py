@@ -82,9 +82,7 @@ def _review_modal(
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*{slack_mrkdwn_escape(agent_name)} needs GitHub access*\n"
-                        f"{repo_detail}\n"
-                        f"Access: {slack_mrkdwn_escape(ability)}"
+                        f"*{slack_mrkdwn_escape(agent_name)} needs GitHub access*\n{repo_detail}"
                     ),
                 },
             },
@@ -327,7 +325,6 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
             for name in request.repo_names
             if name.casefold() in connected
         ]
-        level = "Read only" if request.required_ability == "read" else "Read and write"
         await client.views_open(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=str(payload.get("trigger_id") or ""),
             view=_review_modal(
@@ -337,7 +334,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 agent_name=request.agent_name,
                 repo_names=connected_names,
                 other_repo_count=len(request.repo_names) - len(connected_names),
-                ability=level,
+                ability="write",
             ),
         )
         return
