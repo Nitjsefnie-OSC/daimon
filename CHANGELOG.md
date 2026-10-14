@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the complete Managed Agents call inventory in compact JSON below the shared file-size limit, with the unchanged zero-call ratchet outside drivers.
 - Retain explicit source-loss consent with immutable agent backend revisions and scoped effective configuration associations; legacy revisions remain consent-free.
 - Read retained source-loss authority from persisted columns and refuse dirty or deleted proof state without flushing or replacing caller caches.
+- Require exact preview confirmation for supported source losses and revalidate the original scoped source and canonical target before cross-backend preparation.
 
 - Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
 - Read exact root billing references through immutable outcomes without summing reused-session history.

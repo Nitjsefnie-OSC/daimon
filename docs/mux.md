@@ -2965,3 +2965,20 @@ Cached ORM values cannot hide cleared or malformed consent. Effective dirty or
 deleted proof sources refuse without flushing, refreshing or overwriting caller
 state; pending new objects remain unflushed. Ordinary revision reads retain their
 existing ORM behavior unless the authoritative persisted mode is selected.
+
+The backend service may receive a trusted complete source-capture callback. Its
+preview derives losses through the existing worker source-preservation rule and
+includes the exact losses, source pin and target digest in the confirmation
+digest. A switch must accept exactly that tuple. Credentials, instructions,
+unknown obligations and publishing approval cannot be discarded. Missing source
+or publishing context refuses. Clear removes consent; revert rechecks the original
+consent against a fresh capture, and fleet-grant changes carry the current consent.
+
+Turn preparation reads the original accepted revision through the effective
+configuration association, never through the latest preference. It freshly reads
+and projects the source, derives the target again, and supplies that canonical
+target to the existing lazy runtime factory before construction. Native readback
+still must prove the counterpart matches, followed by another fresh source read.
+Source drift requires confirmation again. Provider and adapter owners supply their
+runtime and trusted capture implementations separately; no-consent execution
+retains its existing refusal and all feature defaults remain unchanged.

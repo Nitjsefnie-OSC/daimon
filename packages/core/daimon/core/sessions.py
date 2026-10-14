@@ -463,6 +463,7 @@ async def project_session_resources(
             "resource_requirements": tuple(requirements),
             "repository_sources": tuple(repos),
             "resource_generations": tuple(generations),
+            "asks_before_publishing": asks_before_publishing,
             "memory_required": True,
             "memory_store_id": store_id,
             "memory_read_only": memory_read_only,
