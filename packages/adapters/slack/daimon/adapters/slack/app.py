@@ -127,6 +127,7 @@ from daimon.adapters.slack.feedback import (
 )
 from daimon.adapters.slack.gating import (
     is_external_interactive,
+    is_plain_text_mention_event,
     is_slack_connect_external,
     mentions_bot,
 )
@@ -233,7 +234,7 @@ from daimon.core.stores.slack_turn_contexts import (
     delete_slack_turn_context,
 )
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
-from daimon.core.stores.tenants import get_tenant, get_turn_cap
+from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -694,8 +695,15 @@ class SlackApp:
         event_for_ack: dict[str, Any] = (
             cast(dict[str, Any], raw_event) if isinstance(raw_event, dict) else {}
         )
+        # Pure and I/O-free, so it can run before the ack like the other checks;
+        # the tenant switch is read later, only for a message that matched.
+        is_plain_text_mention = req.type == "events_api" and is_plain_text_mention_event(
+            event_for_ack, bot_names=(resolve_bot_display_name(self.runtime.settings),)
+        )
         is_app_mention = req.type == "events_api" and (
-            event_for_ack.get("type") == "app_mention" or is_direct_message_event(event_for_ack)
+            event_for_ack.get("type") == "app_mention"
+            or is_direct_message_event(event_for_ack)
+            or is_plain_text_mention
         )
         received_before_drain = is_app_mention and not self.draining
 
@@ -1161,6 +1169,17 @@ class SlackApp:
                 task = self._spawn(handle_direct_message(self.runtime, event, team_id=team_id))
                 self._mention_tasks.add(task)
                 task.add_done_callback(self._mention_tasks.discard)
+            elif is_plain_text_mention:
+                task = self._spawn(
+                    self._handle_app_mention(
+                        event,
+                        team_id=team_id,
+                        received_before_drain=received_before_drain,
+                        by_name=True,
+                    )
+                )
+                self._mention_tasks.add(task)
+                task.add_done_callback(self._mention_tasks.discard)
             elif etype in {
                 "channel_archive",
                 "channel_unarchive",
@@ -1384,14 +1403,30 @@ class SlackApp:
         except (SlackApiError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.cancel_refusal_notice_failed", team_id=team_id, exc_info=exc)
 
+    async def _claim_event(self, team_id: str, channel: str, event_ts: str) -> bool:
+        """Record the event's ts; False when it was already handled (a Slack retry)."""
+        async with self.runtime.sessionmaker() as s:
+            is_new = await insert_if_new(s, team_id=team_id, channel=channel, event_ts=event_ts)
+            await s.commit()
+        if not is_new:
+            log.debug("slack.event_dropped.duplicate", team_id=team_id, event_ts=event_ts)
+        return is_new
+
     async def _handle_app_mention(
         self,
         event: dict[str, Any],
         *,
         team_id: str,
         received_before_drain: bool = False,
+        by_name: bool = False,
     ) -> None:
         """Pre-turn safety gates → orchestration seam (turn body injected).
+
+        ``by_name`` is a channel ``message`` event that typed "@<bot name>"
+        (``is_plain_text_mention_event``). It runs the same gates, except that
+        the tenant's plain-text switch stands in for the explicit mention, and
+        it is dropped before dedup when it also carries a real mention: that
+        message's ``app_mention`` event runs the turn, so it runs once.
 
         The cap is fetched before these gates so no await splits the queue
         check from its thread claim. Gate order (strict):
@@ -1446,12 +1481,14 @@ class SlackApp:
             return
 
         try:
-            # (1) DEDUP — insert_if_new before any other work.
-            async with self.runtime.sessionmaker() as s:
-                is_new = await insert_if_new(s, team_id=team_id, channel=channel, event_ts=event_ts)
-                await s.commit()
-            if not is_new:
-                log.debug("slack.event_dropped.duplicate", team_id=team_id, event_ts=event_ts)
+            if by_name and not await get_plain_text_mentions(
+                self.runtime.sessionmaker, tenant_id=tenant_id
+            ):
+                return
+            # (1) DEDUP — insert_if_new before any other work. A by-name event
+            # dedups after the mention gate instead: claiming the ts first could
+            # drop the app_mention of a message that carries a real mention too.
+            if not by_name and not await self._claim_event(team_id, channel, event_ts):
                 return
 
             # (2) TOKEN RESOLVE — token-existence = tenant liveness.
@@ -1492,7 +1529,18 @@ class SlackApp:
                 )
                 capture_exception_with_scope(exc)
                 return
-            if not mentions_bot(event, bot_user_id=bot_user_id):
+            if by_name:
+                if mentions_bot(event, bot_user_id=bot_user_id):
+                    return  # its app_mention event runs the turn
+                if not await self._claim_event(team_id, channel, event_ts):
+                    return
+                log.info(
+                    "plain_text_mention.accepted",
+                    team_id=team_id,
+                    channel=channel,
+                    event_ts=event_ts,
+                )
+            elif not mentions_bot(event, bot_user_id=bot_user_id):
                 log.info(
                     "slack.event_dropped.no_explicit_mention",
                     team_id=team_id,
