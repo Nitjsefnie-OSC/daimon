@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Provider-neutral mux library, optional provider drivers and offline conformance tests. The host runtime remains unchanged; the library does not activate backend selection. Shared test helpers retain the current skill and conditional memory-delete routes.
+
 ### Fixed
 
 - **Anyone in a Discord thread can now use its Connect GitHub button**, not only the person who asked. Before, anyone else got "Only @name can use this". Now the link opens privately for whoever clicks; what they can give the agent is capped by their own GitHub permission on each repo, and the person who asked must still manage the agent. The link stays single-use and is not tied to the clicker's own Daimon account.

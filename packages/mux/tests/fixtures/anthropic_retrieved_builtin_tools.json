@@ -1,0 +1,61 @@
+[
+  {
+    "configs": [
+      {
+        "enabled": true,
+        "name": "bash",
+        "permission_policy": {
+          "type": "always_allow"
+        },
+        "type": "bash"
+      },
+      {
+        "enabled": true,
+        "name": "read",
+        "permission_policy": {
+          "type": "always_allow"
+        },
+        "type": "read"
+      },
+      {
+        "enabled": true,
+        "name": "edit",
+        "permission_policy": {
+          "type": "always_allow"
+        },
+        "type": "edit"
+      },
+      {
+        "enabled": true,
+        "name": "grep",
+        "permission_policy": {
+          "type": "always_allow"
+        },
+        "type": "grep"
+      },
+      {
+        "enabled": true,
+        "name": "glob",
+        "permission_policy": {
+          "type": "always_allow"
+        },
+        "type": "glob"
+      },
+      {
+        "enabled": true,
+        "name": "write",
+        "permission_policy": {
+          "type": "always_allow"
+        },
+        "type": "write"
+      }
+    ],
+    "default_config": {
+      "enabled": true,
+      "permission_policy": {
+        "type": "always_allow"
+      }
+    },
+    "type": "agent_toolset_20260401"
+  }
+]

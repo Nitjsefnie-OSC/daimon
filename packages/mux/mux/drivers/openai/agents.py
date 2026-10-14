@@ -1,0 +1,229 @@
+"""Saved agent resources; unsupported conditional updates fail before I/O."""
+
+from __future__ import annotations
+
+from pydantic import JsonValue
+
+from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Revision, Scope
+from mux.contracts.receipts import DeletionReceipt, Operation
+from mux.contracts.resources import (
+    Agent,
+    AgentFilter,
+    AgentPatch,
+    AgentSpec,
+    MCPConnection,
+    ToolSpec,
+)
+from mux.drivers.openai import mcp_auth
+from mux.drivers.openai._common import (
+    Context,
+    objects,
+    owned,
+    page_of,
+    query,
+    revision,
+    text,
+    timestamp,
+)
+from mux.drivers.openai.skill_bindings import decode, encode_metadata, reserved, verify_pins
+from mux.drivers.openai.transport import Object, object_json, segment
+from mux.errors import ScopeViolation
+
+
+def agent_body(spec: AgentSpec, context: Context) -> Object:
+    if spec.model.provider != "openai":
+        raise context.unsupported("model_provider")
+    if spec.description is not None or spec.model.options or spec.extensions:
+        raise context.unsupported("agent_configuration")
+    body: Object = {"name": spec.name, "model": spec.model.id}
+    if spec.system is not None:
+        body["instructions"] = spec.system
+    if spec.metadata is not None:
+        body["metadata"] = dict(spec.metadata)
+    if spec.metadata is not None and any(
+        reserved(key) or key == mcp_auth.KEY for key in spec.metadata
+    ):
+        raise context.unsupported("reserved_skill_metadata")
+    if spec.skills is not None:
+        body["metadata"] = {
+            **object_json(body.get("metadata") or {}),
+            **encode_metadata(spec.skills, context),
+        }
+    credential_intent = mcp_auth.encode(spec.mcp_servers or (), context)
+    if credential_intent:
+        body["metadata"] = {**object_json(body.get("metadata") or {}), **credential_intent}
+    if len(object_json(body.get("metadata") or {})) > 15:
+        # Leave one native metadata slot for the tenant ownership marker.
+        raise context.unsupported("agent_metadata_size")
+    tools: list[JsonValue] = []
+    for tool in spec.tools or ():
+        if tool.permission != "auto":
+            raise context.unsupported("tool_confirmation")
+        if tool.kind == "custom":
+            tools.append(
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": dict(tool.input_schema or {}),
+                }
+            )
+        elif tool.kind == "builtin" and tool.name in (
+            "web_search",
+            "tool_search",
+            "programmatic_tool_calling",
+        ):
+            tools.append({"type": tool.name})
+        elif tool.kind == "builtin" and tool.name == "bash":
+            # Bash is a hosted-harness capability, not an agent.tools entry.
+            # F1 declares their Bash/apply-patch mapping and verifies the actual
+            # session has a hosted environment. Conversation-only cannot bind it.
+            if context.profile_id != "openai.persistent_workspace":
+                raise context.unsupported("hosted_builtin_tools")
+        elif tool.kind == "mcp_toolset" and any(
+            server.name == tool.name for server in spec.mcp_servers or ()
+        ):
+            # The connection below is the provider's toolset configuration.
+            continue
+        else:
+            raise context.unsupported("agent_tool")
+    for mcp in spec.mcp_servers or ():
+        tools.append(mcp_auth.tool(mcp, context))
+    if spec.tools is not None or spec.mcp_servers is not None:
+        body["tools"] = tools
+    return body
+
+
+def agent_spec(raw: Object, context: Context | None = None) -> AgentSpec:
+    tools: list[ToolSpec] = []
+    servers: list[MCPConnection] = []
+    if context is None and mcp_auth.KEY in object_json(raw.get("metadata") or {}):
+        raise ValueError("credential intent needs scoped driver decoding")
+    credentials = {c.name: c for c in mcp_auth.decode(raw, context)} if context is not None else {}
+    for tool in objects(raw.get("tools", [])):
+        kind = text(tool["type"])
+        if kind == "mcp":
+            transport = object_json(tool["transport"])
+            servers.append(
+                credentials.get(text(tool["server_label"]))
+                or MCPConnection(
+                    name=text(tool["server_label"]),
+                    url=text(transport["server_url"]),
+                    tool_policy={
+                        key: tool[key]
+                        for key in ("allowed_tools", "required")
+                        if tool.get(key) is not None
+                    },
+                )
+            )
+        elif kind == "function":
+            tools.append(
+                ToolSpec(
+                    name=text(tool["name"]),
+                    kind="custom",
+                    description=text(tool["description"]) if tool.get("description") else None,
+                    input_schema=object_json(tool["parameters"]),
+                )
+            )
+        else:
+            tools.append(ToolSpec(name=kind, kind="builtin"))
+    return AgentSpec.model_validate(
+        {
+            "name": raw.get("name") or "",
+            "model": ModelRef(provider="openai", id=text(raw["model"])),
+            "system": raw.get("instructions"),
+            "tools": tuple(tools) if "tools" in raw else None,
+            "mcp_servers": tuple(servers) if "tools" in raw else None,
+            "metadata": raw.get("metadata"),
+            "skills": decode(raw.get("metadata")),
+        }
+    )
+
+
+class OpenAIAgents:
+    def __init__(self, context: Context) -> None:
+        self._c = context
+
+    provider = "openai"
+    enabled = True
+
+    @property
+    def profile_id(self) -> str:
+        return self._c.profile_id
+
+    @property
+    def account_scope_id(self) -> str:
+        return self._c.account_scope_id
+
+    def _decode(self, scope: Scope, raw: Object) -> Agent:
+        self._c.record(scope, raw)
+        return Agent(
+            ref=self._c.ref(scope, "agent", text(raw["id"])),
+            revision=revision(raw),
+            spec=agent_spec(raw, self._c),
+            created_at=timestamp(raw["created_at"]),
+        )
+
+    @owned
+    async def create(self, scope: Scope, spec: AgentSpec, *, key: str) -> Agent:
+        self._c.authorize(scope, "agent")
+        body = agent_body(spec, self._c)
+        if spec.skills is not None:
+            await verify_pins(spec.skills, scope, self._c)
+        body["metadata"] = {
+            **object_json(body.get("metadata") or {}),
+            "mux_tenant": scope.tenant_id,
+        }
+        return self._decode(scope, await self._c.call("POST", "/agents", body=body, key=key))
+
+    @owned
+    async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
+        self._c.check(scope, ref, "agent")
+        raw = await self._c.call("GET", "/agents/" + segment(ref.id))
+        if raw.get("id") != ref.id:
+            raise ValueError("wrong agent identity")
+        return self._decode(scope, raw)
+
+    @owned
+    async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
+        self._c.authorize(scope, "agent")
+        if (
+            filters.name is not None
+            or filters.created_after is not None
+            or filters.include_archived
+        ):
+            raise self._c.unsupported("agent_filters")
+        raw = await self._c.call("GET", "/agents", params=query(page))
+        parsed = page_of(raw, lambda item: self._decode(scope, item))
+        return parsed.model_copy(
+            update={
+                "data": tuple(
+                    a for a in parsed.data if scope.is_platform or self._visible(scope, a.ref.id)
+                )
+            }
+        )
+
+    def _visible(self, scope: Scope, id_: str) -> bool:
+        try:
+            self._c.authorize(scope, "agent", id_)
+        except ScopeViolation:
+            return False
+        return True
+
+    @owned
+    async def update(
+        self, scope: Scope, ref: ResourceRef, patch: AgentPatch, *, expected: Revision, key: str
+    ) -> Agent:
+        self._c.check(scope, ref, "agent")
+        raise self._c.unsupported("agent_conditional_update")
+
+    @owned
+    async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
+        self._c.check(scope, ref, "agent")
+        raise self._c.unsupported("agent_archive")
+
+    @owned
+    async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
+        self._c.check(scope, ref, "agent")
+        await self._c.call("DELETE", "/agents/" + segment(ref.id))
+        return DeletionReceipt(operation_id=key, deleted=(ref,))
