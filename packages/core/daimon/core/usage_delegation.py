@@ -28,6 +28,36 @@ from mux.profiles import accounting_mode_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
+def root_usage_outcome_id(
+    scope: Scope, session: ResourceRef, *, previous: uuid.UUID | None, fresh: bool
+) -> uuid.UUID | None:
+    """Retain the first observer at its input claim, including an unknown join.
+
+    Caller owns the atomic counted root operation. Replays keep the original
+    id or missing marker, never a fresh observer. This function writes nothing.
+    """
+    if scope.is_platform or scope.is_legacy_host_authorized or session.kind != "session":
+        raise ValueError("root usage requires an admitted tenant session")
+    if (session.tenant_id, session.account_id) != (scope.tenant_id, scope.account_id):
+        raise ValueError("root usage session differs from admission")
+    if not fresh:
+        return previous
+    if previous is not None:
+        raise ValueError("fresh input already has an outcome association")
+    from daimon.core.turn.outcomes import current_outcome
+
+    outcome = current_outcome.get()
+    if outcome is None:
+        return None
+    if (str(outcome.tenant_id), str(outcome.account_id), outcome.session_id) != (
+        scope.tenant_id,
+        scope.account_id,
+        session.id,
+    ):
+        raise ValueError("root usage observer differs from admission")
+    return outcome.id
+
+
 @dataclass(frozen=True)
 class HostUsageBinding:
     """Host-authorized worker session; native subagent ancestry is independent."""
