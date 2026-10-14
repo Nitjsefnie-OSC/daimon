@@ -819,9 +819,13 @@ async def test_a_typed_bot_name_is_a_mention_when_the_switch_is_on(
     teams = _app(db_session_factory, FakeSender())
     root = _named_post("@Daimon summarise the week", conversation_id=CHANNEL_ID)
 
-    [(path, inbound)] = await _route(teams, root)
+    with structlog.testing.capture_logs() as logs:
+        [(path, inbound)] = await _route(teams, root)
     assert path == "turn" and inbound.text == "summarise the week", (
         "the root post must run a turn without the typed name in its text"
+    )
+    assert "plain_text_mention.accepted" in [entry["event"] for entry in logs], (
+        "a typed name that starts a turn is logged as accepted"
     )
     assert not inbound.unprompted and not inbound.by_name, "it is an ordinary mention now"
     [(path, inbound)] = await _route(teams, _named_post("@daimon", activity_id="activity-2"))
@@ -857,11 +861,14 @@ async def test_an_oversize_typed_bot_name_gets_the_notice_only_when_the_switch_i
     await _switch(db_session_factory, on=on)
     teams, reply = _app(db_session_factory, FakeSender()), AsyncMock()
     text = "@Daimon " + "x" * MAX_INBOUND_MESSAGE_BYTES
-    await teams.handle_message(_message(_named_post(text, conversation_id=CHANNEL_ID), reply))
+    with structlog.testing.capture_logs() as logs:
+        await teams.handle_message(_message(_named_post(text, conversation_id=CHANNEL_ID), reply))
     if on:
         reply.assert_awaited_once_with(INPUT_TOO_LONG)
     else:
         reply.assert_not_awaited()
+    events = [entry["event"] for entry in logs]
+    assert "plain_text_mention.accepted" not in events, "a refusal starts no turn"
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
