@@ -591,7 +591,7 @@ async def get_fleet_root_operation(
         if intent is None:
             raise ScopeViolation(str(intent_id), "root intent is unavailable")
         key = f"fleet_root:{origin_id}:root:0"
-        previous = (await session.scalars(query)).one_or_none()
+        previous = (await read_persisted_columns(session, query)).one_or_none()
         if previous is not None and (previous.account_id, previous.key) != (scope.account_id, key):
             raise OperationConflict(key)
         begun = await begin_operation(
@@ -639,13 +639,19 @@ async def get_fleet_root_operation(
         raise ValueError("exactly one root selector required")
     if origin_id is not None:
         key = f"fleet_root:{origin_id}:root:0"
-        record = await _operation(session, scope, key, lock=for_update)
+        original = select(MuxOperation.record).where(*_op_where(scope, key))
+        body = (
+            await read_persisted_columns(
+                session, original.with_for_update() if for_update else original
+            )
+        ).scalar_one_or_none()
+        record = OperationRecord.model_validate(body) if body is not None else None
         if record is not None:
             operations.check_owner(record, scope)
         return record
     if not check_intent_owner:
         query = query.where(MuxOperation.account_id == scope.account_id)
-    body = (await session.scalars(query)).one_or_none()
+    body = (await read_persisted_columns(session, query)).one_or_none()
     if body is None:
         return None
     record = OperationRecord.model_validate(body.record)
@@ -688,7 +694,7 @@ async def list_fleet_root_finances(
         .order_by(MuxOperation.key)
         .with_for_update()
     )
-    bodies = await read_persisted_columns(session, statement)
+    bodies = await read_persisted_columns(session, statement, reject_new=True)
     records = tuple(OperationRecord.model_validate(row.record) for row in bodies)
     if any(record.tenant_id != str(tenant_id) for record in records):
         raise ScopeViolation("root-budget", "financial root belongs to another tenant")
