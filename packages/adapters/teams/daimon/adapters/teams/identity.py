@@ -19,6 +19,7 @@ is refused, as before.
 
 from __future__ import annotations
 
+import html
 import re
 import uuid
 from collections.abc import Mapping
@@ -45,6 +46,8 @@ MAX_INBOUND_MESSAGE_BYTES = 16 * 1024
 GENERAL_CHANNEL = "General"
 # Where a quote sits in the text; its sender and preview ride in a `quotedReply` entity.
 _QUOTED = re.compile(r'<quoted\s+messageId="([^"]*)"\s*/>')
+_BLOCKQUOTE_TAG = re.compile(r"<(/?)blockquote\b([^>]*)>", re.IGNORECASE)
+_REPLY_ITEMTYPE = re.compile(r'itemtype\s*=\s*"[^"]*schema\.skype\.com/reply"', re.IGNORECASE)
 
 
 def canonical_uuid(value: object) -> str | None:
@@ -213,6 +216,28 @@ def render_quotes(text: str, quotes: Mapping[str, QuotedReplyData]) -> str:
     return _QUOTED.sub(describe, text)
 
 
+def _typed_text(text: str) -> str:
+    """The text the sender typed: reply quotes cut out, HTML entities decoded.
+
+    A blockquote reply carries the quoted message in `text`, so a quote of
+    someone's "@Daimon" would otherwise read as this sender naming the bot.
+    """
+    kept: list[str] = []
+    start = depth = 0
+    for tag in _BLOCKQUOTE_TAG.finditer(text):
+        closing = tag.group(1) == "/"
+        if not depth and not closing and _REPLY_ITEMTYPE.search(tag.group(2)):
+            kept.append(text[start : tag.start()])
+            depth = 1
+        elif depth:
+            depth += -1 if closing else 1
+            if not depth:
+                start = tag.end()
+    if not depth:
+        kept.append(text[start:])
+    return html.unescape("".join(kept))
+
+
 def _is_from_person(activity: MessageActivity) -> bool:
     sender = activity.from_
     return not (
@@ -253,7 +278,7 @@ def parse_inbound(
     by_name = (
         not addressed
         and _is_from_person(activity)
-        and mentions_by_name(activity.text or "", (activity.recipient.name,))
+        and mentions_by_name(_typed_text(activity.text or ""), (activity.recipient.name,))
     )
     if not addressed and not thread_reply and not by_name:
         return Refusal(None)  # Channel chatter the bot was not asked about.

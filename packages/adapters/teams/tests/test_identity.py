@@ -446,3 +446,25 @@ def test_an_oversize_typed_bot_name_is_refused_once_the_switch_is_known() -> Non
     assert _parse(_to_named_bot(root)) == Refusal(INPUT_TOO_LONG, by_name=True), (
         "an oversize typed name must get the notice a real mention gets, behind the switch"
     )
+
+
+def test_a_quoted_bot_name_is_not_a_typed_mention() -> None:
+    """A blockquote reply puts the quoted message in `text`; its "@daimon" is not the sender's."""
+    quote = (
+        '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1">'
+        '<strong itemprop="mri" itemid="8:orgid:someone">Ada</strong>'
+        '<p itemprop="preview">@daimon ship it</p></blockquote>'
+    )
+    reply = make_channel_activity(mention_bot=False, text=f"{quote}<p>agreed</p>")
+    inbound = _parse(_to_named_bot(reply))
+    assert isinstance(inbound, TeamsInbound) and not inbound.by_name, (
+        "a name inside someone else's quote must not address the bot"
+    )
+
+
+def test_a_typed_multi_word_name_with_an_html_no_break_space_is_by_name() -> None:
+    """Teams may send the space between typed words as `&nbsp;`."""
+    reply = make_channel_activity(mention_bot=False, text="<p>@Daimon&nbsp;Bot hi</p>")
+    payload = reply | {"recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon Bot"}}
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound) and inbound.by_name, "the entity must read as a space"
