@@ -133,7 +133,8 @@ def manifest(source: dict, sha: str, target: str, image: str, name: str) -> dict
         "spec": copy.deepcopy(source["spec"]),
     }
     template = result["spec"]["template"]
-    task = template["spec"]["template"]["spec"]
+    task_template = template["spec"]["template"]
+    task = task_template["spec"]
     containers = task["containers"]
     if len(containers) != 1 or containers[0]["image"] != image or "@sha256:" not in image:
         raise ValueError("migration template differs from the expected immutable CI image")
@@ -147,24 +148,77 @@ def manifest(source: dict, sha: str, target: str, image: str, name: str) -> dict
     database = [
         item for item in env if item["name"] in ("DAIMON_DATABASE__URL", "DAIMON_DATABASE_URL")
     ]
-    if len(database) != 1 or "secretKeyRef" not in database[0].get("valueFrom", {}):
+    if (
+        len(database) != 1
+        or "value" in database[0]
+        or "secretKeyRef" not in database[0].get("valueFrom", {})
+    ):
         raise ValueError("database configuration must come from Secret Manager")
+
+    def owned_project(project):
+        if project not in (PROJECT, number):
+            raise ValueError("foreign binding project")
+
+    # Cloud Run v1 resolves secret aliases and Cloud SQL bindings from the
+    # execution template, before starting the container or its endpoint guard.
+    annotations = template.setdefault("metadata", {}).setdefault("annotations", {})
+    for execution_owner, owner in (
+        (False, source["metadata"]),
+        (True, template["metadata"]),
+        (False, task_template.get("metadata", {})),
+    ):
+        values = owner.get("annotations", {})
+        if not execution_owner and any(
+            key in values
+            for key in ("run.googleapis.com/secrets", "run.googleapis.com/cloudsql-instances")
+        ):
+            raise ValueError("foreign or misplaced execution bindings")
+        for key, value in values.items():
+            if key == "run.googleapis.com/network-interfaces":
+                value = json.dumps(json.loads(value), ensure_ascii=False)
+            for project in re.findall(r"projects/([^/\s,\"}]+)", value):
+                owned_project(project)
+
+    aliases = {}
+
+    def secret_resource(reference):
+        resource = aliases.get(reference, reference)
+        if re.fullmatch(r"[A-Za-z0-9_-]+", resource):
+            return f"projects/{number}/secrets/{resource}"
+        match = re.fullmatch(r"projects/([^/]+)/secrets/([A-Za-z0-9_-]+)", resource)
+        if not match:
+            raise ValueError("foreign or malformed secret reference")
+        owned_project(match[1])
+        return f"projects/{number}/secrets/{match[2]}"
+
+    for entry in annotations.get("run.googleapis.com/secrets", "").split(","):
+        if not entry:
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9_-]+):(projects/[^/]+/secrets/[A-Za-z0-9_-]+)", entry)
+        if not match or match[1] in aliases:
+            raise ValueError("foreign or ambiguous secret alias")
+        aliases[match[1]] = secret_resource(match[2])
     for item in env:
-        secret = item.get("valueFrom", {}).get("secretKeyRef", {}).get("name", "")
-        if secret.startswith("projects/") and not any(
-            secret.startswith(f"projects/{project}/secrets/") for project in (PROJECT, number)
-        ):
-            raise ValueError("foreign secret project")
-    annotations = template["spec"]["template"].get("metadata", {}).get("annotations", {})
+        reference = item.get("valueFrom", {}).get("secretKeyRef")
+        if reference is not None:
+            secret_resource(reference["name"])
+    for volume in task.get("volumes", []):
+        if "secret" in volume:
+            secret_resource(volume["secret"]["secretName"])
     for instance in annotations.get("run.googleapis.com/cloudsql-instances", "").split(","):
-        if instance and not instance.startswith(PROJECT + ":"):
-            raise ValueError("foreign database instance")
-    for alias in annotations.get("run.googleapis.com/secrets", "").split(","):
-        if alias and not re.fullmatch(
-            rf"[A-Za-z0-9_-]+:projects/(?:{re.escape(PROJECT)}|{number})/secrets/[A-Za-z0-9_-]+",
-            alias,
-        ):
-            raise ValueError("foreign or malformed secret alias")
+        if instance:
+            match = re.fullmatch(r"([^:]+):([a-z0-9-]+):([a-z0-9-]+)", instance)
+            if not match:
+                raise ValueError("foreign or malformed database instance")
+            owned_project(match[1])
+    reference = database[0]["valueFrom"]["secretKeyRef"]
+    resource = secret_resource(reference["name"])
+    reference["name"] = "maintenance-database"
+    annotations["run.googleapis.com/secrets"] = f"maintenance-database:{resource}"
+    # The executor consumes only its database environment binding. Other
+    # volumes, mounts and aliases must not materialize unrelated secrets.
+    task.pop("volumes", None)
+    containers[0].pop("volumeMounts", None)
     payload = base64.b64encode(gzip.compress(Path(__file__).read_bytes(), mtime=0)).decode()
     containers[0]["command"] = ["/app/.venv/bin/python"]
     containers[0]["args"] = [

@@ -880,6 +880,9 @@ deploys. Production targets and unrecognized restore plans are refused.
 The executor uses the immutable image from that commit's successful CI migration
 receipt and the existing staging migration job's Secret Manager bindings. It
 bypasses the application entrypoint and never reads or logs `/etc/daimon`.
+Before job creation it resolves database secret aliases from the execution
+template to the staging project, refuses foreign secret and Cloud SQL bindings,
+and removes unrelated aliases, volumes and mounts.
 Book a drained staging window first. The proof locks writers, refuses active
 completion wakes, executes the full neutral-branch downgrade, compares the
 restored schema to the accepted baseline and original main-column row hashes,

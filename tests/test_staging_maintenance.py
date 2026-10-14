@@ -24,36 +24,19 @@ IMAGE = "us-east1-docker.pkg.dev/pymc-daimon-staging/staging-daimon/daimon@sha25
 
 
 def source_job():
-    return {
-        "metadata": {"namespace": "1234567890"},
-        "spec": {
-            "template": {
-                "spec": {
-                    "template": {
-                        "spec": {
-                            "serviceAccountName": "migrations@pymc-daimon-staging.iam.gserviceaccount.com",
-                            "containers": [
-                                {
-                                    "image": IMAGE,
-                                    "env": [
-                                        {
-                                            "name": "DAIMON_DATABASE__URL",
-                                            "valueFrom": {
-                                                "secretKeyRef": {
-                                                    "name": "database-url",
-                                                    "key": "latest",
-                                                }
-                                            },
-                                        }
-                                    ],
-                                }
-                            ],
-                        }
-                    }
-                }
-            }
-        },
-    }
+    return yaml.safe_load((ROOT / "tests/fixtures/cloud_run_migration_job.yaml").read_text())
+
+
+@pytest.fixture
+def manifest_environment(monkeypatch):
+    for name, value in {
+        "ENVIRONMENT": "staging",
+        "PROJECT_ID": maintenance.PROJECT,
+        "REPO": maintenance.REPOSITORY,
+        "PROJECT_NUMBER": "1234567890",
+        "DATABASE_HOSTS": '["10.1.2.3"]',
+    }.items():
+        monkeypatch.setenv(name, value)
 
 
 def test_dispatch_is_separate_from_normal_deploy_and_inherits_staging_protection():
@@ -105,12 +88,9 @@ def test_non_staging_or_unpinned_inputs_are_refused(field, value):
         maintenance.require_staging(**inputs)
 
 
-def test_ephemeral_executor_keeps_secret_references_and_original_template_unchanged(monkeypatch):
-    monkeypatch.setenv("ENVIRONMENT", "staging")
-    monkeypatch.setenv("PROJECT_ID", maintenance.PROJECT)
-    monkeypatch.setenv("REPO", maintenance.REPOSITORY)
-    monkeypatch.setenv("PROJECT_NUMBER", "1234567890")
-    monkeypatch.setenv("DATABASE_HOSTS", '["10.1.2.3"]')
+def test_ephemeral_executor_keeps_only_owned_database_binding_and_original_unchanged(
+    manifest_environment,
+):
     original = source_job()
     before = copy.deepcopy(original)
     result = maintenance.manifest(
@@ -119,8 +99,23 @@ def test_ephemeral_executor_keeps_secret_references_and_original_template_unchan
     assert original == before
     assert result["metadata"]["namespace"] == "1234567890"
     task = result["spec"]["template"]["spec"]["template"]["spec"]
-    original_env = before["spec"]["template"]["spec"]["template"]["spec"]["containers"][0]["env"]
-    assert task["containers"][0]["env"][0]["valueFrom"] == original_env[0]["valueFrom"]
+    annotations = result["spec"]["template"]["metadata"]["annotations"]
+    assert annotations["run.googleapis.com/secrets"] == (
+        "maintenance-database:projects/1234567890/secrets/database-url"
+    )
+    assert annotations["run.googleapis.com/cloudsql-instances"] == (
+        "pymc-daimon-staging:us-east1:database"
+    )
+    assert annotations["run.googleapis.com/vpc-access-connector"] == (
+        "projects/1234567890/locations/us-east1/connectors/staging"
+    )
+    assert task["containers"][0]["env"][0] == {
+        "name": "DAIMON_DATABASE__URL",
+        "valueFrom": {"secretKeyRef": {"name": "maintenance-database", "key": "latest"}},
+    }
+    assert not any(item["name"] == "UNRELATED_SECRET" for item in task["containers"][0]["env"])
+    assert "volumes" not in task
+    assert "volumeMounts" not in task["containers"][0]
     assert task["containers"][0]["command"] == ["/app/.venv/bin/python"]
     assert task["maxRetries"] == 0
 
@@ -128,15 +123,10 @@ def test_ephemeral_executor_keeps_secret_references_and_original_template_unchan
 @pytest.mark.parametrize(
     "fault", ["image", "account", "plaintext", "secret_project", "sql_project", "alias"]
 )
-def test_foreign_or_plaintext_template_is_refused_before_job_creation(monkeypatch, fault):
-    monkeypatch.setenv("ENVIRONMENT", "staging")
-    monkeypatch.setenv("PROJECT_ID", maintenance.PROJECT)
-    monkeypatch.setenv("REPO", maintenance.REPOSITORY)
-    monkeypatch.setenv("PROJECT_NUMBER", "1234567890")
-    monkeypatch.setenv("DATABASE_HOSTS", '["10.1.2.3"]')
+def test_foreign_or_plaintext_template_is_refused_before_job_creation(manifest_environment, fault):
     source = source_job()
-    template = source["spec"]["template"]["spec"]["template"]
-    task = template["spec"]
+    template = source["spec"]["template"]
+    task = template["spec"]["template"]["spec"]
     if fault == "image":
         task["containers"][0]["image"] = IMAGE.replace("b" * 64, "c" * 64)
     elif fault == "account":
@@ -165,6 +155,142 @@ def test_foreign_or_plaintext_template_is_refused_before_job_creation(monkeypatc
         maintenance.manifest(
             source, SHA, maintenance.TARGET, IMAGE, "staging-daimon-maintenance-123-1"
         )
+
+
+@pytest.mark.parametrize(
+    "binding,value",
+    [
+        ("secrets", "database-url:projects/pymc-daimon-prod/secrets/database-url"),
+        ("secrets", "database-url:projects/9876543210/secrets/database-url"),
+        (
+            "secrets",
+            "database-url:projects/1234567890/secrets/database-url,"
+            "unused:projects/pymc-daimon-prod/secrets/unrelated",
+        ),
+        (
+            "secrets",
+            "database-url:projects/1234567890/secrets/database-url,"
+            "database-url:projects/1234567890/secrets/other",
+        ),
+        ("secrets", "database-url:unrecognized/resource"),
+        ("cloudsql-instances", "pymc-daimon-prod:us-east1:database"),
+        ("cloudsql-instances", "9876543210:us-east1:database"),
+        ("cloudsql-instances", "pymc-daimon-staging-other:us-east1:database"),
+        (
+            "cloudsql-instances",
+            "pymc-daimon-staging:us-east1:database,pymc-daimon-prod:us-east1:database",
+        ),
+        (
+            "vpc-access-connector",
+            "projects/pymc-daimon-prod/locations/us-east1/connectors/production",
+        ),
+        (
+            "encryption-key",
+            "projects/9876543210/locations/us-east1/keyRings/ring/cryptoKeys/key",
+        ),
+        (
+            "network-interfaces",
+            '[{"network":"projects/pymc-daimon-prod/global/networks/production"}]',
+        ),
+        (
+            "network-interfaces",
+            r'[{"network":"projects\u002fpymc-daimon-prod\u002fglobal\u002fnetworks\u002fproduction"}]',
+        ),
+    ],
+)
+def test_execution_bindings_refuse_foreign_or_ambiguous_authority(
+    manifest_environment, binding, value
+):
+    source = source_job()
+    source["spec"]["template"]["metadata"]["annotations"][f"run.googleapis.com/{binding}"] = value
+    with pytest.raises(ValueError, match="foreign"):
+        maintenance.manifest(
+            source, SHA, maintenance.TARGET, IMAGE, "staging-daimon-maintenance-123-1"
+        )
+
+
+@pytest.mark.parametrize("owner", ["job", "task"])
+@pytest.mark.parametrize("binding", ["secrets", "cloudsql-instances"])
+def test_bindings_at_unsupported_metadata_levels_are_refused(manifest_environment, owner, binding):
+    source = source_job()
+    execution = source["spec"]["template"]
+    metadata = (
+        source["metadata"]
+        if owner == "job"
+        else execution["spec"]["template"].setdefault("metadata", {})
+    )
+    metadata["annotations"] = {
+        f"run.googleapis.com/{binding}": execution["metadata"]["annotations"][
+            f"run.googleapis.com/{binding}"
+        ]
+    }
+    with pytest.raises(ValueError, match="misplaced"):
+        maintenance.manifest(
+            source, SHA, maintenance.TARGET, IMAGE, "staging-daimon-maintenance-123-1"
+        )
+
+
+@pytest.mark.parametrize("owner", ["database", "unused_env", "volume"])
+@pytest.mark.parametrize("project", ["pymc-daimon-prod", "9876543210"])
+def test_all_secret_references_are_checked_even_when_removed(manifest_environment, owner, project):
+    source = source_job()
+    task = source["spec"]["template"]["spec"]["template"]["spec"]
+    resource = f"projects/{project}/secrets/database-url"
+    if owner == "volume":
+        task["volumes"][0]["secret"]["secretName"] = resource
+    else:
+        task["containers"][0]["env"][0 if owner == "database" else 1]["valueFrom"]["secretKeyRef"][
+            "name"
+        ] = resource
+    with pytest.raises(ValueError, match="foreign"):
+        maintenance.manifest(
+            source, SHA, maintenance.TARGET, IMAGE, "staging-daimon-maintenance-123-1"
+        )
+
+
+@pytest.mark.parametrize("style", ["project_alias", "plain", "project_resource", "number_resource"])
+def test_owned_secret_forms_resolve_to_one_explicit_staging_binding(manifest_environment, style):
+    source = source_job()
+    execution = source["spec"]["template"]
+    reference = execution["spec"]["template"]["spec"]["containers"][0]["env"][0]["valueFrom"][
+        "secretKeyRef"
+    ]
+    if style == "project_alias":
+        execution["metadata"]["annotations"]["run.googleapis.com/secrets"] = (
+            "database-url:projects/pymc-daimon-staging/secrets/database-url"
+        )
+    elif style == "plain":
+        execution["metadata"]["annotations"].pop("run.googleapis.com/secrets")
+    else:
+        reference["name"] = (
+            "projects/"
+            + ("pymc-daimon-staging" if style == "project_resource" else "1234567890")
+            + "/secrets/database-url"
+        )
+    result = maintenance.manifest(
+        source, SHA, maintenance.TARGET, IMAGE, "staging-daimon-maintenance-123-1"
+    )
+    assert result["spec"]["template"]["metadata"]["annotations"]["run.googleapis.com/secrets"] == (
+        "maintenance-database:projects/1234567890/secrets/database-url"
+    )
+
+
+@pytest.mark.parametrize("project", ["pymc-daimon-staging", "1234567890"])
+def test_database_lookup_resolves_a_differently_named_owned_secret(manifest_environment, project):
+    source = source_job()
+    source["spec"]["template"]["metadata"]["annotations"]["run.googleapis.com/secrets"] = (
+        f"database-url:projects/{project}/secrets/actual-database-secret"
+    )
+    result = maintenance.manifest(
+        source, SHA, maintenance.TARGET, IMAGE, "staging-daimon-maintenance-123-1"
+    )
+    execution = result["spec"]["template"]
+    assert execution["metadata"]["annotations"]["run.googleapis.com/secrets"] == (
+        "maintenance-database:projects/1234567890/secrets/actual-database-secret"
+    )
+    assert execution["spec"]["template"]["spec"]["containers"][0]["env"][0]["valueFrom"] == {
+        "secretKeyRef": {"name": "maintenance-database", "key": "latest"}
+    }
 
 
 def fixture_config(tmp_path):
