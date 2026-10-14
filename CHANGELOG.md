@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
+
 - Add a testing-only scoped fleet journal exporter with atomic restricted bundles, verified paired worker generations/failure facts and pointer-bound public review digests, authoritative persisted reads, offline verification and explicit missing owner evidence.
 
 - Pin the minimum completion-wake rollback reader and verify the downgrade lock against a concurrent writer.

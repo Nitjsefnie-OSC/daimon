@@ -2908,3 +2908,39 @@ The grant's budget ceiling covers workers only. The ordinary root's requests
 are separate; fleet installation does not establish a whole-root provider bill
 cap. Root financial controls require their own installation before a bounded
 root-and-workers run.
+
+
+### Fleet runtime composition and draining
+
+With `DAIMON_FLEET__ENABLED=true`, the ordinary Discord `build_runtime(settings)`
+and MCP `create_mcp_app` factories construct the existing fleet orchestrator,
+worker pool and scoped host ports. They use the process's real sessions, client,
+markup and turn dependencies. No permission loader needs to be injected: root
+preparation uses the current per-agent DB grant. The factories own only what
+they construct, and close fleet work before draining and disposing their existing
+clients and database pools. With the flag off they construct no fleet owner,
+pool, state store or tariff lookup.
+
+The existing runtime registry can supply cold native tariff callbacks without
+constructing a provider client or inspecting credentials or deployment files.
+The host pricing context retains canonical managed-agent rates and every supplied
+native rate. Actual attenuated worker backend/model pairs resolve through the
+pricing owner before financial admission; a new pair does not discard rates for
+prior workers. A missing native tariff remains missing and is refused by financial
+admission. Registering a callback is not proof of a complete provider bill, funding
+or execution authority. Native deployment suppliers must supply matching dated
+request-tier rates; this composition does not invent them.
+
+An ordinary initial card read may return no fleet only after the shared reader
+verifies the current admitted source/session, original origin/account/thread,
+current persisted binding and policy, genuinely absent per-agent grant, and no
+root reservation in any state. A foreign account's reservation on the exact
+intent refuses rather than appearing absent. Ordinary sealed and final responses
+then retain their existing delivery path.
+
+Revocation blocks new inputs and allocation. Scoped Stop, status, wait and
+collection for an already-running root continue under its original frozen epoch;
+they do not refresh authority or permit new worker inputs. Native preparation,
+spawn and resume stay strict, and completed/cancelled/failed roots remain refused.
+Grant ceilings cover workers only. Whole-root financial/input controls are a
+separate prerequisite before any live fleet execution.

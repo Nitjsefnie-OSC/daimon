@@ -30,6 +30,7 @@ async def prepared_persistence(
     operation_key: str | None = None,
     session_ref: ResourceRef | None = None,
     scope: Scope | None = None,
+    fleet_capture: bool = False,
 ) -> TurnPersistence:
     """Adopt existing native ids; publish ownership through put_binding only.
 
@@ -77,7 +78,15 @@ async def prepared_persistence(
             raise ScopeViolation(
                 session_id, "provider preparation has no matching persisted binding"
             )
-        return TurnPersistence(store, binding, scope, operation_key=f"turn:{session_id}:{key}")
+        return TurnPersistence(
+            store,
+            binding,
+            scope,
+            operation_key=f"turn:{session_id}:{key}",
+            source_agent_id=admission.agent.id,
+            session_ref=session_ref,
+            fleet_capture=fleet_capture,
+        )
     channel_id = admission.origin_channel_id or ""
     if mapping_id is not None:
         async with deps.sessionmaker() as db:
@@ -167,4 +176,12 @@ async def prepared_persistence(
             if winner is None or winner.native_refs.get("session") != session_id:
                 raise
             binding = winner
-    return TurnPersistence(store, binding, scope, operation_key=f"turn:{session_id}:{key}")
+    return TurnPersistence(
+        store,
+        binding,
+        scope,
+        operation_key=f"turn:{session_id}:{key}",
+        source_agent_id=admission.agent.id,
+        session_ref=session_ref,
+        fleet_capture=fleet_capture,
+    )

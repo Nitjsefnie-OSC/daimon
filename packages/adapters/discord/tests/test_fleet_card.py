@@ -1142,31 +1142,6 @@ async def test_runtime_installs_factory_only_with_opted_in_owner_bindings(
         assert runtime.turn_deps.fleet_root_grants is (grants if enabled else None)
 
 
-async def test_runtime_refuses_missing_fleet_binding_before_sdk_or_db_construction(monkeypatch):
-    from daimon.adapters.discord import runtime as runtime_module
-    from daimon.core.config import Settings
-    from daimon.core.fleet_orchestration import FleetRefused
-
-    settings = Settings.model_validate(
-        {
-            "fleet": {"enabled": True},
-            "database": {
-                "url": "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test_nc_N7_fleet"
-            },
-            "anthropic": {"api_key": "offline-test-key"},
-        }
-    )
-    database = MagicMock(side_effect=AssertionError("no database construction permitted"))
-    sdk = MagicMock(side_effect=AssertionError("no SDK construction permitted"))
-    monkeypatch.setattr(runtime_module, "build_engine", database)
-    monkeypatch.setattr(runtime_module, "AsyncAnthropic", sdk)
-    with pytest.raises(FleetRefused, match="prerequisites_unavailable"):
-        async with runtime_module.build_runtime(settings):
-            raise AssertionError("unbound runtime must refuse")
-    database.assert_not_called()
-    sdk.assert_not_called()
-
-
 @pytest.mark.parametrize("failure", ["write", "timeout"])
 async def test_replacement_capture_uses_the_owners_failure_policy(
     db_session_factory, monkeypatch, failure
@@ -1270,7 +1245,7 @@ async def test_stored_replacement_attribution_cannot_be_overridden_before_writin
 
 
 @pytest.fixture
-async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkeypatch):
+async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkeypatch, request):
     """Reuse the root owner's SDK/PG fixture with Discord destination metadata."""
     from packages.core.tests.turn import test_frozen_root as root_owner
 
@@ -1311,7 +1286,8 @@ async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkey
     monkeypatch.setattr(root_owner, "Subject", original_subject)
     monkeypatch.setattr(root_owner, "parent", permissions)
     async for value in root_owner.root_turn.__wrapped__(db_preflight, db_nullpool_engine):
-        await root_owner.freeze(value)
+        if getattr(request, "param", True):
+            await root_owner.freeze(value)
         yield value
 
 
@@ -1510,3 +1486,279 @@ async def test_real_runtime_refreshes_click_subject_without_replacing_root_scope
     assert (
         current.limits == original.limits and current.source_revisions == original.source_revisions
     )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("supplied_prices", [False, True])
+async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clients(
+    db_nullpool_engine, monkeypatch, enabled, supplied_prices
+):
+    from pathlib import Path
+
+    from daimon.adapters.discord import runtime as runtime_module
+    from daimon.core.config import Settings
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.pricing import MODEL_PRICING
+    from daimon.testing.ma import build_stub_anthropic
+
+    settings = Settings.model_validate(
+        {
+            "database": {
+                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "pool_size": 1,
+                "max_overflow": 3,
+            },
+            "anthropic": {"api_key": "offline-test-key"},
+            "crypto": {"allow_plaintext": True},
+            "defaults_root": Path("defaults"),
+            "turn": {"path": "mux", "channel_backends": True, "agent_backends": True},
+            "fleet": {"enabled": enabled},
+        }
+    )
+    client = build_stub_anthropic()
+    monkeypatch.setattr(runtime_module, "AsyncAnthropic", lambda **kwargs: client)
+    prices = {("anthropic", model): rate for model, rate in MODEL_PRICING.items()}
+    events = []
+    engines = []
+    build = runtime_module.build_engine
+    close = HostFleetPorts.close
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    dispose = AsyncEngine.dispose
+
+    def observe_engine(*args, **kwargs):
+        engine = build(*args, **kwargs)
+        engines.append(engine)
+        return engine
+
+    async def observe_dispose(engine, *args, **kwargs):
+        if engine in engines:
+            events.append(f"engine-{engines.index(engine)}")
+        await dispose(engine, *args, **kwargs)
+
+    async def observe_close(owner):
+        assert owner._deps.running_turns.shutting_down
+        assert not client.is_closed()
+        assert events == []
+        events.append("fleet")
+        await close(owner)
+
+    drain_outcomes, drain_notices = (
+        runtime_module.drain_outcomes,
+        runtime_module.drain_budget_notices,
+    )
+
+    async def outcomes():
+        events.append("outcomes")
+        await drain_outcomes()
+
+    async def notices():
+        events.append("notices")
+        await drain_notices()
+
+    monkeypatch.setattr(AsyncEngine, "dispose", observe_dispose)
+    monkeypatch.setattr(runtime_module, "build_engine", observe_engine)
+    monkeypatch.setattr(runtime_module, "drain_outcomes", outcomes)
+    monkeypatch.setattr(runtime_module, "drain_budget_notices", notices)
+    monkeypatch.setattr(HostFleetPorts, "close", observe_close)
+    async with runtime_module.build_runtime(
+        settings, fleet_prices=prices if supplied_prices else None
+    ) as runtime:
+        assert len(engines) == 2
+        assert runtime.gateway_lease is not None
+        assert runtime.turn_deps.fleet_root_grants is None
+        assert runtime.turn_deps.running_turns.count() == 0
+        if enabled:
+            assert isinstance(runtime.fleet_card_factory, DiscordFleetCardFactory)
+            owner = runtime.fleet_card_factory._service._owner()
+            assert isinstance(owner, HostFleetPorts)
+            assert owner.sessions is runtime.sessionmaker
+            assert owner.prices is prices if supplied_prices else dict(owner.prices) == prices
+            assert owner.markup == settings.billing.markup
+            assert owner._deps is runtime.turn_deps
+            assert owner._pool._tenant_cap == settings.fleet.max_concurrent_workers_per_tenant
+            assert owner._pool._slots._value == settings.fleet.max_concurrent_workers
+            assert not owner._tasks and not owner._watches
+        else:
+            assert runtime.fleet_card_factory is None
+            assert runtime.turn_deps.state_store is None
+        assert not events
+    assert events == (["fleet"] if enabled else []) + [
+        "outcomes",
+        "notices",
+        "engine-1",
+        "engine-0",
+    ]
+    assert client.is_closed()
+
+
+async def test_runtime_preserves_falsey_injected_fleet_service_ownership(
+    db_nullpool_engine, monkeypatch
+):
+    from pathlib import Path
+
+    from daimon.adapters.discord import runtime as runtime_module
+    from daimon.core.config import Settings
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.testing.ma import build_stub_anthropic
+
+    class ExplicitOwner(FleetOrchestrator):
+        def __bool__(self):
+            return False
+
+    settings = Settings.model_validate(
+        {
+            "database": {
+                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "pool_size": 1,
+                "max_overflow": 3,
+            },
+            "anthropic": {"api_key": "offline-test-key"},
+            "crypto": {"allow_plaintext": True},
+            "defaults_root": Path("defaults"),
+            "fleet": {"enabled": True},
+        }
+    )
+    monkeypatch.setattr(runtime_module, "AsyncAnthropic", lambda **kwargs: build_stub_anthropic())
+    constructor = MagicMock(side_effect=AssertionError("explicit fleet service must stay external"))
+    monkeypatch.setattr(HostFleetPorts, "__init__", constructor)
+    service = ExplicitOwner()
+    async with runtime_module.build_runtime(settings, fleet_service=service) as runtime:
+        assert runtime.fleet_card_factory._service is service
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("discord_frozen_root", [False], indirect=True)
+@pytest.mark.parametrize("fleet_enabled", [False, True])
+async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
+    discord_frozen_root, db_nullpool_engine, db_schema, monkeypatch, fleet_enabled
+):
+    from pathlib import Path
+
+    import httpx
+    from daimon.adapters.discord import runtime as runtime_module
+    from daimon.core.config import Settings
+    from daimon.core.stores import mux_state
+    from daimon.core.turn.run import run_prepared_turn
+    from daimon.testing.db import build_test_engine
+    from daimon.testing.ma import sse_response
+    from daimon.testing.ma_transport import ScriptedReply
+
+    from packages.core.tests.turn.conftest import (
+        make_agent_message,
+        make_status_idle,
+        make_tool_use,
+    )
+    from packages.core.tests.turn.test_frozen_preparation import revoke
+
+    deps, prepared, _, intent, origin, scope, _, transport = discord_frozen_root
+    await revoke(discord_frozen_root)
+    ordinary = replace(prepared, _source=None, _preparation=None)
+    settings = Settings.model_validate(
+        {
+            "database": {
+                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "pool_size": 1,
+                "max_overflow": 3,
+            },
+            "anthropic": {"api_key": "offline-test-key"},
+            "crypto": {"allow_plaintext": True},
+            "defaults_root": Path("defaults"),
+            "fleet": {"enabled": fleet_enabled},
+            "turn": {"path": "mux", "channel_backends": True},
+        }
+    )
+    monkeypatch.setattr(runtime_module, "AsyncAnthropic", lambda **kwargs: deps.anthropic)
+    monkeypatch.setattr(
+        runtime_module,
+        "build_engine",
+        lambda url, **kwargs: build_test_engine(url, db_schema, **kwargs),
+    )
+    sent = asyncio.Event()
+    sealed = "A complete ordinary answer. " * 30
+    final = "Ordinary final answer."
+    payload = sse_response(
+        [
+            make_agent_message(event_id="ordinary-sealed", text=sealed).model_dump(mode="json"),
+            make_tool_use(event_id="ordinary-tool", name="read").model_dump(mode="json"),
+            make_agent_message(event_id="ordinary-final", text=final).model_dump(mode="json"),
+            make_status_idle(event_id="ordinary-idle").model_dump(mode="json"),
+        ]
+    ).content
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await sent.wait()
+            yield payload
+
+    assert transport.router is not None
+    original_routes = transport.router.routes
+
+    def accept_input(request, match):
+        from daimon.testing.ma import send_events_response
+
+        sent.set()
+        return send_events_response()
+
+    transport.router.routes = [
+        ("POST", re.compile(rf"/v1/sessions/{prepared.ma_session_id}/events"), accept_input),
+        *original_routes,
+    ]
+    transport.queue(
+        ScriptedReply(
+            "GET",
+            f"/v1/sessions/{prepared.ma_session_id}/events/stream",
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=Stream()),
+        )
+    )
+    async with runtime_module.build_runtime(settings) as runtime:
+        assert runtime.turn_deps.fleet_root_grants is None
+        assert (runtime.fleet_card_factory is not None) is fleet_enabled
+        thread = MagicMock(spec=discord.Thread)
+        thread.id, thread.parent_id, thread.guild.id = 70, 50, 60
+        accepted = MagicMock(spec=discord.Message)
+        accepted.id, accepted.channel.id = 900, 70
+        send = AsyncMock(return_value=accepted)
+        edit = AsyncMock(return_value=accepted)
+        card = (
+            runtime.fleet_card_factory(thread, 123, send, edit, turn_card_intent_id=intent.id)
+            if fleet_enabled
+            else None
+        )
+        lifecycle = DiscordTurnLifecycle(
+            send=send, edit=edit, agent_name="root", model_id="claude-haiku-5-5", fleet_card=card
+        )
+
+        async def reseed():
+            return "Ordinary input."
+
+        outcome = await run_prepared_turn(
+            runtime.turn_deps,
+            ordinary,
+            tenant_id=ordinary.admission.grant.tenant_id,
+            platform="discord",
+            thread_id=origin.thread_id,
+            external_user_id="123",
+            user_message="Ordinary input.",
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: lifecycle,
+            turn_card_intent_id=intent.id,
+        )
+        assert outcome.state.error is None
+        contents = [
+            call.kwargs.get("content", "") for call in send.await_args_list + edit.await_args_list
+        ]
+        assert any(sealed.strip() in content for content in contents)
+        assert any(final in content for content in contents)
+        assert not any("Fleet" in content for content in contents)
+        async with runtime.sessionmaker() as db:
+            assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+        assert (
+            len(
+                [r for r in transport.requests if r.method == "POST" and r.path.endswith("/events")]
+            )
+            == 1
+        )
+        assert not transport.violations

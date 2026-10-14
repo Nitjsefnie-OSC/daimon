@@ -986,6 +986,7 @@ async def run_prepared_turn_impl(
             operation_key=operation_key,
             session_ref=session_ref,
             scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+            fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
         )
         with persistence.activate():
             yield
