@@ -989,30 +989,29 @@ def classify_source_obligations(
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())
-    if target is not None:
-        from mux.drivers.anthropic.schemas import agent_tools
+    from mux.drivers.anthropic.schemas import agent_tools
 
-        for extension in spec.extensions or ():
-            model = extension.value.get("model")
-            if extension.version != 1:
-                missing.add("source_definition")
-            elif extension.namespace == "anthropic.agent_tools":
-                try:
-                    native = agent_tools(extension)
-                    if "tools" not in drops:
-                        source_tools = native.intent()
-                except ValueError:
-                    missing.update(("source_definition", "tools"))
-            elif not (
-                extension.namespace == "anthropic.model_config"
-                and isinstance(model, dict)
-                and set(model) <= {"id", "speed"}
-                and model.get("speed") is None
-                or extension.namespace == "anthropic.multiagent"
-                and extension.value == {"clear": True}
-                or extension.namespace == "anthropic.agent_create_nulls"
-            ):
-                missing.add("source_definition")
+    for extension in spec.extensions or ():
+        model = extension.value.get("model")
+        if extension.version != 1:
+            missing.add("source_definition")
+        elif extension.namespace == "anthropic.agent_tools":
+            try:
+                native = agent_tools(extension)
+                if "tools" not in drops:
+                    source_tools = native.intent()
+            except ValueError:
+                missing.update(("source_definition", "tools"))
+        elif not (
+            extension.namespace == "anthropic.model_config"
+            and isinstance(model, dict)
+            and set(model) <= {"id", "speed"}
+            and model.get("speed") is None
+            or extension.namespace == "anthropic.multiagent"
+            and extension.value == {"clear": True}
+            or extension.namespace == "anthropic.agent_create_nulls"
+        ):
+            missing.add("source_definition")
     profile = get_profile(backend_selection(spec.model.provider).profile)
     tools_required = bool(
         spec.tools or any(item.value.get("tools") for item in spec.extensions or ())
