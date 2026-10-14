@@ -2653,6 +2653,7 @@
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
+        Non-admin callers get null ``mcp_servers`` and ``created_at``.
         For an admin on an editable agent, ``system`` is the full system prompt;
         null means withheld (non-admin caller, or Daimon/defaults-managed agent).
         Pass this turn's ``origin_context_id`` so its channel counts.
@@ -3029,7 +3030,7 @@
         when someone only asks to connect GitHub.
         For a clear 'give this agent access to owner/repo', call with repo_name
         right away; don't ask for a yes first. Ask only if the repo or agent is
-        unclear. Use write only if asked. confirmed is ignored. A connected repo is granted
+        unclear. confirmed is ignored. A connected repo is granted
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
@@ -3090,14 +3091,6 @@
               }),
             ]),
             'default': None,
-          }),
-          'required_ability': dict({
-            'default': 'read',
-            'enum': list([
-              'read',
-              'write',
-            ]),
-            'type': 'string',
           }),
         }),
         'type': 'object',
@@ -3219,8 +3212,11 @@
       'description': '''
         List agents visible here, including their attached ``mcp_servers`` and ``skills``.
         <blank line>
-        Members see the channel/thread responders and agents explicitly allowed
-        to run here; unrouted agents and other channels' agents are hidden.
+        ``mcp_servers`` and ``created_at`` are null for a caller who is neither an
+        admin nor an admin of a channel the agent is limited to: setup details are
+        for them, capabilities (name, description, model, skills) are not. Members
+        see the channel/thread responders and agents explicitly allowed to run
+        here; unrouted agents and other channels' agents are hidden.
         Pass this turn's ``origin_context_id`` to verify its location. Without
         a verified location a member cannot list unrestricted agents. Admins
         retain their existing visibility. ``page`` is reserved for pagination.
@@ -4491,18 +4487,10 @@
           'repo_name': dict({
             'type': 'string',
           }),
-          'required_ability': dict({
-            'enum': list([
-              'read',
-              'write',
-            ]),
-            'type': 'string',
-          }),
         }),
         'required': list([
           'origin_context_id',
           'repo_name',
-          'required_ability',
           'remaining_work',
         ]),
         'type': 'object',

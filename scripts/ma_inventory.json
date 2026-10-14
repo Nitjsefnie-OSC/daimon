@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2699,
+  "files_scanned": 2705,
   "parse_errors": [],
   "calls": [
     {
@@ -5543,8 +5543,8 @@
     },
     {
       "file": "packages/core/tests/test_output_delivery.py",
-      "line": 1053,
-      "end": 1053,
+      "line": 1062,
+      "end": 1062,
       "scope": "test_sweep_skips_handoff_bundles_and_leaves_them_listed",
       "category": "test",
       "resource": "files.list",
@@ -11279,7 +11279,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 2932,
+      "line": 2971,
       "module": "anthropic",
       "names": [
         "APIStatusError"
@@ -12788,7 +12788,7 @@
     },
     {
       "file": "packages/adapters/slack/daimon/adapters/slack/output_delivery.py",
-      "line": 19,
+      "line": 20,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -12888,7 +12888,7 @@
     },
     {
       "file": "packages/adapters/slack/tests/test_app.py",
-      "line": 3770,
+      "line": 3771,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -12897,7 +12897,7 @@
     },
     {
       "file": "packages/adapters/slack/tests/test_app.py",
-      "line": 4078,
+      "line": 4079,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -13582,7 +13582,7 @@
     },
     {
       "file": "packages/core/daimon/core/credential_env.py",
-      "line": 19,
+      "line": 20,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -13591,7 +13591,7 @@
     },
     {
       "file": "packages/core/daimon/core/credential_env.py",
-      "line": 20,
+      "line": 21,
       "module": "anthropic.types.beta",
       "names": [
         "FileMetadata"
@@ -13600,7 +13600,7 @@
     },
     {
       "file": "packages/core/daimon/core/credential_env.py",
-      "line": 21,
+      "line": 22,
       "module": "anthropic.types.beta.beta_managed_agents_file_resource_params",
       "names": [
         "BetaManagedAgentsFileResourceParams"
@@ -16690,7 +16690,7 @@
     },
     {
       "file": "packages/core/tests/test_github_access_foundation.py",
-      "line": 15,
+      "line": 16,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -17560,7 +17560,7 @@
     },
     {
       "file": "packages/core/tests/test_sessions.py",
-      "line": 217,
+      "line": 219,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsCustomSkill"

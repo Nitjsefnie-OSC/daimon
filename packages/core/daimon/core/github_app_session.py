@@ -21,17 +21,14 @@ from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     PERMISSION_PROFILES,
+    BotIdentity,
     PermissionProfile,
     build_app_jwt,
+    get_bot_identity,
     group_repository_access,
     mint_installation_token,
 )
-from daimon.core.github_requester_access import (
-    Access,
-    PermissionCache,
-    effective_access,
-    linked_permissions,
-)
+from daimon.core.github_requester_access import PermissionCache
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_credential
 from daimon.core.mux_backend import resource_scope
@@ -51,6 +48,7 @@ from daimon.core.stores.github_access import (
     list_agent_grants,
     list_authorized_repos,
     list_live_grant_repositories,
+    lock_agent_grants,
 )
 from daimon.core.stores.github_issued_tokens import (
     GitHubTokenRowClosedError,
@@ -68,7 +66,6 @@ from daimon.core.stores.github_issued_tokens import (
     set_session_id,
     store_token,
 )
-from daimon.core.stores.github_links import get_account_link, get_user
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.turn_origin import current_origin_id
 from mux.contracts.ids import Scope
@@ -96,6 +93,34 @@ class AppSessionAccess:
 
 
 REQUESTER_CACHE = PermissionCache()
+
+#: Bot identity per App slug. The numeric bot id never changes for a slug, so a
+#: process asks GitHub once; a failed lookup is not cached and is retried by the
+#: next session.
+_BOT_IDENTITIES: dict[str, BotIdentity] = {}
+
+
+async def resolve_bot_identity(
+    client: httpx.AsyncClient, *, slug: str | None
+) -> BotIdentity | None:
+    """The App's bot commit identity, or None when it cannot be resolved.
+
+    Best-effort: a missing slug, an unknown bot user or a GitHub failure leaves
+    the session without a preset identity rather than failing it.
+    """
+    if slug is None:
+        return None
+    cached = _BOT_IDENTITIES.get(slug)
+    if cached is not None:
+        return cached
+    try:
+        identity = await get_bot_identity(client, slug=slug)
+    except (httpx.HTTPError, ValueError):
+        _log.warning("Could not resolve the GitHub App bot identity for %s", slug, exc_info=True)
+        return None
+    if identity is not None:
+        _BOT_IDENTITIES[slug] = identity
+    return identity
 
 
 async def effective_repo_urls(
@@ -253,47 +278,23 @@ async def _effective_rows(
 ) -> tuple[list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]], int | None, int | None]:
     async with sessionmaker() as session:
         live = await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
-        grants = [grant for grant, _ in live]
-        repos = {repo.repo_id: repo for _, repo in live}
-        link = await get_account_link(session, account_id=account_id) if account_id else None
-        user = await get_user(session, github_user_id=link.github_user_id) if link else None
-    if user is None or user.status != "active":
-        user = None
-    asker: dict[int, Access] = {}
-    if user is not None:
-        if config.client_id is None or config.client_secret is None:
-            raise ValueError("GitHub App user authorization is not configured")
-        for installation_id in {repo.installation_id for repo in repos.values()}:
-            asker.update(
-                await linked_permissions(
-                    sessionmaker,
-                    client,
-                    user_id=user.github_user_id,
-                    installation_id=installation_id,
-                    fernet=fernet,
-                    client_id=config.client_id,
-                    client_secret=config.client_secret.get_secret_value(),
-                    cache=cache,
-                )
-            )
-        async with sessionmaker() as session:
-            user = await get_user(session, github_user_id=user.github_user_id)
-        if user is None or user.status != "active":
-            raise ValueError("GitHub requester link changed during access check")
-    abilities: dict[int, PermissionProfile] = {
-        grant.repo_id: grant.ceiling_access for grant in grants if grant.repo_id in repos
-    }
-    baselines: dict[int, Access] = {grant.repo_id: grant.baseline_access for grant in grants}
-    access = effective_access(abilities, asker if account_id is not None else {}, baselines)
-    return (
-        [
-            (grant, repos[grant.repo_id], access[grant.repo_id])
-            for grant in grants
-            if grant.repo_id in access
-        ],
-        user.github_user_id if user is not None else None,
-        user.link_generation if user is not None else None,
+    if not live:
+        return [], None, None
+    by_installation: dict[int, list[tuple[AgentGrant, AuthorizedRepo]]] = {}
+    for grant, repo in live:
+        by_installation.setdefault(repo.installation_id, []).append((grant, repo))
+    working = next((repo.installation_id for grant, repo in live if grant.is_working_repo), None)
+    selected = working or max(
+        by_installation,
+        key=lambda installation_id: (len(by_installation[installation_id]), -installation_id),
     )
+    if len(by_installation) > 1:
+        _log.warning(
+            "Agent %s has grants in multiple GitHub installations; using %s for GH_TOKEN",
+            agent_id,
+            selected,
+        )
+    return [(grant, repo, "write") for grant, repo in by_installation[selected]], None, None
 
 
 async def revoke_token(client: httpx.AsyncClient, token: str) -> None:
@@ -364,14 +365,14 @@ async def prepare_app_access(
         [(repo.installation_id, repo.repo_id, access) for _, repo, access in rows]
     )
     groups.sort(key=lambda group: (group[0], group[1], group[2]))
-    if len(groups) > 15:
+    if len(groups) + 1 > 15:
         raise ValueError("GitHub App access exceeds the session vault credential limit")
     jwt = build_app_jwt(
         config.private_key.get_secret_value(), config.app_id, now=int(datetime.now(UTC).timestamp())
     )
     tokens: list[AppToken] = []
     try:
-        for group_index, (installation_id, profile, repo_ids) in enumerate(groups):
+        for installation_id, profile, repo_ids in groups:
             versions = {
                 key: version
                 for grant, repo, _ in rows
@@ -432,12 +433,7 @@ async def prepare_app_access(
             except Exception:
                 await revoke_token(client, token)
                 raise
-            first_repo = next(repo for _, repo, _ in rows if repo.repo_id == repo_ids[0])
-            owner = first_repo.repo_full_name.split("/", 1)[0]
-            owner_key = "".join(char if char.isalnum() else "_" for char in owner.upper())
-            credential_name = f"GH_TOKEN_{owner_key}_{profile.upper()}"
-            if any(item.credential_name == credential_name for item in tokens):
-                credential_name += f"_{group_index}"
+            credential_name = "GH_TOKEN"
             tokens.append(
                 AppToken(
                     pending.token_id,
@@ -449,7 +445,7 @@ async def prepare_app_access(
                 )
             )
             async with sessionmaker() as session:
-                stale = await select_stale_tokens(session)
+                stale = await select_stale_tokens(session, include_live_version_bumps=True)
             if any(row.token_id == pending.token_id for row in stale):
                 raise ValueError("GitHub access changed during token mint")
     except Exception:
@@ -537,9 +533,8 @@ async def add_app_credentials(
     scope = scope or Scope.legacy_host_authorized(
         call_site="daimon.core.github_app_session:add_app_credentials"
     )
-    desired = {issued.credential_name: issued.token for issued in access.tokens}
-    if access.working_token is not None:
-        desired["GH_TOKEN"] = access.working_token
+    token = access.working_token or (access.tokens[0].token if access.tokens else None)
+    desired = {"GH_TOKEN": token} if token is not None else {}
     existing = {
         cred.auth.secret_name: cred.id
         async for cred in list_credentials(anthropic, vault_id, scope=scope)
@@ -608,8 +603,13 @@ async def finish_app_delivery(
     access: AppSessionAccess,
     provisional_session_id: str,
     session_id: str,
+    grant_guard: tuple[uuid.UUID, uuid.UUID] | None = None,
 ) -> None:
     async with sessionmaker.begin() as session:
+        if grant_guard is not None:
+            await lock_agent_grants(session, tenant_id=grant_guard[0], agent_id=grant_guard[1])
+            if await _access_is_stale(session, access):
+                raise ValueError("GitHub access changed during session delivery")
         await set_session_id(
             session, provisional_session_id=provisional_session_id, session_id=session_id
         )
@@ -632,7 +632,7 @@ async def finish_app_delivery(
                 grant_versions=delivered.grant_versions,
             )
     async with sessionmaker() as session:
-        stale = await select_stale_tokens(session)
+        stale = await select_stale_tokens(session, include_live_version_bumps=True)
     stale_ids = {row.token_id for row in stale}
     if any(issued.token_id in stale_ids for issued in access.tokens):
         for issued in access.tokens:
@@ -640,6 +640,16 @@ async def finish_app_delivery(
             async with sessionmaker.begin() as session:
                 await mark_revoked(session, token_id=issued.token_id)
         raise ValueError("GitHub access changed during session delivery")
+
+
+async def _access_is_stale(session: AsyncSession, access: AppSessionAccess) -> bool:
+    """Limit a grant-locked recheck to this session's replacement tokens."""
+    for token in access.tokens:
+        if await select_stale_tokens(
+            session, include_live_version_bumps=True, token_id=token.token_id
+        ):
+            return True
+    return False
 
 
 async def revoke_session_tokens(
@@ -758,7 +768,7 @@ async def _current_app_access(
     mounted = _mounted_repo_ids(
         [repo_id for row in ordered for repo_id in row.repo_ids], working_ids=working_ids
     )
-    for group_index, row in enumerate(ordered):
+    for row in ordered:
         token = decrypt_issued_token(row, fernet=fernet)
         if (
             token is None
@@ -769,11 +779,7 @@ async def _current_app_access(
         profile: PermissionProfile = (
             "write" if row.permissions.get("contents") == "write" else "read"
         )
-        owner = repos[row.repo_ids[0]].repo_full_name.split("/", 1)[0]
-        owner_key = "".join(char if char.isalnum() else "_" for char in owner.upper())
-        credential_name = f"GH_TOKEN_{owner_key}_{profile.upper()}"
-        if any(item.credential_name == credential_name for item in tokens):
-            credential_name += f"_{group_index}"
+        credential_name = "GH_TOKEN"
         tokens.append(
             AppToken(
                 row.token_id,
@@ -805,7 +811,7 @@ async def _current_app_access(
     )
 
 
-async def rotate_live_app_tokens(
+async def _rotate_live_app_tokens_unlocked(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -906,8 +912,12 @@ async def rotate_live_app_tokens(
                 access=access,
                 provisional_session_id=provisional,
                 session_id=session_id,
+                grant_guard=(tenant_id, agent_id),
             )
             async with sessionmaker.begin() as session:
+                await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
+                if await _access_is_stale(session, access):
+                    raise ValueError("GitHub access changed before token retirement")
                 await mark_session_tokens_superseded(
                     session,
                     session_id=session_id,
@@ -917,6 +927,20 @@ async def rotate_live_app_tokens(
         except Exception:
             kept: frozenset[uuid.UUID] = frozenset()
             try:
+                if old_access is not None:
+                    async with sessionmaker() as session:
+                        usable_ids = {
+                            row.token_id
+                            for row in await list_session_tokens(session, session_id=session_id)
+                        }
+                        hard_stale_ids = {
+                            row.token_id for row in await select_stale_tokens(session)
+                        }
+                    if any(
+                        token.token_id not in usable_ids or token.token_id in hard_stale_ids
+                        for token in old_access.tokens
+                    ):
+                        old_access = None
                 if old_access is not None:
                     try:
                         async with sessionmaker.begin() as session:
@@ -995,3 +1019,35 @@ async def rotate_live_app_tokens(
                     ),
                 )
             raise
+
+
+async def rotate_live_app_tokens(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    session_id: str,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    is_external: bool,
+    vault_id: str,
+    resource_ids: dict[str, str],
+    config: GithubAppSettings,
+    fernet: MultiFernet,
+    active_turn: bool = False,
+) -> None:
+    """Rotate without holding a database connection during network calls."""
+    await _rotate_live_app_tokens_unlocked(
+        anthropic,
+        sessionmaker,
+        session_id=session_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=account_id,
+        is_external=is_external,
+        vault_id=vault_id,
+        resource_ids=resource_ids,
+        config=config,
+        fernet=fernet,
+        active_turn=active_turn,
+    )

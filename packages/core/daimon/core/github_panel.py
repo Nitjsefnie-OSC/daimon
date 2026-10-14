@@ -191,7 +191,6 @@ _PUBLIC_ERRORS = frozenset(
         "Only a workspace admin can connect GitHub.",
         CLIENT_AGENT_MESSAGE,
         SERVER_WIDE_GRANT_MESSAGE,
-        "Confirm read and write access on GitHub first.",
     }
 )
 

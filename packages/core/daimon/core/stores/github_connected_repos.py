@@ -151,39 +151,10 @@ async def set_repo_ability(
     repo = await _server_wide_row(session, tenant_id=tenant_id, repo_id=repo_id)
     if repo is None or repo.status != "active":
         raise ValueError("This repo is no longer connected.")
-    if ability == "write" and repo.max_access != "write":
-        raise ValueError("Confirm read and write access on GitHub first.")
-    repo.max_access = ability
+    if ability != "write":
+        raise ValueError("GitHub grants always include write access.")
+    repo.max_access = "write"
     repo.version += 1
-    if ability == "read":
-        grants = await session.scalars(
-            select(AgentGitHubGrant)
-            .where(
-                AgentGitHubGrant.tenant_id == tenant_id,
-                AgentGitHubGrant.repo_id == repo_id,
-                ~_has_own_row(AgentGitHubGrant),
-            )
-            .with_for_update()
-        )
-        for grant in grants:
-            grant.ceiling_access = "read"
-            if grant.baseline_access == "write":
-                grant.baseline_access = "read"
-            grant.version += 1
-        drafts = await session.scalars(
-            select(AgentGitHubGrantDraft)
-            .where(
-                AgentGitHubGrantDraft.tenant_id == tenant_id,
-                AgentGitHubGrantDraft.repo_id == repo_id,
-                ~_has_own_row(AgentGitHubGrantDraft),
-            )
-            .with_for_update()
-        )
-        for draft in drafts:
-            if draft.operation == "upsert":
-                draft.ceiling_access = "read"
-                if draft.baseline_access == "write":
-                    draft.baseline_access = "read"
     await append_event(
         session,
         tenant_id=tenant_id,

@@ -834,7 +834,11 @@ write (`daimon config set`, `daimon config propagate`) binds an agent with a
 rule as the default of a channel outside it, for server admins too
 (`authorize(BIND_CHANNEL_DEFAULT)`). Managed agents
 and the tenant default stay with server
-admins, and a tenant with no grant behaves as before. Stored role ids refresh on
+admins, and a tenant with no grant behaves as before. Setup details follow the same
+reach: `list_agents` and `get_agent` show a channel admin an agent's MCP servers, creation date
+and prompt only for an agent they could edit this way, and the agent's own guidance tells a
+channel admin its setup details only about agents that answer in their channel; every other
+non-admin sees capabilities only. Stored role ids refresh on
 the member's next chat turn; until then MCP calls, a coding-tools token
 included, keep the old grant. Unattended runs are routines and queued wakes
 (timers, handoffs, applied private input); each fires with its requester's
@@ -1126,16 +1130,40 @@ replaced is decided in `packages/core/daimon/core/session_preparation.py`
 against the fingerprints stored on the mapping row; the outcome rides back on
 `PreparedTurn.continuity` so the adapter can say what happened.
 
-GitHub App mode uses the agent's live grants and the current asker's linked
-GitHub permissions when assembling a turn. External askers get no App token.
-Each effective installation and permission profile gets an ID-scoped token,
-recorded before minting and checked again after delivery. The session mounts
-only the selected working repository, if there is one, and uses its own vault
-for `GH_TOKEN` and Copilot. Other granted repos are available through tokens
+GitHub App mode uses the agent's live grants when assembling a turn. External
+askers get no App token. Each session gets one write token scoped to the agent's
+live repositories in one installation. The token is recorded before minting
+and checked again after delivery. The session mounts only the selected working
+repository, if there is one, and uses its own vault for `GH_TOKEN` and Copilot.
+Other granted repos are available through that token
 for cloning by name. A change to the working mount or the token repository
 set replaces the session on its next turn; unchanged sets receive refreshed
-tokens through resource updates. Legacy sessions continue to
-use their existing binding and credential path.
+tokens through resource updates. A session holding an App token also mounts
+`/mnt/session/uploads/git-identity.sh`, two `git config --global` lines that
+make sandbox commits author as the App's bot (`<app-slug>[bot]`, with the
+noreply email `<bot-user-id>+<app-slug>[bot]@users.noreply.github.com`); the
+bot id is read once per process from GitHub and cached, and a failed lookup
+just leaves the file off. It is a separate file because an agent with no secrets
+has no `.env` and the `.env` bytes feed the session fingerprint. A member-set
+`GIT_AUTHOR_*` or `GIT_COMMITTER_*` key in the `.env` still wins over it, as
+git's environment variables outrank its config. The agent guidance tells agents
+to commit with git and open pull requests with `gh pr create` on `GH_TOKEN`,
+ending the body with "Requested by <author_name>" (or "Requested in chat" when
+the `<user_query>` has no `author_name`), instead of the GitHub MCP, where a
+person's own sign-in would outrank the agent's credential and author the work.
+In the Managed Agents sandbox `GH_TOKEN` is a placeholder swapped in only on
+outbound requests, so the guidance has agents push with the explicit
+`https://x-access-token:${GH_TOKEN}@github.com/<owner>/<repo>.git` URL and never
+run plain `git push` or `git fetch` against origin, which hang. Slack renders
+`author_name` (the requester's profile display name, else real name, else
+username, from the turn's one `users.info` call) on the `<user_query>` as Discord
+already does; Teams does not.
+A stored per-agent token is not read in App mode. Legacy sessions continue to
+use their existing binding and credential path. Switching a legacy agent to
+App mode keeps its working repo: when the agent has a repo binding and no
+grant is marked as the working repo (a working repo chosen in the same flow
+wins), the one grant for the binding's repo becomes the working repo, because
+App mode ignores the binding and mounts only a marked grant.
 
 **Stage three, `run_prepared_turn()` —
 `packages/core/daimon/core/turn/run.py`.** Calls the driver, and on a
@@ -1187,9 +1215,11 @@ only if a new attachment holds its exact bytes, and the next edit starts from
 what is there. A file the answer cannot take (Discord's
 10-attachment limit, or a failed edit) is posted on its own below it, and a
 turn that ended without an answer (stopped or failed) gets its files as
-separate posts. Discord uses the guild's upload limit and checks the
-channel's writers before posting. A file over the limit (the guild's on
-Discord, 20 MB on Slack) is never deleted: it stays listed and in the
+separate posts. Discord uses the guild's upload limit (10 MB, up to 100 MB
+for a boosted server; 10 MB where there is no guild) and checks the
+channel's writers before posting. No limit goes above 200 MB, because each
+file is read into memory whole. A file over the limit (the guild's on
+Discord, 200 MB on Slack, 20 MB on Teams) is never deleted: it stays listed and in the
 agent's workspace, and the thread gets one notice naming the file, its size
 and the limit, and offering a smaller version or parts under the limit.
 Each adapter remembers which kept files it has announced (bounded, per
@@ -1298,8 +1328,10 @@ string.
 
 `packages/core/daimon/core/turn/notices.py` turns a reason into a
 `TerminationNotice`: a short headline, the cause, the tool work still running
-and how much had finished, what survived, the next step, and a request id. The
-copy lives in core; Discord and Slack draw it in `on_terminal_failure` as the
+and how much had finished, what survived, the next step, and a request id. Discord
+and Slack pass the request id only when the person whose turn it is holds the
+admin role there, so everyone else sees no `Ref` line. The copy lives in
+core; Discord and Slack draw it in `on_terminal_failure` as the
 body of the red card, with the headline as the footer reason, and log the
 request id with the underlying error so it is the handle for the detail;
 Teams draws it as plain text on the ❌ card. No
@@ -1660,7 +1692,7 @@ admission before any of this runs.
   clears it with `none`; other grants provide token access for clones by name.
   The tool checks the live server or channel-admin permission for that agent.
   A clear request in chat gives an agent access to an already connected repo:
-  `github_connect` grants read access (write only when requested) if the caller
+  `github_connect` grants read and write access if the caller
   may grant it. Otherwise it posts the Connect GitHub browser link for that repo.
   Chat changes need no separate confirmation turn; the agent says what changed
   and how to undo it. Browser edits apply only after **Save changes**.
@@ -1670,10 +1702,8 @@ admission before any of this runs.
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
   `/oauth/github/confirm`. The browser flow checks the confirming person's
-  GitHub permission before authorizing tenant repositories: read, triage, write,
-  maintain or admin lets them offer a repo, and the access they can give is capped by
-  that permission (read or triage gives read, write, maintain or admin allows
-  write) and by the App installation's own permissions. Each repo row records
+  GitHub permission before authorizing tenant repositories: write, maintain or
+  admin lets them offer a repo when the App installation can write. Each repo row records
   the permission (`authorized_permission`). These routes
   are absent when GitHub connection is unconfigured.
   Discord `/github home` and Slack `/github`, plus agent setup on Discord,
@@ -1700,7 +1730,7 @@ admission before any of this runs.
   line in the origin thread or channel. Failed notices back off and expire
   after eight attempts or 24 hours.
   For one agent, the connection page is titled "<Agent>'s repos". It lists
-  every recorded repo grant with its access, working-repo marker, and staged
+  every recorded repo grant with its working-repo marker and staged
   or unavailable status, including repos the signed-in GitHub account cannot
   edit. The person may add repos, remove repos, and select or clear the one
   working repo, then confirm with **Save changes**. **Add repos** opens a
@@ -1708,28 +1738,24 @@ admission before any of this runs.
   or use the filter box (a case-insensitive match on the full repo name),
   **Select all N shown** (only the repos the filter shows), **Clear**, or one
   **Everything in <owner>** button per GitHub account the App is installed on.
-  One access choice, Read only (the default) or Read and write, covers the whole
-  selection; each repo is capped at the signed-in person's own GitHub permission
-  and the installation's, and a repo capped at read shows a "Read only on GitHub"
-  tag when Read and write is chosen. The dialog lists every repo GitHub
+  Every selected repo is connected with read and write access. A repo needs
+  write permission from the signed-in person and the App installation. The dialog lists every repo GitHub
   returns, with no limit per addition. Select **Grant N repos** (N is the live
   count) in the dialog, then **Grant N repos** (or **Save changes** when
   only removing) on the page. When the card came from a chat ask that named one
   repo, the dialog opens with that repo already ticked if the person can add
   it. Added and removed rows stay
   visible as pending changes, and removals can be undone before saving.
-  Working-repo actions live on the repo row. Adding never lowers existing
-  access.
+  Working-repo actions live on the repo row. An agent uses repos from one
+  GitHub installation; a second installation is refused on save.
   Canceling shows **No changes saved** and leaves connected repos unchanged.
   A missing working or skill repo remains visible as a setup requirement.
-  Repos that need more access can be confirmed again to finish setup.
+  Repos that need write access can be confirmed again to finish setup.
   The invitation requester must still manage the agent when the page opens
-  and when it saves. The signed-in GitHub account needs current read access
-  or better to each affected repo, including the previous working repo when
-  changing or clearing that selection. Read and triage permission offer only
-  Read only for a repo and the save refuses Read and write from them; write,
-  maintain and admin permission offer both. A repo the agent needs at write is
-  added at read for someone who cannot write, and stays listed as still needed.
+  and when it saves. The signed-in GitHub account needs current write access
+  to each repo it adds. It needs permission on the previous working repo when
+  changing or clearing that selection. A repo that cannot be granted at write
+  stays listed as still needed.
   The dialog notes how many repos are hidden because the account has no
   permission on them. Other repos stay visible without edit controls.
   Each save consumes one invitation and applies its changes in one database

@@ -62,7 +62,8 @@ async def _post_app_install_link_impl(
         return PostAppInstallLinkResult(
             channel_id=channel_id, message_id=message_id, install_url=None
         )
-    slug = runtime.settings.github.app_slug
+    # The App that GitHub setup uses wins; the older setting covers deployments without it.
+    slug = runtime.settings.github_app.app_slug or runtime.settings.github.app_slug
     if slug is None:
         raise ToolError(
             "this deployment has no GitHub App install link configured — "

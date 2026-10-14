@@ -687,6 +687,7 @@ async def insert_mapping(
         platform=platform,
         thread_id=thread_id,
         account_id=session_account_id,
+        is_external=admission.is_external,
         ma_session_id=created.ma_session_id,
         ma_agent_id=admission.agent.id,
         channel_id=admission.budget_channel_id,

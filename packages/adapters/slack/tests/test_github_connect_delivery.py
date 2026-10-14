@@ -55,7 +55,7 @@ async def test_bare_connect_confirms_ephemerally_in_origin_thread(
         channel="C1",
         user="U1",
         thread_ts="123.456",
-        text="Connected private/repo, Read only. Ready.",
+        text="Connected private/repo. Ready.",
     )
 
 

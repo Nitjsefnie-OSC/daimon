@@ -275,8 +275,8 @@ async def test_a_converted_core_refusal_keeps_its_words_and_the_ref() -> None:
             )
     wrapped = TurnError(kind="upstream", cause=caught.value)
     assert render_error(wrapped, request_id=TEST_RID) == (
-        "No credential is authorized to clone acme/widgets. Re-bind this repo "
-        "with a GitHub token that can read it, using request_repo_binding."
+        "No credential is authorized to clone acme/widgets. Connect it again "
+        "with Connect GitHub."
         f"\n\n{REF}"
     )
 

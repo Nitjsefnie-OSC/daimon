@@ -81,10 +81,8 @@ class _Repo:
 
     @property
     def max_access(self) -> Literal["read", "write"]:
-        """The most this person may grant an agent on the repo."""
-        if self.permission is None:
-            return "read"
-        return github_connect.permission_max_access(self.permission)
+        """The App grants write on any usable installed repository."""
+        return "write" if self.usable else "read"
 
 
 def _repo_confirmation(
@@ -94,25 +92,15 @@ def _repo_confirmation(
     needs_write: bool,
     installation_writes: Mapping[int, bool],
 ) -> github_connect.RepoConfirmation:
-    """What to confirm for one repo: the request, capped by the person and the installation.
-
-    A repo the agent needs at write is raised to write, but only when the
-    person's GitHub permission allows it; otherwise it gets what they chose
-    (read). The installation's own permissions cap the result the same way.
-    """
-    access: Literal["read", "write"] = (
-        "write" if needs_write and repo.max_access == "write" else requested
-    )
-    if access == "write" and (
-        repo.max_access != "write" or not installation_writes.get(repo.installation_id, False)
-    ):
-        access = "read"
+    """Confirm write access from the App installation for a usable repo."""
+    if not repo.usable or not installation_writes.get(repo.installation_id, False):
+        raise ValueError("The GitHub App needs write access to connect this repo.")
     return github_connect.RepoConfirmation(
         repo_id=repo.id,
         owner_id=repo.owner_id,
         installation_id=repo.installation_id,
         full_name=repo.full_name,
-        max_access=access,
+        max_access="write",
         authorizer_permission=repo.permission,
     )
 
@@ -410,8 +398,7 @@ def _saved_agent_page(
 ) -> Response:
     items = "".join(
         f"<li><strong>{html.escape(repo.full_name)}</strong> "
-        f"<span>{'Read and write' if repo.ceiling_access == 'write' else 'Read only'}"
-        f"{'</span><span>Working repo' if repo.is_working_repo else ''}"
+        f"<span>{'Working repo' if repo.is_working_repo else 'Connected'}"
         f"{'</span><span>Setup pending' if repo.staged else ''}"
         f"{'</span><span>Unavailable' if not repo.staged and repo.status != 'active' else ''}"
         "</span></li>"
@@ -509,12 +496,6 @@ _EDITOR_SCRIPT = """
       }
       const access = isAdding ? staged.get(id) : row.dataset.access;
       const indicator = row.querySelector(".gh-access-indicator");
-      indicator.classList.toggle("gh-access-write", access === "write");
-      indicator.classList.toggle("gh-access-read", access !== "write");
-      indicator.querySelector(".gh-access-label").textContent =
-        access === "write" ? "Read and write" : "Read only";
-      indicator.querySelector(".gh-access-eye").hidden = access === "write";
-      indicator.querySelector(".gh-access-pencil").hidden = access !== "write";
       row.querySelector(".gh-working-badge").hidden = isRemoved || working !== id;
       row.querySelector(".gh-pending-label").textContent =
         isRemoved ? "Removing" : isAdding ? "Adding" : "";
@@ -549,8 +530,6 @@ _EDITOR_SCRIPT = """
       (working !== initialWorking && !removed.has(initialWorking))
       ? (working || "clear") : "keep";
   }
-  const accessRadios = [...dialog.querySelectorAll('input[name="picker_access"]')];
-  const pickerAccess = () => accessRadios.find(radio => radio.checked).value;
   const checkbox = option => option.querySelector(".gh-picker-toggle");
   const plural = n => n === 1 ? "repo" : "repos";
   function resetPicker() {
@@ -558,8 +537,6 @@ _EDITOR_SCRIPT = """
       const id = option.dataset.repoId;
       checkbox(option).checked = staged.has(id) || preselected.has(id);
     }
-    const anyWrite = [...staged.values()].includes("write");
-    for (const radio of accessRadios) radio.checked = radio.value === (anyWrite ? "write" : "read");
     search.value = "";
     for (const option of options) option.hidden = false;
     document.getElementById("no-search-results").hidden = true;
@@ -573,11 +550,6 @@ _EDITOR_SCRIPT = """
     selectShown.textContent = "Select all " + shown + " shown";
     selectShown.disabled = shown === 0;
     clearSelection.disabled = count === 0;
-    const write = pickerAccess() === "write";
-    for (const option of options) {
-      const tag = option.querySelector(".gh-cap-tag");
-      if (tag) tag.hidden = !write;
-    }
   }
   document.getElementById("open-repo-picker").addEventListener("click", event => {
     opener = event.currentTarget;
@@ -623,14 +595,9 @@ _EDITOR_SCRIPT = """
     if (!selected.length) return;
     preselected.clear();
     staged.clear();
-    const chosen = pickerAccess();
     for (const option of selected) {
       const id = option.dataset.repoId;
-      // Each repo is capped at the person's own GitHub permission; the server
-      // caps again, and by the App installation's permissions.
-      const access = option.dataset.requiredWrite === "true" ||
-        (chosen === "write" && option.dataset.maxAccess === "write") ? "write" : "read";
-      staged.set(id, access);
+      staged.set(id, "write");
       if (!rowFor(id)) makeAddedRow(id, option.dataset.name, staged.get(id));
       removed.delete(id);
     }
@@ -712,15 +679,6 @@ class _PickerOption:
     needs_write: bool
     can_write: bool
     installation_id: int
-
-
-def _access_options(*, required_write: bool, can_write: bool) -> str:
-    """The access choices for one repo: write only when the person's GitHub permission allows it."""
-    if required_write and can_write:
-        return '<option value="write">Read and write</option>'
-    return '<option value="read">Read only</option>' + (
-        '<option value="write">Read and write</option>' if can_write else ""
-    )
 
 
 def _agent_editor_page(
@@ -807,7 +765,7 @@ def _agent_editor_page(
         f'<input type="hidden" name="snapshot" value="{esc(snapshot, quote=True)}">',
         f'<input type="hidden" name="snapshot_sig" '
         f'value="{_snapshot_signature(state, invitation_hash, snapshot, secret)}">',
-        '<input type="hidden" name="access" value="read">',
+        '<input type="hidden" name="access" value="write">',
         '<input id="working-input" type="hidden" name="working" value="keep" disabled>',
         f'<div class="gh-context">{platform_mark(platform)}'
         f"<span>{place}: {esc(workspace)}</span></div>",
@@ -866,16 +824,7 @@ def _agent_editor_page(
                     f"{icon('ellipsis')}</button>"
                 )
         parts.append('</div></div><div class="gh-row-meta">')
-        parts.append(
-            f'<span class="gh-access-indicator gh-access-{repo.ceiling_access}">'
-            f'<span class="gh-access-eye"{" hidden" if repo.ceiling_access == "write" else ""}>'
-            f"{icon('eye')}</span>"
-            f'<span class="gh-access-pencil"{" hidden" if repo.ceiling_access != "write" else ""}>'
-            f"{icon('pencil')}</span>"
-            '<span class="gh-access-label">'
-            + ("Read and write" if repo.ceiling_access == "write" else "Read only")
-            + "</span></span>"
-        )
+        parts.append("")
         parts.append(
             f'<span class="gh-working-badge"{"" if repo.is_working_repo else " hidden"}>'
             f"{icon('folder')}Working repo</span>"
@@ -892,22 +841,14 @@ def _agent_editor_page(
                 "so you can't edit it here.</p>"
             )
         if repo.repo_id in needed and needed[repo.repo_id]:
-            parts.append(
-                '<p class="gh-repo-state">Needs read and write to finish setup'
-                + (
-                    "."
-                    if usable[repo.repo_id].max_access == "write" or not editable
-                    else ". Your GitHub permission allows read only, so only read can be added."
-                )
-                + "</p>"
-            )
+            parts.append('<p class="gh-repo-state">Needs read and write to finish setup.</p>')
         if editable:
             parts.append(f'<input type="hidden" name="remove" value="{repo.repo_id}" disabled>')
             if repo in repairable:
                 parts.append(
                     f'<input type="hidden" name="repo" value="{repo.repo_id}" disabled>'
                     f'<input class="gh-scoped-access" type="hidden" '
-                    f'name="access_{repo.repo_id}" value="read" disabled>'
+                    f'name="access_{repo.repo_id}" value="write" disabled>'
                 )
             if may_change_working and repo.status == "active":
                 parts.append(
@@ -952,20 +893,12 @@ def _agent_editor_page(
             if any(option.installation_id == installation.id for option in options)
         )
         + "</div>"
-        '<fieldset class="gh-dialog-link gh-dialog-access">'
-        "<legend>Access for the repos you grant</legend>"
-        '<label><input type="radio" name="picker_access" value="read" checked> Read only</label> '
-        '<label><input type="radio" name="picker_access" value="write"> Read and write</label>'
-        '<small id="picker-cap-note"> Repos where your GitHub permission is read-only get read.'
-        "</small></fieldset>"
         '<div class="gh-dialog-choices">'
     )
     if not options:
         parts.append("<p>No repos available to add.</p>")
     for option in options:
-        # A repo the agent needs at write is forced to write only for someone
-        # whose GitHub permission allows it; anyone else can still add read.
-        required_write = option.needs_write and option.can_write
+        required_write = option.needs_write
         parts.append(
             f'<div class="gh-picker-choice" data-repo-id="{option.repo_id}" '
             f'data-name="{esc(option.name, quote=True)}" '
@@ -977,18 +910,7 @@ def _agent_editor_page(
             + ">"
             f"<span>{esc(option.name)}"
             + ("<small>Finish setup</small>" if option.repair else "")
-            + (
-                "<small>Required to finish setup</small>"
-                if required_write
-                else "<small>Needs read and write; your GitHub permission allows read only</small>"
-                if option.needs_write
-                else ""
-            )
-            + (
-                '<small class="gh-cap-tag" hidden>Read only on GitHub</small>'
-                if not option.can_write and not option.needs_write
-                else ""
-            )
+            + ("<small>Required to finish setup</small>" if required_write else "")
             + "</span></label></div>"
         )
     parts.append(
@@ -1016,10 +938,6 @@ def _agent_editor_page(
             else ""
         )
         + '</div></div><div class="gh-row-meta">'
-        f'<span class="gh-access-indicator gh-access-read">'
-        f'<span class="gh-access-eye">{icon("eye")}</span>'
-        f'<span class="gh-access-pencil" hidden>{icon("pencil")}</span>'
-        '<span class="gh-access-label">Read only</span></span>'
         f'<span class="gh-working-badge" hidden>{icon("folder")}Working repo</span>'
         '<span class="gh-pending-label" aria-live="polite"></span></div>'
         '<input type="hidden" name="repo" disabled>'
@@ -1047,13 +965,7 @@ def _agent_editor_page(
             parts.append(
                 f'<label><input type="checkbox" name="repo" value="{repo.repo_id}">'
                 f"Finish setup for {esc(repo.full_name)}</label>"
-                f'<select name="access_{repo.repo_id}" '
-                f'aria-label="Access for {esc(repo.full_name, quote=True)}">'
-                + _access_options(
-                    required_write=bool(needed.get(repo.repo_id)),
-                    can_write=usable[repo.repo_id].max_access == "write",
-                )
-                + "</select>"
+                f'<input type="hidden" name="access_{repo.repo_id}" value="write">'
             )
     for repo in available:
         parts.append(
@@ -1061,13 +973,7 @@ def _agent_editor_page(
             + (" checked" if repo.id == requested_id else "")
             + ">"
             f"Add {esc(repo.full_name)}</label>"
-            f'<select name="access_{repo.id}" '
-            f'aria-label="Access for {esc(repo.full_name, quote=True)}">'
-            + _access_options(
-                required_write=bool(needed.get(repo.id)),
-                can_write=repo.max_access == "write",
-            )
-            + "</select>"
+            f'<input type="hidden" name="access_{repo.id}" value="write">'
         )
     parts.append(
         '<label>Working repo <select name="working"><option value="keep">Keep current</option>'
@@ -1135,19 +1041,18 @@ _PICKER_SCRIPT = """
       selectedOnly ? `${visible} selected ${plural(visible)}` : `${all.length} repos available`;
     showSelected.hidden = selected === 0;
     showSelected.textContent = selectedOnly ? "Show all" : "Show selected";
-    changeAccess.hidden = selected === 0;
+    changeAccess.hidden = true;
     const visibleBoxes = boxes.filter(box => !box.closest(".gh-choice").hidden);
     const allVisibleChecked = visibleBoxes.length > 0 && visibleBoxes.every(box => box.checked);
     bulk.textContent = allVisibleChecked ? "Clear selection" : `Select all ${visibleBoxes.length}`;
     bulk.hidden = visibleBoxes.length === 0;
     const access = form.querySelector('input[name="access"]:checked').value;
-    const accessLabel = access === "write" ? "Read and write" : "Read only";
-    status.textContent = selected ? `${selected} selected. ${accessLabel}.` : "0 selected";
+    status.textContent = selected ? `${selected} selected.` : "0 selected";
     submit.disabled = selected === 0;
     submitLabel.textContent = selected ?
       `Grant ${selected} ${plural(selected)}` : `${verb} repos`;
     if (audience) {
-      const can = access === "write" ? "read and change" : "read";
+      const can = "read and change";
       audience.textContent =
         `Anyone who talks to ${audience.dataset.agent} can ask it to ${can} them.`;
     }
@@ -1201,18 +1106,7 @@ _PICKER_SCRIPT = """
 
 
 def _access_choices(*, agent: bool) -> str:
-    applies = '<p class="gh-access-note">For the repos you add now.</p>' if agent else ""
-    return (
-        '<section class="gh-side-card gh-access" id="github-access" '
-        'aria-label="Access"><h2>Access</h2>'
-        '<label><input type="radio" name="access" value="read" checked>'
-        f'<span class="gh-access-copy"><strong>{icon("eye")}Read only</strong>'
-        "<small>Read code, issues and pull requests.</small></span></label>"
-        '<label><input type="radio" name="access" value="write">'
-        f'<span class="gh-access-copy"><strong>{icon("pencil")}Read and write</strong>'
-        "<small>Push branches, open issues and pull requests.</small></span></label>"
-        f"{applies}</section>"
-    )
+    return '<input type="radio" name="access" value="write" checked hidden>'
 
 
 def _confirmation_page(
@@ -1242,7 +1136,7 @@ def _confirmation_page(
     place = "Server" if platform == "discord" else "Workspace"
     audience = (
         f'<p class="gh-audience" id="audience" data-agent="{html.escape(agent_name, quote=True)}">'
-        f"{html.escape(audience_line(agent_name, write=False))}</p>"
+        f"{html.escape(audience_line(agent_name, write=True))}</p>"
         if agent_name
         else ""
     )
@@ -1317,11 +1211,6 @@ def _confirmation_page(
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
                 f'<span class="gh-repo-name">{html.escape(name)}</span>'
                 + (f'<span class="gh-added">{note}</span>' if note else "")
-                + (
-                    '<span class="gh-added">Read only on GitHub</span>'
-                    if repo.max_access != "write" and not added
-                    else ""
-                )
                 + "</span></label>"
             )
         parts.append("</div>")
@@ -2045,6 +1934,15 @@ def build_oauth_github_routes(
                 detail.installation_id: installation_supports_write(detail.permissions)
                 for detail in details
             }
+            if any(
+                not installation_writes.get(visible[repo_id].installation_id, False)
+                for repo_id in selected_ids
+            ):
+                return _error(
+                    "The GitHub App needs write access to connect these repos.",
+                    403,
+                    retry_confirm_url,
+                )
             repos = [
                 _repo_confirmation(
                     visible[repo_id],
@@ -2138,6 +2036,8 @@ def build_oauth_github_routes(
                 return _error(
                     "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                 )
+            except github_access.SecondInstallationError as exc:
+                return _error(str(exc), 400, retry_confirm_url)
             except DBAPIError as exc:
                 if getattr(exc.orig, "sqlstate", None) in ("40001", "40P01"):
                     return _error(
@@ -2229,6 +2129,15 @@ def build_oauth_github_routes(
                 detail.installation_id: installation_supports_write(detail.permissions)
                 for detail in details
             }
+            if any(
+                not installation_writes.get(visible[repo_id].installation_id, False)
+                for repo_id in selected_ids
+            ):
+                return _error(
+                    "The GitHub App needs write access to connect these repos.",
+                    403,
+                    retry_confirm_url,
+                )
             repos: list[github_connect.RepoConfirmation] = [
                 _repo_confirmation(
                     visible[repo_id],
@@ -2312,6 +2221,9 @@ def build_oauth_github_routes(
             except github_connect.ClientAgentConnectionError:
                 await revoke_user_token(token)
                 return _error(github_connect.CLIENT_AGENT_MESSAGE)
+            except github_access.SecondInstallationError as exc:
+                await revoke_user_token(token)
+                return _error(str(exc))
             except ValueError:
                 await revoke_user_token(token)
                 return _error(

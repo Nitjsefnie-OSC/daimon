@@ -19,6 +19,7 @@ from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
@@ -156,6 +157,189 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
             await _list_agent_keys_impl(
                 runtime, auth, agent_name="renamed", origin_context_id=origin_id
             )
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_agent_reads_withhold_setup_details_from_non_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], admin: bool
+) -> None:
+    """A non-admin learns what an agent can do, not how it was set up."""
+    now = dt.datetime.now(dt.UTC)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="slack",
+            parent_channel_id="CLOCAL",
+            thread_id="123.456",
+            responder_ma_agent_id="ag_shared",
+            responder_name="shared",
+            configuration_target_ma_agent_id="ag_shared",
+            configuration_target_name="shared",
+            role=Role.USER,
+            now=now,
+            expires_at=now + dt.timedelta(minutes=10),
+        )
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(
+            id="ag_shared",
+            name="shared",
+            description="Answers questions",
+            tenant_id=tenant.id,
+            mcp_servers=[{"name": "docs", "type": "url", "url": "https://docs.example/mcp"}],
+            skills=[{"type": "anthropic", "skill_id": "xlsx", "version": "2"}],
+        )
+    )
+    router.add("GET", r"/v1/skills", lambda _r, _m: list_response([]))
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=build_fake_anthropic(router.dispatch),
+        settings=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="shared"),
+    )
+    auth = AuthIdentity(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        role=Role.ADMIN if admin else Role.USER,
+        platform="slack",
+        is_admin=admin,
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared"),
+    )
+    origin_id = str(origin.id)
+
+    listed = await _list_agents_impl(runtime, auth, None, origin_id)
+    fetched = await _get_agent_impl(runtime, auth, "shared", origin_context_id=origin_id)
+
+    assert [info.name for info in listed] == ["shared"], "should list the local responder"
+    for info in (listed[0], fetched):
+        assert info.name == "shared", "should show the agent name"
+        assert info.description == "Answers questions", "should show the description"
+        assert info.model, "should show the model"
+        assert info.id == "ag_shared", "should keep the id passed back as expected_ma_agent_id"
+        assert [s.skill_id for s in info.skills] == ["xlsx"], "should show skills"
+        if admin:
+            assert info.created_at is not None, "admin should see the creation date"
+            assert info.mcp_servers is not None
+            assert [(s.name, s.url) for s in info.mcp_servers] == [
+                ("docs", "https://docs.example/mcp")
+            ], "admin should see MCP servers"
+        else:
+            assert info.created_at is None, "should withhold the creation date"
+            assert info.mcp_servers is None, "should withhold MCP servers"
+            assert info.sync_warnings is None, "should withhold sync warnings"
+            assert "docs.example" not in info.model_dump_json(), "should not leak the server URL"
+
+
+@pytest.mark.parametrize("caller", ["admin-of-channel", "admin-of-other", "member", "workspace"])
+async def test_agent_reads_show_setup_to_the_admin_of_the_channel_the_agent_is_limited_to(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], caller: str
+) -> None:
+    """A channel admin sees how their channel's own agent is set up, and nothing else's."""
+    now = dt.datetime.now(dt.UTC)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        for channel, agent_name in (("CLOCAL", "local"), ("COTHER", "other")):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+                tenant_id=tenant.id,
+                agent_name=agent_name,
+                mode="agent",
+                set_by_admin=True,
+            )
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                agent_channel_pins={"local": ("CLOCAL",), "other": ("COTHER",)}
+            ),
+        )
+        administered = {"admin-of-channel": "CLOCAL", "admin-of-other": "COTHER"}.get(caller)
+        if administered is not None:
+            await set_channel_admins(
+                session,
+                tenant_id=tenant.id,
+                platform="slack",
+                channel_id=administered,
+                role_ids=[],
+                user_ids=["UCHAN"],
+                actor_account_id=None,
+            )
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="slack",
+            parent_channel_id="CLOCAL",
+            thread_id="123.456",
+            responder_ma_agent_id="ag_local",
+            responder_name="local",
+            configuration_target_ma_agent_id="ag_local",
+            configuration_target_name="local",
+            role=Role.USER,
+            now=now,
+            expires_at=now + dt.timedelta(minutes=10),
+        )
+    server = [{"name": "docs", "type": "url", "url": "https://docs.example/mcp"}]
+    owner = {"daimon_account": str(account.id)}
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(
+            id="ag_local",
+            name="local",
+            tenant_id=tenant.id,
+            system="Local prompt",
+            mcp_servers=server,
+            metadata=owner,
+        ),
+        ma_agent(
+            id="ag_shared",
+            name="shared",
+            tenant_id=tenant.id,
+            system="Shared prompt",
+            mcp_servers=server,
+            metadata=owner,
+        ),
+    )
+    router.add("GET", r"/v1/skills", lambda _r, _m: list_response([]))
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=build_fake_anthropic(router.dispatch),
+        settings=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="shared"),
+    )
+    auth = AuthIdentity(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        role=Role.ADMIN if caller == "workspace" else Role.USER,
+        platform="slack",
+        platform_user_id="UCHAN",
+        is_admin=caller == "workspace",
+        administered_channel_ids=frozenset({administered} if administered else ()),
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_local"),
+    )
+    origin_id = str(origin.id)
+
+    listed = {info.name: info for info in await _list_agents_impl(runtime, auth, None, origin_id)}
+    fetched = {
+        name: await _get_agent_impl(runtime, auth, name, origin_context_id=origin_id)
+        for name in listed
+    }
+
+    sees_setup = caller in {"admin-of-channel", "workspace"}
+    expected_names = {"local", "shared"} if caller == "workspace" else {"local"}
+    assert set(listed) == expected_names, "should list only agents answering here"
+    for info in (listed["local"], fetched["local"]):
+        assert (info.mcp_servers is not None) == sees_setup, f"MCP servers for {caller}"
+        assert (info.created_at is not None) == sees_setup, f"creation date for {caller}"
+    assert fetched["local"].system == ("Local prompt" if sees_setup else None), caller
+    if caller == "workspace":
+        assert listed["shared"].mcp_servers is not None, "the workspace admin is unchanged"
 
 
 @pytest.mark.parametrize("platform", ["slack", "discord", "teams"])

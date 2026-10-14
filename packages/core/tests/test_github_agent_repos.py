@@ -490,7 +490,7 @@ async def test_server_wide_and_scoped_rows_coexist_and_the_agents_own_row_wins(
         ma_agent_id="ma_loose",
         repo_ids=(101,),
         manages=False,
-        access="read",
+        access="write",
     )
     own = await github_access.repo_for_agent(
         db_session, tenant_id=world.tenant_id, repo_id=101, agent_id=loose
@@ -498,7 +498,7 @@ async def test_server_wide_and_scoped_rows_coexist_and_the_agents_own_row_wins(
     shared = await github_access.repo_for_agent(
         db_session, tenant_id=world.tenant_id, repo_id=101, agent_id=other
     )
-    assert own is not None and own.scope_agent_id == loose and own.max_access == "read"
+    assert own is not None and own.scope_agent_id == loose and own.max_access == "write"
     assert shared is not None and shared.scope_agent_id is None and shared.max_access == "write"
     [listed] = await github_access.list_agent_repos(
         db_session, tenant_id=world.tenant_id, agent_id=other
@@ -688,13 +688,15 @@ async def test_saved_key_is_retired_only_when_the_working_repo_stays_covered(
 
 
 @pytest.mark.asyncio
-async def test_read_only_working_repo_keeps_the_key_until_write_is_connected(
+async def test_read_only_confirmation_still_connects_the_working_repo_with_write(
     db_session: AsyncSession,
 ) -> None:
+    # Every connected repo is read and write (Derick, 2026-10-14), even when the
+    # person connecting it only has read access on GitHub.
     world = await _world(db_session)
     team_a = world.agent("ma_team_a")
     await _saved_key_and_working_repo(db_session, world, team_a)
-    pending = await _connect(
+    await _connect(
         db_session,
         world,
         requester_id=world.channel_admin_id,
@@ -704,35 +706,10 @@ async def test_read_only_working_repo_keeps_the_key_until_write_is_connected(
         manages=True,
         access="read",
     )
-    assert pending is not None and pending.status == "update_pending"
-    await stage_panel_grant(
-        db_session,
-        tenant_id=world.tenant_id,
-        agent_id=team_a,
-        repo_id=101,
-        baseline_access="read",
-        ceiling_access="read",
-        account_id=world.channel_admin_id,
-        is_working_repo=True,
+    [grant] = await github_access.list_agent_grants(
+        db_session, tenant_id=world.tenant_id, agent_id=team_a
     )
-    # Read only on the working repo still strands it.
-    with pytest.raises(ValueError, match="working repo"):
-        await activate_grants(
-            db_session,
-            tenant_id=world.tenant_id,
-            agent_id=team_a,
-            account_id=world.channel_admin_id,
-            agent_name="TeamA",
-        )
-    await _connect(
-        db_session,
-        world,
-        requester_id=world.channel_admin_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-    )
+    assert (grant.baseline_access, grant.ceiling_access) == ("write", "write")
     assert await github_access.get_agent_mode(
         db_session, tenant_id=world.tenant_id, agent_id=team_a
     ) == ("app")
@@ -745,7 +722,7 @@ async def test_read_only_working_repo_keeps_the_key_until_write_is_connected(
             )
         )
     )
-    assert statuses == {"update_pending", "activated"}
+    assert statuses == {"activated"}
 
 
 @pytest.mark.asyncio
@@ -756,6 +733,20 @@ async def test_panel_save_retires_the_key_after_a_pending_connect(
     team_a = world.agent("ma_team_a")
     await _saved_key_and_working_repo(db_session, world, team_a)
     await _server_wide(db_session, world, 102)
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=world.tenant_id,
+            repo_id=102,
+            scope_agent_id=team_a,
+            owner_id=55,
+            installation_id=INSTALLATION,
+            repo_full_name=REPOS[102],
+            max_access="write",
+            authorized_by_github_user_id=17,
+            authorized_by_account_id=world.admin_id,
+        )
+    )
+    await db_session.flush()
     # Without a pending Connect the panel still refuses to switch a saved key.
     await stage_panel_grant(
         db_session,
@@ -778,6 +769,17 @@ async def test_panel_save_retires_the_key_after_a_pending_connect(
     await github_access.remove_grant(
         db_session, tenant_id=world.tenant_id, agent_id=team_a, repo_id=102
     )
+    db_session.add(
+        AgentSkillRepoCredential(
+            tenant_id=world.tenant_id,
+            agent_id=team_a,
+            repo_url="team-a/docs",
+            default_branch="main",
+            ma_secret_ref="saved-key",
+            proof_kind="private",
+        )
+    )
+    await db_session.flush()
     pending = await _connect(
         db_session,
         world,
@@ -786,31 +788,24 @@ async def test_panel_save_retires_the_key_after_a_pending_connect(
         ma_agent_id="ma_team_a",
         repo_ids=(101,),
         manages=True,
-        access="read",
+        access="write",
     )
     assert pending is not None and pending.status == "update_pending"
-    row = await db_session.scalar(
-        select(TenantGitHubRepo).where(
-            TenantGitHubRepo.repo_id == 101, TenantGitHubRepo.scope_agent_id == team_a
-        )
-    )
-    assert row is not None
-    row.max_access = "write"
     await stage_panel_grant(
         db_session,
         tenant_id=world.tenant_id,
         agent_id=team_a,
-        repo_id=101,
+        repo_id=102,
         baseline_access="write",
         ceiling_access="write",
-        account_id=world.channel_admin_id,
-        is_working_repo=True,
+        account_id=world.admin_id,
+        is_working_repo=False,
     )
     assert await activate_grants(
         db_session,
         tenant_id=world.tenant_id,
         agent_id=team_a,
-        account_id=world.channel_admin_id,
+        account_id=world.admin_id,
         agent_name="TeamA",
     )
     assert await db_session.get(AgentGithubBinding, team_a) is None
@@ -912,20 +907,30 @@ async def test_confirm_recheck_uses_live_roles_and_managed_status(
 
 
 @pytest.mark.asyncio
-async def test_reconnecting_at_read_keeps_existing_write(db_session: AsyncSession) -> None:
+async def test_reconnecting_with_read_only_access_keeps_write(
+    db_session: AsyncSession,
+) -> None:
     world = await _world(db_session)
     team_a = world.agent("ma_team_a")
-    for access in ("write", "read"):
-        assert await _connect(
-            db_session,
-            world,
-            requester_id=world.channel_admin_id,
-            agent_name="TeamA",
-            ma_agent_id="ma_team_a",
-            repo_ids=(101,),
-            manages=True,
-            access=access,
-        )
+    assert await _connect(
+        db_session,
+        world,
+        requester_id=world.channel_admin_id,
+        agent_name="TeamA",
+        ma_agent_id="ma_team_a",
+        repo_ids=(101,),
+        manages=True,
+    )
+    await _connect(
+        db_session,
+        world,
+        requester_id=world.channel_admin_id,
+        agent_name="TeamA",
+        ma_agent_id="ma_team_a",
+        repo_ids=(101,),
+        manages=True,
+        access="read",
+    )
     [grant] = await github_access.list_agent_grants(
         db_session, tenant_id=world.tenant_id, agent_id=team_a
     )
@@ -1026,8 +1031,7 @@ async def test_a_repo_that_is_working_and_skill_repo_is_missing_once_with_write(
     assert await github_connect.missing_required_repos(
         db_session, tenant_id=world.tenant_id, agent_id=team_a
     ) == [github_connect.MissingRepo(full_name="team-a/app", needs_write=True)]
-    # Read only on it still leaves the agent waiting, and says it needs write.
-    pending = await _connect(
+    connected = await _connect(
         db_session,
         world,
         requester_id=world.channel_admin_id,
@@ -1035,9 +1039,5 @@ async def test_a_repo_that_is_working_and_skill_repo_is_missing_once_with_write(
         ma_agent_id="ma_team_a",
         repo_ids=(101,),
         manages=True,
-        access="read",
     )
-    assert pending == github_connect.ConfirmedActivation(
-        status="update_pending",
-        missing_repos=(github_connect.MissingRepo(full_name="team-a/app", needs_write=True),),
-    )
+    assert connected is not None and connected.status == "activated"

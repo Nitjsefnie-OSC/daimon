@@ -120,8 +120,6 @@ def _run_grant_command(
     agent: uuid.UUID,
     *,
     repo: int | None = None,
-    baseline: str = "none",
-    ceiling: str = "read",
     working: bool = False,
 ) -> None:
     settings = load_settings()
@@ -148,26 +146,19 @@ def _run_grant_command(
                 ):
                     raise ValueError("current CLI user is not a workspace admin")
                 if action == "stage":
-                    if (
-                        repo is None
-                        or baseline not in ("none", "read", "write")
-                        or ceiling not in ("read", "write")
-                    ):
-                        raise ValueError("provide a repository ID and valid access levels")
+                    if repo is None:
+                        raise ValueError("provide a repository ID")
                     result = await stage_grant(
                         session,
                         tenant_id=tenant,
                         agent_id=agent,
                         repo_id=repo,
-                        baseline_access=baseline,
-                        ceiling_access=ceiling,
+                        baseline_access="write",
+                        ceiling_access="write",
                         granted_by_account_id=account_id,
                         is_working_repo=working,
                     )
-                    console.print(
-                        f"{'staged' if result.staged else 'updated'} {result.repo_id} "
-                        f"({result.baseline_access}/{result.ceiling_access})"
-                    )
+                    console.print(f"{'staged' if result.staged else 'updated'} {result.repo_id}")
                 elif action == "remove":
                     if repo is None:
                         raise ValueError("provide a repository ID")
@@ -198,10 +189,7 @@ def _run_grant_command(
                 else:
                     rows = await list_agent_grants(session, tenant_id=tenant, agent_id=agent)
                     for row in rows:
-                        console.print(
-                            f"{row.repo_id} {row.baseline_access}/{row.ceiling_access} "
-                            f"{'staged' if row.staged else 'live'}"
-                        )
+                        console.print(f"{row.repo_id} {'staged' if row.staged else 'live'}")
             async with sessionmaker() as session:
                 app_mode = await get_agent_mode(session, tenant_id=tenant, agent_id=agent) == "app"
             if action in ("activate", "deactivate") or (app_mode and action in ("stage", "remove")):
@@ -313,13 +301,9 @@ def grants_stage(
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
     agent: Annotated[uuid.UUID, typer.Option("--agent")],
     repo: Annotated[int, typer.Option("--repo")],
-    baseline: Annotated[str, typer.Option("--baseline")] = "none",
-    ceiling: Annotated[str, typer.Option("--ceiling")] = "read",
     working: Annotated[bool, typer.Option("--working")] = False,
 ) -> None:
-    _run_grant_command(
-        tenant, "stage", agent, repo=repo, baseline=baseline, ceiling=ceiling, working=working
-    )
+    _run_grant_command(tenant, "stage", agent, repo=repo, working=working)
 
 
 @grants_app.command("list")

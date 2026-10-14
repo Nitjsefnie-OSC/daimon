@@ -94,6 +94,7 @@ from daimon.core.stores.credential_requests import (
     update_credential_request_message,
 )
 from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
+from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
@@ -882,6 +883,15 @@ async def _request_repo_binding_impl(
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
+    # The token form is for agents still on a saved token; an App-mode agent's
+    # repos change through Connect GitHub, which never moves the working repo.
+    async with runtime.session_factory() as session:
+        mode = await get_agent_mode(session, tenant_id=origin.tenant_id, agent_id=agent_id)
+    if mode == "app":
+        raise ToolError(
+            f"{agent_name} uses the GitHub App. Call github_connect to post the "
+            "Connect GitHub button instead."
+        )
     return await _mint_and_post(
         runtime,
         auth,

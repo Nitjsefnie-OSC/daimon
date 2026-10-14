@@ -108,6 +108,19 @@ def test_app_token_swap_keeps_session_but_repo_set_change_replaces_it() -> None:
         )
         == ReuseAsIs()
     )
+    assert decide_session_compatibility(
+        recorded=fresh,
+        desired=desired,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+        force_app_token_rotation=True,
+    ) == UpdateInPlace(
+        ops=(
+            RotateAppTokens(resource_ids={url: "repo-resource"}),
+            RemirrorVaultCredentials(),
+        ),
+        reasons=("repo_token_age",),
+    )
     expanded = desired.model_copy(update={"repo_urls": (url, "https://github.com/example/two")})
     assert decide_session_compatibility(
         recorded=recorded,

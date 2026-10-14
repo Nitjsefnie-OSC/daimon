@@ -13,6 +13,7 @@ key_count only.
 from __future__ import annotations
 
 import datetime as dt
+import shlex
 import uuid
 
 import structlog
@@ -22,6 +23,7 @@ from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
 from daimon.core.env_file import env_row_skip_reason, serialize_env_file
+from daimon.core.github_app_auth import BotIdentity
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import upload_credential_file
 from daimon.core.stores.agent_files import list_agent_files
@@ -32,6 +34,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 _MOUNT_PATH = ".env"
+#: Served at /mnt/session/uploads/git-identity.sh. Not a ``.env`` suffix, so the
+#: session snapshot and the `.env` swap never mistake it for the secrets file.
+GIT_IDENTITY_MOUNT_PATH = "git-identity.sh"
 
 
 def session_env_key(key: str, *, exclude_github: bool) -> bool:
@@ -88,25 +93,82 @@ async def upload_env_file(
     `sessions.resources.add` rather than through `sessions.create` — same
     bytes, same disposable-object retention, different mount call.
     """
-    scope = scope or Scope.legacy_host_authorized(
-        call_site="daimon.core.credential_env:upload_env_file"
+    file_id = await _upload_disposable(
+        anthropic,
+        session_factory,
+        content=assemble_env_bytes(rows),
+        mount_path=_MOUNT_PATH,
+        ttl_hours=ttl_hours,
+        secret_values=[row.content for row in rows],
+        scope=scope
+        or Scope.legacy_host_authorized(call_site="daimon.core.credential_env:upload_env_file"),
     )
-    content = assemble_env_bytes(rows)
+    _log.info("credential_env.uploaded", file_id=file_id, key_count=len(rows))
+    return file_id
+
+
+async def _upload_disposable(
+    anthropic: AsyncAnthropic,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    content: bytes,
+    mount_path: str,
+    ttl_hours: int,
+    secret_values: list[str],
+    scope: Scope,
+) -> str:
+    """Upload `content` through the Files API and enqueue the object's TTL delete."""
     uploaded: FileMetadata = await upload_credential_file(
         anthropic,
         content,
-        filename=_MOUNT_PATH,
+        filename=mount_path,
         media_type="text/plain",
-        secret_values=[row.content for row in rows],
+        secret_values=secret_values,
         scope=scope,
     )
-
     delete_after = dt.datetime.now(dt.UTC) + dt.timedelta(hours=ttl_hours)
     async with session_factory() as session, session.begin():
         await enqueue_pending_file_delete(session, file_id=uploaded.id, delete_after=delete_after)
-
-    _log.info("credential_env.uploaded", file_id=uploaded.id, key_count=len(rows))
     return uploaded.id
+
+
+def render_git_identity_script(identity: BotIdentity) -> bytes:
+    """Pure: the two `git config` lines that make commits author as the App's bot."""
+    name, email = shlex.quote(identity.name), shlex.quote(identity.email)
+    return (
+        f"git config --global user.name {name}\ngit config --global user.email {email}\n"
+    ).encode()
+
+
+async def upload_git_identity_and_mount(
+    anthropic: AsyncAnthropic,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    identity: BotIdentity,
+    ttl_hours: int = 1,
+    scope: Scope | None = None,
+) -> BetaManagedAgentsFileResourceParams:
+    """Upload the bot commit-identity script and return its session resource.
+
+    The identity is not a secret, but it cannot ride the GitHub App's vault
+    credentials (those are injected into request headers, not exported as
+    plain environment variables) and it cannot ride the `.env` (an agent with
+    no secrets has no `.env`, and its bytes are hashed into the session
+    snapshot). A separate file leaves both alone.
+    """
+    file_id = await _upload_disposable(
+        anthropic,
+        session_factory,
+        content=render_git_identity_script(identity),
+        mount_path=GIT_IDENTITY_MOUNT_PATH,
+        ttl_hours=ttl_hours,
+        secret_values=[],
+        scope=scope
+        or Scope.legacy_host_authorized(
+            call_site="daimon.core.credential_env:upload_git_identity_and_mount"
+        ),
+    )
+    return {"type": "file", "file_id": file_id, "mount_path": GIT_IDENTITY_MOUNT_PATH}
 
 
 async def upload_env_and_mount(

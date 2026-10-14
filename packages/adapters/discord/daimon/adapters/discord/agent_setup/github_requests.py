@@ -243,10 +243,9 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
             repo_lines = [f"Repo: {name}" for name in connected_names]
             if other_count:
                 repo_lines.append(f"{other_count} other repo(s) not connected yet")
-            level = "Read only" if request.required_ability == "read" else "Read and write"
             detail = discord.Embed(
                 title=f"{request.agent_name} needs GitHub access",
-                description="\n".join((*repo_lines, f"Access: {level}")),
+                description="\n".join(repo_lines),
             )
             view = discord.ui.View(timeout=900)
             for label, decision in (
