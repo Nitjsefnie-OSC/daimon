@@ -16,12 +16,13 @@ from mux.contracts.usage import UsageObservation
 
 @pytest.fixture(autouse=True)
 def fixed_source_date(monkeypatch):
-    class CheckedDate(date):
+    class CheckedClock(datetime):
         @classmethod
-        def today(cls):
-            return date(2026, 10, 14)
+        def now(cls, tz=None):
+            assert tz is UTC
+            return datetime(2026, 10, 14, tzinfo=UTC)
 
-    monkeypatch.setattr(pricing, "date", CheckedDate)
+    monkeypatch.setattr(pricing, "datetime", CheckedClock)
 
 
 def usage(price, **changes):
@@ -126,12 +127,13 @@ def test_published_expiry_and_future_source_refuse_floor_and_exact_cost(monkeypa
         assert pricing.minimum_cost_of(value, price) is None
         assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) is None
 
-    class AfterPromotion(date):
+    class AfterPromotion(datetime):
         @classmethod
-        def today(cls):
-            return date(2027, 1, 1)
+        def now(cls, tz=None):
+            assert tz is UTC
+            return datetime(2027, 1, 1, tzinfo=UTC)
 
-    monkeypatch.setattr(pricing, "date", AfterPromotion)
+    monkeypatch.setattr(pricing, "datetime", AfterPromotion)
     rows = pricing.provider_prices("gemini.inline_reuse")
     assert ("gemini", "gemini-3.8-flash") not in rows
     assert ("gemini", "gemini-3.5-flash-lite") in rows
@@ -165,3 +167,21 @@ def test_owner_supplier_is_cold_without_environment_file_or_transport_reads(monk
         assert len(pricing.provider_prices("openai.persistent_workspace")) == 1
         assert len(pricing.provider_prices("gemini.inline_reuse")) == 2
         assert not pricing.provider_prices("unknown.profile")
+
+
+def test_supplier_identity_comes_from_profiles_and_uses_utc_not_host_date(monkeypatch):
+    from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE
+
+    class HostDate(date):
+        @classmethod
+        def today(cls):
+            raise AssertionError("supplier consulted host-local date")
+
+    monkeypatch.setattr(pricing, "date", HostDate)
+    for profile in (INLINE_REUSE, PERSISTENT_WORKSPACE):
+        rows = pricing.provider_prices(profile.profile_id)
+        assert rows
+        assert all(
+            key == (profile.provider, price.model) and price.provider == profile.provider
+            for key, price in rows.items()
+        )

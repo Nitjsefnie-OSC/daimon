@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import Protocol
@@ -20,7 +20,7 @@ from typing import Protocol
 from mux.contracts.config import ResolvedBackend
 from mux.contracts.ids import ModelRef
 from mux.contracts.usage import UsageObservation
-from mux.profiles import get_profile
+from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE, get_profile
 
 
 class LegacyUsage(Protocol):
@@ -553,9 +553,9 @@ PROVIDER_PRICING_SOURCES = (
 )
 _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
     {
-        "openai.persistent_workspace": (
+        PERSISTENT_WORKSPACE.profile_id: (
             ProviderPrice(
-                "openai",
+                PERSISTENT_WORKSPACE.provider,
                 "gpt-6-luna",
                 PROVIDER_PRICING_CHECKED_ON,
                 Decimal("0.10"),
@@ -565,9 +565,9 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 max_priced_input_tokens=272_000,
             ),
         ),
-        "gemini.inline_reuse": (
+        INLINE_REUSE.profile_id: (
             ProviderPrice(
-                "gemini",
+                INLINE_REUSE.provider,
                 "gemini-3.5-flash-lite",
                 PROVIDER_PRICING_CHECKED_ON,
                 Decimal("0.30"),
@@ -575,7 +575,7 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.03"),
             ),
             ProviderPrice(
-                "gemini",
+                INLINE_REUSE.provider,
                 "gemini-3.8-flash",
                 PROVIDER_PRICING_CHECKED_ON,
                 Decimal("0.75"),
@@ -594,7 +594,7 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     Unsupported profiles/models are absent. This supplies Standard token
     rates, not a whole-bill proof, native request limit or authority grant.
     """
-    on = date.today()
+    on = datetime.now(UTC).date()
     return MappingProxyType(
         {
             (price.provider, price.model): price

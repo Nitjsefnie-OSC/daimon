@@ -1216,7 +1216,8 @@ an ambiguous declaration rather than picking a different billing protocol.
 
 
 Production native runtime registrars obtain paid Standard direct-API text rates
-from `daimon.core.pricing.provider_prices(profile)`. These immutable source rows
+from `daimon.core.pricing.provider_prices(profile)`. Their provider identities come from the existing profile owner, and validity
+is evaluated against the UTC date. These immutable source rows
 were checked on 2026-10-14 against the official OpenAI model/Agents usage pages
 and Gemini pricing/Antigravity pages listed in `PROVIDER_PRICING_SOURCES`.
 Coverage is `gpt-6-luna`, `gemini-3.5-flash-lite`, and `gemini-3.8-flash`;
