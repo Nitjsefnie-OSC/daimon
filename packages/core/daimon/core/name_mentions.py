@@ -7,10 +7,11 @@ human channel or thread message that names the bot this way like a real
 mention. The adapters run this regex before any I/O, so only a matching
 message pays the read of the flag.
 
-Matching is case-insensitive and Unicode-aware. The "@" must not follow a
-word character, "@" or "/" (``me@daimon.example``, ``https://example.com/@daimon``),
-and the name must not run on into a word character, a hyphen, a dotted domain
-or a "(" ("@Daimonic", "@Daimon-dev", "@daimon.example.com", "@Daimon (Staging)"
+Matching is case-insensitive and Unicode-aware, and any run of whitespace
+matches a space in the name. The "@" must not follow a word character, "@"
+or "/" (``me@daimon.example``, ``https://example.com/@daimon``), and the name
+must not run on into a word character, a hyphen, a dotted domain or a
+"(" ("@Daimonic", "@Daimon-dev", "@daimon.example.com", "@Daimon (Staging)"
 for a bot named "Daimon"). A following word is prose ("@Daimon please"), so
 bots whose names share a prefix ("Daimon", "Daimon Helper") all answer
 "@Daimon Helper". Code spans and blocks are not special: a name inside
@@ -31,22 +32,26 @@ def name_variants(names: Iterable[str | None]) -> tuple[str, ...]:
 
     A deployment named "Daimon (Staging)" still answers to "@Daimon". Longest
     first, so the alternation consumes "Daimon (Staging)" whole before "Daimon".
+    Casefolding only dedupes: it rewrites "ß" as "ss", which the pattern would
+    then fail to find in "@Straße".
     """
-    variants: set[str] = set()
+    variants: dict[str, str] = {}
     for name in names:
         cleaned = (name or "").strip()
-        if not cleaned:
-            continue
-        variants.add(cleaned.casefold())
         short = _TRAILING_PARENTHETICAL.sub("", cleaned).strip()
-        if short:
-            variants.add(short.casefold())
-    return tuple(sorted(variants, key=lambda variant: (-len(variant), variant)))
+        for variant in (cleaned, short):
+            if variant:
+                variants.setdefault(variant.casefold(), variant)
+    return tuple(sorted(variants.values(), key=lambda variant: (-len(variant), variant)))
+
+
+def _name_pattern(variant: str) -> str:
+    return r"\s+".join(re.escape(word) for word in variant.split())
 
 
 @lru_cache(maxsize=64)
 def _pattern(variants: tuple[str, ...]) -> re.Pattern[str]:
-    alternation = "|".join(re.escape(variant) for variant in variants)
+    alternation = "|".join(_name_pattern(variant) for variant in variants)
     return re.compile(rf"(?<![\w@/])@(?:{alternation})(?![\w-]|\.\w|\s*\()", re.IGNORECASE)
 
 

@@ -59,7 +59,7 @@ def test_mentions_by_name_is_false_without_names() -> None:
 def test_name_variants_adds_the_name_without_its_trailing_parenthetical() -> None:
     """A deployment called "Daimon (Staging)" also answers to "@Daimon"."""
     variants = name_variants(["Daimon (Staging)"])
-    assert variants == ("daimon (staging)", "daimon"), "both forms must be present, longest first"
+    assert variants == ("Daimon (Staging)", "Daimon"), "both forms must be present, longest first"
     assert mentions_by_name("@daimon do this", ["Daimon (Staging)"]), "the short form must match"
     assert mentions_by_name("@Daimon (Staging) do this", ["Daimon (Staging)"]), (
         "the full form must match"
@@ -74,6 +74,19 @@ def test_mentions_by_name_handles_unicode_and_multi_word_names() -> None:
     assert not mentions_by_name("@Dämonen", ["Dämon"]), (
         "a Unicode word character after the name must block the match"
     )
+
+
+def test_mentions_by_name_matches_a_name_that_casefolding_would_change() -> None:
+    """The pattern keeps the name as written: casefold turns "ß" into "ss"."""
+    assert mentions_by_name("@Straße bitte", ["Straße"]), "the name as written must match"
+    assert name_variants(["Daimon", "DAIMON"]) == ("Daimon",), "the first spelling wins the dedupe"
+
+
+@pytest.mark.parametrize("text", ["@Daimon  Bot go", "@Daimon\u00a0Bot go", "@daimon\nbot go"])
+def test_mentions_by_name_matches_any_whitespace_inside_a_name(text: str) -> None:
+    """Teams and other clients may type a no-break space or a line break between words."""
+    assert mentions_by_name(text, ["Daimon Bot"]), f"{text!r} names the bot"
+    assert strip_name_mentions(text, ["Daimon Bot"]) == "go", "the whole name must be stripped"
 
 
 def test_strip_name_mentions_removes_every_token_and_trims() -> None:
