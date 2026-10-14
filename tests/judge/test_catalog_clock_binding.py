@@ -18,7 +18,7 @@ from mux.contracts.events import Event
 from mux.contracts.ids import Provider
 from mux.state.memory import MemoryStateStore
 
-from . import gemini_catalog_host, headless_executor, openai_catalog_host
+from . import headless_executor
 from .headless_executor import execute_cell, execute_gemini_cell, execute_openai_cell
 from .test_catalog_runner import planned, source
 from .test_headless_executor import scripted
@@ -34,13 +34,12 @@ async def test_real_native_root_budget_does_not_time_outer_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: Provider, control: str
 ) -> None:
     arrival = ArrivalClock()
-    host = (
-        headless_executor
-        if provider == "anthropic"
-        else openai_catalog_host
-        if provider == "openai"
-        else gemini_catalog_host
-    )
+    if provider == "openai":
+        from . import openai_catalog_host as host
+    elif provider == "gemini":
+        from . import gemini_catalog_host as host
+    else:
+        host = headless_executor
     actual_run = host.run_turn
     drained = asyncio.Event()
     observers: list[ClockedLifecycle] = []
