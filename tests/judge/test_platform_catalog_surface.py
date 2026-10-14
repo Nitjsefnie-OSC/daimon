@@ -8,14 +8,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
-import yaml
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing.outcome_oracle import RunEvidence, TurnEvidence, evaluate
 from daimon.testing.platform_surface import PlatformSurfaceCapture
 from daimon.testing.provider_fixtures import load_provider_fixtures
-from daimon.testing.provider_replay import SourcePin
 
-from .catalog_runner import load_catalog, plan_scenario, sha
+from .catalog_runner import load_catalog, plan_scenario
 from .headless_executor import execute_cell, execute_gemini_cell, execute_openai_cell
 from .platform_catalog_surface import CatalogLifecycle, bind_platform_text
 from .test_catalog_runner import planned, source
@@ -282,80 +280,6 @@ async def test_failed_or_double_terminal_delivery_keeps_capture_partial(platform
         assert not bound(lc.platform_capture).text_capture_complete
 
 
-@pytest.mark.parametrize("platform", ["slack", "teams"])
-@pytest.mark.parametrize("backend", ["openai", "gemini"])
-async def test_real_native_hosts_bind_newly_pinned_platform_followup_microcases(
-    tmp_path: Path,
-    platform: str,
-    backend: Literal["openai", "gemini"],
-) -> None:
-    # Separate source bytes + source pin: no scored catalog fixture is changed.
-    pack = load_provider_fixtures(INDEX, catalog_root=CATALOG)
-    template = next(
-        s for s in pack.scenarios if s.scenario_id == "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY"
-    )
-    original = next(p for p in template.providers if p.backend == backend)
-    row = source(f"QA-ISOLATED-{backend.upper()}-{platform.upper()}")
-    row["surface"] = platform
-    row["steps"][1]["text"] = original.turns[0].request_text
-    row["steps"][3]["text"] = original.turns[1].request_text
-    row["assert"] = [
-        {"kind": "text_absent", "turn": t, "pattern": "NEVER_FORBIDDEN"} for t in (1, 2)
-    ]
-    row["assert"].append({"kind": "card_finalized", "turn": 1})
-    plan = planned(tmp_path, row, backend)
-    invocations = [i for i in plan.invocations if i.operation == "host_turn"]
-    turns = tuple(
-        t.model_copy(
-            update={
-                "turn": i.turn,
-                "location": i.location,
-                "channel": i.channel,
-                "thread": i.thread,
-                "completion_gate": None,
-                # This newly pinned microcase requests the current safety shape;
-                # frozen fixture requests remain solely N3-owned.
-                "request": {**t.request, "tools": []} if backend == "gemini" else t.request,
-            }
-        )
-        for t, i in zip(original.turns, invocations, strict=True)
-    )
-    fixture = original.model_copy(update={"turns": turns, "gaps": ()})
-    pin = SourcePin(path=f"scenarios/{plan.scenario.filename}", sha256=plan.scenario.sha256)
-    raw = (tmp_path / pin.path).read_bytes()
-    assert sha(raw) == pin.sha256
-    scenario = template.model_copy(
-        update={
-            "scenario_id": plan.scenario.id,
-            "source": pin,
-            "projection": pin,
-            "scenario": yaml.safe_load(raw),
-            "values": {},
-            "assets": (),
-            "providers": tuple(fixture if p.backend == backend else p for p in template.providers),
-        }
-    )
-    execute = execute_openai_cell if backend == "openai" else execute_gemini_cell
-    result = await execute(plan, scenario, fixture, source_root=tmp_path, repository_root=REPO)
-    assert result.status == "PENDING"  # The unbound card predicate remains in this microcase.
-    assert result.host_outcome.status == "PASS"
-    assert [c.status for c in result.catalog_outcome.checks[:2]] == ["PASS", "PASS"]
-    assert len(result.catalog_outcome.checks) == len(plan.assertions) + len(plan.global_assertions)
-    assert len(result.platform_surfaces) == 2 and not result.discord_surfaces
-    assert len({t.session_id for t in result.evidence.turns}) == 1
-    assert len({t.slot_id for t in result.evidence.turns}) == 1
-    assert result.request_count == (12 if backend == "openai" else 9)
-    for turn, capture in zip(result.evidence.turns, result.platform_surfaces, strict=True):
-        assert capture.session_id == turn.session_id and capture.root_turn_id == turn.root_turn_id
-        assert turn.text_capture_complete and turn.texts
-        assert turn.terminals[0].authority == "record" and turn.terminal_capture_complete
-        assert not turn.card_capture_complete and not turn.tool_capture_complete
-        expected = [
-            "\n".join((*m.body_texts, *m.card_texts, *m.control_labels)) for m in capture.messages
-        ]
-        assert [t.text for t in turn.texts] == [t for t in expected if t.strip()]
-
-
 def test_absent_capture_confers_no_platform_credit() -> None:
     turn = evidence(1.0)
     assert (
@@ -408,7 +332,7 @@ asyncio.run(check())
 
 
 @pytest.mark.parametrize("scenario_id", ["QA-D1-SLACK-FOLLOWUP", "QA-D3-TEAMS-ANSWER-NOT-REPLACED"])
-@pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
+@pytest.mark.parametrize("backend", ("anthropic",))
 async def test_frozen_manual_platform_cells_remain_pending_without_dispatch(
     scenario_id: str, backend: Literal["anthropic", "openai", "gemini"]
 ) -> None:

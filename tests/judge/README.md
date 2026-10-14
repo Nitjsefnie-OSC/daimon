@@ -481,3 +481,12 @@ switch/turn/revert scoring, retained-thread controls, receipt chain and separate
 staging GO. Its [offline plan](fixtures/section_h/staging-plan.json) starts with
 all owner/financial execution bindings unbound and zero earned points. It is
 preparation only and provides no live/staging entry point.
+
+Provider-dependent catalog tests live in separate `test_*_openai.py` and
+`test_*_gemini.py` modules. The original modules keep the Anthropic and neutral
+cases, including provider-labelled admission controls that need no native host.
+Shared helpers and the parametrized admin fixture stay in those original
+modules; only the native-host test's fixture parameter is narrowed with an
+indirect mark. A later slice can include one provider's tests without installing
+the other provider's host. Replay-module imports inside the three cross-provider bodies
+follow the selected provider, so an OpenAI run never imports Gemini replay.

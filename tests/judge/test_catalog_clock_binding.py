@@ -28,7 +28,7 @@ REPO = Path(__file__).resolve().parents[2]
 FIXTURES = REPO / "packages/testing/fixtures/target53"
 
 
-@pytest.mark.parametrize("provider", ("anthropic", "openai", "gemini"))
+@pytest.mark.parametrize("provider", ("anthropic",))
 @pytest.mark.parametrize("control", ("timely_cleanup", "late_root", "missing_journal"))
 async def test_real_native_root_budget_does_not_time_outer_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: Provider, control: str

@@ -71,6 +71,7 @@ def context(bound: AdminBindings, tmp_path: Path) -> ProductContext:
     )
 
 
+@pytest.mark.parametrize("binding", ["anthropic"], indirect=True)
 async def test_opt_in_without_pinned_preparation_never_executes_synthetic_turn(
     tmp_path: Path,
     binding: AdminBindings,
