@@ -118,9 +118,14 @@ class TeamsInbound:
 
 @dataclass(frozen=True)
 class Refusal:
-    """Tell the sender why no turn runs. `None` text means drop silently."""
+    """Tell the sender why no turn runs. `None` text means drop silently.
+
+    `by_name` refusals answer a typed "@<bot name>": sent only with the
+    tenant's plain-text switch on.
+    """
 
     text: str | None
+    by_name: bool = False
 
 
 def foreign_tenant(sender: Account, channel_data: ChannelData | None, *, ours: str) -> str | None:
@@ -290,7 +295,7 @@ def parse_inbound(
     if not text and not files and kind == "personal":
         return Refusal(TEXT_ONLY)
     if len(text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
-        return Refusal(INPUT_TOO_LONG if addressed else None)
+        return Refusal(INPUT_TOO_LONG if addressed or by_name else None, by_name=by_name)
 
     team = channel_data.team if channel_data is not None else None
     channel = channel_data.channel if channel_data is not None else None

@@ -17,7 +17,7 @@ from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import ANSWERED_IN_CHAT, CHANNEL_POINTER, fresh_start
 from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.externals import Membership
-from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -846,6 +846,22 @@ async def test_a_typed_bot_name_behaves_as_before_when_the_switch_is_off(
         True,
         "@daimon thoughts?",
     ), "with the switch off a thread reply is screened exactly as before, text untouched"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize("on", [True, False])
+async def test_an_oversize_typed_bot_name_gets_the_notice_only_when_the_switch_is_on(
+    db_session_factory: async_sessionmaker[AsyncSession], on: bool
+) -> None:
+    """On, it is a mention and owed the too-long notice; off, nobody asked."""
+    await _switch(db_session_factory, on=on)
+    teams, reply = _app(db_session_factory, FakeSender()), AsyncMock()
+    text = "@Daimon " + "x" * MAX_INBOUND_MESSAGE_BYTES
+    await teams.handle_message(_message(_named_post(text, conversation_id=CHANNEL_ID), reply))
+    if on:
+        reply.assert_awaited_once_with(INPUT_TOO_LONG)
+    else:
+        reply.assert_not_awaited()
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

@@ -525,6 +525,8 @@ class TeamsApp:
                     reason="not_mentioned",
                 )
                 return
+            if parsed.by_name and not await self._plain_text_mentions_on():
+                return  # a typed name with the switch off asked nothing
             conversation_id = activity.conversation.id
             if await self._may_post(conversation_id.split(";", 1)[0], conversation_id):
                 try:

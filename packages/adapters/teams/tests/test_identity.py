@@ -437,3 +437,12 @@ def test_an_internal_channel_sender_is_not_external() -> None:
     inbound = _parse(make_channel_activity())
     assert isinstance(inbound, TeamsInbound)
     assert (inbound.is_external, inbound.home_tenant_id) == (False, None)
+
+
+def test_an_oversize_typed_bot_name_is_refused_once_the_switch_is_known() -> None:
+    """Too long, it still carries `by_name`, so the handler can send the notice when on."""
+    text = "@daimon " + "x" * MAX_INBOUND_MESSAGE_BYTES
+    root = make_channel_activity(mention_bot=False, conversation_id=CHANNEL_ID, text=text)
+    assert _parse(_to_named_bot(root)) == Refusal(INPUT_TOO_LONG, by_name=True), (
+        "an oversize typed name must get the notice a real mention gets, behind the switch"
+    )
