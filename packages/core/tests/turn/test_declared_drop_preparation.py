@@ -450,3 +450,282 @@ async def test_known_implicit_environment_policy_remains_an_explicit_sandbox_los
     assert "source_definition" not in classify_source_obligations(captured, None, environment=None)
     quote = await service.preview(source, "openai")
     assert quote.allowed and quote.declared_drops == ("memory", "sandbox")
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "agent.root",
+        "agent.root_null",
+        "agent.model",
+        "agent.skills",
+        "agent.mcp_visible",
+        "agent.mcp_hidden",
+        "tools.builtin_root",
+        "tools.builtin_default",
+        "tools.builtin_config",
+        "tools.builtin_policy",
+        "tools.custom_root",
+        "tools.mcp_root",
+        "tools.mcp_default",
+        "tools.mcp_config",
+        "tools.mcp_policy",
+        "tools.hidden_mcp_root",
+        "tools.hidden_mcp_root_null",
+        "tools.hidden_mcp_default",
+        "tools.hidden_mcp_config",
+        "tools.hidden_mcp_policy",
+        "environment.root",
+        "environment.root_null",
+        "environment.null_config",
+        "environment.config",
+        "environment.networking",
+        "environment.packages",
+        "mount.file_binding",
+        "mount.file_source",
+        "mount.file_reference",
+        "mount.repository",
+        "mount.file_native",
+        "mount.repository_native",
+        "mount.repository_checkout",
+    ],
+)
+async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_request, surface):
+    from uuid import uuid4
+
+    import httpx
+    from anthropic.types.beta import (
+        BetaManagedAgentsFileResourceConfig,
+        BetaManagedAgentsGitHubRepositoryResourceConfig,
+    )
+    from daimon.core.turn.runtime_manifest import preview_source_drops
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import ResourceBinding, WorkspaceSource
+    from mux.errors import UnsupportedCapability
+    from pydantic import ValidationError
+
+    from ..test_sessions import _record_personal_sign_in
+
+    request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
+        consent_request
+    )
+    before = await service.audit(source.tenant_id)
+    policy = {"requires_confirmation": True}
+    key = "future_execution_policy"
+    if surface in {"mount.file_native", "mount.repository_native", "mount.repository_checkout"}:
+        captured = await capture_preparation_source(request, fresh=True)
+        payload = (
+            {"type": "file", "file_id": "owned-file", "mount_path": "document.txt"}
+            if surface == "mount.file_native"
+            else {"type": "github_repository", "url": "https://public.invalid/repo"}
+        )
+        container = payload
+        if surface == "mount.repository_checkout":
+            payload["checkout"] = {"type": "branch", "name": "main"}
+            container = payload["checkout"]
+        container[key] = policy
+        native = (
+            BetaManagedAgentsFileResourceConfig.model_validate(payload)
+            if surface == "mount.file_native"
+            else BetaManagedAgentsGitHubRepositoryResourceConfig.model_validate(payload)
+        )
+        raw_native = native.model_dump(mode="json", exclude_unset=True)
+        assert (
+            raw_native["checkout"][key]
+            if surface == "mount.repository_checkout"
+            else raw_native[key]
+        ) == policy
+        captured = captured.model_copy(
+            update={
+                "resource_requirements": (
+                    ResourceBinding(
+                        id="opaque-mount",
+                        kind="artifact" if surface == "mount.file_native" else "repository",
+                        target_path="document.txt" if surface == "mount.file_native" else ".",
+                        native=ExtensionConfig(
+                            namespace="anthropic.session_resource_create",
+                            version=1,
+                            value={"resource": raw_native},
+                        ),
+                    ),
+                )
+            }
+        )
+        with pytest.raises(UnsupportedCapability) as refused:
+            preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
+        assert "source_definition" in refused.value.missing
+        assert await service.current(source) == accepted
+        assert await service.audit(source.tenant_id) == before
+        assert constructions == targets == []
+        assert reads and all(call.method == "GET" for call in reads)
+        return
+    if surface.startswith("mount."):
+        if surface == "mount.file_binding":
+            schema, payload = (
+                ResourceBinding,
+                {"id": "owned-file", "kind": "artifact", "target_path": "document.txt"},
+            )
+        else:
+            schema, payload = (
+                WorkspaceSource,
+                {
+                    "kind": "repository" if surface == "mount.repository" else "file",
+                    "target_path": "." if surface == "mount.repository" else "document.txt",
+                },
+            )
+            if surface == "mount.repository":
+                payload["repository_url"] = "https://public.invalid/repo"
+            if surface == "mount.file_reference":
+                payload["artifact"] = {**source.source.ref.model_dump(mode="json"), "kind": "file"}
+        schema.model_validate(payload)
+        container = payload["artifact"] if surface == "mount.file_reference" else payload
+        container[key] = policy
+        with pytest.raises(ValidationError) as refused:
+            schema.model_validate(payload)
+        assert {error["type"] for error in refused.value.errors()} == {"extra_forbidden"}
+        assert await service.current(source) == accepted
+        assert await service.audit(source.tenant_id) == before
+        assert reads == constructions == targets == []
+        return
+
+    agent = request.admission.agent.model_dump(mode="json", exclude_unset=True)
+    environment = request.admission.environment.model_dump(mode="json", exclude_unset=True)
+    hidden = "hidden" in surface
+    if hidden:
+        async with request.deps.sessionmaker() as db:
+            await _record_personal_sign_in(
+                db, tenant_id=source.tenant_id, account_id=uuid4(), agent_uuid=source.agent_id
+            )
+    container = agent
+    if surface == "agent.model":
+        container = agent["model"]
+    elif surface == "agent.skills":
+        agent["skills"] = [{"type": "custom", "skill_id": "bundle", "version": "1"}]
+        container = agent["skills"][0]
+    elif "mcp" in surface:
+        agent["mcp_servers"] = [
+            {"type": "url", "name": "docs", "url": "https://mcp.example.com/docs"}
+        ]
+        container = agent["mcp_servers"][0]
+    if surface.startswith("tools."):
+        if surface == "tools.custom_root":
+            tool = {
+                "type": "custom",
+                "name": "helper",
+                "description": "Read-only helper",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        else:
+            tool = {
+                "type": "mcp_toolset" if "mcp" in surface else "agent_toolset_20260401",
+                "configs": [
+                    {
+                        "name": "helper" if "mcp" in surface else "bash",
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    }
+                ],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+            if "mcp" in surface:
+                tool["mcp_server_name"] = "docs"
+            if surface in {"tools.hidden_mcp_root", "tools.hidden_mcp_root_null"}:
+                tool["configs"] = []
+        agent["tools"] = [tool]
+        container = tool
+        if surface.endswith("_default"):
+            container = tool["default_config"]
+        elif surface.endswith("_config"):
+            container = tool["configs"][0]
+        elif surface.endswith("_policy"):
+            container = tool["default_config"]["permission_policy"]
+    elif surface.startswith("environment."):
+        container = environment
+        if surface == "environment.null_config":
+            environment["config"] = None
+        elif surface not in {"environment.root", "environment.root_null"}:
+            environment["config"] = {
+                "type": "cloud",
+                "networking": {"type": "unrestricted"},
+                "packages": {name: [] for name in ("apt", "pip", "npm", "cargo", "gem", "go")},
+            }
+            container = environment["config"]
+            if surface == "environment.networking":
+                container = container["networking"]
+            elif surface == "environment.packages":
+                container = container["packages"]
+    container[key] = None if surface.endswith("_null") else policy
+    router.routes.clear()
+    router.add(
+        "GET",
+        "/v1/agents/" + request.admission.agent.id,
+        lambda call, match: httpx.Response(200, json=agent),
+    )
+    router.add(
+        "GET",
+        "/v1/environments/" + request.admission.environment.id,
+        lambda call, match: httpx.Response(200, json=environment),
+    )
+    captured = await capture_preparation_source(request, fresh=True)
+    if hidden:
+        assert captured.effective_spec.mcp_servers == ()
+        assert not any(
+            extension.value.get("tools") for extension in captured.effective_spec.extensions
+        )
+    with pytest.raises(AgentBackendRefused) as preview:
+        await service.preview(source, "openai")
+    assert preview.value.reason == "source_unavailable"
+    with pytest.raises(AgentBackendRefused) as commit:
+        await service.set_backend(
+            source,
+            "openai",
+            accepted.local,
+            actor,
+            accepted_drops=accepted.declared_drops,
+            expected_preview_digest=accepted.preview_digest,
+        )
+    assert commit.value.reason == "source_unavailable"
+    assert await service.current(source) == accepted
+    assert await service.audit(source.tenant_id) == before
+    with pytest.raises(AdmissionDenied) as handoff:
+        await read_preparation_counterpart(request)
+    assert isinstance(handoff.value.__cause__, AgentBackendRefused)
+    assert handoff.value.__cause__.reason == "re_confirm"
+    assert constructions == targets == []
+    assert reads and all(call.method == "GET" for call in reads)
+
+
+async def test_known_hidden_oauth_toolset_keeps_existing_projection(consent_request):
+    from uuid import uuid4
+
+    from anthropic.types.beta import BetaManagedAgentsAgent
+
+    from ..test_sessions import _record_personal_sign_in
+
+    request, service, source, _, _, router, _, _, _, _ = consent_request
+    async with request.deps.sessionmaker() as db:
+        await _record_personal_sign_in(
+            db, tenant_id=source.tenant_id, account_id=uuid4(), agent_uuid=source.agent_id
+        )
+    payload = request.admission.agent.model_dump(mode="json", exclude_unset=True)
+    payload["mcp_servers"] = [
+        {"type": "url", "name": "docs", "url": "https://mcp.example.com/docs"}
+    ]
+    payload["tools"] = [
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "docs",
+            "configs": [],
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        }
+    ]
+    router.routes.clear()
+    router.add_agent(BetaManagedAgentsAgent.model_validate(payload))
+    router.add_environment(request.admission.environment)
+    captured = await capture_preparation_source(request, fresh=True)
+    assert captured.effective_spec.mcp_servers == ()
+    assert not any(extension.value.get("tools") for extension in captured.effective_spec.extensions)
+    assert "source_definition" not in classify_source_obligations(captured, None, environment=None)
+    quote = await service.preview(source, "openai")
+    assert quote.allowed and quote.declared_drops == ("memory", "sandbox")
