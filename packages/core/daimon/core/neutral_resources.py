@@ -73,7 +73,12 @@ from mux.contracts.resources import (
     ToolSpec,
 )
 from mux.errors import InvalidConfig, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles import get_profile, native_agent_tools, neutral_catalog_profile_for
+from mux.profiles import (
+    MANAGED_AGENTS,
+    get_profile,
+    native_agent_tools,
+    neutral_catalog_profile_for,
+)
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
@@ -1190,7 +1195,7 @@ def fleet_root_permissions(
     tools = effective.tools
     try:
         for extension in effective.extensions or ():
-            if extension.namespace == "anthropic.agent_tools":
+            if extension.namespace == f"{MANAGED_AGENTS.provider}.agent_tools":
                 tools = agent_tools(extension).intent()
     except ValueError:
         raise WorkerSpecRefused("tools", "unsupported") from None
@@ -1212,7 +1217,7 @@ def fleet_root_permissions(
                     }
                 ),
                 native=ExtensionConfig(
-                    namespace="anthropic.session_resource_create",
+                    namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
                     version=1,
                     value={"resource": mount},
                 ),
