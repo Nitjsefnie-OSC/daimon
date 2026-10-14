@@ -547,10 +547,23 @@ class TeamsApp:
             return
         self.spawn(self._handle(parsed), name="teams.turn")
 
+    async def _plain_text_mentions_on(self) -> bool:
+        """Read the tenant's switch for a message that already names the bot as text."""
+        try:
+            enabled = await get_plain_text_mentions(
+                self.runtime.sessionmaker, tenant_id=self._tenant_id
+            )
+        except SQLAlchemyError as exc:
+            # A failed read leaves the message unaddressed, as with the switch off.
+            log.warning("plain_text_mention.lookup_failed", error_type=type(exc).__name__)
+            return False
+        if enabled:
+            log.info("plain_text_mention.accepted", conversation_type="channel")
+        return enabled
+
     async def _route_by_name(self, inbound: TeamsInbound) -> None:
         """A typed "@<bot name>": a mention with the tenant's switch on, else as before."""
-        if await get_plain_text_mentions(self.runtime.sessionmaker, tenant_id=self._tenant_id):
-            log.info("plain_text_mention.accepted", conversation_type="channel")
+        if await self._plain_text_mentions_on():
             text = strip_name_mentions(inbound.text, (inbound.bot_name,))
             await self._handle(
                 dataclasses.replace(inbound, text=text, by_name=False, unprompted=False)

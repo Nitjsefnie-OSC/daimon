@@ -39,6 +39,7 @@ from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import MessageActivity
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -845,3 +846,21 @@ async def test_a_typed_bot_name_behaves_as_before_when_the_switch_is_off(
         True,
         "@daimon thoughts?",
     ), "with the switch off a thread reply is screened exactly as before, text untouched"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_failed_switch_read_leaves_a_typed_bot_name_unaddressed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The read failing is logged and the reply is screened as if the switch were off."""
+    teams = _app(db_session_factory, FakeSender())
+    failing = AsyncMock(side_effect=SQLAlchemyError("down"))
+    with (
+        patch.object(app_module, "get_plain_text_mentions", failing),
+        structlog.testing.capture_logs() as logs,
+    ):
+        routed = await _route(teams, _named_post("@daimon thoughts?"))
+    assert [path for path, _ in routed] == ["participation"], "it must fall back to screening"
+    events = [entry["event"] for entry in logs]
+    assert "plain_text_mention.lookup_failed" in events, "the failure must be logged"
+    assert "teams.task_failed" not in events, "the failure must not escape the task"
