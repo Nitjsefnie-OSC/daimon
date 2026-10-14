@@ -6983,9 +6983,8 @@ async def test_handle_app_mention_auth_test_failure_drops_without_raising(
 ) -> None:
     """A failing auth.test on cold-cache resolution drops the event: nothing
     raises, no turn runs, and no error reply is posted, since whether the event
-    addressed the bot is unknown. (Dedup has already recorded the event, so a
-    Slack retry will not re-deliver it — the mention is lost for this process;
-    acceptable once per workspace lifetime.)"""
+    addressed the bot is unknown. Dedup has not claimed the event yet, so
+    Slack's retry still runs the turn."""
     team_id = "T_APP_AUTH_FAIL"
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
@@ -7042,6 +7041,13 @@ async def test_handle_app_mention_auth_test_failure_drops_without_raising(
     assert posted == [], (
         "a failed auth.test must not post an error reply into a thread that may "
         "never have mentioned the bot"
+    )
+
+    with aioresponses() as mock:
+        mock.post("https://slack.com/api/auth.test", payload={"ok": True, "user_id": "U_BOT"})
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+    assert orchestrate_calls == [{"event_ts": event["event_ts"]}], (
+        "the retry must run the turn: the failed attempt claimed no dedup slot"
     )
 
 
