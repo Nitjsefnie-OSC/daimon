@@ -343,23 +343,20 @@ async def test_server_repo_settings_clamp_live_access_and_disconnect(
         await set_repo_ability(
             db_session, tenant_id=tenant_id, repo_id=101, ability="read", account_id=member_id
         )
-    await set_repo_ability(
-        db_session, tenant_id=tenant_id, repo_id=101, ability="read", account_id=admin_id
-    )
-    with pytest.raises(ValueError, match="Confirm read and write access on GitHub first"):
+    with pytest.raises(ValueError, match="always include write"):
         await set_repo_ability(
             db_session,
             tenant_id=tenant_id,
             repo_id=101,
-            ability="write",
+            ability="read",
             account_id=admin_id,
         )
     live = await github_access.list_live_grant_repositories(
         db_session, tenant_id=tenant_id, agent_id=agent_id
     )
     assert len(live) == 1
-    assert live[0][0].baseline_access == "read"
-    assert live[0][0].ceiling_access == "read"
+    assert live[0][0].baseline_access == "write"
+    assert live[0][0].ceiling_access == "write"
     await disconnect_repo(db_session, tenant_id=tenant_id, repo_id=101, account_id=admin_id)
     assert (
         await github_access.list_live_grant_repositories(

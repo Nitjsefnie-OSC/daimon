@@ -111,7 +111,8 @@ async def test_connected_repo_is_granted_immediately_in_chat(
     )
     assert result.status == "granted"
     assert result.message == (
-        "Agent can now read owner/repo from the next message. To undo, ask me to remove it."
+        "Agent can now read and change owner/repo from the next message. "
+        "To undo, ask me to remove it."
     )
     delivery.assert_not_awaited()
     async with committing_sessionmaker() as session:
@@ -123,8 +124,8 @@ async def test_connected_repo_is_granted_immediately_in_chat(
             session, tenant_id=tenant.id, agent_id=agent_id
         )
         assert (grant.baseline_access, grant.ceiling_access, grant.staged) == (
-            "read",
-            "read",
+            "write",
+            "write",
             False,
         )
     write = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]

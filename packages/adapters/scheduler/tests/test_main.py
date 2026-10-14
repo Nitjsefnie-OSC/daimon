@@ -42,12 +42,14 @@ from daimon.adapters.scheduler.main import (
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.pricing import MODEL_PRICING, ModelRates
 from daimon.core.promo_codes import build_promo_code_terms
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.scheduler import run_one_tick
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores import github_issued_tokens, tenant_ledger, tenant_user_caps, usage_events
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
@@ -56,6 +58,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_provision_status
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import (
@@ -229,6 +232,10 @@ async def test_running_mcp_turn_refreshes_across_three_token_expiries(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.session_token_needs_rotation",
+        unittest.mock.AsyncMock(return_value=False),
+    )
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     agent_id = uuid.uuid4()
@@ -327,6 +334,7 @@ def _mapped_app_session(
             id=uuid.UUID(int=1),
             tenant_id=uuid.UUID(int=2),
             account_id=uuid.UUID(int=3),
+            is_external=False,
             ma_session_id="mapped-active-turn",
             active_turn_message_id="turn-1" if active_turn else None,
             active_turn_started_at=datetime.now(UTC) - started_ago if active_turn else None,
@@ -414,6 +422,182 @@ async def test_mapped_active_turn_rotates_without_archiving(
     assert lister.await_args_list[1].kwargs == {"session_id": "mapped-active-turn"}
 
 
+async def test_mapped_session_with_only_revoked_token_is_refreshed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    ma_agent_id = "agent_revoked_token"
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_agent_id)
+    session_id = f"mapped-revoked-{uuid.uuid4()}"
+    url = "https://github.com/acme/repo"
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=session_id,
+        account_id=account.id,
+        ma_session_id=session_id,
+        ma_agent_id=ma_agent_id,
+        effective_config=SessionSnapshot.model_validate(
+            {
+                "ma_agent_id": ma_agent_id,
+                "model_id": "test-model",
+                "system_sha256": None,
+                "skills_sha256": "skills",
+                "environment_id": "environment",
+                "github_mode": "app",
+                "repo_urls": [url],
+                "token_repo_urls": [url],
+                "repo_url": None,
+                "repo_branch": None,
+                "memory_store_id": None,
+                "memory_read_only": False,
+                "vault_id": "vault-revoked",
+                "tools_sha256": "tools",
+                "mcp_servers_sha256": "servers",
+                "env_sha256": None,
+                "agent_version": 1,
+                "agent_name": "Agent",
+            }
+        ),
+    )
+    await db_session.flush()
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    pending = await github_issued_tokens.create_pending(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        session_id=session_id,
+        installation_id=1,
+        repo_ids=[11],
+        permissions={"contents": "write"},
+        grant_versions={"grant:11": 1, "authorization:11": 1},
+        expires_at=datetime.now(UTC) + timedelta(minutes=45),
+    )
+    await github_issued_tokens.store_token(
+        db_session, token_id=pending.token_id, token="dead", fernet=fernet
+    )
+    await github_issued_tokens.mark_delivered(db_session, token_id=pending.token_id)
+    await github_issued_tokens.mark_revoked(db_session, token_id=pending.token_id)
+    await db_session.commit()
+    async with db_session_factory() as session:
+        [discovered] = await github_issued_tokens.list_live_app_sessions(session)
+    assert discovered.agent_id == agent_id and discovered.expires_at is None
+    rotate = unittest.mock.AsyncMock()
+    monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.effective_repo_state",
+        unittest.mock.AsyncMock(return_value=((url,), {11: {"contents": "write"}})),
+    )
+    anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace()))
+    await _refresh_github_app_sessions(
+        anthropic,
+        db_session_factory,
+        settings=Settings.model_validate(
+            {
+                "database": {"url": "postgresql+asyncpg://localhost/test"},
+                "anthropic": {"api_key": "test"},
+            }
+        ),
+        fernet=fernet,
+    )
+    rotate.assert_awaited_once()
+
+
+@pytest.mark.parametrize("stored_flag, account_flag", [(True, False), (False, True)])
+async def test_external_live_app_sessions_without_tokens_are_never_rotated(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    stored_flag: bool,
+    account_flag: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    if account_flag:
+        await db_session.execute(
+            text("UPDATE accounts SET is_external = true WHERE id = :account_id"),
+            {"account_id": account.id},
+        )
+    mapped_id = f"external-mapped-{uuid.uuid4()}"
+    mcp_id = f"external-mcp-{uuid.uuid4()}"
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=mapped_id,
+        account_id=account.id,
+        is_external=stored_flag,
+        ma_session_id=mapped_id,
+        ma_agent_id="external-agent",
+        effective_config=SessionSnapshot.model_validate(
+            {
+                "ma_agent_id": "external-agent",
+                "model_id": "test-model",
+                "system_sha256": None,
+                "skills_sha256": "skills",
+                "environment_id": "environment",
+                "github_mode": "app",
+                "repo_urls": [],
+                "token_repo_urls": [],
+                "repo_url": None,
+                "repo_branch": None,
+                "memory_store_id": None,
+                "memory_read_only": False,
+                "vault_id": "external-vault",
+                "tools_sha256": "tools",
+                "mcp_servers_sha256": "servers",
+                "env_sha256": None,
+                "agent_version": 1,
+                "agent_name": "Agent",
+            }
+        ),
+    )
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id=mcp_id,
+        tenant_id=tenant.id,
+        vault_id="external-mcp-vault",
+        is_unmapped=True,
+        is_mcp=True,
+        is_external=stored_flag,
+        agent_id=uuid.uuid4(),
+        account_id=account.id,
+    )
+    await db_session.commit()
+    async with db_session_factory() as session:
+        assert await github_issued_tokens.list_live_app_sessions(session) == []
+        assert (
+            await github_issued_tokens.list_live_mcp_app_sessions(
+                session, now=datetime.now(UTC), include_expired=True
+            )
+            == []
+        )
+    rotate = unittest.mock.AsyncMock()
+    desired = unittest.mock.AsyncMock()
+    monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.effective_repo_state", desired)
+    anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace()))
+    await _refresh_github_app_sessions(
+        anthropic,
+        db_session_factory,
+        settings=Settings.model_validate(
+            {
+                "database": {"url": "postgresql+asyncpg://localhost/test"},
+                "anthropic": {"api_key": "test"},
+            }
+        ),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+    )
+    desired.assert_not_awaited()
+    rotate.assert_not_awaited()
+
+
 async def test_mapped_refresh_rereads_turn_state_inside_the_fence(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -480,6 +664,10 @@ async def test_access_check_with_nothing_to_rotate_clears_the_backoff(
     item = _mapped_app_session()
     item.expires_at = datetime.now(UTC) + timedelta(minutes=50)
     fresh_refresh_state["mapped-active-turn"] = (4, datetime.now(UTC) - timedelta(seconds=1))
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.session_token_needs_rotation",
+        unittest.mock.AsyncMock(return_value=False),
+    )
     _, rotate, _ = await _refresh_mapped(
         db_session_factory,
         monkeypatch,

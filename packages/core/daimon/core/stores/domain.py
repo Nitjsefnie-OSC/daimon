@@ -261,6 +261,7 @@ class ThreadSessionRow(BaseModel):
     platform: str
     thread_id: str
     account_id: uuid.UUID | None
+    is_external: bool = False
     ma_session_id: str
     ma_agent_id: str | None = None
     channel_id: str | None = None

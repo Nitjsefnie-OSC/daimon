@@ -1071,12 +1071,12 @@ replaced is decided in `packages/core/daimon/core/session_preparation.py`
 against the fingerprints stored on the mapping row; the outcome rides back on
 `PreparedTurn.continuity` so the adapter can say what happened.
 
-GitHub App mode uses the agent's live grants and the current asker's linked
-GitHub permissions when assembling a turn. External askers get no App token.
-Each effective installation and permission profile gets an ID-scoped token,
-recorded before minting and checked again after delivery. The session mounts
-only the selected working repository, if there is one, and uses its own vault
-for `GH_TOKEN` and Copilot. Other granted repos are available through tokens
+GitHub App mode uses the agent's live grants when assembling a turn. External
+askers get no App token. Each session gets one write token scoped to the agent's
+live repositories in one installation. The token is recorded before minting
+and checked again after delivery. The session mounts only the selected working
+repository, if there is one, and uses its own vault for `GH_TOKEN` and Copilot.
+Other granted repos are available through that token
 for cloning by name. A change to the working mount or the token repository
 set replaces the session on its next turn; unchanged sets receive refreshed
 tokens through resource updates. A session holding an App token also mounts
@@ -1590,7 +1590,7 @@ admission before any of this runs.
   clears it with `none`; other grants provide token access for clones by name.
   The tool checks the live server or channel-admin permission for that agent.
   A clear request in chat gives an agent access to an already connected repo:
-  `github_connect` grants read access (write only when requested) if the caller
+  `github_connect` grants read and write access if the caller
   may grant it. Otherwise it posts the Connect GitHub browser link for that repo.
   Chat changes need no separate confirmation turn; the agent says what changed
   and how to undo it. Browser edits apply only after **Save changes**.
@@ -1600,10 +1600,8 @@ admission before any of this runs.
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
   `/oauth/github/confirm`. The browser flow checks the confirming person's
-  GitHub permission before authorizing tenant repositories: read, triage, write,
-  maintain or admin lets them offer a repo, and the access they can give is capped by
-  that permission (read or triage gives read, write, maintain or admin allows
-  write) and by the App installation's own permissions. Each repo row records
+  GitHub permission before authorizing tenant repositories: write, maintain or
+  admin lets them offer a repo when the App installation can write. Each repo row records
   the permission (`authorized_permission`). These routes
   are absent when GitHub connection is unconfigured.
   Discord `/github home` and Slack `/github`, plus agent setup on Discord,
@@ -1630,7 +1628,7 @@ admission before any of this runs.
   line in the origin thread or channel. Failed notices back off and expire
   after eight attempts or 24 hours.
   For one agent, the connection page is titled "<Agent>'s repos". It lists
-  every recorded repo grant with its access, working-repo marker, and staged
+  every recorded repo grant with its working-repo marker and staged
   or unavailable status, including repos the signed-in GitHub account cannot
   edit. The person may add repos, remove repos, and select or clear the one
   working repo, then confirm with **Save changes**. **Add repos** opens a
@@ -1638,28 +1636,24 @@ admission before any of this runs.
   or use the filter box (a case-insensitive match on the full repo name),
   **Select all N shown** (only the repos the filter shows), **Clear**, or one
   **Everything in <owner>** button per GitHub account the App is installed on.
-  One access choice, Read only (the default) or Read and write, covers the whole
-  selection; each repo is capped at the signed-in person's own GitHub permission
-  and the installation's, and a repo capped at read shows a "Read only on GitHub"
-  tag when Read and write is chosen. The dialog lists every repo GitHub
+  Every selected repo is connected with read and write access. A repo needs
+  write permission from the signed-in person and the App installation. The dialog lists every repo GitHub
   returns, with no limit per addition. Select **Grant N repos** (N is the live
   count) in the dialog, then **Grant N repos** (or **Save changes** when
   only removing) on the page. When the card came from a chat ask that named one
   repo, the dialog opens with that repo already ticked if the person can add
   it. Added and removed rows stay
   visible as pending changes, and removals can be undone before saving.
-  Working-repo actions live on the repo row. Adding never lowers existing
-  access.
+  Working-repo actions live on the repo row. An agent uses repos from one
+  GitHub installation; a second installation is refused on save.
   Canceling shows **No changes saved** and leaves connected repos unchanged.
   A missing working or skill repo remains visible as a setup requirement.
-  Repos that need more access can be confirmed again to finish setup.
+  Repos that need write access can be confirmed again to finish setup.
   The invitation requester must still manage the agent when the page opens
-  and when it saves. The signed-in GitHub account needs current read access
-  or better to each affected repo, including the previous working repo when
-  changing or clearing that selection. Read and triage permission offer only
-  Read only for a repo and the save refuses Read and write from them; write,
-  maintain and admin permission offer both. A repo the agent needs at write is
-  added at read for someone who cannot write, and stays listed as still needed.
+  and when it saves. The signed-in GitHub account needs current write access
+  to each repo it adds. It needs permission on the previous working repo when
+  changing or clearing that selection. A repo that cannot be granted at write
+  stays listed as still needed.
   The dialog notes how many repos are hidden because the account has no
   permission on them. Other repos stay visible without edit controls.
   Each save consumes one invitation and applies its changes in one database

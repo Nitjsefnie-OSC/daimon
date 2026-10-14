@@ -3030,7 +3030,7 @@
         when someone only asks to connect GitHub.
         For a clear 'give this agent access to owner/repo', call with repo_name
         right away; don't ask for a yes first. Ask only if the repo or agent is
-        unclear. Use write only if asked. confirmed is ignored. A connected repo is granted
+        unclear. confirmed is ignored. A connected repo is granted
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
@@ -3091,14 +3091,6 @@
               }),
             ]),
             'default': None,
-          }),
-          'required_ability': dict({
-            'default': 'read',
-            'enum': list([
-              'read',
-              'write',
-            ]),
-            'type': 'string',
           }),
         }),
         'type': 'object',
@@ -4495,18 +4487,10 @@
           'repo_name': dict({
             'type': 'string',
           }),
-          'required_ability': dict({
-            'enum': list([
-              'read',
-              'write',
-            ]),
-            'type': 'string',
-          }),
         }),
         'required': list([
           'origin_context_id',
           'repo_name',
-          'required_ability',
           'remaining_work',
         ]),
         'type': 'object',

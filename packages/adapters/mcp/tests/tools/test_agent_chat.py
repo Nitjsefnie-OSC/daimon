@@ -556,10 +556,6 @@ async def test_start_turn_mints_baseline_app_token_with_or_without_personal_link
         client_secret=SecretStr("secret"),
     )
     monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *_a, **_k: "app-jwt")
-    monkeypatch.setattr(
-        "daimon.core.github_app_session.linked_permissions",
-        AsyncMock(return_value={101: "read"}),
-    )
     monkeypatch.setattr("daimon.core.sessions.prepare_app_access", prepare_with_mock_github)
     monkeypatch.setattr(
         "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_start_turn")
@@ -601,9 +597,9 @@ async def test_start_turn_mints_baseline_app_token_with_or_without_personal_link
             "repository_ids": [101],
             "permissions": {
                 "metadata": "read",
-                "contents": "read",
-                "issues": "read",
-                "pull_requests": "read",
+                "contents": "write",
+                "issues": "write",
+                "pull_requests": "write",
             },
         }
     ]

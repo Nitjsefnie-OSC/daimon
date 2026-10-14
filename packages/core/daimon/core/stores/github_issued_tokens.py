@@ -7,8 +7,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from cryptography.fernet import MultiFernet
-from daimon.core._models import GitHubAppSessionVault, GitHubIssuedToken, ThreadSession
+from daimon.core._models import Account, GitHubAppSessionVault, GitHubIssuedToken, ThreadSession
 from daimon.core.github_credentials import decrypt_token, encrypt_token
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import ThreadSessionRow
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text, update
@@ -46,7 +47,7 @@ class LiveAppSession(BaseModel):
     model_config = ConfigDict(frozen=True)
     mapping: ThreadSessionRow
     agent_id: uuid.UUID
-    expires_at: datetime
+    expires_at: datetime | None
     has_linked_requester: bool
     permissions_by_repo: dict[int, dict[str, str]]
 
@@ -58,6 +59,7 @@ class LiveMcpAppSession(BaseModel):
     vault_id: str
     agent_id: uuid.UUID
     account_id: uuid.UUID | None
+    is_external: bool = False
     repo_urls: tuple[str, ...]
     repo_resource_ids: dict[str, str]
     expires_at: datetime | None
@@ -180,32 +182,34 @@ def decrypt_issued_token(row: IssuedToken, *, fernet: MultiFernet) -> str | None
 
 
 async def select_stale_tokens(
-    session: AsyncSession, *, now: datetime | None = None
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    include_live_version_bumps: bool = False,
+    token_id: uuid.UUID | None = None,
 ) -> list[IssuedToken]:
-    """Find live tokens with changed grant, authorization or requester link state.
+    """Find live tokens with changed grant or authorization state.
 
-    A superseded token (its session already holds a replacement) is revoked
-    early only on a hard change: the installation, requester link, grant or
-    authorization is gone, staged or inactive, or write access was narrowed.
-    A version bump alone, such as a ceiling raise or working-repo move, leaves
-    it to expire through ``revoke_after``.
+    A version bump is reported only when the caller asks to rotate or to
+    verify a newly minted token. The sweep never revokes for a version bump,
+    including a provisional stored token that MA may already hold. A hard
+    change revokes early: installation, grant, or authorization removed,
+    staged, or inactive, or write access narrowed.
     """
     current = now or datetime.now(UTC)
+    token_filter = "AND token.token_id = :token_id" if token_id is not None else ""
     statement = (
         select(GitHubIssuedToken)
         .from_statement(
             text(
-                """
+                f"""
             SELECT token.*
             FROM github_issued_tokens AS token
             LEFT JOIN github_app_installations AS installation
               ON installation.installation_id = token.installation_id
-            LEFT JOIN account_github_links AS account_link
-              ON account_link.account_id = token.requester_account_id
-            LEFT JOIN github_user_links AS user_link
-              ON user_link.github_user_id = account_link.github_user_id
             WHERE token.status IN ('stored', 'delivered')
               AND token.expires_at > :now
+              {token_filter}
               AND (
                 token.revoke_after IS NULL
                 OR token.revoke_after <= :now
@@ -214,15 +218,6 @@ async def select_stale_tokens(
               AND (
                 installation.installation_id IS NULL
                 OR installation.suspended_at IS NOT NULL
-                OR (
-                  token.link_generation IS NOT NULL
-                  AND (
-                    user_link.github_user_id IS NULL
-                    OR user_link.github_user_id IS DISTINCT FROM token.github_user_id
-                    OR user_link.status <> 'active'
-                    OR user_link.link_generation IS DISTINCT FROM token.link_generation
-                  )
-                )
                 OR EXISTS (
                   SELECT 1
                   FROM unnest(token.repo_ids) AS repo(repo_id)
@@ -251,6 +246,7 @@ async def select_stale_tokens(
                      OR NOT (auth_row.repo_full_name = ANY(installation.repo_full_names))
                      OR (
                        token.superseded_at IS NULL
+                       AND :include_live_version_bumps
                        AND (
                          token.grant_versions ->> ('grant:' || repo.repo_id::text)
                            IS DISTINCT FROM grant_row.version::text
@@ -259,9 +255,8 @@ async def select_stale_tokens(
                        )
                      )
                      OR (
-                       token.superseded_at IS NOT NULL
-                       AND token.permissions ->> 'contents' = 'write'
-                       AND (grant_row.ceiling_access <> 'write' OR auth_row.max_access <> 'write')
+                       token.permissions ->> 'contents' = 'write'
+                       AND grant_row.ceiling_access <> 'write'
                      )
                 )
               )
@@ -270,8 +265,29 @@ async def select_stale_tokens(
         )
         .execution_options(populate_existing=True)
     )
-    rows = await session.scalars(statement, {"now": current})
+    rows = await session.scalars(
+        statement,
+        {
+            "now": current,
+            "include_live_version_bumps": include_live_version_bumps,
+            "token_id": token_id,
+        },
+    )
     return [IssuedToken.model_validate(row) for row in rows]
+
+
+async def session_token_needs_rotation(session: AsyncSession, *, session_id: str) -> bool:
+    """Detect a revoked, missing, or changed current token before a live turn runs."""
+    tokens = await list_session_tokens(session, session_id=session_id)
+    current = [row for row in tokens if row.superseded_at is None]
+    if not current or any(
+        row.status != "delivered" or row.link_generation is not None for row in current
+    ):
+        return True
+    stale_ids = {
+        row.token_id for row in await select_stale_tokens(session, include_live_version_bumps=True)
+    }
+    return any(row.token_id in stale_ids for row in current)
 
 
 async def set_session_id(
@@ -303,8 +319,8 @@ async def mark_session_tokens_superseded(
     environment until that tool ends. The old token therefore remains usable
     through its natural expiry when the replacement grants the same access.
     Tokens superseded by an earlier rotation are checked against this
-    replacement too, so a later narrowing (a baseline drop, or the requester
-    losing access) revokes them now rather than at expiry.
+    replacement too, so a later narrowing revokes them now rather than at
+    expiry.
     """
     rows = list(
         await session.scalars(
@@ -346,9 +362,9 @@ async def keep_failed_rotation_tokens(
     """Keep new tokens a failed active-turn refresh already handed to MA.
 
     A running tool may hold one, so each is recorded as a superseded token of
-    the session and left to expire like any other. One wider than what the
-    session still holds (write where it holds read, or a repo it no longer
-    holds) is not kept; the caller revokes it now. Returns the kept ids.
+    the session and left to expire like any other. Current grants determine
+    whether it may stay; the old session token may have less access than the
+    new grant. Returns the kept ids.
     """
     if not token_ids:
         return frozenset()
@@ -360,24 +376,10 @@ async def keep_failed_rotation_tokens(
             )
         )
     )
-    current = await session.scalars(
-        select(GitHubIssuedToken).where(
-            GitHubIssuedToken.session_id == session_id,
-            GitHubIssuedToken.status == "delivered",
-            GitHubIssuedToken.superseded_at.is_(None),
-            GitHubIssuedToken.token_id.not_in(token_ids),
-        )
-    )
-    held = {repo_id: row.permissions for row in current for repo_id in row.repo_ids}
-    rank = {"none": 0, "read": 1, "write": 2}
     kept: set[uuid.UUID] = set()
+    hard_stale = {row.token_id for row in await select_stale_tokens(session)}
     for row in rows:
-        wider = any(
-            rank.get(held.get(repo_id, {}).get(key, "none"), 0) < rank.get(value, 0)
-            for repo_id in row.repo_ids
-            for key, value in row.permissions.items()
-        )
-        if wider:
+        if row.token_id in hard_stale:
             continue
         row.session_id = session_id
         row.status = "delivered"
@@ -417,11 +419,18 @@ async def select_due_superseded_tokens(
 async def select_abandoned_pending_tokens(
     session: AsyncSession, *, now: datetime | None = None
 ) -> list[IssuedToken]:
+    """Retire provisional tokens only after GitHub expiry.
+
+    A process can crash after MA receives a token but before the provisional
+    row is marked delivered. Revoking a recent stored row would break that
+    live credential.
+    """
+    current = now or datetime.now(UTC)
     rows = await session.scalars(
         select(GitHubIssuedToken).where(
             GitHubIssuedToken.status == "stored",
             GitHubIssuedToken.session_id.startswith("pending:"),
-            GitHubIssuedToken.created_at <= (now or datetime.now(UTC)) - timedelta(minutes=2),
+            GitHubIssuedToken.expires_at <= current - timedelta(minutes=6),
         )
     )
     return [IssuedToken.model_validate(row) for row in rows]
@@ -443,6 +452,7 @@ async def register_app_session_vault(
     vault_id: str,
     is_unmapped: bool = False,
     is_mcp: bool = False,
+    is_external: bool = False,
     agent_id: uuid.UUID | None = None,
     account_id: uuid.UUID | None = None,
     repo_urls: tuple[str, ...] = (),
@@ -457,6 +467,7 @@ async def register_app_session_vault(
             vault_id=vault_id,
             is_unmapped=is_unmapped,
             is_mcp=is_mcp,
+            is_external=is_external,
             agent_id=agent_id,
             account_id=account_id,
             repo_urls=list(repo_urls) if is_mcp else None,
@@ -524,19 +535,56 @@ async def mark_headless_app_session_closed(session: AsyncSession, *, session_id:
         await session.flush()
 
 
-async def select_deactivated_tokens(session: AsyncSession) -> list[IssuedToken]:
+async def select_deactivated_tokens(
+    session: AsyncSession, *, token_id: uuid.UUID | None = None
+) -> list[IssuedToken]:
+    token_filter = "AND token.token_id = :token_id" if token_id is not None else ""
     rows = await session.scalars(
         select(GitHubIssuedToken).from_statement(
             text(
-                """SELECT token.* FROM github_issued_tokens AS token
+                f"""SELECT token.* FROM github_issued_tokens AS token
                 LEFT JOIN agent_github_mode AS mode
                   ON mode.tenant_id = token.tenant_id AND mode.agent_id = token.agent_id
                 WHERE token.status IN ('stored', 'delivered')
-                  AND mode.mode IS DISTINCT FROM 'app'"""
+                  AND mode.mode IS DISTINCT FROM 'app'
+                  {token_filter}"""
             )
-        )
+        ),
+        {"token_id": token_id},
     )
     return [IssuedToken.model_validate(row) for row in rows]
+
+
+async def recheck_token_revoke_due(
+    session: AsyncSession, *, token_id: uuid.UUID, now: datetime
+) -> tuple[IssuedToken, bool] | None:
+    """Recheck a sweep candidate under its row lock before GitHub DELETE.
+
+    The caller keeps this transaction open until DELETE and the inventory
+    update finish, so rotation cannot restore a token selected by an old sweep.
+    """
+    row = await session.get(GitHubIssuedToken, token_id, with_for_update=True)
+    if row is None or row.status not in ("stored", "delivered"):
+        return None
+    hard_stale = bool(await select_stale_tokens(session, now=now, token_id=token_id))
+    deactivated = bool(await select_deactivated_tokens(session, token_id=token_id))
+    due = row.status == "delivered" and row.revoke_after is not None and row.revoke_after <= now
+    abandoned = (
+        row.status == "stored"
+        and row.session_id.startswith("pending:")
+        and row.expires_at <= now - timedelta(minutes=6)
+    )
+    if not (hard_stale or deactivated or due or abandoned):
+        return None
+    naturally_expired = (
+        not hard_stale
+        and not deactivated
+        and (
+            abandoned
+            or (due and row.revoke_after is not None and row.revoke_after >= row.expires_at)
+        )
+    )
+    return IssuedToken.model_validate(row), naturally_expired
 
 
 async def list_live_app_sessions(
@@ -544,11 +592,17 @@ async def list_live_app_sessions(
 ) -> list[LiveAppSession]:
     statement = (
         select(ThreadSession, GitHubIssuedToken)
-        .join(GitHubIssuedToken, GitHubIssuedToken.session_id == ThreadSession.ma_session_id)
+        .outerjoin(Account, Account.id == ThreadSession.account_id)
+        .outerjoin(
+            GitHubIssuedToken,
+            (GitHubIssuedToken.session_id == ThreadSession.ma_session_id)
+            & (GitHubIssuedToken.status == "delivered")
+            & (GitHubIssuedToken.superseded_at.is_(None)),
+        )
         .where(
             ThreadSession.status == "live",
-            GitHubIssuedToken.status == "delivered",
-            GitHubIssuedToken.superseded_at.is_(None),
+            ThreadSession.is_external.is_(False),
+            Account.is_external.is_(False),
         )
     )
     if session_id is not None:
@@ -559,19 +613,37 @@ async def list_live_app_sessions(
         mapped = ThreadSessionRow.model_validate(mapping)
         if mapped.effective_config is None or mapped.effective_config.github_mode != "app":
             continue
+        ma_agent_id = mapped.effective_config.ma_agent_id or mapped.ma_agent_id
+        agent_id = (
+            derive_agent_uuid(tenant_id=mapped.tenant_id, ma_agent_id=ma_agent_id)
+            if ma_agent_id
+            else token.agent_id
+            if token is not None
+            else None
+        )
+        if agent_id is None:
+            continue
         current = grouped.get(mapping.ma_session_id)
         if current is None:
             grouped[mapping.ma_session_id] = LiveAppSession(
                 mapping=mapped,
-                agent_id=token.agent_id,
-                expires_at=token.expires_at,
-                has_linked_requester=token.link_generation is not None,
-                permissions_by_repo={repo_id: token.permissions for repo_id in token.repo_ids},
+                agent_id=agent_id,
+                expires_at=token.expires_at if token is not None else None,
+                has_linked_requester=token is not None and token.link_generation is not None,
+                permissions_by_repo=(
+                    {repo_id: token.permissions for repo_id in token.repo_ids}
+                    if token is not None
+                    else {}
+                ),
             )
-        else:
+        elif token is not None:
             grouped[mapping.ma_session_id] = current.model_copy(
                 update={
-                    "expires_at": min(current.expires_at, token.expires_at),
+                    "expires_at": (
+                        min(current.expires_at, token.expires_at)
+                        if current.expires_at is not None
+                        else token.expires_at
+                    ),
                     "has_linked_requester": current.has_linked_requester
                     or token.link_generation is not None,
                     "permissions_by_repo": {
@@ -590,10 +662,16 @@ async def list_live_mcp_app_sessions(
     session_id: str | None = None,
     include_expired: bool = False,
 ) -> list[LiveMcpAppSession]:
-    statement = select(GitHubAppSessionVault).where(
-        GitHubAppSessionVault.is_mcp.is_(True),
-        GitHubAppSessionVault.closed_at.is_(None),
-        GitHubAppSessionVault.finished_at.is_(None),
+    statement = (
+        select(GitHubAppSessionVault)
+        .outerjoin(Account, Account.id == GitHubAppSessionVault.account_id)
+        .where(
+            GitHubAppSessionVault.is_mcp.is_(True),
+            GitHubAppSessionVault.is_external.is_(False),
+            (Account.is_external.is_(False) | Account.id.is_(None)),
+            GitHubAppSessionVault.closed_at.is_(None),
+            GitHubAppSessionVault.finished_at.is_(None),
+        )
     )
     if not include_expired:
         statement = statement.where(
@@ -621,6 +699,7 @@ async def list_live_mcp_app_sessions(
                 vault_id=vault.vault_id,
                 agent_id=vault.agent_id,
                 account_id=vault.account_id,
+                is_external=vault.is_external,
                 last_started_at=vault.last_started_at,
                 repo_urls=tuple(vault.repo_urls or ()),
                 repo_resource_ids=vault.repo_resource_ids or {},

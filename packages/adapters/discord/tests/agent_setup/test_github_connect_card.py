@@ -28,7 +28,7 @@ def test_connect_embed_variants(variant: Literal["A", "B", "B_NO_FOOTER"]) -> No
     assert payload["thumbnail"]["url"] == "https://mcp.test/web/github-mark.png"
     assert payload["color"] == 0x0C1F40
     assert payload["description"].startswith("Nothing is connected yet.")
-    assert ("Default access: Read and write" in payload["description"]) == (variant != "A")
+    assert "Default access: Read and write" not in payload["description"]
     assert ("footer" in payload) == (variant == "B")
     assert " · " not in str(payload)
 

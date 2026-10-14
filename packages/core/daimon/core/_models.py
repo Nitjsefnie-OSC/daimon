@@ -480,6 +480,7 @@ class ThreadSession(Base):
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     ma_session_id: Mapped[str] = mapped_column(Text, nullable=False)
     ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The channel the session runs for, recorded at creation: a thread's parent,
@@ -3104,6 +3105,7 @@ class GitHubAppSessionVault(Base):
     vault_id: Mapped[str] = mapped_column(Text)
     is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_mcp: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")

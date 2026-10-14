@@ -751,6 +751,7 @@ async def create_session(
                         vault_id=vault_id,
                         is_unmapped=requester_is_headless or app_session_unmapped,
                         is_mcp=app_session_unmapped,
+                        is_external=is_external,
                         agent_id=agent_uuid if app_session_unmapped else None,
                         account_id=account_id if app_session_unmapped else None,
                         repo_urls=snapshot.repo_urls if snapshot is not None else (),

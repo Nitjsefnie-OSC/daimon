@@ -65,8 +65,7 @@ def requester_card(
             if connected_names
             else "Connect and add"
         )
-    level = "Read only" if ability == "read" else "Read and write"
-    detail = f"Can: {level}."
+    detail = "The agent can read and change the repo."
     if not connected_names:
         detail = "GitHub will ask someone who manages it to confirm.\n" + detail
     return RequestCard(
@@ -90,14 +89,13 @@ def admin_card(
         f"{request.agent_name} needs GitHub access to continue {requester_label}'s request {where}."
     )
     names = ", ".join(connected_names) if connected_names else "a repo that isn't connected yet"
-    level = "Read only" if ability == "read" else "Read and write"
     action = (
         ("Add repos" if len(connected_names) > 1 else "Add repo")
         if connected_names
         else "Connect and add"
     )
     return RequestCard(
-        f"{heading}\n{names}\nCan: {level}",
+        f"{heading}\n{names}\nThe agent can read and change the repo.",
         action,
         ("Decline", "Hide for me"),
         names_repos=bool(connected_names),

@@ -508,7 +508,7 @@ async def test_requested_repo_picker_posts_only_selected_repo(
         picker = await browser.get("/oauth/github/confirm", params={"state": state})
         assert 'name="repo" value="101" checked' not in picker.text
         assert 'name="repo" value="102" checked>' in picker.text
-        assert 'name="access" value="read" checked' in picker.text
+        assert 'name="access" value="write" checked' in picker.text
         async with committing_sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         submitted = await browser.post(
@@ -517,7 +517,7 @@ async def test_requested_repo_picker_posts_only_selected_repo(
         assert submitted.status_code == 200
         async with committing_sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-            assert [(repo.repo_id, repo.max_access) for repo in repos] == [(102, "read")]
+            assert [(repo.repo_id, repo.max_access) for repo in repos] == [(102, "write")]
 
 
 @pytest.mark.asyncio
@@ -685,9 +685,8 @@ async def test_connection_happy_path_and_rechecks(
         assert 'const doing = verb === "Add" ? "Adding" : "Connecting";' in page.text
         assert "submit.disabled = true" in page.text
         assert "if (connecting || !boxes.some(box => box.checked))" in page.text
-        assert 'name="access" value="read" checked' in page.text
+        assert 'name="access" value="write" checked' in page.text
         assert 'class="web-icon web-icon--search"' in page.text
-        assert 'class="web-icon web-icon--pencil"' in page.text
         assert 'class="web-icon web-icon--github"' in page.text
         assert page.text.index('id="search-repos"') < page.text.index('class="gh-repo-list"')
         assert page.text.count('class="gh-primary"') == 1
@@ -764,7 +763,7 @@ async def test_connection_happy_path_and_rechecks(
         assert 'type="hidden" name="repo"' not in picker.text
         assert 'name="repo" value="101" checked' not in picker.text
         assert 'name="repo" value="102" checked' not in picker.text
-        assert 'name="access" value="read" checked' in picker.text
+        assert 'name="access" value="write" checked' in picker.text
         empty = await browser.post("/oauth/github/confirm", data={"state": state})
         assert "Select at least one repo" in empty.text
         assert 'id="github-connect-form"' in empty.text
@@ -815,7 +814,7 @@ async def test_connection_happy_path_and_rechecks(
         assert confirmed.status_code == 200 and "Connected 2 repos" in confirmed.text
         async with sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "read", 102: "read"}
+            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "write"}
             assert all(repo.installation_id == 77 for repo in repos)
             installation = await github_app_installations.get(session, installation_id=77)
             assert installation is not None
@@ -845,7 +844,7 @@ async def test_connection_happy_path_and_rechecks(
         async with sessionmaker.begin() as session:
             notice = await claim_next(session, platform="discord", now=datetime.now(UTC))
             assert notice is not None
-            assert notice.text == "Connected example/one, example/two, Read only. Ready."
+            assert notice.text == "Connected example/one, example/two. Ready."
             await settle(session, notice=notice, delivered=True, now=datetime.now(UTC))
             assert await claim_next(session, platform="discord", now=datetime.now(UTC)) is None
         forged = await browser.post(
@@ -860,7 +859,7 @@ async def test_connection_happy_path_and_rechecks(
         github_unavailable = False
         async with sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "read", 102: "read"}
+            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "write"}
             assert len(await list_events(session, tenant_id=tenant_id)) == 1
         used_link = await browser.get(f"/oauth/github/connect/{invitation_token}")
         assert used_link.status_code == 200
@@ -897,7 +896,7 @@ async def test_connection_happy_path_and_rechecks(
             )
         ).status_code == 307
         default_form = await browser.get("/oauth/github/confirm", params={"state": default_state})
-        assert 'name="access" value="read" checked' in default_form.text
+        assert 'name="access" value="write" checked' in default_form.text
         signature_match = re.search(r'name="receipt" value="([a-f0-9]+)"', default_form.text)
         assert signature_match is not None
         signed_form = {
@@ -919,7 +918,7 @@ async def test_connection_happy_path_and_rechecks(
         ) == ["already", "connected"]
         async with sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "read", 102: "read"}
+            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "write"}
             assert len(await list_events(session, tenant_id=tenant_id)) == 2
         async with sessionmaker.begin() as session:
             await github_connect.delete_expired_flows(
@@ -984,10 +983,9 @@ def _agent_picker(
 def test_agent_picker_names_the_agent_and_who_can_use_it() -> None:
     body = _agent_picker()
     assert "<h1>Add repos to ResearchBot</h1>" in body
-    assert "Anyone who talks to ResearchBot can ask it to read them." in body
+    assert "Anyone who talks to ResearchBot can ask it to read and change them." in body
     assert "Server: Test Server" in body
-    assert 'name="access" value="read" checked' in body
-    assert body.index('value="read"') < body.index('value="write"')
+    assert 'name="access" value="write" checked' in body
     assert 'data-verb="Add"' in body
     assert '<span class="gh-button-label">Add repos</span>' in body
     assert " · " not in body
@@ -1261,9 +1259,8 @@ async def test_channel_admin_completes_connect_for_their_agent(
     if still_channel_admin:
         assert done.status_code == 200
         assert "Bot&#x27;s repos saved" in done.text
-        # Read only was chosen; a repo the agent needs to change is added with write.
         assert [(repo.repo_id, repo.scope_agent_id, repo.max_access) for repo in own] == [
-            (101, agent_id, "write" if needs_write else "read")
+            (101, agent_id, "write")
         ]
     else:
         assert "Added" not in done.text
@@ -1418,15 +1415,15 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
                 session, tenant_id=tenant_id, agent_id=agent_id
             )
         assert {repo.repo_id: repo.ceiling_access for repo in grants} == {
-            101: "read",
+            101: "write",
             102: "write",
         }
         replay = await save(hidden, repo=["101", "102"], access_101="read", access_102="write")
         assert replay.status_code == 200 and "editor/repo-101" in replay.text
 
         state, hidden, rendered = await page()
-        assert "Connected repos" in rendered and "Read only" in rendered
-        assert "Read and write" in rendered
+        assert "Connected repos" in rendered
+        assert "Read only" not in rendered and "Read and write" not in rendered
         assert (await save(hidden, repo="101", access_101="write")).status_code == 403
         assert (await save(hidden, repo="103", access_103="admin")).status_code == 400
         assert (await save(hidden, repo="103", access_103=["read", "write"])).status_code == 400
@@ -1475,6 +1472,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
                 baseline_access="read",
                 ceiling_access="read",
                 granted_by_account_id=account_id,
+                mount_path="/workspace/editor/repo-103-stale",
             )
         stale = await save(hidden, remove="103")
         assert stale.status_code == 409
@@ -1527,6 +1525,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
                         baseline_access="read",
                         ceiling_access="read",
                         granted_by_account_id=account_id,
+                        mount_path="/workspace/editor/repo-103-later",
                     )
             return rows
 
