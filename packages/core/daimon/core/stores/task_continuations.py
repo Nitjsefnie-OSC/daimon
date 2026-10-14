@@ -26,6 +26,7 @@ from typing import Literal, get_args
 from daimon.core._models import Account, CredentialRequest, TaskContinuation, ThreadSession
 from daimon.core._models import FleetRun as FleetRunModel
 from daimon.core.fleet import RUN_TRANSITIONS, FleetRun
+from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import (
     ContinuationReason,
     Role,
@@ -156,6 +157,37 @@ async def get_continuation(
         )
     ).scalar_one_or_none()
     return None if orm is None else TaskContinuationRow.model_validate(orm)
+
+
+async def list_worker_finished_for_run(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    run_id: _uuid.UUID,
+) -> tuple[TaskContinuationRow, ...]:
+    """Read this tenant's canonical run waits, including processed audit rows.
+
+    The frozen producer serializes run_id first. Retain malformed owned bodies
+    for the consumer to refuse; never cast untrusted text or mutate scheduling.
+    Root/cohort/key validation and capture completeness remain consumer checks.
+    """
+    rows = await read_persisted_columns(
+        session,
+        select(*TaskContinuation.__table__.c)
+        .where(
+            exists(
+                select(FleetRunModel.id).where(
+                    FleetRunModel.tenant_id == tenant_id,
+                    FleetRunModel.id == run_id,
+                )
+            ),
+            TaskContinuation.tenant_id == tenant_id,
+            TaskContinuation.reason == "worker_finished",
+            TaskContinuation.requested_work.startswith(f'{{"run_id":"{run_id}",', autoescape=True),
+        )
+        .order_by(TaskContinuation.created_at, TaskContinuation.id),
+    )
+    return tuple(TaskContinuationRow.model_validate(dict(row)) for row in rows.mappings())
 
 
 async def list_pending_continuations(
