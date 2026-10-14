@@ -164,6 +164,189 @@ async def test_root_budget_mismatch_retains_ack_and_cleans_only_owned_session(fa
 
 
 @pytest.mark.parametrize(
+    ("budgeted", "fault", "archive_count"),
+    [
+        (True, "foreign_session", 0),
+        (True, "foreign_agent", 0),
+        (True, "foreign_environment", 0),
+        (True, "foreign_tenant", 0),
+        (True, "foreign_account", 0),
+        (True, "missing_metadata", 0),
+        (True, "missing_agent", 0),
+        (True, "missing_environment", 0),
+        (True, "ack_budget", 1),
+        (True, "get_budget", 1),
+        (True, "guard", 1),
+        (True, "archive_refused", 1),
+        (True, "cancel", 1),
+        (True, "allocation_unknown", 0),
+        (False, "registration_conflict", 1),
+        (False, "cancel", 1),
+    ],
+)
+async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
+    db_session, db_session_factory, monkeypatch, budgeted, fault, archive_count
+):
+    import asyncio
+
+    from daimon.core import sessions as session_module
+    from mux.errors import ScopeViolation
+    from sqlalchemy.exc import IntegrityError
+
+    class GuardChanged(Exception):
+        pass
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    agent_id = uuid.uuid4()
+    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_id, mode="app"))
+    if fault == "registration_conflict":
+        db_session.add(
+            GitHubAppSessionVault(
+                session_id="sess_root_app",
+                tenant_id=tenant.id,
+                vault_id="vlt_prior_app",
+                is_unmapped=False,
+                is_mcp=False,
+            )
+        )
+    await db_session.commit()
+    calls, retained = [], []
+    expected_budget = {"type": "limit", "max_list_cost": {"amount": "20", "currency": "USD"}}
+    native = _session_body(session_id="sess_root_app", agent_id="ag_1", environment_id="env_1")
+    native["metadata"] = {"daimon_tenant": str(tenant.id), "daimon_account": str(account.id)}
+    if budgeted:
+        native["budget"] = expected_budget
+    vault = {
+        "id": "vlt_root_app",
+        "type": "vault",
+        "display_name": "owned-root-app",
+        "metadata": None,
+        "created_at": "2026-10-14T00:00:00Z",
+        "archived_at": None,
+    }
+
+    def handle(request):
+        path, method = request.url.path, request.method
+        calls.append((method, path))
+        if method == "POST" and path == "/v1/vaults":
+            return httpx.Response(200, json=vault)
+        if method == "GET" and path == "/v1/vaults/vlt_root_app/credentials":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        if method == "POST" and path == "/v1/vaults/vlt_root_app/archive":
+            return httpx.Response(200, json=vault | {"archived_at": "2026-10-14T00:01:00Z"})
+        if method == "POST" and path == "/v1/sessions":
+            body = json_body(request)
+            assert body.get("budget") == (expected_budget if budgeted else None)
+            assert body["vault_ids"] == ["vlt_root_app"]
+            return httpx.Response(
+                200, json=native | ({"budget": None} if fault == "ack_budget" else {})
+            )
+        if method == "GET" and path == "/v1/sessions/sess_root_app":
+            assert retained and retained[0]["id"] == "sess_root_app"
+            result = json.loads(json.dumps(native))
+            if fault == "foreign_session":
+                result["id"] = "sess_foreign"
+            elif fault == "foreign_agent":
+                result["agent"]["id"] = "ag_foreign"
+            elif fault == "foreign_environment":
+                result["environment_id"] = "env_foreign"
+            elif fault == "foreign_tenant":
+                result["metadata"]["daimon_tenant"] = str(uuid.uuid4())
+            elif fault == "foreign_account":
+                result["metadata"]["daimon_account"] = str(uuid.uuid4())
+            elif fault == "missing_metadata":
+                result["metadata"] = {}
+            elif fault == "missing_agent":
+                result["agent"] = None
+            elif fault == "missing_environment":
+                result["environment_id"] = None
+            elif fault == "get_budget":
+                result["budget"] = None
+            return httpx.Response(200, json=result)
+        assert method == "POST" and path == "/v1/sessions/sess_root_app/archive"
+        if budgeted:
+            assert request.headers.get("x-stainless-retry-count") == "0"
+        if fault == "archive_refused":
+            return httpx.Response(
+                500,
+                json={
+                    "type": "error",
+                    "error": {"type": "api_error", "message": "offline refusal"},
+                },
+            )
+        return httpx.Response(200, json=native | {"archived_at": "2026-10-14T00:01:00Z"})
+
+    guards = 0
+
+    async def guard():
+        nonlocal guards
+        guards += 1
+        if guards == 2 and fault in ("guard", "archive_refused"):
+            raise GuardChanged
+        if guards == 2 and fault == "cancel":
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+
+    async def allocate(call, wire):
+        acknowledged = await call()
+        retained.append(acknowledged.model_dump(mode="json"))
+        if fault == "allocation_unknown":
+            raise GuardChanged
+        if not budgeted and fault == "cancel":
+            asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+        return acknowledged
+
+    revoke = AsyncMock(wraps=session_module.revoke_app_access)
+    monkeypatch.setattr(session_module, "revoke_app_access", revoke)
+    async with build_fake_anthropic_http(
+        combine_handlers(make_fake_memory_store_handler(), handle)
+    ) as client:
+        task = asyncio.create_task(
+            create_session(
+                client,
+                agent=_make_agent(),
+                environment=_make_env(),
+                tenant_id=tenant.id,
+                account_id=account.id,
+                agent_uuid=agent_id,
+                session_factory=db_session_factory,
+                native_budget_usd=Decimal("0.20") if budgeted else None,
+                before_create=guard,
+                allocation=allocate,
+            )
+        )
+        error = (
+            asyncio.CancelledError
+            if fault == "cancel"
+            else GuardChanged
+            if fault in ("guard", "archive_refused", "allocation_unknown")
+            else IntegrityError
+            if fault == "registration_conflict"
+            else ScopeViolation
+        )
+        with pytest.raises(error):
+            await task
+    assert len(retained) == 1 and retained[0]["id"] == "sess_root_app"
+    assert retained[0]["metadata"] == native["metadata"]
+    assert retained[0].get("budget") == (
+        None if fault == "ack_budget" or not budgeted else expected_budget
+    )
+    assert calls.count(("POST", "/v1/sessions")) == 1
+    assert calls.count(("POST", "/v1/sessions/sess_root_app/archive")) == archive_count
+    assert not any(path.endswith("/events") for _, path in calls)
+    assert calls.count(("POST", "/v1/vaults/vlt_root_app/archive")) == 1
+    revoke.assert_awaited_once()
+    assert revoke.await_args.args[2].tokens == ()
+    async with db_session_factory() as db:
+        registered = await db.get(GitHubAppSessionVault, "sess_root_app")
+        if fault == "registration_conflict":
+            assert registered is not None and registered.vault_id == "vlt_prior_app"
+        else:
+            assert registered is None
+
+
+@pytest.mark.parametrize(
     "value",
     [
         Decimal("0"),

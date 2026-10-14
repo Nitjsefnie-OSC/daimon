@@ -2988,3 +2988,14 @@ real card intent and scoped origin before binding and retains the same origin
 through execution. Preparation failure, cancellation and completion release
 that context once. With fleet disabled or no applicable grant, the caller keeps
 its previous preparation arguments and origin timing.
+
+
+Failed controlled native session allocation archives a returned session only
+when its native readback proves the expected tenant, requester, agent and
+environment. That verified session uses the existing bounded single-attempt
+orphan cleanup, including after cancellation; an unverified readback or unknown
+allocation acknowledgement does not authorize a native archive. The ordinary
+uncontrolled app-session archive remains the mutually exclusive fallback.
+App-access revocation and cleanup of the session's owned app vault continue
+independently. Cleanup does not erase the allocator's original acknowledgement
+or authorize release of an unknown financial hold.

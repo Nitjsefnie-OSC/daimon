@@ -1318,7 +1318,12 @@ async def create_session(
 
                 with single_attempt_mutation():
                     await _archive_orphaned_session(anthropic, session_id=created.id, scope=scope)
-            if created is not None and app_mode:
+            elif (
+                created is not None
+                and app_mode
+                and resource_source is None
+                and native_budget_usd is None
+            ):
                 await archive_session_record(
                     anthropic,
                     created.id,
