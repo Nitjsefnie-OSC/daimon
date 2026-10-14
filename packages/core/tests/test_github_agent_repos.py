@@ -688,24 +688,14 @@ async def test_saved_key_is_retired_only_when_the_working_repo_stays_covered(
 
 
 @pytest.mark.asyncio
-async def test_read_only_working_repo_is_refused_until_write_is_connected(
+async def test_read_only_confirmation_still_connects_the_working_repo_with_write(
     db_session: AsyncSession,
 ) -> None:
+    # Every connected repo is read and write (Derick, 2026-10-14), even when the
+    # person connecting it only has read access on GitHub.
     world = await _world(db_session)
     team_a = world.agent("ma_team_a")
     await _saved_key_and_working_repo(db_session, world, team_a)
-    with pytest.raises(ValueError, match="write access is needed"):
-        await _connect(
-            db_session,
-            world,
-            requester_id=world.channel_admin_id,
-            agent_name="TeamA",
-            ma_agent_id="ma_team_a",
-            repo_ids=(101,),
-            manages=True,
-            access="read",
-        )
-    assert await db_session.get(AgentGithubBinding, team_a) is not None
     await _connect(
         db_session,
         world,
@@ -714,7 +704,12 @@ async def test_read_only_working_repo_is_refused_until_write_is_connected(
         ma_agent_id="ma_team_a",
         repo_ids=(101,),
         manages=True,
+        access="read",
     )
+    [grant] = await github_access.list_agent_grants(
+        db_session, tenant_id=world.tenant_id, agent_id=team_a
+    )
+    assert (grant.baseline_access, grant.ceiling_access) == ("write", "write")
     assert await github_access.get_agent_mode(
         db_session, tenant_id=world.tenant_id, agent_id=team_a
     ) == ("app")
@@ -912,7 +907,7 @@ async def test_confirm_recheck_uses_live_roles_and_managed_status(
 
 
 @pytest.mark.asyncio
-async def test_reconnecting_at_read_is_refused_and_keeps_existing_write(
+async def test_reconnecting_with_read_only_access_keeps_write(
     db_session: AsyncSession,
 ) -> None:
     world = await _world(db_session)
@@ -926,17 +921,16 @@ async def test_reconnecting_at_read_is_refused_and_keeps_existing_write(
         repo_ids=(101,),
         manages=True,
     )
-    with pytest.raises(ValueError, match="write access is needed"):
-        await _connect(
-            db_session,
-            world,
-            requester_id=world.channel_admin_id,
-            agent_name="TeamA",
-            ma_agent_id="ma_team_a",
-            repo_ids=(101,),
-            manages=True,
-            access="read",
-        )
+    await _connect(
+        db_session,
+        world,
+        requester_id=world.channel_admin_id,
+        agent_name="TeamA",
+        ma_agent_id="ma_team_a",
+        repo_ids=(101,),
+        manages=True,
+        access="read",
+    )
     [grant] = await github_access.list_agent_grants(
         db_session, tenant_id=world.tenant_id, agent_id=team_a
     )
