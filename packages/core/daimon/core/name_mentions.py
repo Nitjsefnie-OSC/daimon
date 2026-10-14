@@ -49,15 +49,17 @@ def _pattern(variants: tuple[str, ...]) -> re.Pattern[str]:
 
 def mentions_by_name(text: str, names: Iterable[str | None]) -> bool:
     """True when ``text`` contains "@<name>" for any of ``names``; False with no names."""
-    variants = name_variants(names)
-    if not variants or "@" not in text:
+    if "@" not in text:
         return False
-    return _pattern(variants).search(text) is not None
+    variants = name_variants(names)
+    return bool(variants) and _pattern(variants).search(text) is not None
 
 
 def strip_name_mentions(text: str, names: Iterable[str | None]) -> str:
     """Remove every "@<name>" token (and the blank after it), then trim the ends."""
+    if "@" not in text:
+        return text
     variants = name_variants(names)
-    if not variants or "@" not in text:
+    if not variants:
         return text
     return re.sub(rf"(?:{_pattern(variants).pattern})[ \t]?", "", text, flags=re.IGNORECASE).strip()
