@@ -15,7 +15,6 @@ import httpx
 import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionRetriesExhausted
 from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn import driver
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import TurnEvent
@@ -92,29 +91,23 @@ class OfflineIO:
     native send, terminal mapping, or a complete provider case envelope.
     """
 
-    def __init__(self, event: Event, persistence: TurnPersistence | None = None):
+    def __init__(self, event: Event, persistence: TurnPersistence | None = None, *, frame=...):
         self.event = event
         self.persistence = persistence
         self.sent = False
-        if event.native.provider == "anthropic":
-            self.frame = TurnEvent(
+        if frame is ... and event.native.provider != "anthropic":
+            raise ValueError("foreign host controls require their provider codec")
+        self.frame = (
+            frame
+            if frame is not ...
+            else TurnEvent(
                 make_status_idle(
                     event_id=event.id,
                     stop_reason=BetaManagedAgentsSessionRetriesExhausted(type="retries_exhausted"),
                 ),
                 event,
             )
-        elif event.native.provider == "openai":
-            from daimon.core.turn.openai_codec import display_event
-
-            self.frame = TurnEvent(display_event(event, session_id=event.session_id), event)
-        else:
-            from daimon.core.turn.gemini import GeminiTurnIO
-
-            backend = SimpleNamespace(
-                capabilities=lambda: SimpleNamespace(profile_id="gemini.inline_reuse")
-            )
-            self.frame = GeminiTurnIO(backend, SCOPE, session("gemini")).frame(event, {})
+        )
 
     async def open_stream(self, **kwargs):
         return self
@@ -155,8 +148,8 @@ async def host(db_preflight, db_engine: AsyncEngine, db_clean, request):
     return sm
 
 
-async def run_host(monkeypatch, event, persistence=None):
-    io = OfflineIO(event, persistence)
+async def run_host(monkeypatch, event, persistence=None, *, io_factory=OfflineIO):
+    io = io_factory(event, persistence)
     monkeypatch.setattr(driver, "turn_io", lambda *args, **kwargs: io)
     transport = ScriptedTransport()
     async with build_async_anthropic(transport=httpx.MockTransport(transport.dispatch)) as client:
@@ -175,85 +168,11 @@ async def run_host(monkeypatch, event, persistence=None):
     return state
 
 
-@pytest.mark.parametrize("provider", ["openai", "gemini"])
-@pytest.mark.parametrize("journal_mode", ["matched", "omitted", "changed-payload"])
-@pytest.mark.parametrize("ci_shape", [False, True])
-async def test_c17_real_wake_takeover_binding_generation_and_driver_lease(
-    host, monkeypatch, provider, journal_mode, ci_shape
-):
-    from daimon.testing.db import isolated_test_schema
-    from sqlalchemy import text
-
-    engine = host.kw["bind"]
-    physical_database = engine.url.database
-    if ci_shape:
-        # Change URL metadata only. The actual connection creator still targets
-        # this worker's owned lane DB/schema; never open the local shared DB.
-        assert isolated_test_schema(engine) is not None
-        monkeypatch.setattr(engine.sync_engine, "url", engine.url.set(database="daimon_test"))
-        for flag in ("GITHUB_ACTIONS", "CI"):
-            monkeypatch.setenv(flag, "true")
-    async with host() as db:
-        assert await db.scalar(text("SELECT current_database()")) == physical_database
-        assert await db.scalar(text("SELECT current_schema()")) == isolated_test_schema(engine)
-    store = PostgresStateStore(host)
-    profile = "openai.persistent_workspace" if provider == "openai" else "gemini.inline_reuse"
-    before = ProviderBinding(
-        id="binding",
-        thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
-        provider=provider,
-        profile=profile,
-        native_refs={"session": "old-session"},
-        generation=1,
-        config_revision=1,
-        legacy_account_id=str(ACCOUNT),
-    )
-    await store.put_binding(before, expected_generation=0)
-    replacement = before.model_copy(update={"generation": 2, "native_refs": {"session": "session"}})
-    request = ContinuationRequest(
-        tenant_id=TENANT,
-        platform="slack",
-        parent_channel_id="channel",
-        thread_id="thread",
-        requester_account_id=ACCOUNT,
-        requester_external_user_id="caller",
-        target_ma_agent_id="agent",
-        target_name="offline",
-        requested_work="offline wake",
-        reason="task_handoff",
-        idempotency_key=uuid.uuid4(),
-    )
-    event = terminal(provider, "completed")
-    recorded = (
-        event.model_copy(update={"payload": dict(event.payload) | {"native_reason": "different"}})
-        if journal_mode == "changed-payload"
-        else event
-    )
-
-    async def run(persistence):
-        result = await run_host(
-            monkeypatch, recorded, persistence if journal_mode != "omitted" else None
-        )
-        assert result.termination == TerminationReason.COMPLETED
-
-    envelope = WakeEnvelope(
-        host, store, SCOPE, request, replacement, session(provider), event, datetime.now(UTC), run
-    )
-    facts = await wake_evidence(envelope)
-    assert facts["before_generation"] == 1
-    assert facts["current_generation"] == facts["replacement_generation"] == 2
-    assert facts["stale_binding_refused"] and facts["stale_pump_calls"] == 0
-    assert not facts["stale_wake_started"] and not facts["stale_wake_settled"]
-    assert facts["wake_started"] and facts["wake_settled"]
-    assert facts["wake_status"] == "delivered" and facts["pump_calls"] == 1
-    assert facts["journal_event_present"] is (journal_mode == "matched")
-    assert facts["lease_released"]
-    with pytest.raises(ValueError, match="next generation"):
-        await wake_evidence(envelope)
-    with pytest.raises(ScopeViolation):
-        await wake_evidence(
-            replace(envelope, scope=SCOPE.model_copy(update={"account_id": "foreign"}))
-        )
+async def test_anthropic_host_pump_uses_owned_fixture(host, monkeypatch):
+    require_owned_sessionmaker(host)
+    state = await run_host(monkeypatch, terminal("anthropic", "completed"))
+    assert state.termination == TerminationReason.COMPLETED
+    assert state.error is None
 
 
 @pytest.mark.parametrize("retain_original", [True, False])
@@ -613,7 +532,7 @@ async def test_host_control_refuses_provider_environment_before_dispatch(
     with pytest.raises(
         AmbientSDKConfigurationError, match="^test SDK refuses ambient provider configuration$"
     ):
-        await run_host(monkeypatch, terminal("openai", "completed"))
+        await run_host(monkeypatch, terminal("anthropic", "completed"))
     assert calls == []
 
 
@@ -716,8 +635,7 @@ def test_host_fixture_real_preflight_precedes_database_setup(tmp_path: Path, cas
         tmp_path,
         target=(
             "packages/core/tests/turn/test_conformance.py::"
-            "test_c17_real_wake_takeover_binding_generation_and_driver_lease"
-            "[False-False-matched-openai]"
+            "test_anthropic_host_pump_uses_owned_fixture[False]"
         ),
         case=case,
     )

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Separate optional-provider host conformance tests so neutral and OpenAI-only source cuts run without Gemini codecs.
+
 - Isolate the fleet runtime lifecycle test from installed provider tariff discovery.
 
 - Separate OpenAI MCP skill-upload runtime tests from the shared skill-upload suite.
