@@ -1425,20 +1425,20 @@ class SlackApp:
         ``by_name`` is a channel ``message`` event that typed "@<bot name>"
         (``is_plain_text_mention_event``). It runs the same gates, except that
         the tenant's plain-text switch stands in for the explicit mention, and
-        it is dropped before dedup when it also carries a real mention: that
-        message's ``app_mention`` event runs the turn, so it runs once.
+        it is dropped when it also carries a real mention: that message's
+        ``app_mention`` event runs the turn, so it runs once.
 
         The cap is fetched before these gates so no await splits the queue
         check from its thread claim. Gate order (strict):
         1. Draining check (fast path — no I/O).
         1b. MAY POST: the access-policy protection state; anything but
             unprotected returns silently, before any other I/O can fail.
-        2. DEDUP: insert_if_new before any other work.
-        3. TOKEN RESOLVE: get_slack_bot_token; drop on None.
-        4. PER-EVENT CLIENT: decrypt + AsyncWebClient(token=...) — never cached.
-        5. EXPLICIT MENTION GATE: drop events whose text lacks <@bot_user_id>;
+        2. TOKEN RESOLVE: get_slack_bot_token; drop on None.
+        3. PER-EVENT CLIENT: decrypt + AsyncWebClient(token=...) — never cached.
+        4. EXPLICIT MENTION GATE: drop events whose text lacks <@bot_user_id>;
            runs before the Connect gate so un-mentioned external senders are
            dropped silently rather than sent a rejection ephemeral.
+        5. DEDUP: insert_if_new, once the event is known to address the bot.
         6. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
         7. TENANT RESOLVE: derive_tenant_uuid.
         8. Handoff to _orchestrate.
@@ -1485,11 +1485,6 @@ class SlackApp:
                 self.runtime.sessionmaker, tenant_id=tenant_id
             ):
                 return
-            # (1) DEDUP — insert_if_new before any other work. A by-name event
-            # dedups after the mention gate instead: claiming the ts first could
-            # drop the app_mention of a message that carries a real mention too.
-            if not by_name and not await self._claim_event(team_id, channel, event_ts):
-                return
 
             # (2) TOKEN RESOLVE — token-existence = tenant liveness.
             async with self.runtime.sessionmaker() as s:
@@ -1515,8 +1510,6 @@ class SlackApp:
             # cached. A failed resolution drops the event without the boundary's
             # error reply: whether the event addressed the bot is unknown, so
             # nothing is posted into a thread that may never have mentioned it.
-            # Dedup already recorded the event, so a Slack retry will not
-            # re-deliver it — accepted for this once-per-process call.
             try:
                 bot_user_id = await self._bot_user_id(team_id, client)
             except SlackApiError as exc:
@@ -1529,18 +1522,10 @@ class SlackApp:
                 )
                 capture_exception_with_scope(exc)
                 return
-            if by_name:
-                if mentions_bot(event, bot_user_id=bot_user_id):
-                    return  # its app_mention event runs the turn
-                if not await self._claim_event(team_id, channel, event_ts):
-                    return
-                log.info(
-                    "plain_text_mention.accepted",
-                    team_id=team_id,
-                    channel=channel,
-                    event_ts=event_ts,
-                )
-            elif not mentions_bot(event, bot_user_id=bot_user_id):
+            mentioned = mentions_bot(event, bot_user_id=bot_user_id)
+            if by_name and mentioned:
+                return  # its app_mention event runs the turn
+            if not by_name and not mentioned:
                 log.info(
                     "slack.event_dropped.no_explicit_mention",
                     team_id=team_id,
@@ -1548,6 +1533,18 @@ class SlackApp:
                     event_ts=event_ts,
                 )
                 return
+            # (4b) DEDUP — only once the event addresses the bot: an app_mention
+            # without <@bot> claiming the ts would drop the same message's
+            # by-name event.
+            if not await self._claim_event(team_id, channel, event_ts):
+                return
+            if by_name:
+                log.info(
+                    "plain_text_mention.accepted",
+                    team_id=team_id,
+                    channel=channel,
+                    event_ts=event_ts,
+                )
 
             # (5) SLACK CONNECT GATE — reject external-workspace senders.
             if is_slack_connect_external(event, team_id=team_id):

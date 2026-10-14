@@ -7308,3 +7308,19 @@ async def test_real_mention_and_typed_name_together_run_one_turn(
     await app._handle_app_mention(mention, team_id="T_PLAIN_BOTH")  # pyright: ignore[reportPrivateUsage]
 
     assert turns == ["app_mention"], "the real mention's event runs the only turn"
+
+
+async def test_an_app_mention_without_the_bot_token_leaves_the_typed_name_its_turn(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An app_mention lacking <@bot> is dropped before dedup, so its by-name twin still runs."""
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_STRAY", enabled=True
+    )
+    message = _named_message("1000000503.000001")
+    stray = {**message, "type": "app_mention"}
+
+    await app._handle_app_mention(stray, team_id="T_PLAIN_STRAY")  # pyright: ignore[reportPrivateUsage]
+    await app._handle_app_mention(message, team_id="T_PLAIN_STRAY", by_name=True)  # pyright: ignore[reportPrivateUsage]
+
+    assert turns == ["message"], "the stray app_mention must not take the message's dedup slot"
