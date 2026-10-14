@@ -299,6 +299,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report separate default and opt-in QA product profiles, with explicit per-cell profile results and an opt-in PASS tally that never changes default-profile totals.
 - Validate shared test database ownership before fixture setup, and bind metered channel proofs to the run's exact persisted usage identity.
 - Opt-in Gemini native credential target offers with scoped origin and independent agent readback, fresh policy checks and separate native MCP registration; existing credential handlers remain unchanged.
+### Added
+
+- Provider-neutral mux library, optional provider drivers and offline conformance tests. The host runtime remains unchanged; the library does not activate backend selection. Shared test helpers retain the current skill and conditional memory-delete routes.
+
 ### Fixed
 
 - Offline tool-only QA can verify every Discord post against its acknowledged root, including drafts that were later edited or deleted. Existing evidence serialization stays unchanged when post history is absent.
