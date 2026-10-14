@@ -9,6 +9,8 @@ idempotent or the spec hash never stabilises.
 
 from __future__ import annotations
 
+import re
+
 from daimon.core.agent_guidance import (
     CREDENTIAL_GUIDANCE_BLOCK,
     apply_credential_guidance,
@@ -411,4 +413,4 @@ def test_outside_text_rule_still_covers_what_anyone_can_write() -> None:
 def test_commit_guidance_adds_no_personal_access_token_hint() -> None:
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     assert block.count("personal access token") == 1, "only the existing prohibition"
-    assert "PAT" not in block
+    assert re.search(r"\bPATs?\b", block) is None, "no PAT hint (PATCH is an HTTP method)"
