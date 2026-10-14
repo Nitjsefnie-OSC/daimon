@@ -7,13 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Isolate the fleet runtime lifecycle test from installed provider tariff discovery.
+
 - Separate OpenAI MCP skill-upload runtime tests from the shared skill-upload suite.
 - Keep the complete Managed Agents call inventory in compact JSON below the shared file-size limit, with the unchanged zero-call ratchet outside drivers.
 - Keep host conformance tests independent of optional provider installations and share their database preflight helper.
 - Load catalog replay hosts only for the selected provider, so Anthropic judge collection and execution do not require optional OpenAI or Gemini host modules.
+- Populate opt-in native fleet admission and usage pricing through the installed runtime callbacks, using the shared dated tariffs.
 
 - Install opt-in Discord and MCP fleet runtimes through the existing service and pricing owners; preserve ordinary no-grant answers and revoked-grant Stop and collection.
 - Read exact root billing references through immutable outcomes without summing reused-session history.
+- Resolve native tariff identities from provider profiles and check dated validity in UTC.
+
+- Supply immutable dated native Standard token tariffs, retaining unknown actuals when request tiers or infrastructure are incomplete.
 
 - Add a testing-only scoped fleet journal exporter with atomic restricted bundles, verified paired worker generations/failure facts and pointer-bound public review digests, authoritative persisted reads, offline verification and explicit missing owner evidence.
 

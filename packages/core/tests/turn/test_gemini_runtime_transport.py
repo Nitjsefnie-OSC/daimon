@@ -227,3 +227,36 @@ async def test_ambient_override_refuses_before_owned_client_or_native_request(
         else:
             await transport.open_stream("native")
     assert clients == [] and calls == []
+
+
+async def test_worker_request_uses_the_standard_direct_endpoint_with_no_tier_override(monkeypatch):
+    import json
+
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec
+    from mux.drivers.gemini.core import compile_agent
+    from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, json={"id": "native", "status": "completed", "steps": []})
+
+    clients = clients_for(monkeypatch, handle)
+    body = compile_agent(
+        AgentSpec(name="worker", model=ModelRef(provider="gemini", id=WORKER_MODEL), tools=()),
+        max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
+    )
+    body["input"] = "offline tier witness"
+    await deployment.configured_transport(api_key="offline-selected").create(body)
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.url.scheme == "https" and request.url.host == "generativelanguage.googleapis.com"
+    assert request.url.path == "/v1beta/interactions"
+    captured = json.loads(request.content)
+    assert captured["agent_config"]["model"] == WORKER_MODEL
+    assert captured["agent_config"]["max_total_tokens"] == WORKER_MAX_TOTAL_TOKENS
+    assert captured["tools"] == []
+    assert "service_tier" not in captured and "service_tier" not in captured["agent_config"]
+    assert not request.url.query and all(client.is_closed for client in clients)

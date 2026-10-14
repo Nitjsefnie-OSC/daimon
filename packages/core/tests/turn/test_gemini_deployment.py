@@ -16,6 +16,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from daimon.core import pricing
 from daimon.core.channel_backend import check_backend
 from daimon.core.fleet import FleetWorker
 from daimon.core.neutral_resources import (
@@ -64,8 +65,10 @@ from mux.drivers.gemini.storage import ArtifactRecord, Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import ScopeViolation
 from pydantic import JsonValue
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..test_fleet_permissions import NOW, POLICY, parent
+from ..test_native_tariffs import fixed_source_date as fixed_source_date
 from .test_agent_native_runtime import claimed_worker_request as claimed_worker_request
 from .test_agent_native_runtime import clone_source as clone_source
 from .test_agent_native_runtime import explicit_worker_request as explicit_worker_request
@@ -880,7 +883,12 @@ async def test_only_explicit_tools_compile_and_scope_is_pinned(
     native = compile_agent(runtime.journal.deployment.agent)
     assert native["tools"] == ([{"type": "google_search"}] if tools else [])
     assert runtime.journal.state_store is selected.deps.state_store
-    assert isinstance(runtime.usage_store, GeminiUsageRuntime) and not runtime.usage_store.prices
+    assert isinstance(runtime.usage_store, GeminiUsageRuntime)
+    expected = {model: price for (_, model), price in pricing.provider_prices(PROFILE).items()}
+    assert runtime.usage_store.prices == expected
+    assert all(runtime.usage_store.prices[model] is price for model, price in expected.items())
+    with pytest.raises(TypeError):
+        runtime.usage_store.prices[FLASH_PRIMARY] = expected[FLASH_PRIMARY]
     assert runtime.usage_store.infrastructure_usd is None
     assert not (tmp_path / "records.sqlite").exists()
     config = selected.admission.backend_revision
@@ -1710,3 +1718,159 @@ def test_output_cap_omission_preserves_existing_plan_serialization(
     assert default.max_output_tokens is None
     assert default.model_dump_json() == omitted.model_dump_json()
     assert "max_output_tokens" not in json.loads(default.model_dump_json())
+
+
+@pytest.mark.parametrize("host", ["discord", "mcp"])
+async def test_normal_fleet_factories_load_real_installed_native_tariffs(
+    db_nullpool_engine, db_schema, monkeypatch, host
+):
+    from daimon.adapters.discord import runtime as discord_runtime
+    from daimon.adapters.mcp.server import create_mcp_app
+    from daimon.core.config import Settings
+    from daimon.core.turn import runtimes
+    from daimon.testing.asgi import asgi_lifespan
+    from daimon.testing.db import build_test_engine
+    from daimon.testing.ma import build_stub_anthropic
+    from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+    from google.genai import Client
+    from openai import AsyncOpenAI
+
+    settings = Settings.model_validate(
+        {
+            "database": {
+                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "pool_size": 1,
+                "max_overflow": 3,
+            },
+            "anthropic": {"api_key": "offline"},
+            "crypto": {"allow_plaintext": True},
+            "defaults_root": Path("defaults"),
+            "turn": {"path": "mux", "channel_backends": True, "agent_backends": True},
+            "fleet": {"enabled": True},
+            "mcp": {"public_url": "https://offline.invalid/mcp"},
+        }
+    )
+    client = build_stub_anthropic()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("cold native registration constructed a provider client")
+
+    monkeypatch.setattr(Client, "__init__", forbidden)
+    monkeypatch.setattr(AsyncOpenAI, "__init__", forbidden)
+    monkeypatch.setattr(runtimes, "_RUNTIME_FACTORIES", {})
+    expected = dict(pricing.provider_prices(PROFILE)) | dict(
+        pricing.provider_prices("openai.persistent_workspace")
+    )
+    from daimon.core.fleet_orchestration import HostFleetPorts
+
+    owners = []
+    construct = HostFleetPorts.__init__
+
+    def observe(owner, *args, **kwargs):
+        construct(owner, *args, **kwargs)
+        owners.append(owner)
+
+    monkeypatch.setattr(HostFleetPorts, "__init__", observe)
+
+    def verify(owner):
+        for key in (("gemini", "gemini-3.5-flash-lite"), ("openai", "gpt-6-luna")):
+            if owner.prices.get(key) is not expected[key]:
+                raise RuntimeError("normal deployed fleet lost the authoritative tariff")
+        for key in (("gemini", "gemini-flash-latest"), ("openai", "unknown-model")):
+            if key in owner.prices:
+                raise RuntimeError("normal deployed fleet fabricated a model tariff")
+        if dict(runtimes.channel_runtime_prices()) != expected:
+            raise RuntimeError("installed runtime callbacks did not supply authoritative prices")
+
+    if host == "discord":
+        monkeypatch.setattr(discord_runtime, "AsyncAnthropic", lambda **kwargs: client)
+        monkeypatch.setattr(
+            discord_runtime,
+            "build_engine",
+            lambda url, **kwargs: build_test_engine(url, db_schema, **kwargs),
+        )
+        async with discord_runtime.build_runtime(settings) as runtime:
+            verify(runtime.fleet_card_factory._service._owner())
+    else:
+        async with client:
+            app = create_mcp_app(
+                settings=settings,
+                sessionmaker=async_sessionmaker(db_nullpool_engine, expire_on_commit=False),
+                auth=StaticTokenVerifier(tokens={}),
+                anthropic=client,
+            )
+            async with asgi_lifespan(app):
+                services = await app.state.mcp.local_provider.list_tools()
+                assert "fleet_spawn" in {tool.name for tool in services}
+                assert len(owners) == 1
+                verify(owners[0])
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("gemini", "gemini-3.5-flash-lite"), ("openai", "gpt-6-luna")]
+)
+@pytest.mark.parametrize("priced", [False, True])
+async def test_real_financial_admission_requires_the_owner_native_model_row(
+    db_nullpool_engine, db_clean, provider, model, priced
+):
+    from daimon.core.stores import fleet
+    from mux.profiles import backend_selection
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from ..test_fleet_budget import add, reserve, root, setup
+
+    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    original = root(provider)
+    choice = backend_selection(provider).model_copy(update={"model": model})
+    ref = ModelRef(provider=provider, id=model)
+    admitted = replace(
+        original,
+        spec=original.spec.model_copy(update={"model": ref}),
+        models=(ref,),
+        backend_grants=(choice,),
+    )
+    admitted, run = await setup(sm, parent=admitted)
+    worker = await add(sm, admitted)
+    rates = pricing.provider_prices(choice.profile) if priced else {}
+    decision = await reserve(sm, admitted, worker, prices=rates)
+    if decision.admitted is not priced:
+        raise RuntimeError(
+            f"native tariff presence did not control financial admission: {decision.reason}"
+        )
+    current, (stored,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    if not priced and (current.reserved_usd != 0 or stored.reserved_usd != 0):
+        raise RuntimeError("missing tariff changed a reservation")
+
+
+async def test_openai_selected_tariff_matches_real_default_direct_session_request(
+    application, monkeypatch, tmp_path
+):
+    from daimon.core.turn.openai_host import driver
+
+    from .test_openai_deployment import entry as openai_entry
+    from .test_openai_host import Wire
+    from .test_openai_runtime_transport import clients_for
+
+    manifest(monkeypatch, tmp_path / "runtime.json", [openai_entry()])
+    monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline")
+    wire = Wire()
+    clients = clients_for(monkeypatch, wire.handle)
+    runtime = build_channel_runtime(application)
+    config = application.admission.backend_revision
+    assert config is not None
+    assert runtime.price is pricing.provider_prices(config.profile)[("openai", config.model)]
+    backend = driver(runtime, config, application.scope)
+    await backend.sessions.create(
+        application.scope,
+        await runtime.session_plan(application),
+        key="openai:prepare:standard-session",
+    )
+    posts = [request for request in wire.requests if request.method == "POST"]
+    assert len(posts) == 1
+    request = posts[0]
+    assert request.url.scheme == "https" and request.url.host == "api.openai.com"
+    assert request.url.path == "/v1/agents/sessions" and not request.url.query
+    body = json.loads(request.content)
+    assert body["agent"]["model"] == config.model
+    assert "service_tier" not in body and "service_tier" not in body["agent"]
+    assert all(client.is_closed() for client in clients)

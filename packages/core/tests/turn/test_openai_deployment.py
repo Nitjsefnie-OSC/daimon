@@ -42,6 +42,7 @@ from openai import AsyncOpenAI
 from pydantic import JsonValue, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..test_native_tariffs import fixed_source_date as fixed_source_date
 from .test_openai_host import Wire
 from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission
 
@@ -228,7 +229,10 @@ async def test_plan_is_scoped_and_credential_access_is_deferred(
     assert isinstance(runtime, OpenAIHostRuntime)
     assert isinstance(runtime.journal, OpenAIRecoveryJournal)
     assert isinstance(runtime.usage_store, OpenAIUsageRevisions)
-    assert runtime.account_scope_id == "project" and runtime.price is None
+    from daimon.core.pricing import provider_prices
+
+    assert runtime.account_scope_id == "project"
+    assert runtime.price is provider_prices(PROFILE)[("openai", REVISION.model)]
     assert runtime.controls.spend_limit_usd_cents == 4
     assert runtime.controls.require_spend_control_echo is False
     plan = await runtime.session_plan(application)

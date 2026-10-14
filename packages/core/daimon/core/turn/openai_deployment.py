@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from decimal import Decimal, localcontext
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
@@ -16,6 +17,7 @@ from uuid import UUID
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
+from daimon.core.pricing import provider_prices
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -432,6 +434,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         journal=OpenAIRecoveryJournal(),
         usage_store=OpenAIUsageRevisions(),
         account_scope_id=deployment.project,
+        price=provider_prices(PROFILE).get((revision.backend, revision.model)),
         session_plan=plan,
         authorization=authorize,
         controls=SessionControls(
@@ -452,5 +455,9 @@ def register_runtime() -> None:
 
     register_host()
     register_channel_runtime(
-        PROFILE, build_openai_runtime, authorizations=authorized_deployments, fallback=True
+        PROFILE,
+        build_openai_runtime,
+        authorizations=authorized_deployments,
+        tariffs=partial(provider_prices, PROFILE),
+        fallback=True,
     )
