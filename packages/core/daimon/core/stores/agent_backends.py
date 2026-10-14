@@ -63,6 +63,7 @@ async def put_revision(
     agent_name: str,
     preview_digest: str,
     fleet_grant: JsonValue | None = None,
+    drop_consent: JsonValue | None = None,
 ) -> AgentBackendRevision:
     row = AgentBackendRevisionRecord(
         tenant_id=tenant_id,
@@ -74,6 +75,7 @@ async def put_revision(
         agent_name=agent_name,
         preview_digest=preview_digest,
         fleet_grant=fleet_grant,
+        drop_consent=drop_consent,
     )
     session.add(row)
     await session.flush()

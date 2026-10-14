@@ -2944,3 +2944,18 @@ they do not refresh authority or permit new worker inputs. Native preparation,
 spawn and resume stay strict, and completed/cancelled/failed roots remain refused.
 Grant ceilings cover workers only. Whole-root financial/input controls are a
 separate prerequisite before any live fleet execution.
+
+### Source-loss consent persistence
+
+Agent backend revisions can retain a closed source-loss consent body containing
+the canonical declared drops, the complete source pin and the target-spec digest.
+Existing revisions have no consent and serialize as before. Consent-bearing
+effective configuration rows retain the original logical agent UUID and local
+revision; identical backend/model selections with different consent do not share
+an effective revision. Retained reads resolve that exact original association,
+and refuse foreign, malformed or missing originals. This storage alone enables
+no ordinary cross-backend execution.
+
+The migration adds two nullable JSONB columns without changing existing data.
+Downgrade removes consent and its associations; subsequent source-loss execution
+requires fresh confirmation rather than recovering consent from another revision.
