@@ -27,6 +27,7 @@ from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.schemas import (
     AgentCreateNulls,
     AgentModelConfig,
+    AgentToolsConfig,
     ClearMultiagent,
     agent_tools,
     multiagent,
@@ -71,9 +72,23 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
             else None
         )
     if "tools" in fields and (spec.tools is not None or isinstance(spec, AgentPatch)):
-        payload["tools"] = (
-            [tool_payload(tool) for tool in spec.tools] if spec.tools is not None else None
-        )
+        compiled = [tool_payload(tool) for tool in spec.tools] if spec.tools is not None else None
+        if compiled is not None:
+            builtin: dict[str, object] | None = None
+            grouped: list[dict[str, object]] = []
+            for tool in compiled:
+                if tool["type"] == "agent_toolset_20260401":
+                    if builtin is None:
+                        builtin = tool
+                        grouped.append(tool)
+                    else:
+                        cast(list[object], builtin["configs"]).extend(
+                            cast(list[object], tool["configs"])
+                        )
+                else:
+                    grouped.append(tool)
+            compiled = grouped
+        payload["tools"] = compiled
     if isinstance(spec, AgentPatch):
         extensions = tuple((spec.extensions or {}).values())
     else:
@@ -147,7 +162,31 @@ def tool_payload(tool: object) -> dict[str, object]:
         }
     if tool.kind == "mcp_toolset":
         return {"type": "mcp_toolset", "mcp_server_name": tool.name}
-    return {"type": "agent_toolset_20260401", "configs": [{"name": tool.name}]}
+    return {
+        "type": "agent_toolset_20260401",
+        "default_config": {"enabled": False, "permission_policy": {"type": "always_ask"}},
+        "configs": [
+            {
+                "name": tool.name,
+                "enabled": True,
+                "permission_policy": {
+                    "type": "always_ask" if tool.permission == "ask" else "always_allow"
+                },
+            }
+        ],
+    }
+
+
+def native_tools_match(expected: object, observed: object) -> bool:
+    """Compare exact grants, accepting only closed, fully represented readback."""
+    try:
+        wanted = AgentToolsConfig.model_validate({"tools": expected}).intent(exact=True)
+        actual = AgentToolsConfig.model_validate({"tools": observed}).intent(exact=True)
+    except ValueError:
+        return False
+    return sorted(wanted, key=lambda tool: (tool.kind, tool.name)) == sorted(
+        actual, key=lambda tool: (tool.kind, tool.name)
+    )
 
 
 def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Scope) -> Agent:
@@ -181,6 +220,10 @@ def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Sco
         "mcp_servers",
         "skills",
     }
+    # The resolved platform service account names no customer principal.
+    # Other identity shapes remain source obligations, including unknown fields.
+    if native.get("execution_identity") == {"type": "service_account"}:
+        unclassified.discard("execution_identity")
     for name in ("type", "model", "multiagent", "mcp_servers", "skills"):
         if name == "type" or name in native:
             try:

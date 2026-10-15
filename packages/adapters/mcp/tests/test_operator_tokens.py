@@ -106,6 +106,7 @@ async def test_tenant_read_token_lists_exactly_its_tools(
         "get_channel_budget",
         "list_channel_admins",
         "list_channel_skills",
+        "list_agent_tool_rules",
         "list_environments",
     }, "an operator token sees only its scopes' tools, without the search collapse"
 
@@ -156,6 +157,8 @@ async def test_channels_write_token_lists_exactly_its_tools(
         "clear_channel_environment",
         "add_channel_skill",
         "remove_channel_skill",
+        "set_agent_tool_rule",
+        "clear_agent_tool_rule",
     }, (
         "channels:write covers the channel budget, agent, admin, channel and agent rule, "
         "environment and skill tools"

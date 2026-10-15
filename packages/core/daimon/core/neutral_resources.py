@@ -1178,7 +1178,6 @@ def fleet_root_permissions(
     """Compose captured source; caller joins origin/binding and rechecks grant epoch."""
     from daimon.core.memory_resource import memory_mount
     from daimon.core.turn.ceiling import TURN_CEILING_S
-    from mux.drivers.anthropic.schemas import agent_tools
 
     if now.utcoffset() is None:
         raise WorkerSpecRefused("deadline", "unsupported")
@@ -1203,16 +1202,16 @@ def fleet_root_permissions(
         != (fleet.scope.tenant_id, fleet.scope.account_id)
     ):
         raise WorkerSpecRefused("origin", "unbound")
-    tools = effective.tools
+    from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
     try:
-        for extension in effective.extensions or ():
-            if extension.namespace == f"{MANAGED_AGENTS.provider}.agent_tools":
-                tools = agent_tools(extension).intent()
+        ceiling = worker_source_ceiling(source)
     except ValueError:
         raise WorkerSpecRefused("tools", "unsupported") from None
     # The complete capture remains the input to the existing obligation classifier.
-    spec = effective.model_copy(update={"extensions": None, "tools": tools})
-    resources = source.resource_requirements
+    assert ceiling.effective_spec is not None
+    spec = ceiling.effective_spec.model_copy(update={"extensions": None})
+    resources = ceiling.resource_requirements
     read_only = source.memory_read_only is not False
     if source.memory_store_id is not None:
         mount = cast(JsonValue, memory_mount(source.memory_store_id, read_only=read_only))
@@ -1377,6 +1376,7 @@ def resolve_worker_spec(
     from daimon.core.turn.runtime_manifest import (
         classify_source_obligations,
         compose_source_instructions,
+        worker_spec_ceiling,
     )
 
     fleet = parent.fleet
@@ -1427,12 +1427,22 @@ def resolve_worker_spec(
         )
         if not clone:
             raise WorkerSpecRefused("scope", clone.reason or "unbound")
-        source = spec.spec
+        source = (
+            captured_source.effective_spec
+            if captured_source is not None
+            and captured_source.source == spec
+            and captured_source.effective_spec is not None
+            else spec.spec
+        )
     else:
         if overrides is not None:
             raise WorkerSpecRefused("overrides", "unsupported")
         source = spec
-    data = source.model_dump(mode="json")
+    try:
+        normalized_source, _ = worker_spec_ceiling(source)
+    except ValueError:
+        raise WorkerSpecRefused("tools", "unsupported") from None
+    data = normalized_source.model_dump(mode="json")
     if overrides is not None:
         if overrides.extensions:
             raise WorkerSpecRefused("extensions", "unsupported")
@@ -1566,8 +1576,8 @@ def resolve_worker_spec(
                 + (ToolSpec(name=profile.execution_tool, kind="builtin"),)
             }
         )
-    # Native confirmation capability does not imply that the neutral tool
-    # compiler maps this per-tool field. Unproven ask controls refuse.
+    # Worker dispatch has no proved neutral confirmation loop. Ask controls
+    # remain intact in the compiler, but cannot authorize unattended dispatch.
     if any(tool.permission != "auto" for tool in resolved.tools or ()):
         raise WorkerSpecRefused("tools", "unsupported")
     _worker_tools(resolved, parent.spec)
@@ -1700,7 +1710,11 @@ def resolve_worker_spec(
             resolved = resolved.model_copy(update={"system": system + "\n\n" + guidance})
     if captured_source is not None:
         missing = classify_source_obligations(
-            captured_source, resolved, environment=environment, resources=resources
+            captured_source,
+            resolved,
+            environment=environment,
+            resources=resources,
+            worker_ceiling=True,
         )
         if missing:
             field = {
