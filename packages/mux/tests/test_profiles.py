@@ -224,7 +224,41 @@ def test_native_agent_tool_projection_uses_the_closed_anthropic_compiler():
         ),
     )
     assert agent_tools(extension.model_copy(update={"value": {"tools": []}})).intent() == ()
+    # A well-formed toolset with no neutral projection — an unconfigured
+    # agent_toolset_20260401 (ambiguous native defaults) or any mcp_toolset
+    # (e.g. daimon-mcp, which every chat-enabled agent carries) — is excluded
+    # per toolset rather than raised: `.intent()` only drops its contribution,
+    # `has_unrepresented_toolset()` reports the drop for obligation bookkeeping.
+    bare_toolset = agent_tools(
+        extension.model_copy(update={"value": {"tools": [{"type": "agent_toolset_20260401"}]}})
+    )
+    assert bare_toolset.intent() == () and bare_toolset.has_unrepresented_toolset()
+    mcp_toolset = agent_tools(
+        extension.model_copy(
+            update={
+                "value": {
+                    "tools": [
+                        {
+                            "type": "agent_toolset_20260401",
+                            "default_config": {"enabled": False},
+                            "configs": [
+                                {
+                                    "name": "bash",
+                                    "enabled": True,
+                                    "permission_policy": {"type": "always_allow"},
+                                }
+                            ],
+                        },
+                        {"type": "mcp_toolset", "mcp_server_name": "daimon-mcp"},
+                    ]
+                }
+            }
+        )
+    )
+    assert mcp_toolset.intent() == (ToolSpec(name="bash", kind="builtin"),)
+    assert mcp_toolset.has_unrepresented_toolset()
+    # Schema-invalid/unknown native content is still a hard refusal, never excluded.
     with pytest.raises(ValueError):
         agent_tools(
-            extension.model_copy(update={"value": {"tools": [{"type": "agent_toolset_20260401"}]}})
-        ).intent()
+            extension.model_copy(update={"value": {"tools": [{"type": "unknown_toolset"}]}})
+        )

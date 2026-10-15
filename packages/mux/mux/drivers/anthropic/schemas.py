@@ -4,7 +4,7 @@ Optional properties serialize with exclude_unset=True: omission, explicit
 null, and explicit empty lists preserve the provider's distinct meanings.
 """
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
@@ -75,26 +75,83 @@ class CustomTool(NativeConfig):
 type AgentTool = Annotated[AgentToolset | MCPToolset | CustomTool, Field(discriminator="type")]
 
 
+def _toolset_intent(tool: AgentTool) -> tuple[ToolSpec, ...] | None:
+    """Project one closed tool shape to its neutral form, per toolset.
+
+    Returns `None` for a well-formed toolset with no neutral projection (an
+    `MCPToolset`, or an `AgentToolset` without complete coverage and resolved
+    effective enablement and permission controls).
+    `None` is never a schema failure: the caller only sees it for toolsets
+    that already passed `AgentToolsConfig` validation. Treat it as a known,
+    droppable loss — exclude it from a worker ceiling (stricter, never
+    looser) or flag it as a declarable "tools" obligation, but never raise.
+    """
+    if isinstance(tool, CustomTool):
+        return (
+            ToolSpec(
+                name=tool.name,
+                kind="custom",
+                description=tool.description,
+                input_schema=tool.input_schema,
+            ),
+        )
+    if isinstance(tool, MCPToolset):
+        return None
+    default_enabled = tool.default_config.enabled if tool.default_config else None
+    default_policy = tool.default_config.permission_policy if tool.default_config else None
+    configs = tool.configs or []
+    if default_enabled is not False and {c.name for c in configs} != set(
+        get_args(_BuiltinToolName.__value__)
+    ):
+        return None
+    result: dict[str, ToolSpec] = {}
+    disabled: set[str] = set()
+    for config in configs:
+        enabled = config.enabled if config.enabled is not None else default_enabled
+        if enabled is False:
+            disabled.add(config.name)
+            continue
+        policy = config.permission_policy or default_policy
+        if enabled is None or policy is None:
+            return None
+        permission = "ask" if isinstance(policy, AskPolicy) else "auto"
+        previous = result.get(config.name)
+        if previous is not None and previous.permission == "ask":
+            permission = "ask"
+        result[config.name] = ToolSpec(name=config.name, kind="builtin", permission=permission)
+    return tuple(tool for name, tool in result.items() if name not in disabled)
+
+
 class AgentToolsConfig(NativeConfig):
     """Payload for anthropic.agent_tools@1."""
 
     tools: list[AgentTool]
 
     def intent(self) -> tuple[ToolSpec, ...]:
-        """Project the closed tool shapes whose complete neutral intent is represented."""
+        """Project every toolset with a complete neutral representation.
+
+        A well-formed toolset with no neutral form (see `_toolset_intent`)
+        is silently excluded, never raised on — call `has_unrepresented_toolset`
+        to detect the drop for obligation/declared-drop bookkeeping.
+        """
         result: list[ToolSpec] = []
         for tool in self.tools:
-            if not isinstance(tool, CustomTool):
-                raise ValueError("native tool controls have no complete neutral projection")
-            result.append(
-                ToolSpec(
-                    name=tool.name,
-                    kind="custom",
-                    description=tool.description,
-                    input_schema=tool.input_schema,
-                )
-            )
+            projected = _toolset_intent(tool)
+            if projected is not None:
+                result.extend(projected)
         return tuple(result)
+
+    def excluded_mcp_servers(self) -> frozenset[str]:
+        """Servers paired with native-only toolsets cannot enter a worker ceiling."""
+        return frozenset(
+            tool.mcp_server_name
+            for tool in self.tools
+            if isinstance(tool, MCPToolset) and _toolset_intent(tool) is None
+        )
+
+    def has_unrepresented_toolset(self) -> bool:
+        """True iff some well-formed toolset here has no neutral projection."""
+        return any(_toolset_intent(tool) is None for tool in self.tools)
 
 
 class RosterAgent(NativeConfig):

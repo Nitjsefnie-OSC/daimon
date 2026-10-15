@@ -71,9 +71,23 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
             else None
         )
     if "tools" in fields and (spec.tools is not None or isinstance(spec, AgentPatch)):
-        payload["tools"] = (
-            [tool_payload(tool) for tool in spec.tools] if spec.tools is not None else None
-        )
+        compiled = [tool_payload(tool) for tool in spec.tools] if spec.tools is not None else None
+        if compiled is not None:
+            builtin: dict[str, object] | None = None
+            grouped: list[dict[str, object]] = []
+            for tool in compiled:
+                if tool["type"] == "agent_toolset_20260401":
+                    if builtin is None:
+                        builtin = tool
+                        grouped.append(tool)
+                    else:
+                        cast(list[object], builtin["configs"]).extend(
+                            cast(list[object], tool["configs"])
+                        )
+                else:
+                    grouped.append(tool)
+            compiled = grouped
+        payload["tools"] = compiled
     if isinstance(spec, AgentPatch):
         extensions = tuple((spec.extensions or {}).values())
     else:
@@ -147,7 +161,19 @@ def tool_payload(tool: object) -> dict[str, object]:
         }
     if tool.kind == "mcp_toolset":
         return {"type": "mcp_toolset", "mcp_server_name": tool.name}
-    return {"type": "agent_toolset_20260401", "configs": [{"name": tool.name}]}
+    return {
+        "type": "agent_toolset_20260401",
+        "default_config": {"enabled": False, "permission_policy": {"type": "always_ask"}},
+        "configs": [
+            {
+                "name": tool.name,
+                "enabled": True,
+                "permission_policy": {
+                    "type": "always_ask" if tool.permission == "ask" else "always_allow"
+                },
+            }
+        ],
+    }
 
 
 def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Scope) -> Agent:
