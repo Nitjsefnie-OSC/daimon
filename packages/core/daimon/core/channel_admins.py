@@ -339,8 +339,16 @@ class GroupMembersCache:
         self._in_flight: dict[tuple[str, ...], asyncio.Task[frozenset[str]]] = {}
 
     async def members(
-        self, key: tuple[str, ...], fetch: Callable[[], Awaitable[frozenset[str]]]
+        self,
+        key: tuple[str, ...],
+        fetch: Callable[[], Awaitable[frozenset[str]]],
+        *,
+        fresh: bool = False,
     ) -> frozenset[str]:
+        if fresh:
+            # Authorization at an Always-allow click must observe a revoked
+            # membership even when an earlier turn populated the short cache.
+            return await fetch()
         now = self._clock()
         cached = self._entries.get(key)
         if cached is not None and now - cached[0] < self._ttl_s:

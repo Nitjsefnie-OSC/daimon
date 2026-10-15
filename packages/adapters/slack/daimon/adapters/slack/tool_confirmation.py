@@ -22,6 +22,8 @@ import aiohttp
 import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.core.agent_identity import AgentIdentity
+from daimon.core.authz import Subject
+from daimon.core.channel_admins import load_live_subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
@@ -33,9 +35,11 @@ from daimon.core.posted_controls.confirmation import (
     NOT_YOURS_MESSAGE,
     ConfirmationCard,
     ConfirmationCardState,
+    ConfirmationHow,
     build_confirmation_blocks,
     build_confirmation_card,
     confirmation_card_text,
+    parse_always_custom_id,
     parse_confirmation_custom_id,
     parse_details_custom_id,
 )
@@ -43,10 +47,21 @@ from daimon.core.posted_controls.lifecycle import (
     PostedConfirmations,
     check_confirmation_admin,
     edit_card_within,
+    queue_card_edit,
+)
+from daimon.core.posted_controls.tool_rule_confirmation import (
+    ASK_ADMIN_MESSAGE,
+    ONLY_ADMIN_MESSAGE,
+    SAVE_FAILED_MESSAGE,
+    STALE_RULE_MESSAGE,
+    allowed_rule_scope,
+    save_always_allow,
+    snapshot_tool_rule,
 )
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.adapters.slack.runtime import SlackRuntime
@@ -97,7 +112,10 @@ class _PostedCard:
     ts: str
     thread_ts: str | None
     answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
+    retired: asyncio.Event = field(default_factory=asyncio.Event)
     check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None
+    rule_factory: async_sessionmaker[AsyncSession] | None = None
+    rule_subject: Callable[[str], Awaitable[Subject]] | None = None
 
 
 class SlackConfirmationCards:
@@ -160,15 +178,36 @@ class SlackConfirmationCards:
                     current_admin=current_admin,
                 )
 
+        rule_factory = runtime.sessionmaker if runtime is not None else None
+
+        async def rule_subject(clicker: str) -> Subject:
+            from daimon.adapters.slack.admin import resolve_is_admin
+            from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
+
+            if runtime is None or tenant_id is None:
+                return Subject()
+            admin = await resolve_is_admin(client, user_id=clicker)
+            caller = await channel_admin_caller(
+                runtime, client, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
+            )
+            async with runtime.sessionmaker() as session:
+                return await load_live_subject(
+                    session, tenant_id=tenant_id, platform="slack", caller=caller
+                )
+
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
             if prompt.admin:
                 if prepare_admin is None or check_admin is None:
                     return "denied"
                 prompt = await prepare_admin(prompt)
+            if prompt.tool_rule is not None and rule_factory is not None:
+                prompt = await snapshot_tool_rule(prompt, rule_factory)
             posted_cards: list[_PostedCard] = []
 
             async def post(token: str) -> _PostedCard:
-                card = build_confirmation_card(prompt, state="pending", token=token)
+                card = build_confirmation_card(
+                    prompt, state="pending", token=token, allow_always=prompt.tool_rule is not None
+                )
                 response = await post_as_agent(
                     client,
                     identity,
@@ -194,11 +233,14 @@ class SlackConfirmationCards:
                     ts=ts,
                     thread_ts=parent_thread_ts,
                     check_admin=check_admin,
+                    rule_factory=rule_factory,
+                    rule_subject=rule_subject,
                 )
                 posted_cards.append(posted)
                 return posted
 
             async def retire(posted: _PostedCard, state: ConfirmationCardState) -> None:
+                posted.retired.set()
                 await _edit(posted, state, answered_by=None)
 
             result = await self._controls.confirm(
@@ -210,6 +252,8 @@ class SlackConfirmationCards:
                 async def retire_unsent() -> None:
                     # Queued behind the Approved edit on the same card
                     # (`edit_card_within` keeps per-card call order).
+                    await answered_posted.answered_edit_done.wait()
+                    answered_posted.retired.set()
                     await _edit(answered_posted, "stopped", answered_by=None)
 
                 return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
@@ -231,6 +275,9 @@ class SlackConfirmationCards:
                     _plain_message_text("\n".join(posted.prompt.detail_lines))
                     or "No additional details.",
                 )
+            return
+        if always_token := parse_always_custom_id(action_id):
+            await self._handle_always(payload, always_token)
             return
         parsed = parse_confirmation_custom_id(action_id)
         if parsed is None:
@@ -256,27 +303,100 @@ class SlackConfirmationCards:
         finally:
             posted.answered_edit_done.set()
 
+    async def _handle_always(self, payload: dict[str, Any], token: str) -> None:
+        user: dict[str, Any] = payload.get("user") or {}
+        clicker = str(user.get("id") or "")
+        posted = self._controls.cards.get(token)
+        if posted is None:
+            await _ephemeral_from_payload(payload, clicker, self._controls.missing_message(token))
+            return
+        reference = posted.prompt.tool_rule
+        if reference is None or posted.rule_factory is None or posted.rule_subject is None:
+            await _ephemeral(posted, clicker, self._controls.missing_message(token))
+            return
+        try:
+            subject = await posted.rule_subject(clicker)
+            scope = allowed_rule_scope(reference, subject)
+        except Exception:
+            scope = None
+            subject = Subject()
+        if scope is None:
+            message = ONLY_ADMIN_MESSAGE
+            if clicker == posted.prompt.requester_platform_user_id:
+                message += "\n" + ASK_ADMIN_MESSAGE
+            await _ephemeral(posted, clicker, message)
+            return
+        if refusal := self._controls.claim_admin(token):
+            await _ephemeral(posted, clicker, refusal)
+            return
+        queue_card_edit(
+            _card_update(posted, "approved", answered_by=clicker, how="once"),
+            card_key=("slack", posted.channel, posted.ts),
+            failure_errors=(SlackApiError,),
+            failed_event="slack.tool_confirmation.edit_failed",
+        )
+        posted.answered_edit_done.set()
+        try:
+            result = await save_always_allow(
+                posted.rule_factory,
+                reference=reference,
+                scope=scope,
+                subject=subject,
+                clicker=clicker,
+            )
+        except Exception:
+            result = "failed"
+        if result == "saved" and not posted.retired.is_set():
+            how: ConfirmationHow = "always" if scope == "agent" else "channel"
+            await _edit(posted, "approved", answered_by=clicker, how=how)
+        if result != "saved":
+            await _ephemeral(
+                posted,
+                clicker,
+                STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
+            )
+
 
 async def _edit(
-    posted: _PostedCard, state: ConfirmationCardState, *, answered_by: str | None
+    posted: _PostedCard,
+    state: ConfirmationCardState,
+    *,
+    answered_by: str | None,
+    how: ConfirmationHow | None = None,
 ) -> None:
-    card = build_confirmation_card(
-        posted.prompt, state=state, answered_by_platform_user_id=answered_by
-    )
-    # Bounded for the turn, finished in the background (`edit_card_within`).
     await edit_card_within(
-        posted.client.chat_update(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk **kwargs: Unknown
-            channel=posted.channel,
-            ts=posted.ts,
-            text=_plain_message_text(confirmation_card_text(card)),
-            attachments=_attachment(card, posted.prompt),
-            mrkdwn=False,
-            parse="none",
-        ),
+        _card_update(posted, state, answered_by=answered_by, how=how),
         card_key=("slack", posted.channel, posted.ts),
         budget_s=EDIT_TIMEOUT_S,
         failure_errors=(SlackApiError,),
         failed_event="slack.tool_confirmation.edit_failed",
+    )
+
+
+def _card_update(
+    posted: _PostedCard,
+    state: ConfirmationCardState,
+    *,
+    answered_by: str | None,
+    how: ConfirmationHow | None = None,
+) -> Awaitable[object]:
+    card = build_confirmation_card(
+        posted.prompt,
+        state=state,
+        answered_by_platform_user_id=answered_by,
+        how=how
+        if how is not None
+        else "once"
+        if answered_by and posted.prompt.tool_rules_enabled
+        else None,
+    )
+    return posted.client.chat_update(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk **kwargs: Unknown
+        channel=posted.channel,
+        ts=posted.ts,
+        text=_plain_message_text(confirmation_card_text(card)),
+        attachments=_attachment(card, posted.prompt),
+        mrkdwn=False,
+        parse="none",
     )
 
 

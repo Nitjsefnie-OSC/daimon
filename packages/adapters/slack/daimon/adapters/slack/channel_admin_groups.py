@@ -61,7 +61,7 @@ async def list_user_groups(client: AsyncWebClient) -> dict[str, str]:
 
 
 def user_group_members(
-    runtime: SlackRuntime, client: AsyncWebClient, *, tenant_id: uuid.UUID
+    runtime: SlackRuntime, client: AsyncWebClient, *, tenant_id: uuid.UUID, fresh: bool = False
 ) -> GroupMembers:
     """A user group's live members, through the runtime's short cache."""
 
@@ -69,6 +69,7 @@ def user_group_members(
         return await runtime.group_members.members(
             ("slack", str(tenant_id), group_id),
             lambda: fetch_user_group_members(client, group_id),
+            fresh=fresh,
         )
 
     return members
@@ -99,7 +100,12 @@ def stored_group_members(runtime: SlackRuntime) -> GroupMembersFor:
 
 
 async def user_group_ids(
-    runtime: SlackRuntime, client: AsyncWebClient, *, tenant_id: uuid.UUID, user_id: str
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    fresh: bool = False,
 ) -> frozenset[str]:
     """The user groups named by this workspace's grants that `user_id` is in."""
     return await load_member_group_ids(
@@ -107,7 +113,7 @@ async def user_group_ids(
         tenant_id=tenant_id,
         platform="slack",
         platform_user_id=user_id,
-        members=user_group_members(runtime, client, tenant_id=tenant_id),
+        members=user_group_members(runtime, client, tenant_id=tenant_id, fresh=fresh),
     )
 
 
@@ -118,11 +124,14 @@ async def channel_admin_caller(
     tenant_id: uuid.UUID,
     user_id: str,
     is_admin: bool,
+    fresh: bool = False,
 ) -> ChannelAdminCaller:
     """The caller with their grant-named user groups; a workspace admin needs none."""
     groups = (
         frozenset[str]()
         if is_admin
-        else await user_group_ids(runtime, client, tenant_id=tenant_id, user_id=user_id)
+        else await user_group_ids(
+            runtime, client, tenant_id=tenant_id, user_id=user_id, fresh=fresh
+        )
     )
     return ChannelAdminCaller(platform_user_id=user_id, role_ids=groups, is_server_admin=is_admin)

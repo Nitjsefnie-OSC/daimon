@@ -17,10 +17,13 @@ import re
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
+from time import monotonic
 from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
+from daimon.core.authz import Subject
+from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
@@ -28,17 +31,31 @@ from daimon.core.confirmation import (
     ConfirmationPrompt,
 )
 from daimon.core.posted_controls.confirmation import (
+    NO_LONGER_PENDING_MESSAGE,
     NOT_YOURS_MESSAGE,
     ConfirmationCard,
     ConfirmationCardState,
+    ConfirmationHow,
     build_confirmation_card,
 )
 from daimon.core.posted_controls.lifecycle import (
     check_confirmation_admin,
     edit_card_within,
+    queue_card_edit,
+    settle_local_admin_confirmation,
     settle_local_confirmation,
     wait_local_confirmation,
 )
+from daimon.core.posted_controls.tool_rule_confirmation import (
+    ASK_ADMIN_MESSAGE,
+    ONLY_ADMIN_MESSAGE,
+    SAVE_FAILED_MESSAGE,
+    STALE_RULE_MESSAGE,
+    allowed_rule_scope,
+    save_always_allow,
+    snapshot_tool_rule,
+)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
@@ -52,6 +69,7 @@ log = structlog.get_logger(__name__)
 
 #: Most time a card edit may take while retiring it.
 RETIRE_TIMEOUT_S = 2.0
+INTERACTION_TOKEN_LIFETIME_S = 15 * 60
 
 
 def _body(card: ConfirmationCard) -> list[str]:
@@ -74,6 +92,7 @@ def _footer(card: ConfirmationCard, prompt: ConfirmationPrompt) -> str | None:
         return None
     return card.footer.format(
         requester=f"<@{prompt.requester_platform_user_id}>",
+        actor=f"<@{card.answered_by_platform_user_id}>",
         expires=f"<t:{int(prompt.expires_at.timestamp())}:R>",
     )
 
@@ -87,12 +106,17 @@ class _ConfirmationView(discord.ui.LayoutView):
         prompt: ConfirmationPrompt,
         answer: asyncio.Future[ConfirmationAnswer] | None,
         check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
+        rule_factory: async_sessionmaker[AsyncSession] | None = None,
+        rule_subject: Callable[[str], Awaitable[Subject]] | None = None,
     ) -> None:
         super().__init__(timeout=None)
         self._prompt = prompt
         self._answer = answer
         self._check_admin = check_admin
+        self._rule_factory = rule_factory
+        self._rule_subject = rule_subject
         self.answered_edit_done = asyncio.Event()
+        self.retired = False
         #: The posted card's ordering key for `edit_card_within`; set once the
         #: card is sent, before anyone can click it.
         self.card_key: object = ("discord-view", id(self))
@@ -127,6 +151,12 @@ class _ConfirmationView(discord.ui.LayoutView):
             details.callback = self._on_details
             row.add_item(approve)
             row.add_item(deny)
+            if card.allow_always:
+                always: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                    style=discord.ButtonStyle.secondary, label="Always allow"
+                )
+                always.callback = self._on_always
+                row.add_item(always)
             row.add_item(details)
             container.add_item(row)
         footer = _footer(card, prompt)
@@ -140,6 +170,76 @@ class _ConfirmationView(discord.ui.LayoutView):
 
     async def _on_deny(self, interaction: discord.Interaction) -> None:
         await self._settle(interaction, "denied")
+
+    async def _on_always(self, interaction: discord.Interaction) -> None:
+        clicked_at = monotonic()
+        reference = self._prompt.tool_rule
+        clicker = str(interaction.user.id)
+        if reference is None or self._rule_factory is None or self._rule_subject is None:
+            await interaction.response.send_message(NO_LONGER_PENDING_MESSAGE, ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            subject = await self._rule_subject(clicker)
+            scope = allowed_rule_scope(reference, subject)
+        except Exception:
+            scope = None
+            subject = Subject()
+        if scope is None:
+            message = ONLY_ADMIN_MESSAGE
+            if clicker == self._prompt.requester_platform_user_id:
+                message += "\n" + ASK_ADMIN_MESSAGE
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        if refusal := settle_local_admin_confirmation(self._prompt, self._answer):
+            await interaction.followup.send(refusal, ephemeral=True)
+            return
+        self.stop()
+        self._queue_always_answer(interaction, clicker, "once")
+        self.answered_edit_done.set()
+        try:
+            result = await save_always_allow(
+                self._rule_factory,
+                reference=reference,
+                scope=scope,
+                subject=subject,
+                clicker=clicker,
+            )
+        except Exception:
+            result = "failed"
+        if (
+            result == "saved"
+            and not self.retired
+            and monotonic() - clicked_at < INTERACTION_TOKEN_LIFETIME_S
+        ):
+            how: ConfirmationHow = "always" if scope == "agent" else "channel"
+            self._queue_always_answer(interaction, clicker, how)
+        elif result == "saved" and not self.retired:
+            log.info("tool_confirmation.always_edit_token_expired")
+        if result != "saved":
+            await interaction.followup.send(
+                STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
+                ephemeral=True,
+            )
+
+    def _queue_always_answer(
+        self, interaction: discord.Interaction, clicker: str, how: ConfirmationHow
+    ) -> None:
+        answered = build_confirmation_card(
+            self._prompt,
+            state="approved",
+            answered_by_platform_user_id=clicker,
+            how=how,
+        )
+        queue_card_edit(
+            interaction.edit_original_response(
+                view=_ConfirmationView(answered, self._prompt, answer=None),
+                allowed_mentions=discord.AllowedMentions.none(),
+            ),
+            card_key=self.card_key,
+            failure_errors=(discord.HTTPException,),
+            failed_event="tool_confirmation.answer_edit_failed",
+        )
 
     async def _on_details(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
@@ -171,7 +271,10 @@ class _ConfirmationView(discord.ui.LayoutView):
         # Answered: nothing on this card listens any more.
         self.stop()
         answered = build_confirmation_card(
-            self._prompt, state=answer, answered_by_platform_user_id=str(interaction.user.id)
+            self._prompt,
+            state=answer,
+            answered_by_platform_user_id=str(interaction.user.id),
+            how="once" if self._prompt.tool_rules_enabled else None,
         )
         # Same per-card order as `_retire`, registered before any await, so a
         # Stopped retire that follows can never land before this answer.
@@ -252,19 +355,52 @@ def discord_confirmation_hook(
                 current_admin=current_admin,
             )
 
+    rule_factory = runtime.sessionmaker if runtime is not None else None
+
+    async def rule_subject(clicker: str) -> Subject:
+        from daimon.adapters.discord.bot import requester_role
+        from daimon.core.stores.domain import Role
+
+        if (
+            rule_factory is None
+            or tenant_id is None
+            or not isinstance(channel, (discord.Thread, discord.TextChannel))
+        ):
+            return Subject()
+        role, roles = await requester_role(channel.guild, clicker)
+        async with rule_factory() as session:
+            return await load_live_subject(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                caller=ChannelAdminCaller(
+                    platform_user_id=clicker,
+                    role_ids=frozenset(roles),
+                    is_server_admin=role is Role.ADMIN,
+                ),
+            )
+
     async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
         if prompt.admin:
             if prepare_admin is None or check_admin is None:
                 return "denied"
             prompt = await prepare_admin(prompt)
+        if prompt.tool_rule is not None and rule_factory is not None:
+            prompt = await snapshot_tool_rule(prompt, rule_factory)
         loop = asyncio.get_running_loop()
         answer: asyncio.Future[ConfirmationAnswer] = loop.create_future()
-        pending = build_confirmation_card(prompt, state="pending", token=secrets.token_urlsafe(12))
-        view = _ConfirmationView(pending, prompt, answer, check_admin)
+        pending = build_confirmation_card(
+            prompt,
+            state="pending",
+            token=secrets.token_urlsafe(12),
+            allow_always=prompt.tool_rule is not None,
+        )
+        view = _ConfirmationView(pending, prompt, answer, check_admin, rule_factory, rule_subject)
         message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         view.card_key = ("discord", message.id)
 
         async def retire(state: ConfirmationCardState) -> None:
+            view.retired = True
             await _retire(message, prompt, state)
 
         result = await wait_local_confirmation(prompt, answer, stop=view.stop, retire=retire)
@@ -272,6 +408,8 @@ def discord_confirmation_hook(
 
             async def retire_unsent() -> None:
                 # Queued behind the Approved edit on the same card.
+                await view.answered_edit_done.wait()
+                view.retired = True
                 await retire("stopped")
 
             return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)

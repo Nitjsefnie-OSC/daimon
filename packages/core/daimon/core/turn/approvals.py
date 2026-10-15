@@ -30,6 +30,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationHook,
+    ToolRuleCardReference,
     no_confirmation_surface,
     prompt_for_tool_call,
 )
@@ -55,6 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 RuleLookup = Callable[[ToolCall], Awaitable[ResolvedAgentToolRule | None]]
+RuleCardFor = Callable[[ToolCall], ToolRuleCardReference | None]
 
 
 def channel_for_tool_rules(
@@ -317,6 +319,7 @@ def interactive_decider(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
+    rule_card_for: RuleCardFor | None = None,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -358,6 +361,17 @@ def interactive_decider(
                 now=now(),
                 timeout=timedelta(seconds=policy.confirmation_timeout_s),
             )
+            if policy.enabled and policy.agent_rules:
+                prompt = prompt.model_copy(update={"tool_rules_enabled": True})
+            if (
+                policy.enabled
+                and policy.agent_rules
+                and verdict.reason == "write_needs_confirmation"
+                and not read_error
+                and call.server_name not in trusted_servers
+                and rule_card_for is not None
+            ):
+                prompt = prompt.model_copy(update={"tool_rule": rule_card_for(call)})
             response = await confirm(prompt)
         except Exception as err:
             # Named boundary: prompt validation and the adapter's card must
@@ -367,6 +381,24 @@ def interactive_decider(
         answer = response.answer if isinstance(response, ApprovedConfirmation) else response
         log.info("tool_safety.answered", tool=call.key, answer=answer)
         if answer == "approved":
+            if policy.enabled and policy.agent_rules and rules_for is not None:
+                latest, read_failed = await _rule_for(policy, call, trusted_servers, rules_for)
+                if read_failed or (latest is not None and latest.rule == "deny"):
+                    if isinstance(response, ApprovedConfirmation):
+                        await response.retire_unsent()
+                    return ToolConfirmationResult(
+                        allow=False,
+                        deny_message=(
+                            refusal_message(
+                                call,
+                                ToolVerdict(
+                                    outcome="deny", effect="write", reason="agent_rule_deny"
+                                ),
+                            )
+                            if not read_failed
+                            else f"Refused: could not check this agent's rule for {call.key}."
+                        ),
+                    )
             return ToolConfirmationResult(
                 allow=True,
                 retire_unsent=response.retire_unsent
@@ -405,6 +437,7 @@ def chat_tool_confirmation(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
+    rule_card_for: RuleCardFor | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -423,6 +456,7 @@ def chat_tool_confirmation(
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
+            rule_card_for=rule_card_for,
         )
         if attended
         else unattended_decider(

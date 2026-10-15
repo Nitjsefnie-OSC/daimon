@@ -7,6 +7,7 @@ license = "MIT"
 authors = [{ name = "PyMC Labs" }]
 dependencies = [
     "daimon-core",
+    "daimon-mux[openai]",
     "daimon-adapter-cli",
     "daimon-adapter-mcp",
     "daimon-adapter-discord",
