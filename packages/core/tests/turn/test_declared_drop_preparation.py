@@ -1427,3 +1427,135 @@ async def test_portable_native_no_drop_consent_survives_store_and_retained_prepa
     router.add_environment(request.admission.environment)
     with pytest.raises(AgentBackendRefused, match="confirm"):
         await prepare_source(request)
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": "openai",
+            "caller_mcp": True,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize("fault", [None, "foreign_agent", "missing_association", "origin"])
+async def test_agent_origin_openai_host_preserves_original_consent_before_paid_request(
+    consent_request, fault
+):
+    import httpx
+    from daimon.core._models import ChannelConfigRevision
+    from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai
+    from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
+    from mux.contracts.resources import SessionSpec
+    from mux.drivers.openai.session_controls import SessionControls
+    from mux.drivers.openai.transport import SDKTransport
+    from mux.errors import ScopeViolation
+    from openai import AsyncOpenAI
+    from sqlalchemy import update
+
+    request, service, source, actor, accepted, *_ = consent_request
+    await service.clear_backend(source, accepted.local, actor)
+    selected = await read_preparation_counterpart(request)
+    selected = replace(
+        selected, now=lambda: datetime.now(UTC), deadline=datetime.now(UTC) + timedelta(seconds=30)
+    )
+    revision = selected.admission.backend_revision
+    assert selected.target_spec.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    assert selected.verified_counterpart == selected.counterpart
+    if fault == "foreign_agent":
+        selected = replace(
+            selected,
+            admission=replace(
+                selected.admission,
+                agent=selected.admission.agent.model_copy(update={"id": "foreign"}),
+            ),
+        )
+    elif fault is not None:
+        async with selected.deps.sessionmaker.begin() as db:
+            await db.execute(
+                update(ChannelConfigRevision)
+                .where(
+                    ChannelConfigRevision.tenant_id == selected.tenant_id,
+                    ChannelConfigRevision.local == revision.local,
+                )
+                .values(
+                    **(
+                        {"agent_backend_ref": None}
+                        if fault == "missing_association"
+                        else {"origin": "channel"}
+                    )
+                )
+            )
+
+    class PaidBoundary(BaseException):
+        pass
+
+    calls = []
+
+    def native(call):
+        calls.append(call)
+        if call.method == "POST":
+            assert call.url.path == "/v1/agents/sessions"
+            raise PaidBoundary()
+        assert call.url.path == "/v1/agents/native-counterpart"
+        return httpx.Response(
+            200,
+            json={
+                "id": "native-counterpart",
+                "metadata": {"mux_tenant": str(selected.tenant_id)},
+                "multi_agent": {"enabled": False},
+            },
+        )
+
+    async def plan(actual):
+        return SessionSpec(
+            agent=selected.counterpart.agent.ref,
+            environment=selected.counterpart.agent.ref.model_copy(
+                update={"kind": "environment", "id": "native-environment"}
+            ),
+            agent_revision=Revision(local=0),
+            config_revision=revision.local,
+        )
+
+    async with AsyncOpenAI(
+        api_key="offline",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(native)),
+    ) as sdk:
+        runtime = OpenAIHostRuntime(
+            lambda *_: SDKTransport(sdk),
+            OpenAIRecoveryJournal(),
+            OpenAIUsageRevisions(),
+            account_scope_id="project",
+            session_plan=plan,
+            authorization=lambda scope, *_: scope == selected.scope,
+            controls=SessionControls(
+                model=revision.model,
+                multi_agent_enabled=False,
+                container_size="small",
+                spend_limit_usd_cents=4,
+            ),
+        )
+        selected = replace(
+            selected,
+            deps=replace(
+                selected.deps,
+                state_store=mux_state.PostgresStateStore(selected.deps.sessionmaker),
+                turn_runtimes={revision.profile: runtime},
+            ),
+        )
+        with pytest.raises(PaidBoundary if fault is None else ScopeViolation):
+            await prepare_openai(selected)
+    if fault is not None:
+        assert not calls
+        return
+    assert sum(call.method == "POST" for call in calls) == 1
+    async with selected.deps.sessionmaker() as db:
+        assert await mux_state.get_config_revision(db, revision.channel, revision.local) == revision
+        assert await mux_state.config_origin(db, revision.channel, revision.local) == "agent"
+        assert (
+            await mux_state.get_config_agent_revision(db, revision, agent_id=source.agent_id)
+            == accepted
+        )

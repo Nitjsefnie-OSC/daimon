@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import (
     TurnBackend,
     TurnBackendRequest,
@@ -23,6 +24,7 @@ from daimon.core.mux_backend import (
 )
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice
+from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
@@ -362,7 +364,24 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     spec = await runtime.session_plan(request)
     _check_spec(spec, runtime, request.scope, revision)
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
-    await store.put_config_revision(revision)
+    if request.worker is None and current.backend_revision_origin == "agent":
+        # Admission retained this exact source consent; a generic StateStore
+        # write has no agent-origin association and cannot recreate that proof.
+        async with request.deps.sessionmaker.begin() as session:
+            retained = await mux_state.get_config_agent_revision(
+                session,
+                revision,
+                agent_id=derive_agent_uuid(
+                    tenant_id=request.tenant_id, ma_agent_id=current.agent.id
+                ),
+            )
+            if retained is None:
+                raise ScopeViolation(request.thread_id, "missing original backend consent")
+            await mux_state.put_config_revision(
+                session, revision, origin="agent", agent_revision=retained
+            )
+    else:
+        await store.put_config_revision(revision)
     slot = Slot(
         thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
         account_id=request.scope.account_id,
