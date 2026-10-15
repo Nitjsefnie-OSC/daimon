@@ -1,6 +1,7 @@
 """Concrete fleet result/contract reads over real SDK worker journals."""
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -21,6 +22,8 @@ from sqlalchemy import update
 
 from ..test_fleet_budget import POLICY, setup, tariffs
 from ..test_fleet_budget import sm as sm
+from .test_native_session_receipts import native_worker as native_worker
+from .test_native_session_receipts import source_read_only as source_read_only
 from .test_openai_worker_plan import application as application
 from .test_openai_worker_plan import claimed_openai_worker as claimed_openai_worker
 from .test_openai_worker_plan import db_preflight as db_preflight
@@ -359,6 +362,268 @@ async def test_same_backend_review_preserves_real_primary_journal_without_admiss
         "status": "blocked",
         "reason": "review_required",
     }
+
+
+@pytest.mark.parametrize("verdict", ("approved", "refused", "wrong_digest", "wrong_contract"))
+async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
+    native_worker, monkeypatch, tmp_path, verdict
+):
+    from datetime import timedelta
+
+    import httpx
+    from daimon.core._models import FleetRun as RunRow
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.neutral_resources import WorkerLimits
+    from daimon.core.pricing import provider_prices
+    from daimon.core.stores import mux_state
+    from daimon.core.turn.openai_deployment import OpenAIDeployment
+    from daimon.core.turn.runtimes import build_channel_runtime
+    from daimon.testing.isolated_sdk import build_async_openai
+    from mux.contracts.config import ConfigRevision, resolve_default
+    from mux.contracts.ids import ModelRef
+    from mux.drivers.openai import deployment
+    from mux.drivers.openai.transport import SDKTransport
+
+    from .test_openai_conversation_worker import ConversationWire
+
+    request, root, claimed, native_trace, _ = native_worker
+    # Fund both retained attempts; the primary fixture alone owns the original $1 cap.
+    root = replace(
+        root,
+        limits=root.limits.model_copy(update={"budget_usd": Decimal("2")}),
+        subject=replace(root.subject, via_agent_key=False),
+    )
+    request = replace(
+        request,
+        admission=replace(
+            request.admission, grant=replace(request.admission.grant, subject=root.subject)
+        ),
+    )
+    contract = {"format": "text", "review_required": True}
+    async with request.deps.sessionmaker.begin() as db:
+        await db.execute(
+            update(WorkerRow).where(WorkerRow.id == claimed.id).values(result_contract=contract)
+        )
+        await db.execute(
+            update(RunRow)
+            .where(RunRow.id == claimed.run_id)
+            .values(max_workers=2, total_budget_usd=Decimal("2"))
+        )
+        db.add(
+            PlatformPrincipal(
+                tenant_id=request.tenant_id,
+                account_id=root.fleet.account_id,
+                platform=request.platform,
+                external_id=request.external_user_id,
+            )
+        )
+    claimed = replace(claimed, result_contract=contract)
+    primary = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Produce findings",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert primary.status == "succeeded" and primary.result is not None
+    assert primary.backend == "anthropic" and primary.result.excerpt == "verified-worker-result"
+    captured = await capture_preparation_source(
+        replace(request, scope=root.fleet.scope, worker=None, source=None)
+    )
+    assert captured.source is not None
+    model = ModelRef(provider="openai", id="gpt-6-luna")
+    backend = resolve_default(
+        BackendConfig(backend="openai", profile="openai.conversation_only", model=model.id)
+    )
+    root = replace(
+        root, backend_grants=(*root.backend_grants, backend), models=(*root.models, model)
+    )
+    prices = {**tariffs(root), **provider_prices(backend.profile)}
+    text = json.dumps(
+        {
+            "verdict": "refused" if verdict == "refused" else "approved",
+            "reviewed_digest": "wrong" if verdict == "wrong_digest" else primary.result.digest,
+        }
+    )
+
+    class ReviewWire(ConversationWire):
+        def handle(self, call):
+            response = super().handle(call)
+            if call.method == "POST" and call.url.path.endswith("/agents/sessions"):
+                self.items[-1]["content"][0]["text"] = text
+            return response
+
+    wire = ReviewWire()
+    plan = OpenAIDeployment(
+        profile=backend.profile,
+        tenant_id=root.fleet.scope.tenant_id,
+        platform=request.platform,
+        channel_id=root.fleet.root.channel.channel_id,
+        account_id=root.fleet.scope.account_id,
+        project="offline-project",
+        api_key_env="I4_OFFLINE_OPENAI_KEY",
+        worker_materialization=True,
+        source_agent_id=derive_agent_uuid(
+            tenant_id=request.tenant_id, ma_agent_id=captured.source.ref.id
+        ),
+        source_agent_version=captured.source.revision.local,
+        configuration_grant={
+            "profiles": [backend.profile],
+            "models": [model.id],
+            "thread_modes": [backend.thread_mode],
+            "requires": dict(backend.requires),
+        },
+    )
+    manifest = tmp_path / "review-runtime.json"
+    manifest.write_text(json.dumps([plan.model_dump(mode="json")]))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
+    monkeypatch.setenv(plan.api_key_env, "offline")
+    dispatched = []
+
+    async def dispatch(parent, committed, resolved, reviewed):
+        assert committed.backend == "openai" != primary.backend
+        assert reviewed is not None and reviewed.session_id == primary.result.session_id
+        assert reviewed.payload["content"][0]["text"] == "verified-worker-result"
+        assert result_digest(dict(reviewed.payload)) == primary.result.digest
+        assert committed.result_contract == {
+            "format": "review",
+            "reviewed_digest": primary.result.digest,
+        }
+        retained, rows = await fleet.run_status(
+            request.deps.sessionmaker, tenant_id=primary.tenant_id, run_id=primary.run_id
+        )
+        assert committed in rows and retained.reserved_usd >= committed.budget_usd
+        worker = await fleet.claim_worker(
+            request.deps.sessionmaker, tenant_id=committed.tenant_id, run_id=committed.run_id, cap=2
+        )
+        assert worker is not None and worker.id == committed.id
+        revision = ConfigRevision.create(root.fleet.root.channel, 2, resolved.backend)
+        async with request.deps.sessionmaker.begin() as db:
+            await mux_state.put_config_revision(db, revision, origin="agent")
+        selected = replace(
+            request,
+            worker=resolved,
+            scope=resolved.permissions.fleet.scope,
+            deps=replace(
+                request.deps, turn_runtime_factory=build_channel_runtime, turn_runtimes={}
+            ),
+            source=None,
+            counterpart=None,
+            verified_counterpart=None,
+            admission=replace(
+                request.admission,
+                backend_revision=revision,
+                backend_agent_revision=None,
+                backend=None,
+            ),
+        )
+        result = await run_worker(
+            selected,
+            parent=parent,
+            worker=worker,
+            trigger_message="Review the full result: " + json.dumps(dict(reviewed.payload)),
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+        assert result.status == "succeeded" and result.result is not None and result.turns_used == 1
+        assert result.result.session_id != primary.result.session_id
+        dispatched.append(result)
+
+    ports = HostFleetPorts(
+        request.deps.sessionmaker, prices=prices, markup=Decimal(1), dispatch=dispatch
+    )
+    owner = FleetOrchestrator(ports)
+    async with request.deps.sessionmaker() as db:
+        policy = await access_policy.load_access_policy(db, tenant_id=request.tenant_id)
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
+        api_key="offline",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        monkeypatch.setattr(deployment, "configured_transport", lambda **kwargs: SDKTransport(sdk))
+        reply = await owner.spawn(
+            root,
+            policy,
+            now=request.now(),
+            operation_key="cross-backend-review",
+            role="review the full journal",
+            backend=BackendConfig.model_validate(backend.model_dump()),
+            limits=WorkerLimits(
+                budget_usd=Decimal("0.055"),
+                deadline=min(root.limits.deadline, request.now() + timedelta(seconds=60)),
+                max_turns=1,
+                native_budget_usd=Decimal("0.01"),
+            ),
+            agent=root.spec.model_copy(
+                update={
+                    "model": model,
+                    "tools": (),
+                    "skills": (),
+                    "mcp_servers": (),
+                    "extensions": None,
+                    "declared_drops": (
+                        "memory",
+                        "sandbox",
+                        "tools",
+                        "skills",
+                        "mcp",
+                        "files",
+                        "repository",
+                    ),
+                }
+            ),
+            reviewer_of=primary.id,
+            captured_source=captured,
+        )
+
+    assert len(dispatched) == 1 and reply["worker_id"] == str(dispatched[0].id)
+    assert [call.url.path for call in wire.posts] == ["/v1/agents", "/v1/agents/sessions"]
+    assert any(
+        call.method == "POST" and call.path.endswith("/events") for call in native_trace.requests
+    )
+    assert text == dispatched[0].result.excerpt
+    if verdict == "wrong_contract":
+        async with request.deps.sessionmaker.begin() as db:
+            await db.execute(
+                update(WorkerRow)
+                .where(WorkerRow.id == dispatched[0].id)
+                .values(result_contract={"format": "review", "reviewed_digest": "wrong"})
+            )
+        with pytest.raises(FleetRefused, match="review_digest_mismatch"):
+            await owner.collect(root, policy, run_id=primary.run_id)
+    else:
+        result = await owner.collect(root, policy, run_id=primary.run_id)
+        if verdict == "approved":
+            assert result == {
+                "run_id": str(primary.run_id),
+                "status": "ready",
+                "results": [{"worker_id": str(primary.id), "result": "verified-worker-result"}],
+            }
+        else:
+            assert result == {
+                "run_id": str(primary.run_id),
+                "status": "blocked",
+                "reason": "review_refused",
+            }
+            assert "results" not in result
+
+    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
+
+    async def load_parent(interaction):
+        return root, policy
+
+    async def unexpected_display(*args, **kwargs):
+        pytest.fail("summary authorization must not post or edit a platform card")
+
+    card = DiscordFleetCard(
+        run_id=primary.run_id,
+        service=owner,
+        load_parent=load_parent,
+        send=unexpected_display,
+        edit=unexpected_display,
+    )
+    assert await card.allow_summary() is (verdict == "approved")
 
 
 @pytest.mark.parametrize("rollback", (False, True))
