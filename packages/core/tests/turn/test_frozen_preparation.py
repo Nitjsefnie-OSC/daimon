@@ -710,3 +710,123 @@ async def test_default_grant_duration_and_turn_count_bound_the_frozen_run(root_t
     assert parent.limits.max_turns == current.limits.max_turns == 4
     assert parent.backend_grants == current.backends and parent.models == current.models
     assert len(transport.requests) == before
+
+
+@pytest.fixture
+async def retained_budget_root_turn(db_preflight, db_nullpool_engine, request):
+    async for value in root_turn.__wrapped__(
+        db_preflight, db_nullpool_engine, live_root=getattr(request, "param", None) == "recorded_i7"
+    ):
+        yield value
+
+
+@pytest.mark.parametrize("retained_budget_root_turn", [None, "recorded_i7"], indirect=True)
+async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
+    retained_budget_root_turn, record_property
+):
+    import json
+    from decimal import Decimal
+    from pathlib import Path
+
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits, resolve_worker_spec
+    from daimon.core.stores.fleet import WorkerPool
+    from daimon.core.turn.runtime_manifest import prepare_source
+
+    updated, current, source = await default_source_turn(retained_budget_root_turn)
+    deps, prepared, _, intent, _, scope, _, transport = updated
+    deps = replace(deps, agent_backends=True, channel_backends=True)
+    updated = (deps, *updated[1:])
+    plan = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "fixtures/i7_r6_planned_fleet_grant.json"
+        ).read_text()
+    )
+    # Refresh only the host-owned lease; retain every recorded financial limit.
+    plan["grant"]["limits"]["deadline"] = current.expires_at.isoformat()
+    value = AgentFleetGrant.model_validate_json(json.dumps(plan["grant"]))
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
+    preview = await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
+    await service.set_fleet_grant(
+        source,
+        value,
+        preview.setting_revision,
+        actor,
+        expected_preview_digest=preview.digest,
+        now=datetime.now(UTC),
+    )
+    await freeze(updated)
+    parent, policy = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    original_limits = parent.limits
+    assert parent.spec.model.provider == "anthropic"
+    assert parent.limits.budget_usd == Decimal("0.49")
+    assert parent.limits.provider_limits_usd["anthropic"] == Decimal("0.04")
+    before = len(transport.requests)
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.source is not None
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        # This is the default reader and request derivation used by _dispatch_worker.
+        async with ports._load_preparation(parent) as original:
+            assert original.source.source.ref == parent.source_agents[0]
+            dispatch_source = await ports.capture_source(parent)
+            for row in plan["workers"]:
+                backend, model = next(
+                    pair for pair in value.choices if pair[1].provider == row["provider"]
+                )
+                native = model.provider == parent.spec.model.provider
+                spec = (
+                    parent.spec
+                    if native
+                    else parent.spec.model_copy(
+                        update={
+                            "model": model,
+                            "tools": (),
+                            "skills": (),
+                            "mcp_servers": (),
+                            "declared_drops": ("mcp", "memory", "sandbox", "skills", "tools"),
+                        }
+                    )
+                )
+                resolved = resolve_worker_spec(
+                    parent,
+                    spec,
+                    policy=policy,
+                    now=datetime.now(UTC),
+                    backend=backend,
+                    resources=parent.resources if native else (),
+                    environment=parent.environment if native else None,
+                    limits=WorkerLimits(
+                        budget_usd=Decimal(row["budget_usd"]),
+                        deadline=parent.limits.deadline,
+                        max_turns=1,
+                    ),
+                    captured_source=dispatch_source,
+                )
+                worker_request = await original.for_worker(parent, resolved)
+                selected = await prepare_source(worker_request)
+                assert selected.target_spec == resolved.spec
+                assert selected.worker.limits.budget_usd == Decimal(row["budget_usd"])
+                record_property(
+                    row["role"],
+                    json.dumps(
+                        {
+                            "provider": model.provider,
+                            "budget_usd": str(resolved.limits.budget_usd),
+                            "retained_dispatch_preparation": "PASS",
+                        }
+                    ),
+                )
+        assert parent.limits == original_limits
+        assert all(r.method == "GET" for r in transport.requests[before:])
+    finally:
+        await ports.close()
