@@ -1,5 +1,8 @@
 """Switch previews use the worker preservation rule, without worker authority."""
 
+import json
+from pathlib import Path
+
 import pytest
 from daimon.core.turn.runtime_manifest import (
     classify_source_obligations,
@@ -493,17 +496,14 @@ def test_daimon_mcp_credential_stays_nondroppable(captured):
 
 
 def _daimon_haiku55(captured):
-    """The real daimon-haiku55 root shape: agent_toolset_20260401 (explicit
-    per-tool configs) plus the universal daimon-mcp mcp_toolset."""
+    """Recorded resolved builtin controls plus the daimon-mcp toolset."""
     toolset = [
-        {
-            "type": "agent_toolset_20260401",
-            "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
-            "configs": [
-                {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
-                for name in ("bash", "read", "edit", "grep", "glob", "write")
-            ],
-        },
+        *json.loads(
+            (
+                Path(__file__).resolve().parents[3]
+                / "mux/tests/fixtures/anthropic_retrieved_builtin_tools.json"
+            ).read_text()
+        ),
         {
             "type": "mcp_toolset",
             "mcp_server_name": "daimon-mcp",

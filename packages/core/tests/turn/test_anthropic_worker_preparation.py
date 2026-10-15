@@ -381,7 +381,9 @@ async def test_foreign_unproved_session_is_never_archived(native_worker):
     assert not any(call.path.endswith(("/archive", "/events")) for call in trace.requests)
 
 
-@pytest.mark.parametrize("native_worker", ["resolved_readback"], indirect=True)
+@pytest.mark.parametrize(
+    "native_worker", ["resolved_readback", "live_root_readback"], indirect=True
+)
 async def test_recorded_builtin_readback_passes_real_allocation_and_session_checks(native_worker):
     from daimon.core.headless_runner import run_worker
 
@@ -402,7 +404,10 @@ async def test_recorded_builtin_readback_passes_real_allocation_and_session_chec
     )
     tools = allocated["tools"]
     assert tools[0]["default_config"]["enabled"] is False
-    assert [config["name"] for config in tools[0]["configs"]] == ["read"]
+    assert {config["name"] for config in tools[0]["configs"]} == {
+        tool.name for tool in root.spec.tools
+    }
+    assert all(config["enabled"] for config in tools[0]["configs"])
     assert len(allocated["skills"]) == 11 and not allocated.get("mcp_servers")
     assert any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
     trace.assert_consumed()

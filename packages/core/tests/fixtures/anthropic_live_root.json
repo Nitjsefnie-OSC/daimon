@@ -1,0 +1,54 @@
+{
+  "execution_identity": {"type": "service_account"},
+  "tools": [
+    {
+      "type": "agent_toolset_20260401",
+      "default_config": {"enabled": true, "permission_policy": {"type": "always_allow"}},
+      "configs": [
+        {"name": "bash", "type": "bash", "enabled": true, "permission_policy": {"type": "always_allow"}},
+        {"name": "read", "type": "read", "enabled": true, "permission_policy": {"type": "always_allow"}},
+        {"name": "edit", "type": "edit", "enabled": true, "permission_policy": {"type": "always_allow"}},
+        {"name": "grep", "type": "grep", "enabled": true, "permission_policy": {"type": "always_allow"}},
+        {"name": "glob", "type": "glob", "enabled": true, "permission_policy": {"type": "always_allow"}},
+        {"name": "write", "type": "write", "enabled": true, "permission_policy": {"type": "always_allow"}}
+      ]
+    },
+    {
+      "type": "mcp_toolset",
+      "default_config": {"enabled": true, "permission_policy": {"type": "always_allow"}},
+      "configs": [],
+      "mcp_server_name": "daimon-mcp"
+    }
+  ],
+  "mcp_servers": [{"type": "url", "name": "daimon-mcp", "url": "https://mcp.invalid/mcp"}],
+  "skills": [
+    {"type": "custom", "skill_id": "skill-live-0", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-1", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-2", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-3", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-4", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-5", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-6", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-7", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-8", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-9", "version": "1"},
+    {"type": "custom", "skill_id": "skill-live-10", "version": "1"}
+  ],
+  "environment": {
+    "state": "active",
+    "scope": "organization",
+    "config": {
+      "networking": {"type": "unrestricted"},
+      "packages": {
+        "apt": ["captured-apt-package-0"],
+        "cargo": [],
+        "gem": [],
+        "go": [],
+        "npm": [],
+        "pip": ["captured-pip-package-0", "captured-pip-package-1", "captured-pip-package-2"],
+        "type": "packages"
+      },
+      "type": "cloud"
+    }
+  }
+}

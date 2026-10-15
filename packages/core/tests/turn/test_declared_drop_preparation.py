@@ -1,7 +1,9 @@
 """Original consent binds actual scoped source reads to one prepared target."""
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from daimon.core.channel_backend import (
@@ -50,6 +52,22 @@ async def consent_request(owned, request):
         skills=params.get("skills", ()),
     )
     environment = ma_environment(tenant_id=identity.tenant_id)
+    if "execution_identity" in params:
+        from daimon.testing.ma_models import ma_model_config
+
+        native = native.model_copy(
+            update={
+                "execution_identity": params["execution_identity"],
+                "version": 10,
+                "model": ma_model_config("claude-haiku-5-5"),
+            }
+        )
+    if "environment" in params:
+        from anthropic.types.beta import BetaEnvironment
+
+        environment = BetaEnvironment.model_validate(
+            {**environment.model_dump(mode="json"), **params["environment"]}
+        )
     router, reads, constructions, counterpart_reads = MARouter(), [], [], []
     router.add_agent(native)
     router.add_environment(environment)
@@ -1123,23 +1141,9 @@ def json_copy(value):
     return json.loads(json.dumps(value))
 
 
-_LIVE_BUILTINS = ("bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search")
-_LIVE_TOOLS = [
-    {
-        "type": "agent_toolset_20260401",
-        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
-        "configs": [
-            {"name": n, "enabled": True, "permission_policy": {"type": "always_allow"}}
-            for n in _LIVE_BUILTINS
-        ],
-    },
-    {
-        "type": "mcp_toolset",
-        "mcp_server_name": "daimon-mcp",
-        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
-        "configs": [],
-    },
-]
+_LIVE_ROOT = json.loads(
+    (Path(__file__).resolve().parents[1] / "fixtures/anthropic_live_root.json").read_text()
+)
 
 
 @pytest.mark.parametrize(
@@ -1147,13 +1151,7 @@ _LIVE_TOOLS = [
     [
         {
             "backend": backend,
-            "tools": _LIVE_TOOLS,
-            "mcp_servers": [
-                {"type": "url", "name": "daimon-mcp", "url": "https://mcp.invalid/mcp"}
-            ],
-            "skills": [
-                {"type": "custom", "skill_id": f"skill-live-{i}", "version": "1"} for i in range(11)
-            ],
+            **_LIVE_ROOT,
         }
         for backend in ("openai", "gemini")
     ],

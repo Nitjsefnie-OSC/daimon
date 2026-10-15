@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -46,41 +47,19 @@ async def captured(owned, request):
         principal_id="admitted-caller",
         authorization_id="admitted-root",
     )
+    live = getattr(request, "param", None) in ("haiku55", "haiku55_credentials")
+    capture = json.loads(
+        (Path(__file__).resolve().parents[1] / "fixtures/anthropic_live_root.json").read_text()
+    )
     native = ma_agent(
         id="root-source",
         name="helper",
         tenant_id=identity.tenant_id,
         model="claude-haiku-5-5",
         system="Protected source instruction",
-        tools=[
-            {
-                "type": "agent_toolset_20260401",
-                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
-                "configs": [
-                    {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
-                    for name in (
-                        "bash",
-                        "read",
-                        "edit",
-                        "grep",
-                        "glob",
-                        "write",
-                        "web_fetch",
-                        "web_search",
-                    )
-                ],
-            },
-            {
-                "type": "mcp_toolset",
-                "mcp_server_name": "daimon-mcp",
-                "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
-                "configs": [
-                    {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
-                    for name in ("describe_agent", "list_my_sessions")
-                ],
-            },
-        ]
-        if getattr(request, "param", None) in ("haiku55", "haiku55_credentials")
+        version=10 if live else 1,
+        tools=capture["tools"]
+        if live
         else [
             {
                 "type": "custom",
@@ -89,17 +68,25 @@ async def captured(owned, request):
                 "input_schema": {"type": "object", "properties": {}},
             }
         ],
-        skills=[
-            {"type": "custom", "skill_id": f"skill-live-{i}", "version": "1"} for i in range(11)
-        ]
-        if getattr(request, "param", None) in ("haiku55", "haiku55_credentials")
-        else (),
-        mcp_servers=[{"type": "url", "name": "daimon-mcp", "url": "https://mcp.invalid/mcp"}]
-        if getattr(request, "param", None) in ("haiku55", "haiku55_credentials")
+        skills=capture["skills"] if live else (),
+        mcp_servers=capture["mcp_servers"]
+        if live
         else [{"type": "url", "name": "private", "url": "https://private.invalid"}]
         if getattr(request, "param", None) == "mcp"
         else (),
     )
+    if live:
+        native = native.model_copy(update={"execution_identity": capture["execution_identity"]})
+    environment = ma_environment(tenant_id=identity.tenant_id)
+    if live:
+        from anthropic.types.beta import BetaEnvironment
+
+        environment = BetaEnvironment.model_validate(
+            {
+                **environment.model_dump(mode="json"),
+                **capture["environment"],
+            }
+        )
     trace = ScriptedTransport()
     trace.queue(
         ScriptedReply(
@@ -130,7 +117,7 @@ async def captured(owned, request):
         source = await project_session_resources(
             source,
             agent=actual,
-            environment=ma_environment(tenant_id=identity.tenant_id),
+            environment=environment,
             session_factory=sessions,
             tenant_id=identity.tenant_id,
             agent_uuid=source.agent_id,
@@ -530,7 +517,9 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captu
         }
     )
     executing = sdk_agent(execution)
-    environment = ma_environment(tenant_id=source.tenant_id)
+    from anthropic.types.beta import BetaEnvironment
+
+    environment = BetaEnvironment.model_validate(dict(source.environment.native))
     router = MARouter()
     snapshots = {}
 
@@ -651,3 +640,41 @@ async def test_same_provider_native_loss_is_declared_unless_projecting_a_worker_
         resources=permissions.resources,
         worker_ceiling=True,
     )
+
+
+async def test_excluded_toolset_removes_its_credential_ref_only(captured):
+    from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
+    source = captured[0]
+    native = ExtensionConfig(
+        namespace="anthropic.agent_tools",
+        version=1,
+        value={"tools": [{"type": "mcp_toolset", "mcp_server_name": "private"}]},
+    )
+    source = source.model_copy(
+        update={
+            "effective_spec": source.effective_spec.model_copy(
+                update={
+                    "extensions": (native,),
+                    "mcp_servers": (
+                        MCPConnection(
+                            name="private",
+                            url="https://private.invalid",
+                            credential_ref="private-key",
+                        ),
+                    ),
+                }
+            ),
+            "resource_requirements": (
+                ResourceBinding(
+                    id="native-credential", kind="credential", credential_ref="private-key"
+                ),
+                ResourceBinding(
+                    id="unrelated-credential", kind="credential", credential_ref="other-key"
+                ),
+            ),
+        }
+    )
+    ceiling = worker_source_ceiling(source)
+    assert not ceiling.effective_spec.mcp_servers
+    assert ceiling.resource_requirements == (source.resource_requirements[1],)
