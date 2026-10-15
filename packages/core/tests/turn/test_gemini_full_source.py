@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import re
 import zipfile
 from dataclasses import replace
@@ -18,7 +19,7 @@ from pathlib import Path
 import httpx
 import pytest
 import yaml
-from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
+from daimon.core.mcp_auth import token_jti
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores import mux_state
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
@@ -35,6 +36,8 @@ from daimon.core.turn.runtime_manifest import (
     source_preservation_pin,
 )
 from daimon.core.turn.runtimes import build_channel_runtime, scope_channel_runtimes
+from daimon.testing import f2_mcp_binding
+from daimon.testing.f2_mcp_binding import AgentMCPAuthority, AgentMCPBinding
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, SkillRef
@@ -250,18 +253,43 @@ async def full(consent_request, monkeypatch, tmp_path):
         "full-counterpart", canonical.target_spec, expected_revision=0, key="full-publication"
     )
     assert native and all("Bearer" not in json.dumps(body) for body in [native])
-    # Native create/readback ACK precedes the existing token mint owner.
-    async with sessions.begin() as db:
-        token = await mint_agent_mcp_token(
-            db,
-            account_id=actor.account_id,
-            tenant_id=source.tenant_id,
-            agent_id=source.agent_id,
-            label="offline-source",
-            secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
-            now=request.now(),
-            ttl_days=600 / 86400,
+    # Use the same after-ACK owner the provisioner invokes, including actual
+    # registry commit/readback, durable intent and exact-JTI revocation.
+    signer = tmp_path / "mcp.signer"
+    signer.write_text(request.deps.mcp.jwt_secret.get_secret_value())
+    signer.chmod(0o600)
+    auth_output = tmp_path / "after-ack"
+    auth_output.mkdir(mode=0o700)
+    monkeypatch.setattr(f2_mcp_binding, "create_async_engine", lambda *_, **__: sessions.kw["bind"])
+    redacted = []
+    # The captured native read uses a service account. Canonical source pins
+    # intentionally omit that transport account; the verified caller resource
+    # scope below supplies the mint authority, exactly as source consent does.
+    assert source.resource_scope.tenant_id == scope.tenant_id
+    assert source.resource_scope.account_id == scope.account_id
+    canonical_ref = source.source.ref.model_copy(update={"account_id": None})
+    binding = AgentMCPBinding(
+        authority=AgentMCPAuthority(
+            provider="gemini",
+            scope=scope,
+            account_scope_id="project",
+            output=auth_output,
+            deadline_s=600,
+            database_url=os.environ["DAIMON_DATABASE__TEST_URL"],
+            mcp_signing_secret_file=signer,
+            canonical_source=canonical_ref,
+            acknowledged=lambda actual: (
+                actual == counterpart.agent.ref
+                and any(
+                    call.method == "GET" and call.url.path.endswith(actual.id) for call in calls
+                )
+            ),
+            redact=redacted.extend,
         )
+    )
+
+    token = await binding.bind(counterpart.agent.ref)
+    assert token in redacted
     credential = tmp_path / "caller.token"
     credential.write_text(token)
     credential.chmod(0o600)
@@ -294,7 +322,10 @@ async def full(consent_request, monkeypatch, tmp_path):
     manifest.write_text(json.dumps([plan.model_dump(mode="json")]))
     monkeypatch.setenv(plan.api_key_env, "offline-full-source")
     calls.clear()
-    yield request, plan, canonical, native, calls, posts, token, archives, source_reads, router
+    try:
+        yield request, plan, canonical, native, calls, posts, token, archives, source_reads, router
+    finally:
+        await binding.close()
     assert all(client.is_closed for client in clients)
 
 
