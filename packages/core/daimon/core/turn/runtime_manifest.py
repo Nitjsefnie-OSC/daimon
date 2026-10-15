@@ -1048,7 +1048,7 @@ async def read_frozen_preparation(
             now=now(),
             resources=parent.resources,
             environment=parent.environment,
-            limits=parent.limits,
+            limits=parent.limits.for_provider(parent.spec.model.provider),
             captured_source=request.source,
         )
         remaining_s(bound, now=now(), refuse_expired=True)
