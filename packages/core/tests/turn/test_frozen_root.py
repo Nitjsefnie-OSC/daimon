@@ -54,7 +54,9 @@ from .conftest import make_status_idle
 
 
 @pytest.fixture
-async def root_turn(db_preflight, db_nullpool_engine):
+async def root_turn(
+    db_preflight, db_nullpool_engine, *, live_root=False, null_environment_description=False
+):
     sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
     async with sm.begin() as db:
@@ -79,6 +81,32 @@ async def root_turn(db_preflight, db_nullpool_engine):
         model="claude-haiku-5-5",
     )
     environment = ma_environment(tenant_id=str(tenant.id))
+    if live_root:
+        import json
+        from pathlib import Path
+
+        from anthropic.types.beta import BetaEnvironment
+
+        capture = json.loads(
+            (Path(__file__).resolve().parents[1] / "fixtures/anthropic_live_root.json").read_text()
+        )
+        native = native.model_copy(
+            update={
+                "tools": capture["tools"],
+                "skills": capture["skills"],
+                "mcp_servers": capture["mcp_servers"],
+                "execution_identity": capture["execution_identity"],
+                "version": 10,
+            }
+        )
+        # Validate the actual readback shape before the router serves it.
+        native = type(native).model_validate(native.model_dump(mode="json"))
+        environment = BetaEnvironment.model_validate(
+            {**environment.model_dump(mode="json"), **capture["environment"]}
+        )
+    if null_environment_description:
+        # Native SDK readback permits null response metadata despite its str annotation.
+        environment = environment.model_copy(update={"description": None})
     session_id = "root-session-" + str(uuid4())
     snapshot = ma_session(id=session_id, agent=native, environment_id=environment.id)
     router = MARouter()

@@ -11,6 +11,7 @@ from daimon.core.channel_backend import (
     AgentBackendService,
     resolve_turn_backend,
 )
+from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.scope import ResolvedConfig
@@ -62,6 +63,12 @@ async def consent_request(owned, request):
                 "model": ma_model_config("claude-haiku-5-5"),
             }
         )
+    if "model" in params:
+        from anthropic.types.beta import BetaManagedAgentsAgent
+
+        native = BetaManagedAgentsAgent.model_validate(
+            {**native.model_dump(mode="json"), "model": params["model"]}
+        )
     if "environment" in params:
         from anthropic.types.beta import BetaEnvironment
 
@@ -91,7 +98,19 @@ async def consent_request(owned, request):
             backend_revision_origin="agent",
         )
         request = ProviderPreparationRequest(
-            deps=replace(deps_for(client, sessions), agent_backends=True, channel_backends=True),
+            deps=replace(
+                deps_for(client, sessions),
+                agent_backends=True,
+                channel_backends=True,
+                mcp=McpSettings.model_validate(
+                    {
+                        "public_url": "https://mcp.invalid/mcp",
+                        "jwt_secret": "offline-caller-presence",
+                    }
+                )
+                if params.get("caller_mcp")
+                else McpSettings(),
+            ),
             admission=admitted,
             scope=Scope(
                 tenant_id=str(identity.tenant_id),
@@ -1152,6 +1171,7 @@ _LIVE_ROOT = json.loads(
         {
             "backend": backend,
             **_LIVE_ROOT,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
@@ -1163,7 +1183,14 @@ async def test_live_manifest_switch_preview_confirm_and_prepare_declare_exact_lo
     request, _, source, _, accepted, _, reads, constructions, _, _ = consent_request
     assert len(source.effective_spec.skills) == 11
     assert source.memory_required
-    assert accepted.declared_drops == ("mcp", "memory", "sandbox", "skills", "tools")
+    assert accepted.declared_drops == (
+        "mcp",
+        "memory",
+        "model_controls",
+        "sandbox",
+        "skills",
+        "tools",
+    )
     prepared = await read_preparation_counterpart(request)
     assert prepared.target_spec.declared_drops == accepted.declared_drops
     assert not prepared.target_spec.tools and not prepared.target_spec.mcp_servers
@@ -1289,3 +1316,246 @@ async def test_well_formed_channel_skill_remains_a_declarable_loss(
     assert "skills" not in classify_source_obligations(
         captured, retained.model_copy(update={"declared_drops": ()}), environment=None
     )
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": backend,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+        for backend in ("openai", "gemini")
+    ],
+    indirect=True,
+)
+async def test_portable_recorded_model_controls_consent_apply_and_prepare(consent_request):
+    request, service, source, actor, accepted, _, _, constructions, _, _ = consent_request
+    assert accepted.declared_drops == ("memory", "model_controls", "sandbox")
+    quote = await service.preview(source, request.admission.backend_revision.backend)
+    with pytest.raises(AgentBackendRefused):
+        await service.set_backend(
+            source,
+            quote.target_backend,
+            accepted.local,
+            actor,
+            accepted_drops=("memory", "sandbox"),
+            expected_preview_digest=quote.digest,
+        )
+    selected = await read_preparation_counterpart(request)
+    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert "model_controls" in selected.target_spec.system
+    assert not selected.target_spec.extensions
+    assert len(constructions) == 1
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": backend,
+            "caller_mcp": True,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+        for backend in ("openai", "gemini")
+    ],
+    indirect=True,
+)
+async def test_captured_portable_caller_mcp_loss_reaches_retained_preparation(consent_request):
+    request, service, source, actor, accepted, _, _, constructions, _, _ = consent_request
+    assert source.effective_spec.mcp_servers == ()
+    assert len(source.resource_requirements) == 1
+    assert source.resource_requirements[0].id.startswith("caller-mcp:")
+    assert accepted.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    quote = await service.preview(source, request.admission.backend_revision.backend)
+    with pytest.raises(AgentBackendRefused):
+        await service.set_backend(
+            source,
+            quote.target_backend,
+            accepted.local,
+            actor,
+            accepted_drops=("memory", "model_controls", "sandbox"),
+            expected_preview_digest=quote.digest,
+        )
+    selected = await read_preparation_counterpart(request)
+    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert not selected.target_spec.mcp_servers
+    assert len(constructions) == 1
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": "anthropic",
+            "caller_mcp": True,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+    ],
+    indirect=True,
+)
+async def test_portable_native_no_drop_consent_survives_store_and_retained_prepare(consent_request):
+    from mux.drivers.anthropic.resources.agents import agent_payload
+
+    request, service, source, actor, accepted, router, reads, _, _, _ = consent_request
+    assert accepted.drop_consent is not None
+    assert accepted.declared_drops == ()
+    assert request.admission.backend_revision.model is None
+    assert (await service.revision(source, accepted.local)).drop_consent == accepted.drop_consent
+    await service.clear_backend(source, accepted.local, actor)
+    prepared = await prepare_source(request)
+    assert prepared.target_spec == source.effective_spec
+    assert prepared.source.resource_requirements == source.resource_requirements
+    assert len(prepared.source.resource_requirements) == 1
+    assert classify_source_obligations(
+        source,
+        source.effective_spec,
+        environment=source.environment.spec,
+        resources=source.resource_requirements,
+        retained_agent=source.source.ref,
+        worker_ceiling=True,
+    )
+    assert agent_payload(prepared.target_spec)["model"] == {
+        "id": "claude-haiku-5-5",
+        "speed": "standard",
+        "effort": {"type": "medium"},
+    }
+    assert all(call.method == "GET" for call in reads)
+    changed = request.admission.agent.model.model_copy(update={"effort": {"type": "high"}})
+    router.routes.clear()
+    router.add_agent(request.admission.agent.model_copy(update={"model": changed}))
+    router.add_environment(request.admission.environment)
+    with pytest.raises(AgentBackendRefused, match="confirm"):
+        await prepare_source(request)
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": "openai",
+            "caller_mcp": True,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize("fault", [None, "foreign_agent", "missing_association", "origin"])
+async def test_agent_origin_openai_host_preserves_original_consent_before_paid_request(
+    consent_request, fault
+):
+    import httpx
+    from daimon.core._models import ChannelConfigRevision
+    from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai
+    from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
+    from mux.contracts.resources import SessionSpec
+    from mux.drivers.openai.session_controls import SessionControls
+    from mux.drivers.openai.transport import SDKTransport
+    from mux.errors import ScopeViolation
+    from openai import AsyncOpenAI
+    from sqlalchemy import update
+
+    request, service, source, actor, accepted, *_ = consent_request
+    await service.clear_backend(source, accepted.local, actor)
+    selected = await read_preparation_counterpart(request)
+    selected = replace(
+        selected, now=lambda: datetime.now(UTC), deadline=datetime.now(UTC) + timedelta(seconds=30)
+    )
+    revision = selected.admission.backend_revision
+    assert selected.target_spec.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    assert selected.verified_counterpart == selected.counterpart
+    if fault == "foreign_agent":
+        selected = replace(
+            selected,
+            admission=replace(
+                selected.admission,
+                agent=selected.admission.agent.model_copy(update={"id": "foreign"}),
+            ),
+        )
+    elif fault is not None:
+        async with selected.deps.sessionmaker.begin() as db:
+            await db.execute(
+                update(ChannelConfigRevision)
+                .where(
+                    ChannelConfigRevision.tenant_id == selected.tenant_id,
+                    ChannelConfigRevision.local == revision.local,
+                )
+                .values(
+                    **(
+                        {"agent_backend_ref": None}
+                        if fault == "missing_association"
+                        else {"origin": "channel"}
+                    )
+                )
+            )
+
+    class PaidBoundary(BaseException):
+        pass
+
+    calls = []
+
+    def native(call):
+        calls.append(call)
+        if call.method == "POST":
+            assert call.url.path == "/v1/agents/sessions"
+            raise PaidBoundary()
+        assert call.url.path == "/v1/agents/native-counterpart"
+        return httpx.Response(
+            200,
+            json={
+                "id": "native-counterpart",
+                "metadata": {"mux_tenant": str(selected.tenant_id)},
+                "multi_agent": {"enabled": False},
+            },
+        )
+
+    async def plan(actual):
+        return SessionSpec(
+            agent=selected.counterpart.agent.ref,
+            environment=selected.counterpart.agent.ref.model_copy(
+                update={"kind": "environment", "id": "native-environment"}
+            ),
+            agent_revision=Revision(local=0),
+            config_revision=revision.local,
+        )
+
+    async with AsyncOpenAI(
+        api_key="offline",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(native)),
+    ) as sdk:
+        runtime = OpenAIHostRuntime(
+            lambda *_: SDKTransport(sdk),
+            OpenAIRecoveryJournal(),
+            OpenAIUsageRevisions(),
+            account_scope_id="project",
+            session_plan=plan,
+            authorization=lambda scope, *_: scope == selected.scope,
+            controls=SessionControls(
+                model=revision.model,
+                multi_agent_enabled=False,
+                container_size="small",
+                spend_limit_usd_cents=4,
+            ),
+        )
+        selected = replace(
+            selected,
+            deps=replace(
+                selected.deps,
+                state_store=mux_state.PostgresStateStore(selected.deps.sessionmaker),
+                turn_runtimes={revision.profile: runtime},
+            ),
+        )
+        with pytest.raises(PaidBoundary if fault is None else ScopeViolation):
+            await prepare_openai(selected)
+    if fault is not None:
+        assert not calls
+        return
+    assert sum(call.method == "POST" for call in calls) == 1
+    async with selected.deps.sessionmaker() as db:
+        assert await mux_state.get_config_revision(db, revision.channel, revision.local) == revision
+        assert await mux_state.config_origin(db, revision.channel, revision.local) == "agent"
+        assert (
+            await mux_state.get_config_agent_revision(db, revision, agent_id=source.agent_id)
+            == accepted
+        )

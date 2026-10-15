@@ -90,15 +90,51 @@ async def test_real_root_model_survives_session_source_projection(
             mcp_servers=(),
             declared_drops=("memory", "sandbox", "mcp", "skills", "tools"),
         )
-        # Model effort and inference speed have no declared-loss tag: keep the refusal.
+        # Valid foreign model controls require their own explicit loss consent.
         assert classify_source_obligations(projected, foreign, environment=None) == frozenset(
-            {"source_definition"}
+            {"model_controls"}
         )
-        assert "source_definition" in classify_source_obligations(
+        assert "model_controls" in classify_source_obligations(
             projected,
             foreign.model_copy(update={"extensions": target.extensions}),
             environment=None,
         )
+        consented = foreign.model_copy(
+            update={"declared_drops": (*foreign.declared_drops, "model_controls")}
+        )
+        assert classify_source_obligations(projected, consented, environment=None) == frozenset()
+        preview = preview_source_drops(projected, foreign.model)
+        assert preview.declared_drops == (
+            "mcp",
+            "memory",
+            "model_controls",
+            "sandbox",
+            "skills",
+            "tools",
+        )
+        for invalid in ({**model, "effort": "invalid"}, {**model, "unknown": True}):
+            invalid_spec = projected.effective_spec.model_copy(
+                update={
+                    "extensions": tuple(
+                        item.model_copy(update={"value": {"model": invalid}})
+                        if item.namespace == "anthropic.model_config"
+                        else item
+                        for item in projected.effective_spec.extensions
+                    )
+                }
+            )
+            assert "source_definition" in classify_source_obligations(
+                projected.model_copy(update={"effective_spec": invalid_spec}),
+                consented,
+                environment=None,
+            )
+
+    wrong_model = target.model_copy(
+        update={"model": ModelRef(provider="anthropic", id="claude-sonnet-5-5")}
+    )
+    assert "source_definition" in classify_source_obligations(
+        projected, wrong_model, environment=None
+    )
 
     extensions = tuple(
         item for item in target.extensions or () if item.namespace != "anthropic.model_config"
@@ -130,6 +166,13 @@ async def test_real_root_model_survives_session_source_projection(
         malformed_source = projected.model_copy(update={"effective_spec": malformed})
         assert "source_definition" in classify_source_obligations(
             malformed_source, malformed, environment=None
+        )
+        assert "source_definition" in classify_source_obligations(
+            malformed_source,
+            malformed,
+            environment=projected.environment.spec,
+            resources=projected.resource_requirements,
+            retained_agent=projected.source.ref,
         )
 
 

@@ -1480,12 +1480,11 @@ def test_source_obligations_cannot_be_silently_omitted(field):
     additions = {
         "skills": (SkillRef(id="pinned", version="1"),),
     }
-    if field != "tools":
+    if field == "mcp":
         additions["mcp_servers"] = (
             MCPConnection(
                 name="bound",
                 url="https://bound.invalid",
-                credential_ref="bound-auth" if field != "mcp" else None,
                 tool_policy={"allowed_tools": ["read"]},
             ),
         )
@@ -2023,3 +2022,101 @@ def test_freeze_checks_nonselected_backend_grants_against_the_original_policy():
         )
     frozen = freeze_root_permissions(root, source, admission=admission, policy=POLICY, now=NOW)
     assert frozen.backend_grants == root.backend_grants and frozen.models == root.models
+
+
+@pytest.mark.parametrize(
+    "provider,expected", [("anthropic", "0.04"), ("openai", "0.055"), ("gemini", "0.49")]
+)
+def test_inherited_worker_budget_attenuates_to_its_provider(provider, expected):
+    root = parent(provider)
+    limits = WorkerLimits.model_validate(
+        root.limits.model_dump()
+        | {
+            "budget_usd": Decimal("0.49"),
+            "provider_limits_usd": {
+                "anthropic": Decimal("0.04"),
+                "openai": Decimal("0.055"),
+                "gemini": Decimal("0.49"),
+            },
+        }
+    )
+    root = replace(root, limits=limits)
+    inherited = resolve(root)
+    assert inherited.limits.budget_usd == Decimal(expected)
+    assert inherited.limits.provider_limits_usd == limits.provider_limits_usd
+    requested = WorkerLimits(budget_usd=Decimal(expected), deadline=limits.deadline, max_turns=1)
+    explicit = resolve(root, limits=requested)
+    assert explicit.limits.budget_usd == Decimal(expected)
+    assert explicit.limits.provider_limits_usd == limits.provider_limits_usd
+    smaller = replace(root, limits=limits.model_copy(update={"budget_usd": Decimal("0.02")}))
+    assert resolve(smaller).limits.budget_usd == Decimal("0.02")
+    assert root.limits == limits
+
+
+@pytest.mark.parametrize("provider,ceiling", [("anthropic", "0.04"), ("openai", "0.055")])
+def test_explicit_worker_budget_cannot_exceed_provider_ceiling(provider, ceiling):
+    root = parent(provider)
+    root = replace(
+        root,
+        limits=WorkerLimits.model_validate(
+            root.limits.model_dump()
+            | {
+                "budget_usd": Decimal("0.49"),
+                "provider_limits_usd": {provider: Decimal(ceiling)},
+            }
+        ),
+    )
+    request = WorkerLimits(
+        budget_usd=Decimal(ceiling) + Decimal("0.000001"),
+        deadline=root.limits.deadline,
+        max_turns=1,
+    )
+    with pytest.raises(WorkerSpecRefused, match="provider_limits_usd: not_subset"):
+        resolve(root, limits=request)
+
+
+def test_explicit_worker_budget_cannot_exceed_global_ceiling():
+    root = parent("gemini")
+    root = replace(
+        root,
+        limits=WorkerLimits.model_validate(
+            root.limits.model_dump()
+            | {
+                "budget_usd": Decimal("0.49"),
+                "provider_limits_usd": {"gemini": Decimal("0.50")},
+            }
+        ),
+    )
+    request = WorkerLimits(
+        budget_usd=Decimal("0.490001"), deadline=root.limits.deadline, max_turns=1
+    )
+    with pytest.raises(WorkerSpecRefused, match="budget: not_subset"):
+        resolve(root, limits=request)
+
+
+@pytest.mark.parametrize("field", ("max_input_tokens", "max_output_tokens"))
+@pytest.mark.parametrize("replacement", (None, 101))
+def test_gemini_worker_caps_attenuate_monotonically(field, replacement):
+    root = parent("gemini")
+    limits = WorkerLimits.model_validate(
+        root.limits.model_dump()
+        | {"max_input_tokens": 100, "max_output_tokens": 100, "max_turns": 1}
+    )
+    root = replace(root, limits=limits)
+    narrower = limits.model_copy(update={"max_input_tokens": 99, "max_output_tokens": 99})
+    assert resolve(root, limits=narrower).limits == narrower
+    with pytest.raises(WorkerSpecRefused, match=field):
+        resolve(root, limits=limits.model_copy(update={field: replacement}))
+
+
+@pytest.mark.parametrize(
+    "update", ({"max_turns": 2}, {"max_output_tokens": 65537}, {"max_model_requests": 1})
+)
+def test_gemini_unknown_or_expanded_execution_envelopes_refuse(update):
+    limits = WorkerLimits.model_validate(
+        parent("gemini").limits.model_dump()
+        | {"max_input_tokens": 262144, "max_output_tokens": 65536, "max_turns": 1}
+        | update
+    )
+    with pytest.raises(WorkerSpecRefused):
+        limits.require_profile(get_profile("gemini.inline_reuse"))

@@ -10,7 +10,13 @@ from pydantic import JsonValue
 from mux.contracts.ids import ModelRef
 from mux.contracts.resources import Agent
 from mux.drivers.gemini.mcp_auth import model_request
-from mux.drivers.gemini.transport import Object, Transport, object_value, string
+from mux.drivers.gemini.transport import (
+    Object,
+    TokenCountingTransport,
+    Transport,
+    object_value,
+    string,
+)
 from mux.errors import ProviderError
 from mux.profiles.gemini import WORKER_MODEL
 
@@ -40,14 +46,27 @@ class FlashAccounting(Protocol):
 
 class FlashTransport:
     def __init__(
-        self, source: Transport, accounting: FlashAccounting, *, native_agent: Agent | None = None
+        self,
+        source: Transport,
+        accounting: FlashAccounting,
+        *,
+        native_agent: Agent | None = None,
+        bounded_worker: bool = False,
     ) -> None:
+        self._bounded_worker = bounded_worker
         self._native_agent = native_agent
         self.source, self.accounting = source, accounting
         self._models: dict[str, ModelRef] = {}
 
     def model_for_interaction(self, interaction: str) -> ModelRef | None:
         return self._models.get(interaction)
+
+    async def count_input_tokens(self, request: Mapping[str, JsonValue]) -> int:
+        if not isinstance(self.source, TokenCountingTransport):
+            raise ProviderError(
+                "invalid_request", retryable=False, native_code="unknown_input_tokens"
+            )
+        return await self.source.count_input_tokens(request)
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         request = deepcopy(dict(request))
@@ -63,7 +82,11 @@ class FlashTransport:
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
-        models = FLASH_MODELS
+        models = (FLASH_PRIMARY,) if self._bounded_worker else FLASH_MODELS
+        if self._bounded_worker and (not capped or required != FLASH_PRIMARY):
+            raise ProviderError(
+                "invalid_request", retryable=False, native_code="worker_model_required"
+            )
         if self._native_agent is not None:
             if capped:
                 raise ProviderError(

@@ -76,10 +76,22 @@ def native_definition(
 
 
 def verify_definition(observed: Object, expected: Object) -> None:
-    """Ignore optional native metadata, never missing model/tool/mount evidence."""
+    """Allow proto3 omission of empty lists, retaining all other definition proof."""
     for field in ("id", "base_agent", "agent_config", "tools", "base_environment"):
         actual = observed.get(field)
         wanted = expected[field]
+        # Repeated fields may be omitted on readback only when compiled empty.
+        # Copy nested data so verification never alters the provider evidence.
+        if field == "tools" and field not in observed and wanted == []:
+            continue
+        if (
+            field == "base_environment"
+            and isinstance(actual, dict)
+            and isinstance(wanted, dict)
+            and wanted.get("sources") == []
+            and "sources" not in actual
+        ):
+            actual = {**actual, "sources": []}
         # The documented remote shorthand is equivalent only without mounts.
         if (
             field == "base_environment"

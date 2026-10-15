@@ -165,7 +165,30 @@ async def ordinary(consent_request, monkeypatch, tmp_path):
     assert all(client.is_closed for client in clients)
 
 
-async def test_ordinary_confirmed_target_native_readback_and_two_real_host_turns(ordinary):
+@pytest.mark.parametrize("first_reuse", [True, False])
+async def test_ordinary_confirmed_target_native_readback_and_two_real_host_turns(
+    ordinary, first_reuse
+):
+    await assert_ordinary_native_preparation_and_turns(ordinary, first_reuse=first_reuse)
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": "gemini",
+            "caller_mcp": True,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+    ],
+    indirect=True,
+)
+async def test_portable_caller_mcp_and_model_losses_reach_native_gemini_preparation(ordinary):
+    assert ordinary[2].target_spec.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    await assert_ordinary_native_preparation_and_turns(ordinary)
+
+
+async def assert_ordinary_native_preparation_and_turns(ordinary, *, first_reuse=True):
     request, plan, canonical, native, calls, posts, _, *_ = ordinary
     original = request
     service, source, actor, accepted = ordinary[8:]
@@ -196,7 +219,7 @@ async def test_ordinary_confirmed_target_native_readback_and_two_real_host_turns
             external_user_id=request.external_user_id,
             thread_id=request.thread_id,
             session_account_id=request.session_account_id,
-            reuse_existing=True,
+            reuse_existing=first_reuse if index == 0 else True,
         )
         assert prepared.runtime.journal.deployment.native_agent.spec == canonical.target_spec
         if session is not None:

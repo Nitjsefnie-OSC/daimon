@@ -28,7 +28,7 @@ import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Decision, Place, Subject, Surface, authorize
 from daimon.core.errors import DaimonError
-from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker, worker_slot
+from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker, spawn_operation_key, worker_slot
 from daimon.core.neutral_resources import (
     ResolvedWorkerSpec,
     WorkerPermissions,
@@ -723,6 +723,25 @@ async def _produce_fleet_budget(
                     provider_exposures.get(member.backend, Decimal(0)) + member.reserved_usd
                 )
             for worker in selected:
+                # Input-bearing creation has a paid claim before a native binding
+                # exists. Keep its full reservation while that claim is in flight;
+                # absent/unknown receipts never authorize another allocation.
+                creating_input = False
+                if (
+                    worker.status == "starting"
+                    and worker.binding_id is None
+                    and worker.turns_used == 1
+                ):
+                    claim = await mux_state.get_operation(
+                        session,
+                        facts.scope,
+                        spawn_operation_key(run.id, worker.ordinal) + ":send:0",
+                    )
+                    creating_input = (
+                        claim is not None
+                        and claim.slot == worker_slot(run, worker)
+                        and claim.operation.status in ("sent", "processed")
+                    )
                 reason = None
                 if run.status != "running" or worker.status not in (
                     "pending",
@@ -761,8 +780,10 @@ async def _produce_fleet_budget(
                     and (
                         worker.turns_used != 1
                         or worker.turns_used > worker.max_turns
-                        or worker.status != "running"
-                        or worker.binding_id is None
+                        or (
+                            not creating_input
+                            and (worker.status != "running" or worker.binding_id is None)
+                        )
                     )
                 ):
                     reason = "accepted_attempt_inventory_unavailable"

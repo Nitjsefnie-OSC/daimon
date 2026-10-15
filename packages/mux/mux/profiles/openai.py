@@ -67,6 +67,9 @@ CONVERSATION_ONLY = Profile(
     sdk_pin="openai>=2.54.0,<3",
     core=False,
     support={
+        "neutral_catalog": "native",
+        "agent_delete": "native",
+        "session_spend_control": "native",
         "thread_workspace_persistence": "unsupported",
         "turn_lifecycle": "native",
         "cancel": "native",

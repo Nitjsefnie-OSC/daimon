@@ -1352,6 +1352,8 @@ async def _count_input(
     worker: FleetWorker,
     lease: Any,
     key: str,
+    *,
+    expected_status="running",
 ) -> FleetWorker:
     """One model input: its operation's winning send and the turn count, one commit."""
     scope = _driver_scope(run)
@@ -1367,6 +1369,7 @@ async def _count_input(
             tenant_id=run.tenant_id,
             worker_id=worker.id,
             expected_version=worker.version,
+            expected_status=expected_status,
         )
 
 
@@ -1460,3 +1463,26 @@ async def test_a_worker_cannot_use_more_than_its_max_turns(
         )
     _, (after,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
     assert after.turns_used == 3
+
+
+async def test_creation_input_counts_only_with_explicit_starting_state(db_session_factory):
+    sm = db_session_factory
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    run = await _run(sm)
+    await _worker(sm, run, 0)
+    worker = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+    assert worker.status == "starting" and worker.binding_id is None
+    slot = worker_slot(run, worker)
+    lease = await store.acquire_lease(
+        slot, holder="allocation", turn_id="create-input", now=NOW, ttl=timedelta(minutes=5)
+    )
+    counted = await _count_input(
+        sm, store, run, worker, lease, "create-input:send:0", expected_status="starting"
+    )
+    assert counted.turns_used == 1 and counted.status == "starting" and counted.binding_id is None
+    with pytest.raises(FleetConflict):
+        await _count_input(
+            sm, store, run, counted, lease, "extra-input:send:0", expected_status="starting"
+        )
+    _, (after,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert after.turns_used == 1 and after.version == counted.version

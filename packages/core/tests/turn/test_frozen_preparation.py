@@ -59,6 +59,103 @@ async def test_exact_request_reconstructed_from_retained_facts(root_turn):
     assert all(item.method == "GET" for item in transport.requests[before:])
 
 
+@pytest.mark.parametrize(
+    "retained_budget_root_turn", ["recorded_i7", "recorded_i7_null_description"], indirect=True
+)
+@pytest.mark.parametrize("association_fault", [None, "missing", "foreign", "channel"])
+async def test_recorded_agent_origin_root_retains_preparation_association(
+    retained_budget_root_turn, association_fault
+):
+    from daimon.core._models import ChannelConfigRevision
+    from daimon.core.stores import mux_state
+    from mux.contracts.config import ConfigRevision
+    from mux.errors import ScopeViolation
+    from mux.profiles import backend_selection
+    from sqlalchemy import update
+
+    value = retained_budget_root_turn
+    deps, prepared, _, intent, _, scope, binding, _ = value
+    source = prepared._source
+    actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
+
+    async def capture(_source):
+        return source
+
+    service = AgentBackendService(deps.sessionmaker, enabled=True, capture_source=capture)
+    preview = await service.preview(source, "anthropic")
+    current = await service.current(source)
+    accepted = await service.set_backend(
+        source,
+        "anthropic",
+        current.local,
+        actor,
+        accepted_drops=preview.declared_drops,
+        expected_preview_digest=preview.digest,
+    )
+    revision = ConfigRevision.create(binding.thread.channel, 1, backend_selection("anthropic"))
+    async with deps.sessionmaker.begin() as db:
+        await mux_state.put_config_revision(db, revision, origin="agent", agent_revision=accepted)
+    binding = binding.model_copy(
+        update={"config_revision": revision.local, "generation": binding.generation + 1}
+    )
+    await deps.state_store.put_binding(binding, expected_generation=binding.generation - 1)
+    admission = replace(
+        prepared.admission,
+        backend_revision=revision,
+        backend_revision_origin="agent",
+        backend_agent_revision=accepted,
+    )
+    prepared = replace(
+        prepared,
+        admission=admission,
+        _preparation=replace(prepared._preparation, admission=admission),
+    )
+    value = (deps, prepared, *value[2:6], binding, value[7])
+    await freeze(value)
+    async with deps.sessionmaker() as db:
+        stored = await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id)
+    assert (
+        stored.result["preparation"]["environment"]["spec"]["description"]
+        == prepared.admission.environment.description
+    )
+    await service.clear_backend(source, accepted.local, actor)
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    if association_fault:
+        change = (
+            {"origin": "channel"}
+            if association_fault == "channel"
+            else {"agent_backend_ref": None}
+            if association_fault == "missing"
+            else {"agent_backend_ref": [str(UUID(int=7)), accepted.local]}
+        )
+        async with deps.sessionmaker.begin() as db:
+            await db.execute(
+                update(ChannelConfigRevision)
+                .where(
+                    ChannelConfigRevision.tenant_id == source.tenant_id,
+                    ChannelConfigRevision.local == revision.local,
+                    ChannelConfigRevision.platform == revision.channel.platform,
+                    ChannelConfigRevision.channel_id == revision.channel.channel_id,
+                )
+                .values(**change)
+            )
+        before = len(value[7].requests)
+        with pytest.raises((WorkerSpecRefused, ScopeViolation)):
+            await read_frozen_preparation(
+                deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+            )
+        assert len(value[7].requests) == before
+        return
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.admission.backend_revision == revision
+    assert request.admission.backend_revision_origin == "agent"
+    assert request.admission.backend_agent_revision == accepted
+    assert request.admission.environment.description == prepared.admission.environment.description
+    assert request.source.environment.spec.description == prepared.admission.environment.description
+
+
 @pytest.mark.parametrize("fault", ["scope", "subject", "run"])
 async def test_foreign_preparation_parent_refuses_before_sdk_read(root_turn, fault):
     deps, _, _, _, _, _, _, transport = root_turn
@@ -401,6 +498,43 @@ def test_environment_sdk_facade_preserves_represented_network_packages_and_dates
     assert restored.created_at == native.created_at and restored.updated_at == native.updated_at
 
 
+@pytest.mark.parametrize("fault", [None, "scope", "config"])
+def test_environment_facade_preserves_null_description_and_validates_authority(fault):
+    from daimon.core.mux_compat import sdk_environment, source_environment_record
+    from daimon.testing.ma_models import ma_environment
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.ids import Scope
+    from pydantic import ValidationError
+
+    native = ma_environment(tenant_id="tenant").model_copy(update={"description": None})
+    scope = Scope(
+        tenant_id="tenant", account_id="account", principal_id="host", authorization_id="verified"
+    )
+    record = source_environment_record(native, scope).model_copy(update={"native": None})
+    if fault:
+        updates = (
+            {"scope": "unknown"}
+            if fault == "scope"
+            else {
+                "native_config": ExtensionConfig(
+                    namespace="anthropic.environment_config",
+                    version=1,
+                    value={"unclassified_fields": ["unknown_authority"]},
+                )
+            }
+        )
+        record = record.model_copy(update={"spec": record.spec.model_copy(update=updates)})
+        with pytest.raises(ValidationError):
+            sdk_environment(record)
+        return
+    restored = sdk_environment(record)
+    assert restored.description is None
+    assert restored.config.model_dump(mode="json") == native.config.model_dump(mode="json")
+    assert restored.scope == native.scope
+    assert restored.metadata == native.metadata
+    assert restored.id == native.id
+
+
 @pytest.mark.parametrize("change", ["revoke", "expire"])
 async def test_after_source_await_refuses_before_environment_read(root_turn, change):
     import httpx
@@ -710,3 +844,165 @@ async def test_default_grant_duration_and_turn_count_bound_the_frozen_run(root_t
     assert parent.limits.max_turns == current.limits.max_turns == 4
     assert parent.backend_grants == current.backends and parent.models == current.models
     assert len(transport.requests) == before
+
+
+@pytest.fixture
+async def retained_budget_root_turn(db_preflight, db_nullpool_engine, request):
+    async for value in root_turn.__wrapped__(
+        db_preflight,
+        db_nullpool_engine,
+        live_root=getattr(request, "param", None)
+        in ("recorded_i7", "recorded_i7_null_description"),
+        null_environment_description=getattr(request, "param", None)
+        == "recorded_i7_null_description",
+    ):
+        yield value
+
+
+@pytest.mark.parametrize("retained_budget_root_turn", [None, "recorded_i7"], indirect=True)
+@pytest.mark.parametrize("bounded_gemini", [False, True])
+async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
+    retained_budget_root_turn, record_property, bounded_gemini, tmp_path
+):
+    import json
+    from decimal import Decimal
+    from pathlib import Path
+
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits, resolve_worker_spec
+    from daimon.core.stores.fleet import WorkerPool
+    from daimon.core.turn.runtime_manifest import prepare_source
+
+    updated, current, source = await default_source_turn(retained_budget_root_turn)
+    deps, prepared, _, intent, _, scope, _, transport = updated
+    deps = replace(deps, agent_backends=True, channel_backends=True)
+    updated = (deps, *updated[1:])
+    plan = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "fixtures/i7_r6_planned_fleet_grant.json"
+        ).read_text()
+    )
+    if bounded_gemini:
+        for backend, model in plan["grant"]["choices"]:
+            if model["provider"] == "gemini":
+                backend["model"] = model["id"] = "gemini-3.8-flash"
+    # Refresh only the host-owned lease; retain every recorded financial limit.
+    plan["grant"]["limits"]["deadline"] = current.expires_at.isoformat()
+    value = AgentFleetGrant.model_validate_json(json.dumps(plan["grant"]))
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
+    preview = await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
+    await service.set_fleet_grant(
+        source,
+        value,
+        preview.setting_revision,
+        actor,
+        expected_preview_digest=preview.digest,
+        now=datetime.now(UTC),
+    )
+    await freeze(updated)
+    parent, policy = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    original_limits = parent.limits
+    assert parent.spec.model.provider == "anthropic"
+    assert parent.limits.budget_usd == Decimal("0.49")
+    assert parent.limits.provider_limits_usd["anthropic"] == Decimal("0.04")
+    before = len(transport.requests)
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.source is not None
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        # This is the default reader and request derivation used by _dispatch_worker.
+        async with ports._load_preparation(parent) as original:
+            assert original.source.source.ref == parent.source_agents[0]
+            dispatch_source = await ports.capture_source(parent)
+            for row in plan["workers"]:
+                backend, model = next(
+                    pair for pair in value.choices if pair[1].provider == row["provider"]
+                )
+                native = model.provider == parent.spec.model.provider
+                spec = (
+                    parent.spec
+                    if native
+                    else parent.spec.model_copy(
+                        update={
+                            "model": model,
+                            "tools": (),
+                            "skills": (),
+                            "mcp_servers": (),
+                            "declared_drops": ("mcp", "memory", "sandbox", "skills", "tools"),
+                        }
+                    )
+                )
+                resolved = resolve_worker_spec(
+                    parent,
+                    spec,
+                    policy=policy,
+                    now=datetime.now(UTC),
+                    backend=backend,
+                    resources=parent.resources if native else (),
+                    environment=parent.environment if native else None,
+                    limits=WorkerLimits(
+                        budget_usd=Decimal(row["budget_usd"]),
+                        deadline=parent.limits.deadline,
+                        max_turns=1,
+                        max_input_tokens=262144
+                        if bounded_gemini and model.provider == "gemini"
+                        else None,
+                        max_output_tokens=65536
+                        if bounded_gemini and model.provider == "gemini"
+                        else None,
+                    ),
+                    captured_source=dispatch_source,
+                )
+                worker_request = await original.for_worker(parent, resolved)
+                selected = await prepare_source(worker_request)
+                assert selected.target_spec == resolved.spec
+                if bounded_gemini and model.provider == "gemini":
+                    from daimon.core.turn.gemini_deployment import GeminiPlan
+                    from mux.contracts.resources import EnvironmentSpec
+
+                    plan_entry = GeminiPlan(
+                        profile="gemini.inline_reuse",
+                        tenant_id=scope.tenant_id,
+                        platform=parent.fleet.root.channel.platform,
+                        channel_id=parent.fleet.root.channel.channel_id,
+                        account_id=scope.account_id,
+                        config_digest=selected.admission.backend_revision.digest,
+                        project="project",
+                        api_key_env="OFFLINE_GEMINI_KEY",
+                        records_path=tmp_path / "records.sqlite",
+                        holds_path=tmp_path / "holds.sqlite",
+                        hold_usd=Decimal(".49"),
+                        cap_usd=Decimal(".49"),
+                        agent_name=resolved.spec.name,
+                        system=resolved.spec.system,
+                        tools=(),
+                        environment=EnvironmentSpec(name="explicit-no-execution"),
+                    )
+                    deployment = plan_entry.deployment(selected)
+                    assert deployment.max_total_tokens is None
+                    assert deployment.max_input_tokens == 262144
+                    assert deployment.max_output_tokens == 65536
+                assert selected.worker.limits.budget_usd == Decimal(row["budget_usd"])
+                record_property(
+                    row["role"],
+                    json.dumps(
+                        {
+                            "provider": model.provider,
+                            "budget_usd": str(resolved.limits.budget_usd),
+                            "retained_dispatch_preparation": "PASS",
+                        }
+                    ),
+                )
+        assert parent.limits == original_limits
+        assert all(r.method == "GET" for r in transport.requests[before:])
+    finally:
+        await ports.close()

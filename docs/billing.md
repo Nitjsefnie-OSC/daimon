@@ -1281,3 +1281,11 @@ A controlled root never silently falls back to an uncontrolled replacement.
 Unknown allocation keeps its original ACK and cash hold; this does not certify
 usage, final spend, or release of unknown holds. Ordinary unbudgeted turns keep
 their existing preparation path.
+
+Gemini fleet workers with explicit input/output token ceilings execute one
+bounded, tool-free model interaction. The input ceiling includes cached tokens;
+output includes thinking. Worst-case reservations price every input token at
+the maximum applicable input/cache-write rate and every output token at the
+output rate. Cache discounts can reduce actual cost but cannot expand the
+worker's token authority. Existing worker cash holds, funding checks and
+unknown-usage handling remain authoritative.

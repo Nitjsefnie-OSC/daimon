@@ -123,6 +123,10 @@ class GeminiPlan(BaseModel):
     ) -> GeminiDeployment:
         """Compile the resolved worker without adding resources or implicit execution."""
         spec, drops = worker.spec, worker.declared_drops
+        worker.limits.require_profile(INLINE_REUSE)
+        bounded = worker.limits.max_input_tokens is not None
+        if bounded and (revision.model != FLASH_PRIMARY or "sandbox" not in drops):
+            raise AdmissionDenied(reason="backend_unsupported")
         scope = worker.permissions.fleet.scope
         if (
             "memory" not in drops
@@ -181,7 +185,7 @@ class GeminiPlan(BaseModel):
         if environment.sources:
             raise AdmissionDenied(reason="backend_unsupported")
         try:
-            compile_agent(spec)
+            compile_agent(spec, max_output_tokens=worker.limits.max_output_tokens)
             if compile_environment(environment) != {"type": "remote", "sources": []}:
                 raise AdmissionDenied(reason="backend_unsupported")
         except UnsupportedCapability as error:
@@ -192,7 +196,9 @@ class GeminiPlan(BaseModel):
             self.project,
             spec,
             environment,
-            max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
+            max_total_tokens=None if bounded else WORKER_MAX_TOTAL_TOKENS,
+            max_input_tokens=worker.limits.max_input_tokens,
+            max_output_tokens=worker.limits.max_output_tokens,
         )
 
     def deployment(self, request: ProviderPreparationRequest) -> GeminiDeployment:

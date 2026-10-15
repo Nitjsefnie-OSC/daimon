@@ -450,6 +450,8 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
     detail = refused.value.__cause__
     assert isinstance(detail, UnsupportedCapability)
     expected = {"memory", "environment", obligation}
+    if obligation == "credentials":
+        expected.add("mcp")
     if obligation in ("files", "repository"):
         expected.add("credentials")
     assert set(detail.missing) == expected
@@ -524,7 +526,8 @@ async def test_opaque_caller_resource_is_an_unproved_source_definition(native_re
 
 
 @pytest.fixture
-async def explicit_worker_request(owned, monkeypatch):
+async def explicit_worker_request(owned, monkeypatch, request):
+    worker_token_caps = getattr(request, "param", False)
     from datetime import timedelta
 
     from daimon.core.ma_identity import derive_agent_uuid
@@ -605,6 +608,11 @@ async def explicit_worker_request(owned, monkeypatch):
         ),
         policy=POLICY,
         now=request.now(),
+        limits=root.limits.model_copy(
+            update={"max_input_tokens": 262144, "max_output_tokens": 65536, "max_turns": 1}
+        )
+        if worker_token_caps
+        else None,
     )
     scope = worker.permissions.fleet.scope
     agent = await owned.resources.backend.agents.create(scope, worker.spec, key="restricted-worker")
@@ -873,7 +881,6 @@ async def test_explicit_drops_do_not_discharge_unproved_obligations(
             "foreign_root": "worker_context",
             "missing_reader": "native_counterpart",
             "source_drift": "source_drift",
-            "model_controls": "source_definition",
             "ask_without_tools": "tools",
         }.get(failure, failure)
         assert expected in refused.value.__cause__.missing
@@ -1587,6 +1594,9 @@ async def claimed_worker_request(explicit_worker_request, monkeypatch, clone_sou
     native_requests = []
 
     def native(call):
+        if call.url.path.endswith(":countTokens"):
+            native_requests.append(call)
+            return httpx.Response(200, json={"totalTokens": 262144})
         assert (call.method, call.url.path) in {
             ("POST", "/v1beta/interactions"),
             ("GET", "/v1beta/interactions/worker-result"),

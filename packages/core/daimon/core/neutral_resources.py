@@ -65,6 +65,7 @@ from mux.contracts.resources import (
     Agent,
     AgentPatch,
     AgentSpec,
+    DeclaredDrop,
     EnvironmentSpec,
     MCPConnection,
     ResourceBinding,
@@ -78,6 +79,7 @@ from mux.profiles import (
     get_profile,
     native_agent_tools,
     neutral_catalog_profile_for,
+    worker_token_limits_supported,
 )
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
@@ -186,7 +188,9 @@ class NeutralResourceHost:
         self.operation_key = operation_key
         self.resolve_pin = resolve_pin
         capabilities = backend.capabilities()
-        profile = neutral_catalog_profile_for(capabilities.provider)
+        profile = neutral_catalog_profile_for(
+            capabilities.provider, profile_id=capabilities.profile_id
+        )
         if profile is None:
             raise UnsupportedCapability(
                 ("neutral_resource_host_provider",), capabilities.profile_id
@@ -900,6 +904,18 @@ class WorkerLimits(Contract):
             raise ValueError("worker deadline must be aware")
         return self
 
+    def for_provider(self, provider: Provider) -> WorkerLimits:
+        """Attenuate an inherited global ceiling to the selected provider line."""
+        if self.provider_limits_usd is None:
+            return self
+        return self.model_copy(
+            update={
+                "budget_usd": min(
+                    self.budget_usd, self.provider_limits_usd.get(provider, Decimal(0))
+                )
+            }
+        )
+
     def require_profile(self, profile: Profile) -> None:
         """Refuse requested ceilings before a driver can allocate native work."""
         if (
@@ -911,6 +927,13 @@ class WorkerLimits(Contract):
             self.provider_limits_usd.get(profile.provider, Decimal(0)) <= 0
         ):
             raise WorkerSpecRefused("provider_limits_usd", "not_subset")
+        if not worker_token_limits_supported(
+            profile,
+            max_input_tokens=self.max_input_tokens,
+            max_output_tokens=self.max_output_tokens,
+            max_turns=self.max_turns,
+        ):
+            raise WorkerSpecRefused("budget", "unsupported")
         capabilities: tuple[tuple[int | None, Capability], ...] = (
             (self.max_model_requests, "model_request_limit"),
             (self.max_input_tokens, "input_token_limit"),
@@ -1025,9 +1048,7 @@ class ResolvedWorkerSpec:
     source_agent: tuple[ResourceRef, Revision] | None = None
 
     @property
-    def declared_drops(
-        self,
-    ) -> tuple[Literal["memory", "sandbox", "skills", "mcp", "tools", "files", "repository"], ...]:
+    def declared_drops(self) -> tuple[DeclaredDrop, ...]:
         return self.spec.declared_drops
 
 
@@ -1210,7 +1231,7 @@ def fleet_root_permissions(
         raise WorkerSpecRefused("tools", "unsupported") from None
     # The complete capture remains the input to the existing obligation classifier.
     assert ceiling.effective_spec is not None
-    spec = ceiling.effective_spec.model_copy(update={"extensions": None})
+    spec = ceiling.effective_spec
     resources = ceiling.resource_requirements
     read_only = source.memory_read_only is not False
     if source.memory_store_id is not None:
@@ -1331,11 +1352,12 @@ def freeze_root_permissions(
         now=now,
         resources=grants.resources,
         environment=grants.environment,
-        limits=caps,
+        limits=caps.for_provider(grants.spec.model.provider),
         captured_source=source,
     ).permissions
     return replace(
         narrowed,
+        limits=caps,
         fleet=fleet,
         subject=admission.subject,
         agent=admission.agent,
@@ -1376,6 +1398,7 @@ def resolve_worker_spec(
     from daimon.core.turn.runtime_manifest import (
         classify_source_obligations,
         compose_source_instructions,
+        worker_model_spec,
         worker_spec_ceiling,
     )
 
@@ -1504,8 +1527,10 @@ def resolve_worker_spec(
         raise WorkerSpecRefused("scope", worker_run.reason or "unbound")
     if resolved.model.options:
         raise WorkerSpecRefused("effort", "unsupported")
-    if resolved.extensions:
-        raise WorkerSpecRefused("extensions", "unsupported")
+    try:
+        resolved = worker_model_spec(parent.spec, resolved)
+    except ValueError:
+        raise WorkerSpecRefused("extensions", "unsupported") from None
     choices = tuple(
         grant
         for grant in parent.backend_grants
@@ -1653,7 +1678,13 @@ def resolve_worker_spec(
         for tool in resolved.tools or ()
     ):
         raise WorkerSpecRefused("sandbox", "unbound")
-    cap = limits or parent.limits
+    cap = limits if limits is not None else parent.limits.for_provider(selected.backend)
+    if (
+        parent.limits.provider_limits_usd is not None
+        and "provider_limits_usd" not in cap.model_fields_set
+    ):
+        # Tool callers may omit inherited authority; explicit null still refuses.
+        cap = cap.model_copy(update={"provider_limits_usd": parent.limits.provider_limits_usd})
     cap.require_native_dispatch(now)
     if cap.budget_usd <= 0 or cap.budget_usd > parent.limits.budget_usd:
         raise WorkerSpecRefused("budget", "not_subset")

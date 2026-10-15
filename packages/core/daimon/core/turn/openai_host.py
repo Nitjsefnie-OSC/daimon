@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import (
     TurnBackend,
     TurnBackendRequest,
@@ -23,15 +24,17 @@ from daimon.core.mux_backend import (
 )
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice
+from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
-from daimon.core.turn.openai_codec import PROFILE
+from daimon.core.turn.openai_codec import CONVERSATION_PROFILE, PROFILE, PROFILES
 from daimon.core.turn.openai_io import OpenAITurnIO
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
     OpenAIUsageRevisions,
+    initial_input_consumed,
     invocation_baseline,
 )
 from daimon.core.turn.persistence import UncertainSend, current_persistence
@@ -85,7 +88,7 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     if not isinstance(runtime, OpenAIHostRuntime) or revision is None:
         raise UnsupportedCapability(("openai_host_runtime",), PROFILE)
     if (
-        revision.profile != PROFILE
+        revision.profile not in PROFILES
         or revision.backend != "openai"
         or revision.model != "gpt-6-luna"
     ):
@@ -94,7 +97,7 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
         not runtime.account_scope_id.strip()
         or runtime.controls.model != "gpt-6-luna"
         or runtime.controls.multi_agent_enabled is not False
-        or runtime.controls.container_size != "small"
+        or runtime.controls.container_size != ("small" if revision.profile == PROFILE else None)
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)
         or not isinstance(runtime.usage_store, OpenAIUsageRevisions)
     ):
@@ -122,6 +125,7 @@ def driver(
     return OpenAIDriver(
         cast(Transport, runtime.transport_factory(revision, scope)),
         account_scope_id=runtime.account_scope_id,
+        profile_id=revision.profile,
         journal=cast(OpenAIRecoveryJournal, runtime.journal),
         usage_revisions=cast(OpenAIUsageRevisions, runtime.usage_store),
         authorization=runtime.authorization,
@@ -157,12 +161,17 @@ def _codec(request: TurnCodecRequest) -> TurnIO:
         request.session,
         persistence=active,
         baseline_loader=invocation_baseline,
+        initial_input_loader=initial_input_consumed,
     )
 
 
 def _check_spec(
     spec: SessionSpec, runtime: OpenAIHostRuntime, scope: Scope, revision: ConfigRevision
 ) -> None:
+    if revision.profile == CONVERSATION_PROFILE and (
+        spec.environment is not None or spec.resources or spec.extensions
+    ):
+        raise UnsupportedCapability(("conversation_only_workspace",), revision.profile)
     refs = (spec.agent,) + ((spec.environment,) if spec.environment is not None else ())
     if spec.config_revision != revision.local or spec.state_mode != "continue":
         raise ScopeViolation("preparation", "OpenAI plan differs from admitted revision")
@@ -202,15 +211,44 @@ async def _create(
             raise AdmissionDenied(reason="backend_unsupported")
         active.check_session(request.scope, None)
 
+        initial = (
+            request.initial_input
+            if backend.capabilities().profile_id == CONVERSATION_PROFILE
+            else None
+        )
+        if backend.capabilities().profile_id == CONVERSATION_PROFILE and initial is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+
         async def create(native_key: str) -> Session:
-            return await backend.sessions.create(request.scope, spec, key=native_key)
+            native = await backend.sessions.create(
+                request.scope, spec, key=native_key, initial=initial
+            )
+            if initial is not None:
+                native = native.model_copy(
+                    update={
+                        "binding": native.binding.model_copy(
+                            update={
+                                "native_refs": {
+                                    **native.binding.native_refs,
+                                    "initial_input_operation": native_key,
+                                    "initial_input_turn": active.operation_key,
+                                    "initial_input_digest": request_digest(
+                                        initial.model_dump(mode="json")
+                                    ),
+                                }
+                            }
+                        )
+                    }
+                )
+            return native
 
         return await active.mutate(
             None,
-            "session_create",
+            "send" if initial is not None else "session_create",
             {
                 "spec": spec.model_dump(mode="json"),
                 "controls": runtime.controls.model_dump(mode="json"),
+                **({"initial": initial.model_dump(mode="json")} if initial is not None else {}),
             },
             create,
             Session,
@@ -285,7 +323,9 @@ async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
 
 async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     revision = request.admission.backend_revision
-    runtime = runtime_for(request.deps.turn_runtimes.get(PROFILE), revision)
+    runtime = runtime_for(
+        request.deps.turn_runtimes.get(revision.profile) if revision is not None else None, revision
+    )
     if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
         raise AdmissionDenied(reason="backend_unsupported")
     if (
@@ -300,9 +340,19 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         or request.scope.account_id != str(request.session_account_id)
     ):
         raise ScopeViolation("preparation", "OpenAI thread differs from admitted scope")
+    if revision.profile == CONVERSATION_PROFILE and request.worker is None:
+        raise AdmissionDenied(reason="backend_unsupported")
     current = await reauthorize(request.deps, request.admission)
     if (
-        current.memory_read_only
+        (
+            current.memory_read_only
+            and not (
+                revision.profile == CONVERSATION_PROFILE
+                and request.worker is not None
+                and "memory" in request.worker.declared_drops
+                and not request.worker.resources
+            )
+        )
         or current.origin_seal_ids
         or current.source_sealed
         or current.asks_before_publishing
@@ -314,7 +364,24 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     spec = await runtime.session_plan(request)
     _check_spec(spec, runtime, request.scope, revision)
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
-    await store.put_config_revision(revision)
+    if request.worker is None and current.backend_revision_origin == "agent":
+        # Admission retained this exact source consent; a generic StateStore
+        # write has no agent-origin association and cannot recreate that proof.
+        async with request.deps.sessionmaker.begin() as session:
+            retained = await mux_state.get_config_agent_revision(
+                session,
+                revision,
+                agent_id=derive_agent_uuid(
+                    tenant_id=request.tenant_id, ma_agent_id=current.agent.id
+                ),
+            )
+            if retained is None:
+                raise ScopeViolation(request.thread_id, "missing original backend consent")
+            await mux_state.put_config_revision(
+                session, revision, origin="agent", agent_revision=retained
+            )
+    else:
+        await store.put_config_revision(revision)
     slot = Slot(
         thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
         account_id=request.scope.account_id,
@@ -326,7 +393,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     reused = binding is not None
     if binding is not None and (
         not request.reuse_existing
-        or binding.profile != PROFILE
+        or binding.profile != revision.profile
         or binding.provider != "openai"
         or binding.config_revision != revision.local
         or binding.native_refs.get("agent") != spec.agent.id
@@ -393,7 +460,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             id=str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
             thread=slot.thread,
             provider="openai",
-            profile=PROFILE,
+            profile=revision.profile,
             native_refs={
                 **native.binding.native_refs,
                 "agent": spec.agent.id,
@@ -476,9 +543,10 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
 
 def register_host() -> None:
     """Fill missing host callbacks while preserving explicit application overrides."""
-    register_turn_backend(PROFILE, _backend, fallback=True)
-    register_turn_codec(PROFILE, _codec, fallback=True)
-    register_turn_preparation(PROFILE, prepare_openai, fallback=True)
+    for profile in PROFILES:
+        register_turn_backend(profile, _backend, fallback=True)
+        register_turn_codec(profile, _codec, fallback=True)
+        register_turn_preparation(profile, prepare_openai, fallback=True)
 
 
 register_host()

@@ -48,6 +48,38 @@ def installed_entry(monkeypatch, install):
     return entry
 
 
+def test_installed_conversation_profile_is_discoverable_in_a_cold_process():
+    code = """
+from importlib.metadata import entry_points
+from daimon.core.turn import runtimes
+from mux.profiles.openai import CONVERSATION_ONLY
+
+profile = CONVERSATION_ONLY.profile_id
+entries = entry_points(group="daimon.turn_runtimes", name=profile)
+assert len(entries) == 1, "Missing installed conversation profile; refresh package metadata with uv sync"
+assert not runtimes._RUNTIME_FACTORIES
+assert runtimes.ensure_channel_runtime(profile)
+registration = runtimes._RUNTIME_FACTORIES[profile]
+assert registration.authorizations is not None
+assert registration.tariffs is None
+"""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "PYTHONPATH"
+        and not key.startswith(("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_"))
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_default_profile_never_discovers_optional_distributions(registry, monkeypatch):
     def forbidden(**kwargs):
         raise AssertionError("default turn discovered provider distributions")
@@ -533,3 +565,69 @@ def test_conflicting_registered_tariffs_refuse_before_runtime_construction(regis
     )
     with pytest.raises(UnsupportedCapability, match="conflicting_runtime_price"):
         registry.channel_runtime_prices()
+
+
+def test_conversation_registration_preserves_explicit_openai_tariff_owner(registry, monkeypatch):
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.pricing import ProviderPrice
+    from daimon.core.turn.openai_deployment import register_runtime
+
+    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
+    price = ProviderPrice(
+        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
+    )
+
+    def explicit(*args):
+        raise AssertionError("tariff lookup constructed a runtime")
+
+    source = {("openai", "gpt-6-luna"): price}
+    registry.register_channel_runtime(PROFILE, explicit, tariffs=lambda: source)
+    register_runtime()
+    assert registry._RUNTIME_FACTORIES[PROFILE].factory is explicit
+    assert "openai.conversation_only" in registry._RUNTIME_FACTORIES
+    assert dict(registry.channel_runtime_prices()) == source
+
+
+def test_openai_authorization_reads_only_the_selected_profile(registry, monkeypatch, tmp_path):
+    from daimon.core.turn.openai_deployment import (
+        OpenAIDeployment,
+        authorized_deployments,
+        register_runtime,
+    )
+
+    common = dict(
+        tenant_id="tenant",
+        platform="slack",
+        channel_id="channel",
+        account_id="account",
+        config_digest="digest",
+        project="project",
+        agent_id="agent",
+        api_key_env="OFFLINE_OPENAI_KEY",
+    )
+    persistent = OpenAIDeployment(profile=PROFILE, environment_id="environment", **common)
+    conversation = OpenAIDeployment(profile="openai.conversation_only", **common)
+    path = tmp_path / "runtime.json"
+    path.write_text(
+        json.dumps([persistent.model_dump(mode="json"), conversation.model_dump(mode="json")])
+    )
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
+    register_runtime()
+    assert authorized_deployments("tenant") == (persistent,)
+    assert registry.authorized_channel_deployments(PROFILE, "tenant") == (persistent,)
+    assert registry.authorized_channel_deployments("openai.conversation_only", "tenant") == (
+        conversation,
+    )
+    path.write_text(
+        json.dumps(
+            [
+                persistent.model_dump(mode="json"),
+                {"profile": "openai.conversation_only", "tenant_id": "tenant"},
+            ]
+        )
+    )
+    assert registry.authorized_channel_deployments(PROFILE, "tenant") == (persistent,)
+    assert registry.authorized_channel_deployments("openai.conversation_only", "tenant") == ()

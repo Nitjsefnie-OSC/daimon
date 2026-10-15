@@ -90,6 +90,7 @@ from daimon.core.turn.runtimes import ensure_channel_runtime, scope_channel_runt
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
+from mux.contracts.actions import UserMessage
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import Agent, AgentSpec, SessionSpec
@@ -213,6 +214,7 @@ class ProviderPreparationRequest:
     )
     source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
     worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
+    initial_input: UserMessage | None = field(default=None, kw_only=True, compare=False, repr=False)
     native_budget_usd: Decimal | None = field(default=None, kw_only=True, compare=False, repr=False)
     target_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
     root_controls: dict[str, JsonValue] | None = field(
@@ -1166,6 +1168,7 @@ async def bind_session_impl(
     _on_orphan: Callable[[PreparedTurn], Awaitable[None]] | None = None,
     worker: ResolvedWorkerSpec | None = None,
     before_native: Callable[[], Awaitable[None]] | None = None,
+    initial_input: UserMessage | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
@@ -1247,6 +1250,7 @@ async def bind_session_impl(
         now,
         worker=worker,
         before_native=before_native,
+        initial_input=initial_input,
     )
     from daimon.core.turn.runtime_manifest import (
         prepare_controlled_root,

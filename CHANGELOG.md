@@ -9,12 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Allow fresh Gemini preparation for a new mention thread while preserving an existing session when replacement is unsupported.
+
+- Accept omitted empty Gemini catalog tool and source lists on readback while continuing to refuse capability drift.
+
+- Enforce explicitly requested Gemini fleet worker input and output token envelopes through one tool-free model interaction, counting complete prompts before dispatch and retaining existing accounting holds.
+
+- Preserve heterogeneous fleet budget ceilings when freezing a root; inherited workers use their provider cap while explicit excess requests still refuse.
+
 - Keep native-only MCP servers and their credentials out of fleet worker grants,
   preserve exact builtin permissions, and declare incomplete native toolsets on backend switches.
 
 ### Added
 
 - **Fleet roots now run against one retained original reservation.** A fleet root is admitted once against a scoped hold that it keeps for its whole run: pending financial state is settled before any funding check, each original input the root sends is counted against that hold, and a native root carries its explicit budget into the session. A root is an ordinary agent session, so it keeps the agent's personal memory store, which is neither counted nor funded. Off by default: fleet roots run only with `DAIMON_FLEET__ENABLED=true`. No migration.
+- Explicitly authorized OpenAI fleet workers can run without a workspace, tools, MCP, memory or skills. Their initial task is counted and sent with session creation; retries reuse the acknowledged input and uncertain delivery requires reconciliation.
+
 - Approval cards for classified third-party MCP writes now offer **Always allow** when agent tool rules are enabled. Workspace admins save a chat-only rule for the agent; channel admins save one for the parent channel. The click approves the pending call, and a concurrent rule edit leaves it approved for this time only. Discord, Slack and Teams show who answered and whether the rule was saved.
 
 - Workspace admins can set, list and clear per-agent rules for individual third-party MCP tools from `daimon agents tool-rules` or MCP. Channel admins can manage rules for any agent in their channels. A channel rule also applies to threads under its parent channel; where it overlaps an agent-wide rule, the stricter outcome wins. Rules can allow, ask or deny in chat, with an explicit option to allow unattended routines. They are bound to the agent id and server URL, audited with revisions, and inactive by default behind `DAIMON_TOOL_SAFETY__AGENT_RULES`.
@@ -42,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Backend switching refuses unknown fields and values on channel skills as source-definition obligations, even when all supported capability losses are confirmed.
+- Backend admission refusals now log the failed gate and closed profile/cause labels (unknown labels are redacted), distinguishing workspace policy, invalid configuration, missing capabilities, non-runnable profiles and source preparation failures, so operators can distinguish them without exposing provider messages or agent setup.
 
 - **A Teams turn no longer loses its thread to one slow Microsoft Graph read.** Reading the thread history or a message's images and files gave up on the first timeout, and the agent then said it could not read earlier messages. A Graph read that times out or loses its connection is now tried once more before the turn goes on without it. Writes, such as file uploads, are never repeated, since the first may already have landed.
 - **A workspace too large to move whole now carries what fits, instead of nothing.** When a session is replaced (a model, instructions or environment change, or a handoff), the old session archives its working files for the new one, up to 20 MiB. An archive over that cap used to be deleted, and the new session started with the conversation but none of the files, so the agent could no longer see its own earlier outputs. The archive is now rebuilt once without its largest files, so the handoff note, scripts, tables and charts still travel, and the new session is told which files were left out, the first 50 by path and the rest as a count, so it can regenerate the ones it needs. Only an archive still over the cap after that rebuild falls back to the conversation alone, as before.

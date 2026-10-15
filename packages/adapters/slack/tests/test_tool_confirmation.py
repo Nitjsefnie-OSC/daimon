@@ -731,7 +731,7 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
     from daimon.adapters.slack.tool_confirmation import _attachment
     from daimon.core.posted_controls.confirmation import build_confirmation_card
 
-    losses = "Won't be available on openai: files, mcp, memory, repository, sandbox, skills, tools"
+    losses = "Won't be available on openai: files, mcp, memory, model_controls, repository, sandbox, skills, tools"
     prompt = _prompt().model_copy(
         update={
             "admin": True,

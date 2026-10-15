@@ -72,7 +72,7 @@ when it supports all nine.
 | --- | --- | --- |
 | `anthropic.managed_agents` | yes | Every capability native. |
 | `openai.persistent_workspace` | yes | `reconcile` is emulated from saved items; missed events cannot be replayed. |
-| `openai.conversation_only` | no | No workspace. Admitted only when the channel names it. |
+| `openai.conversation_only` | no | No workspace. Runnable for explicitly granted conversation-only fleet workers. |
 | `gemini.inline_reuse` | no | The inline environment expires after inactivity, so workspace persistence is not guaranteed. Its usage reporting is undeclared, so admission refuses it until a driver shows usage observations. |
 
 `admit(config, profile)` is pure and runs before any provider call:
@@ -2478,7 +2478,7 @@ A sandbox declaration removes its environment and execution builtins and prevent
 
 The existing provider preparation request can carry the canonical resolved worker beside its actual source and scoped counterpart. The worker is hidden from representation and absent by default. Carrying a resolved spec alone is not an execution grant: the shared source proof and registered native plan must independently verify and consume the same restrictions before a worker can run.
 
-OpenAI hosted worker plans require an explicit persistent-memory drop, an authorized Bash grant, known hosted network/package policy, explicit empty template inputs and no inherited resource mounts. Readback compares the exact resolved agent and environment, including protected instructions, attachments and metadata stamps. Residual template files, opaque environment configuration and unbound MCP credentials refuse. A no-tools or no-sandbox declaration cannot silently retain hosted Bash. Conversation-only worker execution remains refused until session creation can consume the real first input with a durable acknowledgment that prevents a second send. Ordinary channel plans and unsupported seal, read-only and publishing restrictions retain their behavior.
+OpenAI hosted worker plans require an explicit persistent-memory drop, an authorized Bash grant, known hosted network/package policy, explicit empty template inputs and no inherited resource mounts. Readback compares the exact resolved agent and environment, including protected instructions, attachments and metadata stamps. Residual template files, opaque environment configuration and unbound MCP credentials refuse. A no-tools or no-sandbox declaration cannot silently retain hosted Bash. An explicitly selected `openai.conversation_only` worker instead requires all five losses (`sandbox`, `tools`, `mcp`, `memory`, `skills`) and no remaining tools, skills, connections, environments or resource mounts. Its deployment must omit `environment_id` and skill identities. Creation includes the task's initial input under the same fenced worker input claim used by turn sends. Acknowledged creation is replayed without another input; an uncertain create retains its reservation and requires reconciliation. Read-only memory posture remains recorded and can execute only because the worker has no memory mounts. Ordinary persistent-workspace channel plans and their seal, read-only and publishing restrictions retain their behavior.
 
 Gemini's deployment owner checks the exact resolved worker instructions, tools,
 skill pins and native catalog readback before its preparer consumes the checked
@@ -2749,8 +2749,8 @@ The existing driver compiles a model interaction with
 conversation history, and preserves the limit on subsequent turns and 503
 fallbacks. No sandbox environment is created or reused in this configuration.
 
-Managed tools, skills, MCP, mounts, native agent definitions and worker execution
-are incompatible with this configuration and refuse before provider access.
+Managed tools, skills, MCP, mounts and native agent definitions are incompatible
+with this ordinary-turn configuration and refuse before provider access.
 Omitting the field preserves existing managed-agent turns and worker option-A
 budgets. The native model response limit is distinct from the managed-agent
 `max_total_tokens` budget, which is best-effort and does not enforce an output
@@ -3025,8 +3025,17 @@ existing ORM behavior unless the authoritative persisted mode is selected.
 The backend service may receive a trusted complete source-capture callback. Its
 preview derives losses through the existing worker source-preservation rule and
 includes the exact losses, source pin and target digest in the confirmation
-digest. A switch must accept exactly that tuple. Credentials, instructions,
-unknown obligations and publishing approval cannot be discarded. Missing source
+digest. A switch must accept exactly that tuple. Switching from Anthropic to
+another provider declares `model_controls` when the source's valid effort or
+speed controls cannot be represented. Identical same-provider native model
+controls are preserved. Unknown or invalid controls still refuse as
+`source_definition`, even with `model_controls` consent. DD3 cards, CLI previews
+and MCP results show this loss through the same canonical declared-drop tuple.
+A credential paired to an MCP server is lost with an explicit `mcp` declaration
+only when that server is absent from the target. The session composer's scoped
+caller-MCP credential is paired to its injected MCP server even if the native
+agent's MCP list is empty. Credentials for retained servers, unpaired credentials,
+instructions, unknown obligations and publishing approval cannot be discarded. Missing source
 or publishing context refuses. Clear removes consent; revert rechecks the original
 consent against a fresh capture, and fleet-grant changes carry the current consent.
 
@@ -3076,3 +3085,16 @@ cold. A setting applies to new threads; existing threads retain their backend.
 setting and applies the existing revision compare-and-set. Source drift requires
 confirmation again; revert does not restore historical fleet grants. `--dry-run`
 on revert is read-only. Clearing still uses the existing explicit clear operation.
+
+Gemini fleet workers can explicitly request both `max_input_tokens` and
+`max_output_tokens` in their existing `WorkerLimits`. This requires
+`max_turns=1`, `gemini-3.8-flash`, no tools, skills, MCP or mounted resources,
+and explicit memory/sandbox drops. The worker retains counterpart verification
+and uses a model interaction for execution. The complete prompt, including
+system instructions, is counted before dispatch; missing counts or excess input
+refuse. Cached input remains inside the ceiling, and output includes thinking.
+The existing journal permits one accepted or uncertain interaction across the
+worker lifetime; subsequent turns refuse, including after restart. This mode
+has no fallback to another model. Worker limits remain monotonic under the
+existing permission resolver. Other profiles and uncapped Gemini turns retain
+their existing behavior.

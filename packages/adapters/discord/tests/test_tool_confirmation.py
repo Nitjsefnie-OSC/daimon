@@ -794,7 +794,7 @@ async def test_runtime_hook_current_admin_refuses_outside_a_thread_or_text_chann
 
 @pytest.mark.parametrize("state", ["pending", "approved", "denied", "expired", "stopped"])
 async def test_complete_backend_loss_list_survives_native_card_rendering(state):
-    losses = "Won't be available on openai: files, mcp, memory, repository, sandbox, skills, tools"
+    losses = "Won't be available on openai: files, mcp, memory, model_controls, repository, sandbox, skills, tools"
     prompt = _prompt().model_copy(
         update={
             "admin": True,
@@ -808,4 +808,4 @@ async def test_complete_backend_loss_list_survives_native_card_rendering(state):
         prompt, state=state, token="abcdefgh" if state == "pending" else None
     )
     rendered = "\n".join(_texts(build_confirmation_view(card, prompt)))
-    assert (losses in rendered) == (state in {"pending", "approved"})
+    assert (losses in rendered.replace(r"\_", "_")) == (state in {"pending", "approved"})

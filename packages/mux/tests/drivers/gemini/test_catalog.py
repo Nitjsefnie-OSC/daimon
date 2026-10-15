@@ -100,6 +100,7 @@ class Wire:
         self.get_changes: Object = {}
         self.lose_post = False
         self.sparse_ack = False
+        self.omit_empty_lists = False
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -121,7 +122,14 @@ class Wire:
             body = self.agents.get(id_)
             if body is None:
                 return httpx.Response(404, json={"error": {"message": "not found"}})
-            return httpx.Response(200, json={**deepcopy(body), **self.get_changes})
+            readback = {**deepcopy(body), **self.get_changes}
+            if self.omit_empty_lists:
+                if readback.get("tools") == []:
+                    del readback["tools"]
+                environment = readback.get("base_environment")
+                if isinstance(environment, dict) and environment.get("sources") == []:
+                    del environment["sources"]
+            return httpx.Response(200, json=readback)
         raise ValueError("unexpected native catalog request")
 
 
@@ -281,6 +289,76 @@ async def test_sparse_null_sdk_ack_and_nullable_metadata_do_not_require_native_r
     assert made.spec == requested
     assert case.wire.agents[made.ref.id]["tools"] == []
     assert await case.driver.agents.retrieve(SCOPE, made.ref) == made
+
+
+async def test_recorded_empty_list_readback_reconciles_without_replaying_post(case: Case) -> None:
+    # Recorded GET shape: id/base_agent/agent_config/system_instruction, with
+    # tools omitted and base_environment containing only type.
+    requested = spec().model_copy(update={"description": None, "tools": ()})
+    case.wire.omit_empty_lists = True
+    case.wire.lose_post = True
+    with pytest.raises(ProviderError):
+        await case.driver.agents.create(SCOPE, requested, key="empty-readback")
+    made = await case.driver.agents.create(SCOPE, requested, key="empty-readback")
+    assert await case.driver.agents.retrieve(SCOPE, made.ref) == made
+    assert [r.method for r in case.wire.requests] == ["POST", "GET", "GET"]
+    assert made.spec == requested
+    assert case.driver.catalog_adapter is not None
+    expected = await case.driver.catalog_adapter.compile(SCOPE, requested, id_=made.ref.id)
+    assert expected["tools"] == []
+    assert expected["base_environment"] == {"type": "remote", "sources": []}
+    observed = await case.native.get_agent(made.ref.id)
+    assert set(observed) == {
+        "id",
+        "base_agent",
+        "agent_config",
+        "system_instruction",
+        "base_environment",
+    }
+    assert observed["base_agent"] == expected["base_agent"]
+    assert observed["agent_config"] == expected["agent_config"]
+    assert observed["base_environment"] == {"type": "remote"}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"tools": [{"type": "code_execution"}]},
+        {"tools": None},
+        {"base_environment": {"type": "remote", "unknown": []}},
+        {"base_environment": {"type": "remote", "sources": [{"target": "/extra"}]}},
+        {"base_environment": {"type": "remote", "sources": None}},
+        {"base_environment": {}},
+    ],
+)
+async def test_empty_list_omission_does_not_hide_added_or_unknown_capabilities(
+    case: Case, change: Object
+) -> None:
+    requested = spec().model_copy(update={"description": None, "tools": ()})
+    case.wire.omit_empty_lists = True
+    made = await case.driver.agents.create(SCOPE, requested, key="empty-negative")
+    case.wire.get_changes = change
+    with pytest.raises(ProviderError, match="catalog_native_definition_drift"):
+        await case.driver.agents.retrieve(SCOPE, made.ref)
+    assert [r.method for r in case.wire.requests] == ["POST", "GET", "GET"]
+
+
+@pytest.mark.parametrize("missing", ["tools", "sources"])
+async def test_missing_nonempty_list_still_refuses(case: Case, missing: str) -> None:
+    pin = await case.driver.skills.create(SCOPE, bundle(), key="mounted-skill")
+    assert pin.latest_version is not None
+    made = await case.driver.agents.create(
+        SCOPE, spec(pins=(pin.latest_version,)), key="nonempty-readback"
+    )
+    body = case.wire.agents[made.ref.id]
+    if missing == "tools":
+        del body["tools"]
+    else:
+        environment = body["base_environment"]
+        assert isinstance(environment, dict)
+        del environment["sources"]
+    with pytest.raises(ProviderError, match="catalog_native_definition_drift"):
+        await case.driver.agents.retrieve(SCOPE, made.ref)
 
 
 @pytest.mark.parametrize(
