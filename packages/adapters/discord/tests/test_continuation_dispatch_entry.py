@@ -1231,3 +1231,88 @@ async def test_production_completion_entry_keeps_original_root_and_never_replays
         if mode == "denied":
             assert all(row.skip_reason == "admission_denied:balance_depleted" for row in retained)
             thread.send.assert_not_awaited()
+
+
+async def test_continuation_turn_backend_switch_card_captures_through_its_own_admission(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuation (follow-up) turn's Confirm card reads the switched agent's
+    source as that turn's own admitted caller, exactly like a mention turn's card.
+    Built without the admission, every backend-switch card on this call site
+    refuses `source_unavailable`.
+    """
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+
+    workspace_id = "710000099"
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=workspace_id)
+        await tenant_ledger.insert_entry(
+            session,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("100.00"),
+            reason="trial",
+            idempotency_key=f"trial:{tenant.id}",
+        )
+        account = await make_account(session, tenant=tenant)
+
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    bot = make_bot(runtime)
+    thread = _make_thread()
+    row = _make_continuation_row(tenant_id=tenant.id, account_id=account.id, reason="task_handoff")
+    decision = ContinuationDecision(action="dispatch", seed_user_message="finish the migration")
+
+    services: list[Any] = []
+    real_callbacks = confirmation.backend_switch_callbacks
+
+    def spy_callbacks(service: Any, **kwargs: Any) -> Any:
+        services.append(service)
+        return real_callbacks(service, **kwargs)
+
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
+    captured = MagicMock(name="captured_source")
+    capture_backend_source = AsyncMock(return_value=captured)
+    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_config", new_callable=AsyncMock
+        ) as resolve_config,
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as resolve_env,
+        patch("daimon.adapters.discord.bot.bind_session", new_callable=AsyncMock) as bind,
+        patch("daimon.adapters.discord.bot.run_prepared_turn", new_callable=AsyncMock) as run_turn,
+    ):
+        resolve_config.return_value = ResolvedConfig(
+            agent_name="test-agent",
+            agent_name_tier="tenant",
+            environment_name="test-env",
+            environment_name_tier="tenant",
+        )
+        resolve_agent.return_value = "ag_test"
+        resolve_env.return_value = "env_test"
+        bind.return_value = _make_prepared_turn(account_id=account.id)
+        run_turn.return_value = RunOutcome(
+            state=TurnState(), ma_session_id="sess_test", mapping_id=None, recovered=False
+        )
+        await bot._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row, decision, thread=thread, tenant_id=tenant.id, guild_id=workspace_id
+        )
+
+    (service,) = services
+    source = MagicMock(name="source")
+    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
+    assert await capture(source) is captured
+    capture_backend_source.assert_awaited_once()
+    args, kwargs = capture_backend_source.await_args
+    assert args[1] is source
+    context = kwargs["context"]
+    assert (context.platform, context.channel_id, context.thread_id) == (
+        "discord",
+        str(_THREAD_ID - 1),
+        str(_THREAD_ID),
+    )

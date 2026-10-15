@@ -44,6 +44,7 @@ import discord
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.runtime import DiscordRuntime
+    from daimon.core.turn.admission import Admission
 
 __all__ = ["build_confirmation_view", "discord_confirmation_hook"]
 
@@ -202,6 +203,7 @@ def discord_confirmation_hook(
     channel: discord.abc.Messageable,
     *,
     runtime: DiscordRuntime | None = None,
+    admission: Admission | None = None,
     tenant_id: uuid.UUID | None = None,
     account_id: uuid.UUID | None = None,
     prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
@@ -226,8 +228,23 @@ def discord_confirmation_hook(
                 role, _ = await requester_role(channel.guild, clicker)
                 return role is Role.ADMIN
 
+            from functools import partial
+
+            from daimon.core.turn.admission import capture_admitted_backend_source
+
+            capture = partial(
+                capture_admitted_backend_source,
+                runtime.turn_deps,
+                admission=admission,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                platform="discord",
+            )
+
             prepare_admin, check_admin = backend_switch_callbacks(
-                make_backend_service(runtime.sessionmaker, runtime.settings.turn),
+                make_backend_service(
+                    runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+                ),
                 sessionmaker=runtime.sessionmaker,
                 anthropic=runtime.anthropic,
                 tenant_id=tenant_id,

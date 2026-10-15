@@ -690,6 +690,8 @@ def agents_backend_set_command(
     backend: str,
     yes: Annotated[bool, YES_OPTION] = False,
     as_json: Annotated[bool, JSON_OPTION] = False,
+    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
     """Preview and set an enabled backend for new threads using this agent."""
     settings = load_settings()
@@ -705,6 +707,8 @@ def agents_backend_set_command(
                 yes=yes,
                 as_json=as_json,
                 selector=ctx.obj,
+                accept_drops=accept_drops,
+                dry_run=dry_run,
             )
 
     run_cli(work(), console=console)
@@ -736,6 +740,37 @@ def agents_backend_clear_command(
     run_cli(work(), console=console)
 
 
+@backend_app.command("revert")
+def agents_backend_revert_command(
+    ctx: typer.Context,
+    name: str,
+    yes: Annotated[bool, YES_OPTION] = False,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Preview and restore the preceding retained backend setting."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        if not channel_backend.backend_selection_enabled(settings.turn):
+            raise StoreError("Model backend selection is disabled on this deployment.")
+        async with build_runtime(settings) as runtime:
+            await agents_backend_change(
+                rt=runtime,
+                console=console,
+                name=name,
+                backend=None,
+                yes=yes,
+                as_json=as_json,
+                selector=ctx.obj,
+                dry_run=dry_run,
+                revert=True,
+            )
+
+    run_cli(work(), console=console)
+
+
 async def agents_backend_change(
     *,
     rt: CliRuntime,
@@ -745,6 +780,9 @@ async def agents_backend_change(
     yes: bool,
     as_json: bool,
     selector: TenantSelector | None = None,
+    accept_drops: str | None = None,
+    dry_run: bool = False,
+    revert: bool = False,
 ) -> None:
     from mux.contracts.config import BackendConfig
 
@@ -754,7 +792,7 @@ async def agents_backend_change(
         target = BackendConfig.model_validate({"backend": backend}).backend
     except ValidationError as exc:
         raise typer.BadParameter("Choose a backend supported by this deployment.") from exc
-    if as_json and not yes:
+    if as_json and not yes and not dry_run:
         raise typer.BadParameter("Use --yes with --json after reviewing the backend preview.")
     async with rt.sessionmaker.begin() as session:
         override = await resolve_tenant_override(session, selector)
@@ -767,10 +805,54 @@ async def agents_backend_change(
         account_id=principal.account_id,
         subject=Subject(is_admin=True),
     )
-    service = channel_backend.make_backend_service(rt.sessionmaker, rt.settings.turn)
+    from functools import partial
+
+    from daimon.core.authz import Place
+    from daimon.core.scope import ScopeContext
+    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.turn.deps import build_turn_deps
+
+    deps = build_turn_deps(
+        rt.settings,
+        rt.anthropic,
+        rt.sessionmaker,
+        deployment_default=rt.deployment_default,
+        resolver_cache=rt.resolver_cache,
+        billing_config=None,
+    )
+    service = channel_backend.make_backend_service(
+        rt.sessionmaker,
+        rt.settings.turn,
+        capture_source=partial(
+            capture_backend_source,
+            deps,
+            context=ScopeContext(
+                tenant_id=tenant_id,
+                account_id=principal.account_id,
+                platform="cli",
+            ),
+            subject=actor.subject,
+            place=Place(),
+            is_dm=False,
+            slack_turn_context_id=None,
+            private_dm_id=None,
+            external_user_id=principal.os_user,
+            explicit_target_name=name,
+        ),
+    )
     agent = await channel_backend.load_backend_agent(
         rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
     )
+    current_revision = await service.current(agent) if revert else None
+    if revert:
+        if current_revision is None:
+            raise channel_backend.AgentBackendRefused("no_previous_revision")
+        target = None
+        if current_revision.previous_local is not None:
+            previous = await service.revision(agent, current_revision.previous_local)
+            if previous is None:
+                raise channel_backend.AgentBackendRefused("no_previous_revision")
+            target = previous.backend
     preview = await service.preview(agent, target)
     preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
     if not as_json:
@@ -782,13 +864,54 @@ async def agents_backend_change(
             ("Shared-thread limits", preview.shared_thread_limits),
         ):
             console.print(f"{label}: {', '.join(items) or 'None'}", markup=False)
+        if preview.declared_drops:
+            console.print(
+                f"Won't be available on {preview.target_backend}: "
+                + ", ".join(preview.declared_drops),
+                markup=False,
+            )
+            console.print("Revert any time; nothing is deleted.", markup=False)
         console.print(preview.cost_line, markup=False)
         console.print("Existing threads keep their backend; channel overrides still apply.")
+    if dry_run:
+        if as_json:
+            console.print(preview_json, markup=False, highlight=False, soft_wrap=True)
+        return
+    accepted: tuple[str, ...] | None = None
+    if not revert and target is not None and preview.drop_consent is not None:
+        try:
+            consent = type(preview.drop_consent).model_validate(
+                {
+                    **preview.drop_consent.model_dump(),
+                    "declared_drops": tuple(
+                        part.strip() for part in (accept_drops or "").split(",")
+                    ),
+                }
+            )
+        except ValidationError as exc:
+            raise typer.BadParameter(
+                "--accept-drops must exactly match: " + ",".join(preview.declared_drops)
+            ) from exc
+        if consent != preview.drop_consent:
+            raise typer.BadParameter(
+                "--accept-drops must exactly match: " + ",".join(preview.declared_drops)
+            )
+        accepted = consent.declared_drops
+    elif accept_drops is not None:
+        raise typer.BadParameter("This preview does not declare drops.")
     confirm_or_abort(console, f"Change {name}'s model backend?", yes=yes)
     current = await channel_backend.load_backend_agent(
         rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
     )
-    if target is None:
+    if revert:
+        assert current_revision is not None
+        revision = await service.revert(
+            current,
+            actor,
+            expected_revision=current_revision.local,
+            expected_preview_digest=preview.digest,
+        )
+    elif target is None:
         revision = await service.clear_backend(
             current,
             preview.setting_revision,
@@ -802,6 +925,7 @@ async def agents_backend_change(
             preview.setting_revision,
             actor,
             expected_preview_digest=preview.digest,
+            **({"accepted_drops": accepted} if accepted is not None else {}),
         )
     if as_json:
         console.print(

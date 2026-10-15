@@ -397,3 +397,22 @@ async def test_runtime_hook_rechecks_current_configured_admins(
     assert await check(AAD_OBJECT_ID) is True
     runtime.settings.teams.admin_user_ids = ()
     assert await check(AAD_OBJECT_ID) is False
+
+
+@pytest.mark.parametrize("state", ["pending", "approved", "denied", "expired", "stopped"])
+def test_complete_backend_loss_list_survives_native_card_rendering(state):
+    losses = "Won't be available on openai: files, mcp, memory, repository, sandbox, skills, tools"
+    prompt = _prompt().model_copy(
+        update={
+            "admin": True,
+            "action": "Switch Research. " + losses,
+            "denied_action": "Model backend unchanged",
+            "consequence": losses,
+            "detail_lines": ("Optional skill: " + "x" * 1000,),
+        }
+    )
+    card = build_confirmation_card(
+        prompt, state=state, token="abcdefgh" if state == "pending" else None
+    )
+    rendered = confirmation_adaptive_card(card, prompt).model_dump_json(by_alias=True)
+    assert (losses in rendered) == (state in {"pending", "approved"})

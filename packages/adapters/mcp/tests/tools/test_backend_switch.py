@@ -94,8 +94,8 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
         make_tenant,
         make_thread_session,
     )
-    from daimon.testing.ma import list_response
-    from daimon.testing.ma_models import ma_agent, ma_session
+    from daimon.testing.ma import MARouter, list_response
+    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
     from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -148,15 +148,55 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             ],
         }
     ]
-    native = ma_agent(id="agent_owned", tenant_id=str(tenant.id), name="Researcher", tools=tools)
+    # `daimon-mcp` must be both a tool and a matching `mcp_servers` entry (the
+    # real agent carries both together, `AgentSpec._require_mcp_toolset_when_
+    # mcp_servers_set`); otherwise DD3's obligation check sees an unresolvable
+    # resource and hard-refuses rather than declaring the toolset a drop.
+    mcp_servers = [{"name": "daimon-mcp", "type": "url", "url": "https://mcp.invalid"}]
+    native = ma_agent(
+        id="agent_owned",
+        tenant_id=str(tenant.id),
+        name="Researcher",
+        tools=tools,
+        mcp_servers=mcp_servers,
+    )
     payload = native.model_dump(mode="json")
     payload["metadata"]["daimon_name"] = "Researcher"
     frozen = ma_session(
         id="sess_owned",
         agent=native,
-        metadata={"daimon_tenant": str(tenant.id), "daimon_account": str(account.id)},
+        metadata={
+            "daimon_tenant": str(tenant.id),
+            "daimon_account": str(account.id),
+            # DD3's trusted source capture requires positive proof of a public
+            # context (never inferred from an absent field): the stamped
+            # channel/thread must match the verified origin's exactly.
+            "daimon_channel": "channel",
+            "daimon_thread": "thread",
+        },
     ).model_dump(mode="json")
-    trace = ScriptedTransport()
+    # DD3's trusted source capture reads the real target agent and its
+    # deployment environment in a verified host context: a deployment default
+    # naming both (as production's `defaults/config.yaml` does), and a router
+    # fallback serving them, same as the agent/session scripts above.
+    environment = ma_environment(tenant_id=tenant.id)
+    environment.metadata["daimon_name"] = "default"
+    router = MARouter()
+    router.add("GET", r"/v1/agents/agent_owned", lambda *_: httpx.Response(200, json=payload))
+    router.add(
+        "GET",
+        rf"/v1/environments/{environment.id}",
+        lambda *_: httpx.Response(200, json=environment.model_dump(mode="json")),
+    )
+    router.add(
+        "GET", r"/v1/environments", lambda *_: list_response([environment.model_dump(mode="json")])
+    )
+    # The capture callback repeats its own real session-privacy read on every
+    # preview/write (never a cached fact): a plain fallback for the unchanged
+    # session covers that extra read without every `gate()` call site having
+    # to queue twice for the one request they already scripted explicitly.
+    router.add("GET", r"/v1/sessions/sess_owned", lambda *_: httpx.Response(200, json=frozen))
+    trace = ScriptedTransport(router=router)
     async with trace.client() as client:
         settings = Settings(
             database={"url": "postgresql+asyncpg://fixture:fixture@localhost/fixture"},
@@ -164,7 +204,12 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             turn=TurnSettings(path="mux", channel_backends=True),
             mcp=McpSettings(public_url="https://mcp.invalid"),
         )
-        runtime = McpRuntime(sessions, client, settings, DeploymentDefault())
+        runtime = McpRuntime(
+            sessions,
+            client,
+            settings,
+            DeploymentDefault(agent_name="Researcher", environment_name="default"),
+        )
         auth = AuthIdentity(
             tenant_id=tenant.id,
             account_id=account.id,
@@ -205,21 +250,80 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
         )
 
 
-async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_chat):
-    from daimon.core.channel_backend import load_backend_agent
+def _without_own_tools(payload):
+    """The switched agent as MA serves it from now on: no tools of its own.
+
+    A cross-profile preview of a tool-bearing source refuses (native tool
+    controls have no neutral projection yet), so the cross-backend proofs
+    switch a tool-less agent. The chat session's frozen agent keeps the gated
+    toolset the card gate reads, and replies already queued keep theirs.
+    """
+    payload["tools"] = []
+    payload["mcp_servers"] = []
+
+
+@pytest.mark.parametrize("own_tools", [False, True])
+@pytest.mark.parametrize("target", ["openai", "gemini"])
+async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
+    active_chat, target, own_tools
+):
+    from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
 
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    if not own_tools:
+        _without_own_tools(payload)
     gate()
     agent()
+    if own_tools:
+        # A Daimon agent carrying its own `daimon-mcp` toolset cannot yet preview
+        # a cross-profile switch: `classify_source_obligations` reports
+        # `source_definition` for native tool controls instead of declaring
+        # drops, so the shared preview path hard-refuses `source_unavailable`
+        # (runtime_manifest.classify_source_obligations fix pending). Narrowed
+        # to this specific cause so an unrelated ToolError elsewhere in the
+        # preview path (which also surfaces as "Preview again") does not pass
+        # here by coincidence.
+        with pytest.raises(ToolError, match="Preview again") as excinfo:
+            await _request_agent_backend_switch_impl(
+                runtime,
+                auth,
+                agent_name="Researcher",
+                target_backend=target,
+                origin_context_id=str(origin.id),
+            )
+        assert isinstance(excinfo.value.__cause__, AgentBackendRefused)
+        assert str(excinfo.value.__cause__) == "source unavailable"
+        assert not trace.replies and not trace.violations
+        return
     preview = await _request_agent_backend_switch_impl(
         runtime,
         auth,
         agent_name="Researcher",
-        target_backend="openai",
+        target_backend=target,
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview" and preview.expected_revision == 0
     assert "unknown" in preview.cost_line.lower()
+    drops = preview.declared_drops
+    assert {"memory", "sandbox"} <= set(drops)
+    assert drops == ("memory", "sandbox")
+    extra = next(item for item in ("files", "repository", "skills") if item not in drops)
+    # The confirmed call must name exactly the previewed losses.
+    for accepted in (None, (), drops[:1], (*drops, extra)):
+        gate()
+        agent()
+        agent()
+        with pytest.raises(ToolError, match="Preview again"):
+            await _request_agent_backend_switch_impl(
+                runtime,
+                auth,
+                agent_name="Researcher",
+                target_backend=target,
+                origin_context_id=str(origin.id),
+                expected_revision=0,
+                preview_digest=preview.preview_digest,
+                accepted_drops=accepted,
+            )
     gate()
     agent()
     agent()
@@ -227,12 +331,13 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_cha
         runtime,
         auth,
         agent_name="Researcher",
-        target_backend="openai",
+        target_backend=target,
         origin_context_id=str(origin.id),
         expected_revision=0,
         preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
     )
-    assert changed.status == "changed"
+    assert changed.status == "changed" and changed.declared_drops == preview.declared_drops
     gate()
     agent()
     agent()
@@ -241,17 +346,19 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_cha
             runtime,
             auth,
             agent_name="Researcher",
-            target_backend="openai",
+            target_backend=target,
             origin_context_id=str(origin.id),
             expected_revision=0,
             preview_digest=preview.preview_digest,
+            accepted_drops=preview.declared_drops,
         )
     agent()
     actual = await load_backend_agent(
         runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
     )
     current = await service.current(actual)
-    assert current.local == 1 and current.backend == "openai"
+    assert current.local == 1 and current.backend == target
+    assert current.declared_drops == preview.declared_drops
     events = await service.audit(auth.tenant_id, agent_id=actual.agent_id)
     assert len(events) == 1 and events[0].operation == "set"
     assert events[0].account_id == auth.account_id
@@ -313,9 +420,10 @@ async def test_registration_uses_only_the_existing_backend_flags(path, channel_b
     assert len(names) == len(set(names))
 
 
+@pytest.mark.parametrize("target", ["openai", "gemini"])
 @pytest.mark.parametrize("recorded_gate", [False, True])
 async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
-    active_chat, recorded_gate
+    active_chat, recorded_gate, target
 ):
     import httpx
     from anthropic.types.beta import BetaManagedAgentsAgent
@@ -354,14 +462,23 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
             mutable_fingerprint=fingerprint_mutable(snapshot),
         )
     gate()
-    trace.queue(ScriptedReply("GET", "/v1/agents/agent_owned", httpx.Response(200, json=payload)))
+    # The card gate reads the live agent's toolset (once here, and once more in
+    # the preview's own source capture): both reads see the gated toolset, while
+    # the source the preview captures afterwards is the tool-less agent.
+    gated = [
+        ScriptedReply("GET", "/v1/agents/agent_owned", httpx.Response(200, json=payload))
+        for _ in range(2)
+    ]
+    trace.queue(gated[0])
+    _without_own_tools(payload)
     if recorded_gate:
         agent()
+        trace.queue(gated[1])
         preview = await _request_agent_backend_switch_impl(
             runtime,
             auth,
             agent_name="Researcher",
-            target_backend="openai",
+            target_backend=target,
             origin_context_id=str(origin.id),
         )
         assert preview.status == "preview"
@@ -371,8 +488,34 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
                 runtime,
                 auth,
                 agent_name="Researcher",
-                target_backend="openai",
+                target_backend=target,
                 origin_context_id=str(origin.id),
             )
     assert not trace.replies and not trace.violations
     assert all(request.method == "GET" for request in trace.requests)
+
+
+async def test_a_private_session_context_refuses_the_preview(active_chat):
+    """`_capture_backend_source`'s `require_public_context=True` gate
+    (daimon/adapters/mcp/tools/agents.py) must refuse a preview whose live session's
+    stamped channel doesn't match the verified chat origin exactly, even though the
+    origin/admin/live-session checks above it all pass. Here the session is missing
+    its channel stamp entirely (as an un-public or pre-DD3 session would be).
+    """
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    # A tool-bearing source refuses on its own terms (asserted elsewhere in this
+    # file); strip it so the only possible refusal here is the context gate.
+    _without_own_tools(payload)
+    del frozen["metadata"]["daimon_channel"]
+    del frozen["metadata"]["daimon_thread"]
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="Preview again"):
+        await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            agent_name="Researcher",
+            target_backend="openai",
+            origin_context_id=str(origin.id),
+        )
+    assert not trace.replies and not trace.violations

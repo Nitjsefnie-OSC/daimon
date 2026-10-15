@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daimon.adapters.teams import app as app_module
@@ -466,3 +466,97 @@ async def test_a_handoff_refused_at_re_admission_is_not_marked_delivered(
     status, _reason = await _status(db_session_factory, keys[0])
     assert status == "pending", "work that never ran is offered again, not settled delivered"
     assert teams.turn_queue.depth() == 0
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_turn_backend_switch_card_captures_through_its_own_admission(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ordinary turn's Confirm card reads the switched agent's source as that
+    turn's own admitted caller, exactly like a Discord mention/Slack mention
+    turn's card. Built without the admission, every backend-switch card on this
+    call site (shared by mention and continuation turns) refuses
+    `source_unavailable`.
+    """
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+
+    async def _record_noop(*, event: Any) -> None:
+        return None
+
+    async def _bind(
+        deps: Any,
+        admission: Admission,
+        *,
+        tenant_id: uuid.UUID,
+        platform: str,
+        external_user_id: str,
+        thread_id: str,
+        session_account_id: uuid.UUID,
+        reuse_existing: bool,
+        deadline: Any,
+    ) -> PreparedTurn:
+        return PreparedTurn(
+            admission=admission,
+            ma_session_id="sess_teams_admission",
+            mapping_id=None,
+            watermark=None,
+            reused=True,
+            session_account_id=admission.account_id,
+            _record=_record_noop,
+            continuity=ContinuityOutcome(),
+        )
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    teams.runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+
+    services: list[Any] = []
+    real_callbacks = confirmation.backend_switch_callbacks
+
+    def spy_callbacks(service: Any, **kwargs: Any) -> Any:
+        services.append(service)
+        return real_callbacks(service, **kwargs)
+
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
+    captured = MagicMock(name="captured_source")
+    capture_backend_source = AsyncMock(return_value=captured)
+    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
+
+    with (
+        patched_admission(),
+        patch.object(app_module, "bind_session", AsyncMock(side_effect=_bind)),
+        patch.object(
+            app_module,
+            "run_prepared_turn",
+            AsyncMock(
+                return_value=RunOutcome(
+                    state=TurnState(),
+                    ma_session_id="sess_teams_admission",
+                    mapping_id=None,
+                    recovered=False,
+                )
+            ),
+        ),
+    ):
+        await teams._run_turn(  # pyright: ignore[reportPrivateUsage]
+            make_inbound("w", kind="channel", conversation=CHANNEL_ID), TENANT
+        )
+
+    (service,) = services
+    source = MagicMock(name="source")
+    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
+    assert await capture(source) is captured
+    capture_backend_source.assert_awaited_once()
+    args, kwargs = capture_backend_source.await_args
+    assert args[1] is source
+    context = kwargs["context"]
+    assert context.platform == "teams"
