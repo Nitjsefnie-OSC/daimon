@@ -17,9 +17,7 @@ class BrokerError(DaimonError):
 class NoBindingError(BrokerError):
     """Raised when no credential / binding exists for the requesting agent.
 
-    Resolution: bind a working-repo token for the agent — `request_repo_binding`
-    is the chat path that collects one — or install the GitHub App on the
-    repository.
+    Resolution: connect the required external account for this agent.
     """
 
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import datetime
-import time
 import uuid
 from collections.abc import Mapping
 from functools import partial
@@ -74,8 +73,6 @@ from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
 from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
 from daimon.core.errors import DaimonError, DefaultsError
-from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_repo
-from daimon.core.github_repo_auth import InstallationLookup
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import (
@@ -99,7 +96,7 @@ from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import Provider
-from pydantic import BaseModel, Field, JsonValue, SecretStr, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
 log = structlog.get_logger()
 
@@ -569,63 +566,23 @@ async def _create_agent_impl(
     # if agents.create itself raises, let it propagate as ToolError.
     warnings: list[SyncRepoFailure] | None = None
     if spec.skill_repos:
-        fernet = runtime.fernet
-        if fernet is None:
-            # No crypto keys configured — cannot decrypt PAT; surface as warnings.
-            warnings = [
-                SyncRepoFailure(
-                    repo_url=r.url,
-                    reason="no crypto keys configured",
-                    phase="fetch",
-                )
-                for r in spec.skill_repos
-            ]
-        else:
-            github_fallback_pat = (
-                runtime.settings.github.fallback_pat.get_secret_value()
-                if runtime.settings.github.fallback_pat is not None
-                else None
+        async with httpx.AsyncClient() as http_client:
+            report = await sync_agent_skills(
+                principal_id=auth.account_id,
+                tenant_id=auth.tenant_id,
+                agent_name=spec.name,
+                repos=spec.skill_repos,
+                sessionmaker=runtime.session_factory,
+                fernet=runtime.fernet,
+                http_client=http_client,
+                anthropic_client=runtime.client,
+                app_id=runtime.settings.github_app.app_id,
+                app_private_key=runtime.settings.github_app.private_key,
+                max_tarball_decompressed_bytes=(
+                    runtime.settings.github.max_tarball_decompressed_bytes
+                ),
             )
-            github_app_id = runtime.settings.github.app_id
-            github_app_private_key = runtime.settings.github.app_private_key
-            async with httpx.AsyncClient() as http_client:
-                installation_lookup: InstallationLookup | None = None
-                if github_app_id is not None and github_app_private_key is not None:
-                    # Interactive path — a live GitHub lookup is the right
-                    # freshness choice here (the webhook resync injects a
-                    # cheap cached read instead; see resync.py).
-                    resolved_app_id: str = github_app_id
-                    resolved_app_private_key: SecretStr = github_app_private_key
-
-                    async def _live_installation_lookup(owner: str, repo: str) -> int | None:
-                        jwt = build_app_jwt(
-                            resolved_app_private_key.get_secret_value(),
-                            resolved_app_id,
-                            now=int(time.time()),
-                        )
-                        return await get_installation_id_for_repo(
-                            http_client, jwt=jwt, owner=owner, repo=repo
-                        )
-
-                    installation_lookup = _live_installation_lookup
-                report = await sync_agent_skills(
-                    principal_id=auth.account_id,  # NOT auth.principal_id (no such field)
-                    tenant_id=auth.tenant_id,
-                    agent_name=spec.name,
-                    repos=spec.skill_repos,
-                    sessionmaker=runtime.session_factory,  # McpRuntime field is session_factory
-                    fernet=fernet,
-                    http_client=http_client,
-                    anthropic_client=runtime.client,  # McpRuntime field is client
-                    github_fallback_pat=github_fallback_pat,
-                    app_id=github_app_id,
-                    app_private_key=github_app_private_key,
-                    installation_lookup=installation_lookup,
-                    max_tarball_decompressed_bytes=(
-                        runtime.settings.github.max_tarball_decompressed_bytes
-                    ),
-                )
-            warnings = sync_report_failures(report) or None
+        warnings = sync_report_failures(report) or None
     info = await _build_agent_info(
         runtime.client, ma_agent, tenant_id=auth.tenant_id, sync_warnings=warnings
     )

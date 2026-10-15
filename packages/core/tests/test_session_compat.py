@@ -16,7 +16,6 @@ from daimon.core.session_compat import (
     ReplaceToolsAndMcpServers,
     ReuseAsIs,
     RotateAppTokens,
-    RotateRepoToken,
     UpdateInPlace,
     decide_session_compatibility,
     identity_change_reasons,
@@ -57,21 +56,6 @@ def test_decision_is_reuse_when_recorded_and_desired_are_identical() -> None:
         now=NOW,
     )
     assert decision == ReuseAsIs(), "identical snapshots must reuse the session untouched"
-
-
-def test_predeploy_legacy_snapshot_with_bound_repo_is_reused() -> None:
-    recorded = SessionSnapshot.model_validate(make_snapshot().model_dump(exclude={"repo_urls"}))
-    desired = make_snapshot(repo_urls=())
-    assert recorded.repo_url == "https://github.com/acme/data"
-    assert (
-        decide_session_compatibility(
-            recorded=recorded,
-            desired=desired,
-            capabilities=DEFAULT_MA_CAPABILITIES,
-            now=NOW,
-        )
-        == ReuseAsIs()
-    )
 
 
 def test_app_token_swap_keeps_session_but_repo_set_change_replaces_it() -> None:
@@ -299,70 +283,6 @@ def test_decision_replaces_session_when_tools_differ_and_agent_update_is_unsuppo
     )
 
 
-@pytest.mark.parametrize("age_s", [0, 2399, 2400])
-def test_decision_keeps_repo_token_when_it_is_no_older_than_the_threshold(age_s: int) -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(
-            repo_resource_id="res_repo_1",
-            repo_token_issued_at=int(NOW.timestamp()) - age_s,
-        ),
-        desired=make_snapshot(),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
-    assert decision == ReuseAsIs(), f"a token {age_s}s old is still within the 2400s window"
-
-
-def test_decision_rotates_repo_token_when_it_is_older_than_the_threshold() -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(
-            repo_resource_id="res_repo_1",
-            repo_token_issued_at=int(NOW.timestamp()) - 2401,
-        ),
-        desired=make_snapshot(),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
-    assert decision == UpdateInPlace(
-        ops=(RotateRepoToken(resource_id="res_repo_1"),), reasons=("repo_token_age",)
-    ), "an expired clone token is rotated on the resource that holds it"
-
-
-def test_decision_ignores_token_age_when_no_repository_is_mounted() -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(repo_resource_id=None, repo_token_issued_at=0),
-        desired=make_snapshot(),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
-    assert decision == ReuseAsIs(), "with no repo resource there is no token to rotate"
-
-
-def test_decision_ignores_token_age_when_the_issue_time_was_never_recorded() -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(repo_resource_id="res_repo_1", repo_token_issued_at=None),
-        desired=make_snapshot(),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
-    assert decision == ReuseAsIs(), "an unknown issue time is not evidence that the token expired"
-
-
-def test_decision_replaces_session_when_token_is_stale_and_rotation_is_unsupported() -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(
-            repo_resource_id="res_repo_1",
-            repo_token_issued_at=int(NOW.timestamp()) - 9000,
-        ),
-        desired=make_snapshot(),
-        capabilities=MaCapabilities(repo_token_rotatable=False),
-        now=NOW,
-    )
-    assert decision == ReplaceSession(reasons=("repo_token_age",)), (
-        "a stale token that cannot be rotated leaves the session unable to reach the repo"
-    )
-
-
 def test_decision_appends_vault_remirror_last_when_a_vault_is_attached_and_ops_exist() -> None:
     decision = decide_session_compatibility(
         recorded=make_snapshot(vault_id="vault_1", env_resource_id="res_env_1"),
@@ -385,49 +305,6 @@ def test_decision_reuses_when_a_vault_is_attached_and_nothing_else_differs() -> 
     assert decision == ReuseAsIs(), (
         "an attached vault alone is not a change; the caller re-mirrors every turn as it does today"
     )
-
-
-def test_ops_and_reasons_are_in_a_fixed_order_whatever_order_the_differences_were_set() -> None:
-    recorded = make_snapshot(
-        vault_id="vault_1",
-        env_resource_id="res_env_1",
-        env_file_id="file_env_1",
-        repo_resource_id="res_repo_1",
-        repo_token_issued_at=int(NOW.timestamp()) - 9000,
-    )
-    expected = UpdateInPlace(
-        ops=(
-            ReplaceEnvFile(old_resource_id="res_env_1", old_file_id="file_env_1"),
-            ReplaceToolsAndMcpServers(),
-            RotateRepoToken(resource_id="res_repo_1"),
-            RemirrorVaultCredentials(),
-        ),
-        reasons=("env_file", "tools", "mcp_servers", "repo_token_age"),
-    )
-    first = decide_session_compatibility(
-        recorded=recorded,
-        desired=make_snapshot(
-            vault_id="vault_1",
-            env_sha256="other-env-hash",
-            tools_sha256="other-tools-hash",
-            mcp_servers_sha256="other-mcp-hash",
-        ),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
-    second = decide_session_compatibility(
-        recorded=recorded,
-        desired=make_snapshot(
-            mcp_servers_sha256="other-mcp-hash",
-            tools_sha256="other-tools-hash",
-            env_sha256="other-env-hash",
-            vault_id="vault_1",
-        ),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
-    assert first == expected, "ops and reasons follow the declared order, not the difference order"
-    assert second == expected, "the same differences decide the same way whatever order they arrive"
 
 
 def test_decision_raises_when_now_is_naive() -> None:

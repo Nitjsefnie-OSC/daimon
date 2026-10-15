@@ -31,7 +31,6 @@ from daimon.core.config import (
     GithubSettings,
     Settings,
 )
-from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.scope import DeploymentDefault
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -112,118 +111,6 @@ async def cli_token_app(
     yield mcp, account_id, "ghp_supersecret", db_session_factory, settings
 
 
-async def test_get_cli_token_github_returns_plain_string(
-    cli_token_app: tuple[FastMCP, uuid.UUID, str, async_sessionmaker[AsyncSession], Settings],
-) -> None:
-    """``get_cli_token("github")`` returns the decrypted PAT verbatim as a str."""
-    mcp, account_id, plaintext_token, sessionmaker, settings = cli_token_app
-    fernet = build_multifernet(tuple(k.get_secret_value() for k in settings.crypto.keys))
-    await upsert_credential_encrypted(
-        sessionmaker=sessionmaker,
-        fernet=fernet,
-        principal_id=account_id,
-        github_login="octocat",
-        plaintext_token=plaintext_token,
-        scopes=("repo",),
-    )
-
-    async with Client(mcp) as client:
-        result = await client.call_tool("get_cli_token", {"service": "github"})
-
-    text = result.content[0].text  # type: ignore[union-attr]
-    assert text == plaintext_token, "get_cli_token('github') must return the decrypted PAT verbatim"
-
-
-async def test_get_cli_token_audit_log_has_no_token_value(
-    cli_token_app: tuple[FastMCP, uuid.UUID, str, async_sessionmaker[AsyncSession], Settings],
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Audit log emits ``service=... account=...`` but never the token plaintext."""
-    mcp, account_id, plaintext_token, sessionmaker, settings = cli_token_app
-    fernet = build_multifernet(tuple(k.get_secret_value() for k in settings.crypto.keys))
-    await upsert_credential_encrypted(
-        sessionmaker=sessionmaker,
-        fernet=fernet,
-        principal_id=account_id,
-        github_login="octocat",
-        plaintext_token=plaintext_token,
-        scopes=("repo",),
-    )
-
-    async with Client(mcp) as client:
-        await client.call_tool("get_cli_token", {"service": "github"})
-
-    out = capsys.readouterr().out
-    assert plaintext_token not in out, "audit log must never carry the minted token plaintext"
-    assert "service=github" in out, "audit log line must record the service name"
-    assert f"account={account_id}" in out, "audit log line must record the account UUID"
-
-
-async def test_get_cli_token_no_binding_maps_to_tool_error(
-    cli_token_app: tuple[FastMCP, uuid.UUID, str, async_sessionmaker[AsyncSession], Settings],
-) -> None:
-    """An account-only caller needs operator help, not a target-agent repo binding."""
-    mcp, _account_id, _plaintext_token, _sessionmaker, _settings = cli_token_app
-
-    async with Client(mcp) as client:
-        with pytest.raises(ToolError, match="operator.*account"):
-            await client.call_tool("get_cli_token", {"service": "github"})
-
-
-async def test_get_cli_token_github_refuses_when_unbound_even_with_operator_fallback_configured(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An agent with no bound credential is refused; the operator's shared
-    token is never substituted, even when a fallback is configured."""
-    fernet_key = SecretStr(Fernet.generate_key().decode("ascii"))
-    settings = _build_settings(
-        fernet_key=fernet_key, github_fallback_pat=SecretStr("ghp_operator_fallback")
-    )
-    account_id = uuid.uuid4()
-    tenant_id = uuid.uuid4()
-
-    runtime = McpRuntime(
-        session_factory=db_session_factory,
-        client=MagicMock(spec=AsyncAnthropic),
-        settings=settings,
-        deployment_default=DeploymentDefault(),
-    )
-
-    async def fixture_subject_resolver(_ctx: object) -> str:
-        return str(account_id)
-
-    async def fixture_tenant_resolver(_ctx: object) -> str:
-        return str(tenant_id)
-
-    async def fixture_role_resolver(_ctx: object) -> str:
-        return "user"
-
-    async def fixture_agent_id_resolver(_ctx: object) -> str | None:
-        return None
-
-    mcp = FastMCP(name="test")
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=fixture_subject_resolver,
-            tenant_resolver=fixture_tenant_resolver,
-            role_resolver=fixture_role_resolver,
-            agent_id_resolver=fixture_agent_id_resolver,
-            is_admin_resolver=_fixture_is_admin_resolver_false,
-            internal_resolver=_fixture_is_admin_resolver_false,
-            sessionmaker=db_session_factory,
-        )
-    )
-    register_cli_token_tool(mcp, runtime)
-
-    async with Client(mcp) as client:
-        with pytest.raises(ToolError) as exc_info:
-            await client.call_tool("get_cli_token", {"service": "github"})
-
-    assert "ghp_operator_fallback" not in str(exc_info.value), (
-        "the operator's shared token must never reach the caller, by any route"
-    )
-
-
 async def test_get_cli_token_unknown_service_rejected_by_literal(
     cli_token_app: tuple[FastMCP, uuid.UUID, str, async_sessionmaker[AsyncSession], Settings],
 ) -> None:
@@ -232,7 +119,7 @@ async def test_get_cli_token_unknown_service_rejected_by_literal(
     mcp, _account_id, _plaintext_token, _sessionmaker, _settings = cli_token_app
 
     async with Client(mcp) as client:
-        with pytest.raises((McpError, ToolError), match="github|gcloud|literal"):
+        with pytest.raises((McpError, ToolError), match="gcloud|literal"):
             await client.call_tool("get_cli_token", {"service": "not-a-real-service"})
 
 

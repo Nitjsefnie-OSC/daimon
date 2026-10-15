@@ -180,46 +180,6 @@ def test_post_delete_container_user_skills_row_absent_when_zero() -> None:
     )
 
 
-def test_post_delete_container_github_credentials_row_renders_when_nonzero() -> None:
-    """github_credentials checklist row appears when count > 0."""
-    result = _make_result(github_credentials=1)
-    container = build_post_delete_container(result)
-    joined = _joined_text(container)
-    assert "1 stored GitHub token(s) deleted" in joined, (
-        "When result.db.github_credentials > 0, post-delete container must show the github_credentials row"
-    )
-
-
-def test_post_delete_container_github_credentials_row_absent_when_zero() -> None:
-    """D-PREVIEW-FMT-01: github_credentials row is suppressed when count == 0."""
-    result = _make_result(github_credentials=0, accounts=1)
-    container = build_post_delete_container(result)
-    joined = _joined_text(container)
-    assert "GitHub token" not in joined, (
-        "zero-count github_credentials must NOT render a checklist row (D-PREVIEW-FMT-01)"
-    )
-
-
-def test_post_delete_container_github_oauth_states_row_renders_when_nonzero() -> None:
-    """github_oauth_states checklist row appears when count > 0."""
-    result = _make_result(github_oauth_states=2)
-    container = build_post_delete_container(result)
-    joined = _joined_text(container)
-    assert "2 OAuth handshake record(s) removed" in joined, (
-        "When result.db.github_oauth_states > 0, post-delete container must show the oauth_states row"
-    )
-
-
-def test_post_delete_container_github_oauth_states_row_absent_when_zero() -> None:
-    """D-PREVIEW-FMT-01: github_oauth_states row is suppressed when count == 0."""
-    result = _make_result(github_oauth_states=0, accounts=1)
-    container = build_post_delete_container(result)
-    joined = _joined_text(container)
-    assert "OAuth handshake" not in joined, (
-        "zero-count github_oauth_states must NOT render a checklist row (D-PREVIEW-FMT-01)"
-    )
-
-
 def test_post_delete_container_carveout_usage_records_always_present() -> None:
     """usage-records retention carve-out is always shown on the post-delete embed."""
     result = _make_result(accounts=1)

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -26,25 +25,14 @@ from daimon.adapters.mcp.tools.agents import (
     _attach_mcp_server_impl,  # pyright: ignore[reportPrivateUsage]
     _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.repo_binding import (
-    _bind_public_repo_impl,  # pyright: ignore[reportPrivateUsage]
-)
-from daimon.adapters.mcp.tools.self_edit import (
-    _clear_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
-    _self_delete_file_impl,  # pyright: ignore[reportPrivateUsage]
-    _self_write_file_impl,  # pyright: ignore[reportPrivateUsage]
-    _set_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
-)
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
-from daimon.core.stores.tenants import get_tenant
-from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import MARouter, build_fake_anthropic, ma_agent
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -158,80 +146,6 @@ async def test_direct_tools_refuse_a_member_editing_a_pinned_agent(
             await _remove_skill_impl(
                 runtime, auth, agent_name="acme-config", skill_id="skill_1", **target
             )
-
-
-@pytest.mark.parametrize(
-    "tool", ["set_repo_binding", "clear_repo_binding", "self_write_file", "self_delete_file"]
-)
-async def test_an_agent_key_cannot_rebind_a_pinned_agents_repo(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tool: str,
-) -> None:
-    """An agent key carries no turn origin, so a member's key is outside every pin."""
-    runtime, tenant_id = await _pinned(db_session, db_session_factory)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
-    )
-
-    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
-        if tool == "set_repo_binding":
-            await _set_repo_binding_impl(
-                runtime, auth, repo_url="https://github.com/evil/repo", default_branch="main"
-            )
-        elif tool == "clear_repo_binding":
-            await _clear_repo_binding_impl(runtime, auth)
-        elif tool == "self_write_file":
-            await _self_write_file_impl(runtime, auth, key="CRM_TOKEN", content="evil")
-        else:
-            await _self_delete_file_impl(runtime, auth, key="CRM_TOKEN")
-
-
-async def test_bind_public_repo_refuses_a_member_outside_a_pinned_agents_channels(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    runtime, tenant_id = await _pinned(db_session, db_session_factory)
-    tenant_account = await make_account(db_session, tenant=await get_tenant(db_session, tenant_id))
-    await db_session.commit()
-    auth = AuthIdentity(
-        account_id=tenant_account.id,
-        tenant_id=tenant_id,
-        role=Role.USER,
-        platform="discord",
-        platform_user_id="42",
-    )
-    async with db_session_factory.begin() as session:
-        origin = await create_origin(
-            session,
-            tenant_id=tenant_id,
-            account_id=auth.account_id,
-            platform="discord",
-            parent_channel_id="C_CLIENTB",
-            thread_id="T1",
-            responder_ma_agent_id="ag_clientb",
-            responder_name="clientb-project",
-            configuration_target_ma_agent_id=None,
-            configuration_target_name=None,
-            role=Role.USER,
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            now=datetime.now(UTC),
-        )
-
-    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
-        await _bind_public_repo_impl(
-            runtime,
-            auth,
-            agent_name="acme-config",
-            repo_url="https://github.com/evil/repo",
-            branch="main",
-            origin_context_id=str(origin.id),
-            expected_ma_agent_id=_AGENT_ID,
-            unsaved_work=None,
-        )
 
 
 async def test_the_guard_lets_an_admin_through(

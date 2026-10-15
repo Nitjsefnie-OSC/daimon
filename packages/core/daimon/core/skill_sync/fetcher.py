@@ -1,8 +1,6 @@
 """GitHub tarball fetcher, authenticated with an optional bearer credential.
 
-The credential may be a personal access token or a GitHub App installation
-token — both are opaque bearer strings from this module's perspective; the
-caller (the orchestrator) resolves which kind to hand in.
+The optional credential is a GitHub App installation token.
 
 Architectural rule: this module does NOT catch exceptions. Errors raise; the
 orchestrator (named boundary) handles them. The four error CLASSES below are
@@ -23,10 +21,6 @@ from daimon.core.github_rate_limit import (
 from daimon.core.github_repo_auth import normalize_owner_repo
 
 _log = structlog.get_logger(__name__)
-
-
-class PATMissingError(Exception):
-    """No credential was available for the principal (or per-agent overlay)."""
 
 
 class GitHubAuthError(Exception):

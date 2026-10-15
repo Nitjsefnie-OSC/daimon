@@ -49,7 +49,6 @@ async def _load(context: CommandContext) -> HereCard:
     runtime, asked = context.runtime, context.asked_in or context.inbound
     # A plain 1:1 chat is its own thread; only a post or a setup conversation is one.
     thread_id = asked.thread_id if asked.thread_id != asked.channel_id else None
-    github = runtime.settings.github
     public_url = runtime.settings.mcp.public_url
     async with runtime.sessionmaker() as session:
         principal = await find_platform_principal(
@@ -64,8 +63,8 @@ async def _load(context: CommandContext) -> HereCard:
             thread_id=thread_id,
             default=runtime.deployment_default,
             github=GitHubDeploymentFacts(
-                has_fallback_pat=github.fallback_pat is not None,
-                app_configured=github.app_id is not None and github.app_private_key is not None,
+                        app_configured=runtime.settings.github_app.app_id is not None
+                and runtime.settings.github_app.private_key is not None,
             ),
             public_mcp_url=str(public_url) if public_url is not None else None,
             # Answered in the caller's own 1:1 chat, so an admin may see admin views.

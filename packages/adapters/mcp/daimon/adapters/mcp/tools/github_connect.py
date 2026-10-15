@@ -34,17 +34,14 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
-    activate_agent,
-    get_agent_mode,
     list_agent_grants,
     list_authorized_repos,
     stage_grant,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
 from daimon.core.stores.github_connect import (
-    ClientAgentConnectionError,
+    PinnedAgentConnectionError,
     create_discord_connect_intent,
-    has_saved_github_state,
     mint_invitation,
     record_connect_request,
     require_app_eligible_agent,
@@ -214,9 +211,8 @@ async def _github_connect_impl(
                 tenant_id=auth.tenant_id,
                 agent_id=agent_id,
                 agent_name=agent.name,
-                switch_saved_key=True,
             )
-        except ClientAgentConnectionError as exc:
+        except PinnedAgentConnectionError as exc:
             return ConnectResult(status="client_agent", message=str(exc))
         account = await get_account(session, auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
@@ -275,73 +271,61 @@ async def _github_connect_impl(
             if requested_repo.count("/") != 1 or any(c.isspace() for c in requested_repo):
                 raise ToolError("Name one repo as owner/repo.")
             # A clear ask is enough (Derick, 2026-10-10): no separate "say yes" turn.
-            mode = await get_agent_mode(session, tenant_id=auth.tenant_id, agent_id=agent_id)
-            can_activate = mode == "app" or not await has_saved_github_state(
+            repos = await list_authorized_repos(
                 session, tenant_id=auth.tenant_id, agent_id=agent_id
             )
-            if can_activate:
-                repos = await list_authorized_repos(
-                    session, tenant_id=auth.tenant_id, agent_id=agent_id
+            repo = next(
+                (
+                    row
+                    for row in repos
+                    if row.repo_full_name.casefold() == requested_repo.casefold()
+                    and row.status == "active"
+                ),
+                None,
+            )
+            if repo is not None:
+                installation = await get_app_installation(
+                    session, installation_id=repo.installation_id
                 )
-                repo = next(
-                    (
-                        row
-                        for row in repos
-                        if row.repo_full_name.casefold() == requested_repo.casefold()
-                        and row.status == "active"
-                    ),
-                    None,
+                grantable = (
+                    installation is not None
+                    and installation.suspended_at is None
+                    and repo.repo_full_name in installation.repo_full_names
+                    and (is_admin or repo.scope_agent_id == agent_id)
                 )
-                if repo is not None:
-                    installation = await get_app_installation(
-                        session, installation_id=repo.installation_id
-                    )
-                    grantable = (
-                        installation is not None
-                        and installation.suspended_at is None
-                        and repo.repo_full_name in installation.repo_full_names
-                        and (is_admin or repo.scope_agent_id == agent_id)
-                    )
-                    if grantable:
-                        existing = next(
-                            (
-                                row
-                                for row in await list_agent_grants(
-                                    session, tenant_id=auth.tenant_id, agent_id=agent_id
-                                )
-                                if row.repo_id == repo.repo_id
-                            ),
-                            None,
-                        )
-                        try:
-                            await stage_grant(
-                                session,
-                                tenant_id=auth.tenant_id,
-                                agent_id=agent_id,
-                                repo_id=repo.repo_id,
-                                baseline_access="write",
-                                ceiling_access="write",
-                                granted_by_account_id=auth.account_id,
-                                mount_path=existing.mount_path if existing else None,
-                                is_working_repo=existing.is_working_repo if existing else False,
-                                agent_name=agent.name,
+                if grantable:
+                    existing = next(
+                        (
+                            row
+                            for row in await list_agent_grants(
+                                session, tenant_id=auth.tenant_id, agent_id=agent_id
                             )
-                        except ValueError as error:
-                            raise ToolError(str(error)) from error
-                        if mode == "legacy":
-                            await activate_agent(
-                                session,
-                                tenant_id=auth.tenant_id,
-                                agent_id=agent_id,
-                                changed_by_account_id=auth.account_id,
-                            )
-                        return ConnectResult(
-                            status="granted",
-                            message=(
-                                f"{agent.name} can now read and change {repo.repo_full_name} "
-                                "from the next message. To undo, ask me to remove it."
-                            ),
+                            if row.repo_id == repo.repo_id
+                        ),
+                        None,
+                    )
+                    try:
+                        await stage_grant(
+                            session,
+                            tenant_id=auth.tenant_id,
+                            agent_id=agent_id,
+                            repo_id=repo.repo_id,
+                            baseline_access="write",
+                            ceiling_access="write",
+                            granted_by_account_id=auth.account_id,
+                            mount_path=existing.mount_path if existing else None,
+                            is_working_repo=existing.is_working_repo if existing else False,
+                            agent_name=agent.name,
                         )
+                    except ValueError as error:
+                        raise ToolError(str(error)) from error
+                    return ConnectResult(
+                        status="granted",
+                        message=(
+                            f"{agent.name} can now read and change {repo.repo_full_name} "
+                            "from the next message. To undo, ask me to remove it."
+                        ),
+                    )
         intent_id: uuid.UUID | None = None
         token: str | None = None
         if auth.platform == "discord":

@@ -402,12 +402,12 @@ names only.
 
 ### Keys and sign-ins
 
-When an agent asks for an API key, a `.env` file, an MCP token or GitHub
-access (`request_agent_key`, `request_mcp_token`, `request_repo_binding`,
-`request_skill_repo_token`), it posts a card in the conversation. Only the
+When an agent asks for an API key, a `.env` file or an MCP token
+(`request_agent_key`, `request_mcp_token`), it posts a card in the conversation. Only the
 person who asked can open it; the secret goes into a Teams dialog and never
 through the chat. Key values and `.env` contents take a multi-line field (paste
 the file: a dialog has no file input), tokens a password field.
+For GitHub repository access, the agent posts Connect GitHub.
 `request_mcp_oauth` opens a private sign-in link the same way. Once the value
 is saved, the card shows the outcome and the waiting work resumes. Key names,
 replacing a key, whole-file imports, and binding a repo or importing skills

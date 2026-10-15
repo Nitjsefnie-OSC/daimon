@@ -34,7 +34,6 @@ from daimon.core.session_compat import (
     RemirrorVaultCredentials,
     ReplaceEnvFile,
     ReplaceToolsAndMcpServers,
-    RotateRepoToken,
 )
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -52,10 +51,9 @@ from daimon.core.session_update_ops import (
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
-from daimon.core.stores.domain import RepoAccessProof
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.testing.factories import make_agent_repo_binding, make_tenant
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     FakeMAState,
     NotHandled,
@@ -455,110 +453,6 @@ async def test_env_replacement_leaves_no_env_when_the_agents_last_secret_was_rem
     assert isinstance(result, AppliedOps)
     assert result.snapshot.env_sha256 is None, "an agent with no secrets mounts no .env"
     assert state.resources[session_id] == [], "the old .env must be gone from the session"
-
-
-async def test_repo_token_rotation_targets_the_recorded_resource(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    await make_agent_repo_binding(
-        db_session,
-        tenant=tenant,
-        agent_id=agent_uuid,
-        repo_url="acme/data",
-        # Verified-public, so the operator fallback PAT is the authorized
-        # credential and the rotation needs no GitHub App round trip.
-        proof=RepoAccessProof(kind="public", at=_NOW, account_id=None),
-    )
-    await db_session.commit()
-
-    state = FakeSessionsState(ma=FakeMAState())
-    _register_agent(state.ma)
-    created = await build_fake_anthropic(
-        combine_handlers(make_fake_sessions_handler(state), make_fake_ma_handler(state.ma))
-    ).beta.sessions.create(
-        agent=_AGENT_ID,
-        environment_id=_ENV_ID,
-        resources=[
-            {
-                "type": "github_repository",
-                "url": "https://github.com/acme/data",
-                "authorization_token": "ghp_old",
-                "checkout": {"type": "branch", "name": "main"},
-            }
-        ],
-    )
-    recorded = snapshot_from_created_session(
-        created,
-        env_sha256=None,
-        env_file_id=None,
-        repo_token_issued_at=0,
-        vault_id=None,
-        sent_skills=created.agent.skills,
-    )
-    assert recorded.repo_resource_id is not None, "the session must carry a repo resource"
-
-    rotations: list[tuple[str, dict[str, Any]]] = []
-
-    def _record(request: httpx.Request) -> httpx.Response:
-        import json
-
-        if request.method == "POST" and "/resources/" in request.url.path:
-            rotations.append((request.url.path, json.loads(request.content)))
-        raise NotHandled
-
-    client = _build_client(state, before=[_record])
-
-    result = await _apply(
-        client,
-        db_session_factory,
-        ops=(RotateRepoToken(resource_id=recorded.repo_resource_id),),
-        session_id=created.id,
-        recorded=recorded,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-    )
-
-    assert isinstance(result, AppliedOps)
-    assert len(rotations) == 1, "rotation must be one resources.update call"
-    path, body = rotations[0]
-    assert path.endswith(recorded.repo_resource_id), (
-        "the rotation must target the repo resource the snapshot recorded"
-    )
-    assert body["authorization_token"] == "ghp_fallback", (
-        "the rotated token must be the one resolve_clone_token minted now"
-    )
-    assert result.snapshot.repo_token_issued_at == int(_NOW.timestamp()), (
-        "the snapshot must record when the new token was issued, so age is measurable"
-    )
-    assert result.applied == ("repo_token_age",)
-
-
-async def test_repo_token_rotation_is_skipped_when_the_agent_has_no_binding(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    state = FakeSessionsState(ma=FakeMAState())
-    _register_agent(state.ma)
-    client = _build_client(state)
-    session_id, recorded = await _session_with_env(client, content=b"A=1\n")
-
-    result = await _apply(
-        client,
-        db_session_factory,
-        ops=(RotateRepoToken(resource_id="res_gone"),),
-        session_id=session_id,
-        recorded=recorded,
-        tenant_id=tenant.id,
-        agent_uuid=uuid.uuid4(),
-    )
-
-    assert isinstance(result, AppliedOps)
-    assert result.applied == (), "an unbound agent has no token to rotate"
 
 
 async def test_update_defers_as_session_busy_when_ma_refuses_a_running_session(

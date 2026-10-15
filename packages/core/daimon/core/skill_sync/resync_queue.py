@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
-from daimon.core.config import GithubSettings
+from daimon.core.config import GithubAppSettings, GithubSettings
 from daimon.core.skill_sync.resync import resync_bound_repo
 from daimon.core.stores import github_push_resync as resync_store
 from daimon.core.stores.domain import GitHubPushResyncRow
@@ -30,6 +30,7 @@ async def drain_github_push_resync_queue(
     fernet: MultiFernet | None,
     anthropic_client: AsyncAnthropic,
     github_settings: GithubSettings,
+    github_app: GithubAppSettings | None = None,
     now: datetime | None = None,
 ) -> int:
     """Run up to three due jobs, retaining failures for retry on later ticks."""
@@ -97,6 +98,7 @@ async def drain_github_push_resync_queue(
                 fernet=fernet,
                 anthropic_client=anthropic_client,
                 github_settings=github_settings,
+                github_app=github_app,
             )
             current_time = datetime.now(UTC)
             async with sessionmaker.begin() as session:

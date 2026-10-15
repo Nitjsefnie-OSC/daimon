@@ -75,7 +75,6 @@ async def claim_next(
             GitHubConnectInvitation.requester_platform_user_id.is_not(None),
             GitHubConnectInvitation.operator_issued.is_(False),
             GitHubConnectInvitation.used_at.is_not(None),
-            GitHubConnectInvitation.activation_status.is_distinct_from("update_pending"),
             GitHubConnectInvitation.connected_repos.is_not(None),
             GitHubConnectInvitation.notice_delivered_at.is_(None),
             GitHubConnectInvitation.requested_work.is_(None),

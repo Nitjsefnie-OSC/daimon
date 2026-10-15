@@ -71,7 +71,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import get_personal_memory_store_id
 from daimon.core.stores.domain import BackendAgent, TransferKind
-from daimon.core.stores.github_access import get_agent_mode, list_authorized_repos
+from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
@@ -414,9 +414,7 @@ async def _env_bytes_sha256(
     """
     async with deps.sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
-    if mode == "app":
-        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+    rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
     if not rows:
         return None
     return hash_env_bytes(assemble_env_bytes(rows))
@@ -587,8 +585,7 @@ async def create_ma_session(
         if preparation is not None and preparation.source is not None
         else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     )
-    async with deps.sessionmaker() as session:
-        github_mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
+    github_mode = "app"
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     native_controls: _NativeBudgetArgs = {}
     if preparation is not None and preparation.native_budget_usd is not None:
@@ -992,7 +989,6 @@ async def _shared_thread(
         or admission.config.thread_binding_kind == "setup"
     ):
         return None
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     async with deps.sessionmaker() as session:
         try:
             shared = await resolve_shared_thread(
@@ -1008,8 +1004,6 @@ async def _shared_thread(
             raise AdmissionDenied(reason="backend_unsupported") from err
         if shared is None:
             return None
-        if await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid) != "app":
-            raise AdmissionDenied(reason="backend_unsupported")
     return shared
 
 

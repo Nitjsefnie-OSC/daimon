@@ -106,7 +106,6 @@ class PanelState:
     bound_secret_ref: str | None = None
     # Whether the operator fallback PAT is configured, so an anon: binding clones.
     # Set by the hydrate callers from runtime settings; display-only.
-    fallback_pat_configured: bool = False
     last_sync_error: str | None = None
     default_mcp_url: str | None = None
     is_admin: bool = False

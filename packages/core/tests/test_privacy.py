@@ -15,12 +15,10 @@ from datetime import UTC, datetime, timedelta
 from daimon.core._models import (
     Account,
     AccountGitHubLink,
-    AgentGithubBinding,
     Base,
     CliPrincipal,
     GitHubIssuedToken,
     GitHubUserLink,
-    McpToken,
     MessageFeedback,
     PlatformPrincipal,
     Routine,
@@ -39,18 +37,13 @@ from daimon.core.privacy import (
     summary_line,
 )
 from daimon.core.purge import PurgeReport, purge_account
-from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import github_connect as github_connect_store
-from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
-from daimon.core.stores import github_oauth_states as github_oauth_states_store
-from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
-from daimon.core.stores import user_skills as user_skills_store
 from daimon.testing.factories import (
     link_principals,
     make_account,
@@ -61,8 +54,6 @@ from daimon.testing.factories import (
 )
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from .factories.github import make_oauth_state
 
 
 def test_plain_privacy_summary_plural_and_pause_spacing() -> None:
@@ -193,11 +184,7 @@ async def test_collect_purge_preview_returns_zero_counts_when_account_has_no_dat
     assert preview.account.example is None
     assert preview.user_skills.count == 0, "no user_skills seeded"
     assert preview.user_skills.example is None, "example must be None when count==0"
-    assert preview.github_credentials.count == 0, "no github_credentials seeded"
-    assert preview.github_credentials.example is None
     assert preview.github_connect_requests.count == 0
-    assert preview.github_oauth_states.count == 0, "no github_oauth_states seeded"
-    assert preview.github_oauth_states.example is None
 
 
 async def test_collect_purge_preview_account_count_is_zero_when_account_does_not_exist(
@@ -429,109 +416,6 @@ async def test_collect_purge_preview_returns_pure_read_does_not_mutate_db(
     assert pp_before == pp_after, "collect_purge_preview must not touch platform_principals"
     assert cli_before == cli_after, "collect_purge_preview must not touch cli_principals"
     assert routines_before == routines_after, "collect_purge_preview must not touch routines"
-
-
-async def test_collect_purge_preview_cli_oauth_states_excludes_same_os_user_in_other_tenant(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Preview mirrors the tenant-scoped CLI oauth-state predicate (parity with purge).
-
-    A same-os_user handshake row belonging to a different tenant (a different
-    person) must not be counted in this account's preview.
-    """
-    tenant_a = await make_tenant(db_session, workspace_id="pv-osuser-a")
-    tenant_b = await make_tenant(db_session, workspace_id="pv-osuser-b")
-    account = await make_account(db_session, tenant=tenant_a)
-    await make_cli_principal(db_session, os_user="ubuntu", tenant=tenant_a, account=account)
-    await make_oauth_state(
-        db_session,
-        platform="cli",
-        platform_user_id="ubuntu",
-        scopes=("repo",),
-        tenant_id=tenant_a.id,
-    )
-    # A DIFFERENT person's row: same os_user, other tenant.
-    await make_oauth_state(
-        db_session,
-        platform="cli",
-        platform_user_id="ubuntu",
-        scopes=("repo",),
-        tenant_id=tenant_b.id,
-    )
-    await db_session.commit()
-
-    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
-    report = await purge_account(sm=db_session_factory, account_id=account.id)
-
-    assert preview.github_oauth_states.count == 1, (
-        "preview must count only the account's own tenant-scoped CLI handshake row"
-    )
-    assert preview.github_oauth_states.count == report.db.github_oauth_states, (
-        "preview and purge must agree on the tenant-scoped CLI oauth-state predicate"
-    )
-
-
-async def test_preview_oauth_state_count_matches_the_tenant_scoped_purge(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Preview mirrors the tenant-scoped platform-principal oauth-state predicate.
-
-    A folded rider: the same platform external_id can belong to two different
-    people in two different tenants (a Discord user id is workspace-scoped).
-    The preview must count only the account's own tenant's handshake row, not
-    the cross-tenant total — otherwise a user is told their data will be
-    deleted when it will not.
-    """
-    tenant_a = await make_tenant(db_session, workspace_id="pv-oauth-tenant-a")
-    tenant_b = await make_tenant(db_session, workspace_id="pv-oauth-tenant-b")
-    account = await make_account(db_session, tenant=tenant_a)
-    await make_platform_principal(
-        db_session,
-        platform="discord",
-        external_id="SHARED_EXTERNAL_ID",
-        tenant=tenant_a,
-        account=account,
-    )
-    # A DIFFERENT person: same external_id, other tenant (the folded rider).
-    await make_platform_principal(
-        db_session,
-        platform="discord",
-        external_id="SHARED_EXTERNAL_ID",
-        tenant=tenant_b,
-    )
-    await make_oauth_state(
-        db_session,
-        platform="discord",
-        platform_user_id="SHARED_EXTERNAL_ID",
-        scopes=("repo",),
-        tenant_id=tenant_a.id,
-    )
-    await make_oauth_state(
-        db_session,
-        platform="discord",
-        platform_user_id="SHARED_EXTERNAL_ID",
-        scopes=("repo",),
-        tenant_id=tenant_b.id,
-    )
-    await db_session.commit()
-
-    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
-    report = await purge_account(sm=db_session_factory, account_id=account.id)
-
-    assert preview.github_oauth_states.count == 1, (
-        "preview must count only the account's own tenant-scoped platform handshake row, "
-        "not the cross-tenant total for the colliding external_id"
-    )
-    assert preview.github_oauth_states.count == report.db.github_oauth_states, (
-        "preview and purge must agree on the tenant-scoped platform oauth-state predicate"
-    )
-
-    surviving = await github_oauth_states_store.count_states_for_platform_user(
-        db_session, platform="discord", platform_user_id="SHARED_EXTERNAL_ID", tenant_id=tenant_b.id
-    )
-    assert surviving == 1, "tenant_b's identically-external-id row must survive the purge"
 
 
 async def test_collect_purge_preview_counts_slack_user_tokens_and_turn_contexts(
@@ -885,13 +769,10 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "user_configs": "user_configs",
         "accounts": "account",
         "user_skills": "user_skills",
-        "github_credentials": "github_credentials",
         "github_connect_requests": "github_connect_requests",
         "github_connect_click_intents": "github_connect_click_intents",
         "github_user_links": "github_user_links",
-        "github_oauth_states": "github_oauth_states",
         "mcp_tokens": "mcp_tokens",
-        "agent_github_binding": "agent_github_binding",
         "slack_user_tokens": "slack_user_tokens",
         "slack_turn_contexts": "slack_turn_contexts",
         "direct_message_conversations": "direct_message_conversations",
@@ -944,10 +825,8 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "platform_principals": "account_id FK -> accounts.id",
         "user_config": "account_id PK/FK -> accounts.id",
         "user_skills": "principal_id",
-        "github_credentials": "principal_id",
         "github_connect_requests": "requester_account_id FK -> accounts.id",
         "github_connect_click_intents": "requester_account_id FK -> accounts.id",
-        "agent_github_binding": "principal_id",
         "mcp_tokens": "account_id FK -> accounts.id",
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
@@ -976,12 +855,6 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",
-            # Same shape: PK is (tenant_id, agent_id) and the only accounts.id FK is
-            # the nullable provenance column proof_account_id with ON DELETE SET NULL.
-            # An account purge severs who-proved-it while leaving the binding and its
-            # proof kind/timestamp intact — deleting the row would drop a whole
-            # tenant's repo mount because one member erased their account.
-            "agent_repo_binding",
             # A tenant-wide channel budget; the only accounts.id FK is the admin
             # who set it, set_by_account_id with ON DELETE SET NULL.
             "channel_budgets",
@@ -1066,148 +939,4 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         f"daimon.core.purge nor on the documented carve-out allowlist. Wire a delete "
         f"into purge.py (+ PurgeReport/PurgePreview) or add the table to the allowlist "
         f"in this test with a justification. In-scope because: {uncovered}"
-    )
-
-
-async def test_collect_purge_preview_end_to_end_matches_purge_account_counts(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Runtime parity: preview counts must equal what purge_account actually deletes."""
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    pp = await make_platform_principal(
-        db_session,
-        platform="discord",
-        external_id="user-e2e",
-        tenant=tenant,
-        account=account,
-    )
-    cli = await make_cli_principal(db_session, os_user="cli-e2e", tenant=tenant, account=account)
-    await link_principals(db_session, cli=cli, platform=pp)
-    await routines_store.create_routine(
-        db_session,
-        tenant_id=tenant.id,
-        created_by_user_id="user-e2e",
-        agent_id="a1",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-    )
-    db_session.add(UserConfig(account_id=account.id, agent_name="a", environment_name="e"))
-    # Seed new tables for both principals.
-    await user_skills_store.upsert_user_skill(
-        db_session,
-        tenant_id=tenant.id,
-        principal_id=pp.id,
-        agent_name="dev",
-        name="pp-skill",
-        source_repo_url="https://github.com/o/r",
-        source_repo_branch="main",
-        source_path="",
-        content_hash="h1",
-        anthropic_id=None,
-        anthropic_latest_version=None,
-    )
-    await user_skills_store.upsert_user_skill(
-        db_session,
-        tenant_id=tenant.id,
-        principal_id=cli.id,
-        agent_name="dev",
-        name="cli-skill",
-        source_repo_url="https://github.com/o/r",
-        source_repo_branch="main",
-        source_path="",
-        content_hash="h2",
-        anthropic_id=None,
-        anthropic_latest_version=None,
-    )
-    await github_credentials_store.upsert_credential(
-        db_session,
-        principal_id=pp.id,
-        github_login="e2e-gh",
-        encrypted_token=b"tok",
-        scopes=("repo",),
-    )
-    await make_oauth_state(
-        db_session,
-        platform="discord",
-        platform_user_id="user-e2e",
-        scopes=("repo",),
-        tenant_id=tenant.id,
-    )
-    await make_oauth_state(
-        db_session,
-        platform="cli",
-        platform_user_id="cli-e2e",
-        scopes=("repo",),
-        tenant_id=tenant.id,
-    )
-    # A per-agent MCP token (account-scoped) — the row that crashes
-    # purge today — plus an agent_github_binding (principal-scoped).
-    await mcp_tokens_store.create_mcp_token_row(
-        db_session,
-        jti=uuid.uuid4(),
-        account_id=account.id,
-        tenant_id=tenant.id,
-        agent_id="a1",
-        label=None,
-        created_at=datetime.now(tz=UTC),
-    )
-    await agent_github_binding_store.set_agent_github_binding(
-        db_session,
-        agent_id=uuid.uuid4(),
-        principal_id=pp.id,
-    )
-    await db_session.flush()
-    await db_session.commit()
-
-    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
-    report = await purge_account(sm=db_session_factory, account_id=account.id)
-
-    assert (
-        preview.linked_principals.count == report.db.cli_principals + report.db.platform_principals
-    ), "linked_principals.count must equal cli + platform principal deletion totals"
-    assert preview.principal_links.count == report.db.principal_links, (
-        "principal_links.count must equal report.principal_links"
-    )
-    assert preview.routines.count == report.db.routines, "routines.count must equal report.routines"
-    assert preview.user_configs.count == report.db.user_configs, (
-        "user_configs.count must equal report.user_configs"
-    )
-    assert preview.account.count == report.db.accounts, "account.count must equal report.accounts"
-    assert preview.user_skills.count == report.db.user_skills, (
-        "user_skills.count must equal report.db.user_skills"
-    )
-    assert preview.github_credentials.count == report.db.github_credentials, (
-        "github_credentials.count must equal report.db.github_credentials"
-    )
-    assert preview.github_oauth_states.count == report.db.github_oauth_states, (
-        "github_oauth_states.count must equal report.db.github_oauth_states"
-    )
-    assert preview.mcp_tokens.count == report.db.mcp_tokens, (
-        "mcp_tokens.count must equal report.db.mcp_tokens"
-    )
-    assert preview.agent_github_binding.count == report.db.agent_github_binding, (
-        "agent_github_binding.count must equal report.db.agent_github_binding"
-    )
-
-    # The crash fix + erasure invariant: purge_account returned without a
-    # foreign-key error, and zero rows remain in the two new tables. Read on a
-    # fresh session — the purge used (and closed) its own.
-    async with db_session_factory() as verify_session:
-        mcp_residual = await verify_session.scalar(
-            select(func.count()).select_from(McpToken).where(McpToken.account_id == account.id)
-        )
-        binding_residual = await verify_session.scalar(
-            select(func.count())
-            .select_from(AgentGithubBinding)
-            .where(AgentGithubBinding.principal_id == pp.id)
-        )
-    assert mcp_residual == 0, (
-        "purge must hard-delete every mcp_tokens row for the account (crash fix, PURGE-01)"
-    )
-    assert binding_residual == 0, (
-        "purge must hard-delete every agent_github_binding row for the principal (PURGE-02)"
     )

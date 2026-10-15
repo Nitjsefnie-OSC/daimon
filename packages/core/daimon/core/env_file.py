@@ -224,13 +224,10 @@ _MEMBER_DENY_EXACT: Final[frozenset[str]] = frozenset({"ETCDCTL_KEY"})
 _GIT_IDENTITY_NAMES: Final[frozenset[str]] = frozenset(
     {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
 )
-#: Bare secret words a member may use as a whole key name, plus the two names
-#: kept for the documented CLI-token use (`defaults/skills/cli-auth`).
+#: Bare secret words a member may use as a whole key name.
 _MEMBER_ALLOW_EXACT: Final[frozenset[str]] = frozenset(
     {
         *_GIT_IDENTITY_NAMES,
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
         "TOKEN",
         "KEY",
         "APIKEY",
@@ -256,10 +253,12 @@ _MEMBER_NAME_SHAPE: Final[re.Pattern[str]] = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
 
 #: HARD DENY. Exact names whose mere presence hands control to some later tool.
 #: Compared case-insensitively (curl honours ``https_proxy``, tar ``TAR_OPTIONS``).
-#: ``GH_TOKEN``/``GITHUB_TOKEN`` are NOT here — they are plain credentials.
+#: GitHub keys are reserved for session-scoped App credentials.
 _HARD_DENY_EXACT: Final[frozenset[str]] = frozenset(
     {
         "PATH",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
         "HOME",
         "USER",
         "LOGNAME",
@@ -595,7 +594,6 @@ def env_name_member_writable(name: str) -> bool:
 #: added while another is held is a REPLACEMENT of the held one, and a file
 #: that sets two of them is ambiguous.
 _ALIAS_GROUPS: Final[tuple[frozenset[str], ...]] = (
-    frozenset({"GH_TOKEN", "GITHUB_TOKEN"}),
     frozenset({"GITLAB_TOKEN", "GLAB_TOKEN"}),
     frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}),
     frozenset({"AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"}),

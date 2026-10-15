@@ -8,7 +8,7 @@ The tool dispatches to the broker, audit-logs metadata, and returns the token.
 
 The CLI never calls this tool. (The former ``daimon auth github`` OAuth
 flow and its ``/oauth/github/*`` + ``/cli/auth/status`` routes were removed
-— repo credentials now come from the GitHub App or a bound PAT.)
+— repo credentials now come from the GitHub App.)
 
 Audit log invariant: the token plaintext NEVER appears in
 any log line emitted by this module. The combined-log integration test
@@ -25,7 +25,6 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
-from daimon.core.stores.github_access import get_agent_mode
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -36,7 +35,7 @@ async def _get_cli_token_impl(
     runtime: McpRuntime,
     ctx: Context,
     *,
-    service: Literal["github", "gcloud"],
+    service: Literal["gcloud"],
 ) -> str:
     """Dispatch to the broker for ``service``; map BrokerError → ToolError.
 
@@ -44,16 +43,8 @@ async def _get_cli_token_impl(
     no tool-supplied agent_id, avoiding a confused deputy by construction.
     """
     auth = await _auth(ctx)
-    agent_id = auth.agent_id or (auth.chat_agent_id if service == "gcloud" else None)
-    github_agent_id = auth.agent_id or auth.chat_agent_id
-    if service == "github" and github_agent_id is not None:
-        async with runtime.session_factory() as session:
-            mode = await get_agent_mode(session, tenant_id=auth.tenant_id, agent_id=github_agent_id)
-        if mode == "app":
-            raise ToolError("GitHub CLI tokens are unavailable in App mode")
+    agent_id = auth.agent_id or auth.chat_agent_id
     try:
-        # Only Google uses chat execution identity. GitHub chat callers retain
-        # their account principal-default PAT; operator defaults are never returned.
         token = await dispatch_mint_token(
             service=service,
             account_id=auth.account_id,
@@ -90,13 +81,13 @@ def register_cli_token_tool(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def get_cli_token(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        service: Literal["github", "gcloud"],
+        service: Literal["gcloud"],
     ) -> str:
         """Mint a short-lived CLI access token for the named service.
 
         Fails with a ``ToolError`` when the calling agent has no credential
         bound for that service — see the ``cli-auth`` skill for the
         per-agent binding flow. On success, returns the token as plaintext
-        (e.g. for ``export GH_TOKEN=$(...)``).
+        for the Google CLI.
         """
         return await _get_cli_token_impl(runtime, ctx, service=service)

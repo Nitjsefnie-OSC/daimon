@@ -33,10 +33,7 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     "discord_gateway_lease": "one row per database: which process holds the Discord gateway; no tenant data",
     # Keyed by agent_id, which is uuid5(tenant_id, ma_agent_id) via
     # derive_agent_uuid — tenant-salted, so globally unique per tenant.
-    "agent_github_binding": "keyed by tenant-salted agent_id (uuid5)",
     "agent_google_binding": "keyed by tenant-salted agent_id (uuid5)",
-    # Keyed by principal_id (globally unique UUID). Teardown-orphan gap is #199.
-    "github_credentials": "keyed by principal_id; teardown gap tracked in #199",
     # GitHub-side concept: the install webhook carries no Daimon tenant, so
     # tenant is not knowable at install time. Isolation must be enforced by
     # the binding side (repo-access proven at bind). Unfiltered get_for_repo

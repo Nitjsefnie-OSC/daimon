@@ -361,7 +361,7 @@ async def load_agent_repo_lines(
     )
     lines: list[AgentRepoLine] = []
     for repo in await list_agent_repos(session, tenant_id=tenant_id, agent_id=agent_id):
-        if repo.staged or repo.status != "active":
+        if repo.status != "active":
             continue
         shared = repo.scope == "shared"
         account_id = repo.granted_by_account_id if shared else repo.added_by_account_id

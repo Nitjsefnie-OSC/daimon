@@ -33,17 +33,18 @@ from daimon.core.scope import (
     DeploymentDefault,
     ResolvedConfig,
 )
-from daimon.core.stores import scoped_config_write
+from daimon.core.stores import github_access, github_app_installations, scoped_config_write
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing import MARouter, build_fake_anthropic, ma_agent
-from daimon.testing.factories import make_account, make_agent_repo_binding, make_tenant
+from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _NOW = datetime(2026, 9, 14, 9, 30, tzinfo=UTC)
-_NO_GITHUB = GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False)
+_NO_GITHUB = GitHubDeploymentFacts(app_configured=False)
 _PUBLIC_MCP_URL = "https://daimon.example/mcp"
 
 
@@ -67,7 +68,7 @@ def _details(
         channels=channels or [],
         default=default or DeploymentDefault(),
         resolved_here=resolved_here,
-        binding=None,
+        repo=None,
         files=files or [],
         skill_titles={},
         skills_truncated=False,
@@ -253,8 +254,27 @@ async def test_load_agent_details_reads_the_agent_once_and_wires_its_stored_rows
     actor = await make_account(db_session, tenant=tenant)
     agent = ma_agent(id="ag_alpha", name="alpha", tenant_id=tenant.id)
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_alpha")
-    await make_agent_repo_binding(
-        db_session, tenant=tenant, agent_id=agent_uuid, repo_url="acme/widgets"
+    await github_app_installations.upsert(
+        db_session, installation_id=98765, account_login="acme", repo_full_names=["acme/widgets"]
+    )
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_github_repos "
+            "(tenant_id, repo_id, owner_id, installation_id, repo_full_name, max_access, "
+            "authorized_by_github_user_id, authorized_by_account_id) "
+            "VALUES (:tenant, 12345, 12, 98765, 'acme/widgets', 'read', 17, :account)"
+        ),
+        {"tenant": tenant.id, "account": actor.id},
+    )
+    await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        repo_id=12345,
+        baseline_access="read",
+        ceiling_access="read",
+        granted_by_account_id=None,
+        is_working_repo=True,
     )
     await put_agent_file(
         db_session,
@@ -291,14 +311,12 @@ async def test_load_agent_details_reads_the_agent_once_and_wires_its_stored_rows
         "the whole Details read must cost exactly one agent retrieve and no skills listing"
     )
     assert details.repo is not None and details.repo.repo_url == "acme/widgets", (
-        "the binding stored under the derived agent id must be found"
+        "the working App grant stored under the derived agent id must be found"
     )
     assert [key.name for key in details.keys] == ["LINEAR_API_KEY"], (
         "the agent's stored keys must be listed by name"
     )
-    assert details.repo.access.kind == "needs_attention", (
-        "a binding with no token, no proof and no deployment credential needs attention"
-    )
+    assert details.repo.access.credential == "github_app"
 
 
 async def test_load_agent_details_lists_skills_only_when_a_custom_skill_is_attached(

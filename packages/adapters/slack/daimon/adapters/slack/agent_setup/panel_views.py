@@ -61,7 +61,12 @@ from daimon.core.setup_conversations import (
     shared_keys_sentence,
 )
 from daimon.core.skills.ingest import SkillPreview
-from daimon.core.stores.domain import ChannelAdminsRow, ChannelSkillRow, McpTokenRow
+from daimon.core.stores.domain import (
+    ChannelAdminsRow,
+    ChannelSkillRow,
+    CompatibilityPreview,
+    McpTokenRow,
+)
 from mux.contracts.ids import Provider
 
 __all__ = [
@@ -656,7 +661,7 @@ def build_details_view(
 
 
 def build_backend_preview_view(
-    preview: channel_backend.CompatibilityPreview,
+    preview: CompatibilityPreview,
     *,
     meta: PanelMetadata,
     applying: bool = False,
@@ -811,12 +816,7 @@ def _repo_access_lines(access: RepoAccess) -> list[str]:
         return [f"⚠️ needs attention: {escape_mrkdwn(corrective)}"]
     if access.kind == "not_checked":
         return ["Not checked yet"]
-    if access.credential == "per_agent_token":
-        lead = "via token"
-    elif access.credential == "deployment_public":
-        lead = "public repo"
-    else:
-        lead = "via the GitHub App"
+    lead = "via the GitHub App" if access.credential == "github_app" else "access recorded"
     if access.checked_at is None:
         return [lead]
     return [lead, f"Last checked {_slack_date(access.checked_at)}"]

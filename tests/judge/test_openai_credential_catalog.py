@@ -26,7 +26,8 @@ from fastmcp import Context, FastMCP
 from mcp.types import TextContent
 from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import create_async_engine
-from tests.turn import test_openai_credential_requests as a3
+
+from packages.core.tests.turn import test_openai_credential_requests as a3
 
 from .catalog_runner import ScenarioPlan, load_catalog, plan_scenario
 from .headless_executor import CellResult

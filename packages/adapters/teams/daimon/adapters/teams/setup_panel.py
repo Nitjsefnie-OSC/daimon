@@ -455,7 +455,7 @@ class SetupPanel:
         match = next((row for row in roster.rows if row.name == name), None)
         if match is None:
             return None
-        github, mcp = self._runtime.settings.github, self._runtime.settings.mcp
+        mcp = self._runtime.settings.mcp
         async with self._runtime.sessionmaker() as session:
             details = await load_agent_details(
                 session,
@@ -467,8 +467,8 @@ class SetupPanel:
                 thread_id=None,
                 deployment_default=self._runtime.deployment_default,
                 github=GitHubDeploymentFacts(
-                    has_fallback_pat=github.fallback_pat is not None,
-                    app_configured=github.app_id is not None and github.app_private_key is not None,
+                    app_configured=self._runtime.settings.github_app.app_id is not None
+                    and self._runtime.settings.github_app.private_key is not None,
                 ),
                 public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
                 is_admin=actor.is_admin,

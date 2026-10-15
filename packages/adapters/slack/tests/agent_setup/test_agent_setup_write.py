@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Callable
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
@@ -19,17 +18,16 @@ import httpx
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
-from cryptography.fernet import Fernet
 from daimon.adapters.slack.agent_setup import write as write_mod
 from daimon.adapters.slack.agent_setup.write import (
-    load_agent_inline_pat,
     owner_repo_from_url,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.errors import DaimonError
+from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.scope import DeploymentDefault, TenantScopeRef
+from daimon.core.scope import TenantScopeRef
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -44,8 +42,7 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
-from daimon.testing.turn_fakes import deps_for
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,95 +69,8 @@ async def _seed_account(session: AsyncSession, tenant_id: uuid.UUID) -> uuid.UUI
 
 
 # ---------------------------------------------------------------------------
-# load_agent_inline_pat / owner_repo_from_url
+# owner_repo_from_url
 # ---------------------------------------------------------------------------
-
-
-def _runtime_for_inline_pat(
-    *,
-    sessionmaker: Any,
-    fernet_key: str | None,
-    fallback_pat: str | None = None,
-) -> SlackRuntime:
-    """Build a SlackRuntime with just enough settings for load_agent_inline_pat."""
-    settings = MagicMock()
-    settings.crypto.keys = (
-        (MagicMock(get_secret_value=lambda: fernet_key),) if fernet_key is not None else ()
-    )
-    settings.github.oauth_scopes = ("repo", "read:user")
-    settings.github.fallback_pat = (
-        MagicMock(get_secret_value=lambda: fallback_pat) if fallback_pat is not None else None
-    )
-    return SlackRuntime(
-        settings=settings,
-        anthropic=MagicMock(),
-        sessionmaker=sessionmaker,
-        billing_config=None,
-        http_client=MagicMock(),
-        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
-        deployment_default=DeploymentDefault(),
-    )
-
-
-async def test_load_agent_inline_pat_returns_none_when_crypto_unconfigured() -> None:
-    """No crypto keys -> no inline PAT could exist; the sessionmaker must never
-    be touched (calling _build_runtime_fernet unconditionally would raise)."""
-    agent_id = uuid.uuid4()
-
-    def _boom(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("sessionmaker must not be called when crypto is unconfigured")
-
-    runtime = _runtime_for_inline_pat(sessionmaker=_boom, fernet_key=None)
-
-    result = await load_agent_inline_pat(runtime, agent_id=agent_id)
-    assert result is None, "no crypto keys configured -> no inline PAT can exist"
-
-
-async def test_load_agent_inline_pat_returns_stored_pat_for_agent_that_has_one(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Round-trips through store_inline_pat -> load_agent_inline_pat, decrypted."""
-    await make_tenant(db_session, platform="slack", workspace_id="T_INLINE_PAT_LOAD")
-
-    fernet_key = Fernet.generate_key().decode()
-    plaintext = "ghp_slack_inline_pat_load_9999"
-    runtime = _runtime_for_inline_pat(sessionmaker=db_session_factory, fernet_key=fernet_key)
-
-    agent_id = uuid.uuid4()
-    await write_mod.store_inline_pat(
-        runtime,
-        account_id=uuid.uuid4(),
-        agent_id=agent_id,
-        plaintext_pat=plaintext,
-    )
-
-    result = await load_agent_inline_pat(runtime, agent_id=agent_id)
-    assert result == plaintext, "load_agent_inline_pat must decrypt and return the exact stored PAT"
-
-
-async def test_load_agent_inline_pat_returns_none_for_agent_with_no_token_even_with_fallback_configured(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """allow_service_default=False must be honored: an agent with no stored
-    token of its own gets None, never the deployment's shared fallback PAT —
-    this is the check that stops the shared public-read token from being
-    treated as the agent's own credential."""
-    await make_tenant(db_session, platform="slack", workspace_id="T_INLINE_PAT_NO_FALLBACK")
-
-    fernet_key = Fernet.generate_key().decode()
-    runtime = _runtime_for_inline_pat(
-        sessionmaker=db_session_factory,
-        fernet_key=fernet_key,
-        fallback_pat="ghp_shared_operator_fallback",
-    )
-
-    result = await load_agent_inline_pat(runtime, agent_id=uuid.uuid4())
-    assert result is None, (
-        "an agent with no stored token must resolve to None, not the shared fallback PAT"
-    )
 
 
 def test_owner_repo_from_url_collapses_scheme_host_and_git_variants() -> None:
@@ -180,19 +90,13 @@ def test_owner_repo_from_url_collapses_scheme_host_and_git_variants() -> None:
 
 
 def test_owner_repo_from_url_matches_store_normalization() -> None:
-    """Must stay byte-identical to the store's own normalization — a probe run
-    against a differently-canonicalized string would verify a different repo
-    than the one the binding actually records."""
-    from daimon.core.stores.agent_repo_binding import (
-        _normalize_owner_repo,  # pyright: ignore[reportPrivateUsage]
-    )
-
+    """The panel and App grant lookup must normalize the same repo name."""
     for url in [
         "https://github.com/acme-org/widgets.git",
         "github.com/acme-org/widgets/",
         "acme-org/widgets",
     ]:
-        assert owner_repo_from_url(url) == _normalize_owner_repo(url), (
+        assert owner_repo_from_url(url) == normalize_owner_repo(url), (
             "owner_repo_from_url must stay byte-identical to the store's normalization"
         )
 

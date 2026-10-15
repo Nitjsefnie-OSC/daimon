@@ -56,6 +56,7 @@ from daimon.core.setup_conversations import (
     setup_target_label,
     shared_keys_sentence,
 )
+from daimon.core.stores.domain import CompatibilityPreview
 from mux.contracts.config import BackendConfig
 
 import discord
@@ -147,10 +148,6 @@ def _repo_access_line(access: RepoAccess) -> str:
         return f"⚠️ needs attention — {access.corrective or 'nothing would authorize a clone.'}"
     if access.kind == "not_checked":
         return "not checked yet"
-    if access.credential == "per_agent_token":
-        return f"via token{_last_checked(access)}"
-    if access.credential == "deployment_public":
-        return f"public repo{_last_checked(access)}"
     if access.credential == "github_app":
         return f"via GitHub App{_last_checked(access)}"
     return f"access recorded{_last_checked(access)}"
@@ -365,7 +362,7 @@ class DetailsView(PanelViewBase):
         allowed_user_id: int,
         details: AgentDetails | None = None,
         agent: RosterAgent | None = None,
-        backend_preview: channel_backend.CompatibilityPreview | None = None,
+        backend_preview: CompatibilityPreview | None = None,
         backend_clear: bool = False,
     ) -> None:
         super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
@@ -652,7 +649,7 @@ class DetailsView(PanelViewBase):
             runtime=self.runtime,
             allowed_user_id=self.allowed_user_id,
             agent=self.agent,
-            panel=GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False),
+            panel=GrantsPanel(repos=(), working_repo=None),
         )
         if not await gate.allowed(interaction):
             from daimon.core.github_connect_cards import ask_manager_line

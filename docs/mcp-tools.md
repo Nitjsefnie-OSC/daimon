@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 125 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 119 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -183,8 +183,6 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear through an MCP endpoint with a bearer token, not browser OAuth. |
-| `request_repo_binding` | Discord callers, Slack callers, Teams callers | Legacy: save a GitHub token for an agent that already uses one. |
-| `request_skill_repo_token` | Discord callers, Slack callers, Teams callers | The skills repo is private: collect a GitHub token to import its skills. |
 
 ## `enable_files`
 
@@ -320,14 +318,6 @@ Report publishing MCP tools.
 | `delete_report` | all callers | Un-publish a report you published. |
 | `publish_report` | all callers | Publish a report: a page where the named people can read it and ask it questions. |
 
-## `repo_binding`
-
-Bind an agent to a public GitHub repo from inside an ordinary chat turn.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `bind_public_repo` | Discord callers, Slack callers, Teams callers | Have an agent work in a public GitHub repo: "work in github.com/owner/project", "point it at our open-source repository". |
-
 ## `routines`
 
 Routines tools: create / list / get / update / delete.
@@ -347,13 +337,10 @@ MCP tools for an agent to edit its own ``agent_files`` and manage its
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `clear_repo_binding` | agent tokens only | Remove the repo binding for your agent. |
-| `get_repo_binding` | agent tokens only | Return the current repo binding for your agent, or null if unbound. |
 | `self_delete_file` | agent tokens only | Delete a per-agent key by `key`. |
 | `self_list_files` | agent tokens only | List all keys + metadata (no values) in your private agent_files namespace. |
 | `self_read_file` | agent tokens only | Check a per-agent file by `key`. |
 | `self_write_file` | agent tokens only | Add a per-agent key under `key`. |
-| `set_repo_binding` | agent tokens only | Bind your agent to a git repo. |
 
 ## `sessions`
 

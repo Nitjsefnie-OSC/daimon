@@ -294,7 +294,13 @@ async def _effective_rows(
             agent_id,
             selected,
         )
-    return [(grant, repo, "write") for grant, repo in by_installation[selected]], None, None
+    rows: list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]] = []
+    for grant, repo in by_installation[selected]:
+        profile: PermissionProfile = (
+            "write" if grant.ceiling_access == "write" and repo.max_access == "write" else "read"
+        )
+        rows.append((grant, repo, profile))
+    return rows, None, None
 
 
 async def revoke_token(client: httpx.AsyncClient, token: str) -> None:

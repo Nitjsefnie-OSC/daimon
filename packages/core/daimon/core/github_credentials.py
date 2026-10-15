@@ -1,42 +1,10 @@
-"""GitHub PAT encryption + three-tier resolver.
+"""Shared Fernet helpers for encrypted connections.
 
-Encryption: MultiFernet wrapping a list of Fernet keys. v1 ships
-a length-1 tuple; rotation = prepend a new key.
-
-Resolver: get_pat(principal_id, agent_id=None) -> str | None. Cascade:
-- agent_id given: tier-1 overlay ONLY. If no overlay row -> tier-3 (below).
-  get_pat(agent_id=X) never falls back to the principal-default credential.
-- agent_id=None: tier-2 principal-default credential -> tier-3 (below).
-- tier-3 (opt-in, both tiers above exhausted): the operator-wide service
-  default. Gated by two keyword-only parameters that both must be set —
-  `allow_service_default` is the authorization, `fallback_pat` is the
-  payload; neither alone does anything. This keeps the default behavior
-  (both params at their default) identical to the old two-tier cascade, so
-  no future caller can silently inherit the shared operator secret by
-  omission. A resolved real credential (tier-1 or tier-2) always returns
-  before this tier is reached, so the fallback can never shadow one.
-
-  Three callers must NEVER opt into this tier: the agent-fork copy path
-  (would persist the shared token as a per-agent DB row plus a binding), the
-  session Copilot vault mirror and clone-token resolver (the shared token
-  must never beat a short-lived per-repo GitHub App installation token, nor
-  land in a per-agent MA vault credential), and the MCP self-edit
-  repo-binding write (uploads the minted token as a durable MA vault
-  credential).
-
-No try/except — exceptions propagate. None means 'not found', NEVER
-'something broke'.
 """
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime
-
 from cryptography.fernet import Fernet, MultiFernet
-from daimon.core.stores import agent_github_binding as binding_store
-from daimon.core.stores import github_credentials as cred_store
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def build_multifernet(keys: tuple[str, ...]) -> MultiFernet:
@@ -63,77 +31,3 @@ def encrypt_token(fernet: MultiFernet, plaintext: str) -> bytes:
 def decrypt_token(fernet: MultiFernet, ciphertext: bytes | memoryview) -> str:
     # asyncpg may return BYTEA as memoryview; Fernet wants bytes (Pitfall 1).
     return fernet.decrypt(bytes(ciphertext)).decode("utf-8")
-
-
-async def upsert_credential_encrypted(
-    *,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    fernet: MultiFernet,
-    principal_id: uuid.UUID,
-    github_login: str,
-    plaintext_token: str,
-    scopes: tuple[str, ...],
-) -> None:
-    """Encrypt and UPSERT in one shot. Used by the OAuth callback (Plan 05)."""
-    encrypted = encrypt_token(fernet, plaintext_token)
-    async with sessionmaker.begin() as session:
-        await cred_store.upsert_credential(
-            session,
-            principal_id=principal_id,
-            github_login=github_login,
-            encrypted_token=encrypted,
-            scopes=scopes,
-        )
-
-
-async def _pat_principal(
-    session: AsyncSession, *, principal_id: uuid.UUID, agent_id: uuid.UUID | None
-) -> uuid.UUID | None:
-    if agent_id is None:
-        return principal_id
-    binding = await binding_store.get_agent_github_binding(session, agent_id=agent_id)
-    return binding.principal_id if binding is not None else None
-
-
-async def get_pat_revision(
-    *,
-    principal_id: uuid.UUID,
-    agent_id: uuid.UUID | None,
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> tuple[uuid.UUID, datetime] | None:
-    """Capture the same real credential selection as get_pat, without reading its token."""
-    async with sessionmaker() as session:
-        selected = await _pat_principal(session, principal_id=principal_id, agent_id=agent_id)
-        if selected is None:
-            return None
-        revision = await cred_store.get_credential_revision(session, principal_id=selected)
-        return (selected, revision) if revision is not None else None
-
-
-async def get_pat(
-    *,
-    principal_id: uuid.UUID,
-    agent_id: uuid.UUID | None = None,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    fernet: MultiFernet,
-    allow_service_default: bool = False,
-    fallback_pat: str | None = None,
-) -> str | None:
-    """Per-agent credential resolver.
-
-    agent_id given -> overlay-only -> opt-in service default -> None (no
-    principal-default bleed).
-    agent_id=None -> principal-default -> opt-in service default -> None
-    (OAuth-callback / CLI path).
-
-    The opt-in tier only engages when `allow_service_default` is set to True
-    AND `fallback_pat` is not None — see the module docstring for the full
-    contract and the callers that must never opt in.
-    """
-    async with sessionmaker() as session:
-        selected = await _pat_principal(session, principal_id=principal_id, agent_id=agent_id)
-        if selected is not None:
-            cred = await cred_store.get_credential_by_principal(session, principal_id=selected)
-            if cred is not None:
-                return decrypt_token(fernet, cred.encrypted_token)
-        return fallback_pat if allow_service_default and fallback_pat is not None else None

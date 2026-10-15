@@ -83,12 +83,6 @@ _request_mcp_token_impl = (
 _request_mcp_oauth_impl = (
     _credential_requests_mod._request_mcp_oauth_impl  # pyright: ignore[reportPrivateUsage]
 )
-_request_repo_binding_impl = (
-    _credential_requests_mod._request_repo_binding_impl  # pyright: ignore[reportPrivateUsage]
-)
-_request_skill_repo_token_impl = (
-    _credential_requests_mod._request_skill_repo_token_impl  # pyright: ignore[reportPrivateUsage]
-)
 register_credential_request_tools = _credential_requests_mod.register_credential_request_tools
 
 
@@ -974,256 +968,6 @@ async def test_request_mcp_token_rejects_non_http_url(
 # ---------------------------------------------------------------------------
 
 
-async def test_request_repo_binding_creates_row_and_posts_button(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_repo", name="daimon", tenant_id=tenant.id)]
-    )
-    runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    async with committing_sessionmaker.begin() as session:
-        origin = await create_origin(
-            session,
-            tenant_id=tenant.id,
-            account_id=auth.account_id,
-            platform=auth.platform or "discord",
-            parent_channel_id="C_CRED" if auth.platform == "slack" else "1111",
-            thread_id="1700000000.000001" if auth.platform == "slack" else "222",
-            responder_ma_agent_id="ag_daimon",
-            responder_name="Daimon",
-            configuration_target_ma_agent_id=None,
-            configuration_target_name=None,
-            role=auth.role,
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            now=datetime.now(UTC),
-        )
-    before = datetime.now(UTC)
-    posted: dict[str, Any] = {}
-    _patch_successful_post(monkeypatch, message_id="9204", posted=posted)
-
-    result = await _request_repo_binding_impl(
-        runtime,
-        auth,
-        origin_context_id=str(origin.id),
-        expected_ma_agent_id="ag_repo",
-        agent_name="daimon",
-        repo_url="https://github.com/clsandoval/daimon-qa-scratch",
-        purpose="binding the QA scratch repo",
-        channel_id="222",
-    )
-
-    assert result.kind == "repo", "result must report the repo kind"
-    assert result.target == "https://github.com/clsandoval/daimon-qa-scratch@main", (
-        "result must report the repo url packed with the default branch"
-    )
-    assert result.message_id == "9204", "result must report the posted message id"
-    assert await _row_count(db_session) == 1, "exactly one credential_requests row must be created"
-
-    row = await peek_credential_request(db_session, token=_token_from_posted(posted))
-    assert row is not None, "the minted token must resolve to the created row"
-    assert before + DEFAULT_TTL <= row.expires_at, "the row must expire no sooner than now + TTL"
-    assert row.kind == "repo"
-    assert row.target == "https://github.com/clsandoval/daimon-qa-scratch@main", (
-        "the row stores the branch packed into the target"
-    )
-    assert row.mcp_server_url is None, "repo rows must not carry an mcp_server_url"
-    assert row.account_id == auth.account_id, "row must stamp the caller's account_id"
-    assert row.requester_platform_user_id == auth.platform_user_id, (
-        "row must stamp the caller's platform_user_id"
-    )
-    assert row.tenant_id == tenant.id
-
-
-async def test_request_repo_binding_rejects_unknown_agent(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-) -> None:
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents([])  # no agents in the tenant
-    runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    async with committing_sessionmaker.begin() as session:
-        origin = await create_origin(
-            session,
-            tenant_id=tenant.id,
-            account_id=auth.account_id,
-            platform=auth.platform or "discord",
-            parent_channel_id="C_CRED" if auth.platform == "slack" else "1111",
-            thread_id="1700000000.000001" if auth.platform == "slack" else "222",
-            responder_ma_agent_id="ag_daimon",
-            responder_name="Daimon",
-            configuration_target_ma_agent_id=None,
-            configuration_target_name=None,
-            role=auth.role,
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            now=datetime.now(UTC),
-        )
-    with pytest.raises(ToolError, match="missing"):
-        await _request_repo_binding_impl(
-            runtime,
-            auth,
-            origin_context_id=str(origin.id),
-            expected_ma_agent_id="ag_missing",
-            agent_name="ghost",
-            repo_url="https://github.com/clsandoval/daimon-qa-scratch",
-            purpose="x",
-            channel_id="222",
-        )
-    assert await _row_count(db_session) == 0, "an unknown agent must create no row"
-
-
-async def test_request_repo_binding_refuses_an_app_mode_agent(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An App-mode agent's repos change through Connect GitHub, never the token form."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_repo", name="daimon", tenant_id=tenant.id)]
-    )
-    runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    app_agent = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_repo")
-
-    async def _mode(_session: object, *, tenant_id: object, agent_id: object) -> str:
-        return "app" if agent_id == app_agent else "legacy"
-
-    monkeypatch.setattr(_credential_requests_mod, "get_agent_mode", _mode)
-    async with committing_sessionmaker.begin() as session:
-        origin = await create_origin(
-            session,
-            tenant_id=tenant.id,
-            account_id=auth.account_id,
-            platform=auth.platform or "discord",
-            parent_channel_id="C_CRED" if auth.platform == "slack" else "1111",
-            thread_id="1700000000.000001" if auth.platform == "slack" else "222",
-            responder_ma_agent_id="ag_daimon",
-            responder_name="Daimon",
-            configuration_target_ma_agent_id=None,
-            configuration_target_name=None,
-            role=auth.role,
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            now=datetime.now(UTC),
-        )
-    posted: dict[str, Any] = {}
-    _patch_successful_post(monkeypatch, message_id="9205", posted=posted)
-
-    with pytest.raises(ToolError, match="github_connect"):
-        await _request_repo_binding_impl(
-            runtime,
-            auth,
-            origin_context_id=str(origin.id),
-            expected_ma_agent_id="ag_repo",
-            agent_name="daimon",
-            repo_url="https://github.com/clsandoval/daimon-qa-scratch",
-            purpose="binding the QA scratch repo",
-            channel_id="222",
-        )
-    assert posted == {}, "an App-mode agent must get no token form"
-    assert await _row_count(db_session) == 0, "an App-mode agent must create no row"
-
-
-async def test_request_repo_binding_rejects_invalid_repo_url(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-) -> None:
-    runtime = _runtime(committing_sessionmaker)
-    auth = _auth_identity()
-    with pytest.raises(ToolError, match="owner/repo"):
-        await _request_repo_binding_impl(
-            runtime,
-            auth,
-            agent_name="daimon",
-            repo_url="https://github.com/not-a-repo-shape",
-            purpose="x",
-            channel_id="222",
-        )
-    assert await _row_count(db_session) == 0, "an invalid repo url must create no row"
-
-
-async def test_request_repo_binding_signature_has_no_secret_or_branch_parameter() -> None:
-    """Belt-and-suspenders: the repo-binding impl's own signature carries no
-    token/secret/value/pat parameter, and no default_branch parameter — the
-    row has no column to persist one."""
-    params = set(inspect.signature(_request_repo_binding_impl).parameters)
-    forbidden = {
-        p
-        for p in params
-        if any(w in p.lower() for w in ("token", "secret", "value", "pat", "default_branch"))
-    }
-    assert not forbidden, (
-        f"_request_repo_binding_impl must not accept a secret or branch parameter, "
-        f"found {forbidden}"
-    )
-
-
-async def test_request_repo_binding_posts_message_naming_agent_and_repo(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_repo_msg", name="daimon", tenant_id=tenant.id)]
-    )
-    runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    async with committing_sessionmaker.begin() as session:
-        origin = await create_origin(
-            session,
-            tenant_id=tenant.id,
-            account_id=auth.account_id,
-            platform=auth.platform or "discord",
-            parent_channel_id="C_CRED" if auth.platform == "slack" else "1111",
-            thread_id="1700000000.000001" if auth.platform == "slack" else "222",
-            responder_ma_agent_id="ag_daimon",
-            responder_name="Daimon",
-            configuration_target_ma_agent_id=None,
-            configuration_target_name=None,
-            role=auth.role,
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            now=datetime.now(UTC),
-        )
-    posted: dict[str, Any] = {}
-    _patch_successful_post(monkeypatch, message_id="9205", posted=posted)
-
-    await _request_repo_binding_impl(
-        runtime,
-        auth,
-        origin_context_id=str(origin.id),
-        expected_ma_agent_id="ag_repo_msg",
-        agent_name="daimon",
-        repo_url="https://github.com/clsandoval/daimon-qa-scratch",
-        purpose="binding the QA scratch repo",
-        channel_id="222",
-    )
-
-    card_text = _card_text(posted)
-    assert "daimon" in card_text, "the card must name the agent"
-    assert "clsandoval/daimon-qa-scratch" in card_text, "the card must name the exact repo"
-    button = _button_from_posted(posted)
-    assert button["custom_id"].startswith(CUSTOM_ID_PREFIX), (
-        "the button's custom_id must carry the credential-request prefix"
-    )
-
-
 async def test_request_agent_key_raises_when_button_post_fails(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
@@ -1449,61 +1193,6 @@ async def test_request_agent_key_posts_slack_button_carrying_the_token(
     assert body["blocks"] == build_card_blocks(expected_card, token=button["value"]), (
         "the posted message is exactly the core-rendered requested card"
     )
-
-
-async def test_request_repo_binding_posts_slack_button(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-) -> None:
-    from aioresponses import aioresponses
-
-    tenant = await make_tenant(db_session, platform="slack", workspace_id=_SLACK_TEAM_ID)
-    await db_session.commit()
-    fernet = await _seed_slack_bot_token(committing_sessionmaker)
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_repo_slack", name="daimon", tenant_id=tenant.id)]
-    )
-    runtime = _slack_runtime(committing_sessionmaker, client=client, fernet=fernet)
-    auth = _auth_identity(
-        platform="slack",
-        external_id=_SLACK_TEAM_ID,
-        platform_user_id=_SLACK_USER_ID,
-        tenant_id=tenant.id,
-    )
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    async with committing_sessionmaker.begin() as session:
-        origin = await create_origin(
-            session,
-            tenant_id=tenant.id,
-            account_id=auth.account_id,
-            platform=auth.platform or "discord",
-            parent_channel_id="C_CRED" if auth.platform == "slack" else "1111",
-            thread_id="1700000000.000001" if auth.platform == "slack" else "222",
-            responder_ma_agent_id="ag_daimon",
-            responder_name="Daimon",
-            configuration_target_ma_agent_id=None,
-            configuration_target_name=None,
-            role=auth.role,
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            now=datetime.now(UTC),
-        )
-
-    with aioresponses() as m:
-        _register_slack_post_defaults(m)
-        result = await _request_repo_binding_impl(
-            runtime,
-            auth,
-            origin_context_id=str(origin.id),
-            expected_ma_agent_id="ag_repo_slack",
-            agent_name="daimon",
-            repo_url="https://github.com/owner/repo",
-            purpose="cloning the project",
-            channel_id="C_CRED",
-        )
-
-    assert result.kind == "repo"
-    assert await _row_count(db_session) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1774,120 +1463,6 @@ async def test_request_agent_key_allows_replacement_for_admin_on_shared_agent(
     )
 
 
-async def test_request_skill_repo_token_refuses_a_managed_agent_even_for_admin(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Skills imported for a seeded agent could never be attached, so no card is posted."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_seeded", name="daimon", tenant_id=tenant.id, managed=True)]
-    )
-    runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id, is_admin=True)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
-    posted: dict[str, Any] = {}
-    _patch_successful_post(monkeypatch, message_id="9401", posted=posted)
-
-    with pytest.raises(ToolError, match="fork_agent"):
-        await _request_skill_repo_token_impl(
-            runtime,
-            auth,
-            origin_context_id=str(origin_id),
-            expected_ma_agent_id="ag_seeded",
-            agent_name="daimon",
-            repo_url="https://github.com/example/skills",
-            branch="main",
-            path="",
-            purpose="importing the team's skills",
-            channel_id="222",
-        )
-
-    assert await _row_count(db_session) == 0, "a refused request must mint no row"
-    assert posted == {}, "a refused request must post no card"
-
-
-async def test_request_skill_repo_token_refuses_a_member_on_a_shared_agent(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An agent answering for the whole tenant needs an admin to gain skills."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_team", name="team", tenant_id=tenant.id, account_id=uuid.uuid4())]
-    )
-    runtime = _runtime(
-        committing_sessionmaker,
-        client=client,
-        deployment_default=DeploymentDefault(agent_name="team"),
-    )
-    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
-    posted: dict[str, Any] = {}
-    _patch_successful_post(monkeypatch, message_id="9402", posted=posted)
-
-    with pytest.raises(ToolError, match="admin"):
-        await _request_skill_repo_token_impl(
-            runtime,
-            auth,
-            origin_context_id=str(origin_id),
-            expected_ma_agent_id="ag_team",
-            agent_name="team",
-            repo_url="https://github.com/example/skills",
-            branch="main",
-            path="",
-            purpose="importing the team's skills",
-            channel_id="222",
-        )
-
-    assert await _row_count(db_session) == 0, "a refused request must mint no row"
-    assert posted == {}, "a refused request must post no card"
-
-
-async def test_request_skill_repo_token_refuses_a_member_on_an_agent_that_answers_nowhere(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unbound agent has no verified channel ownership, so no card is posted."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_mine", name="mine", tenant_id=tenant.id, account_id=uuid.uuid4())]
-    )
-    runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
-    posted: dict[str, Any] = {}
-    _patch_successful_post(monkeypatch, message_id="9403", posted=posted)
-
-    with pytest.raises(ToolError, match="admin"):
-        await _request_skill_repo_token_impl(
-            runtime,
-            auth,
-            origin_context_id=str(origin_id),
-            expected_ma_agent_id="ag_mine",
-            agent_name="mine",
-            repo_url="https://github.com/example/skills",
-            branch="main",
-            path="",
-            purpose="importing my skills",
-            channel_id="222",
-        )
-    assert await _row_count(db_session) == 0
-    assert posted == {}
-
-
 async def test_pending_task_is_sanitized_and_bounded(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
@@ -2002,65 +1577,6 @@ async def test_pending_task_drops_the_key_request_itself_and_keeps_a_real_task(
     assert task_row.requested_work == task, (
         "a task naming work beyond the save is kept even when it repeats the key name"
     )
-
-
-async def test_request_repo_binding_packs_branch_into_target(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_branch", name="daimon", tenant_id=tenant.id)]
-    )
-    runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
-    posted: dict[str, Any] = {}
-    _patch_successful_post(monkeypatch, message_id="9308", posted=posted)
-
-    result = await _request_repo_binding_impl(
-        runtime,
-        auth,
-        origin_context_id=str(origin_id),
-        expected_ma_agent_id="ag_branch",
-        agent_name="daimon",
-        repo_url="https://github.com/owner/repo",
-        purpose="cloning the project",
-        channel_id="222",
-        branch="develop",
-    )
-
-    assert result.target == "https://github.com/owner/repo@develop", (
-        "the branch rides in the packed target so the click can recover it"
-    )
-    row = await peek_credential_request(db_session, token=_token_from_posted(posted))
-    assert row is not None, "the minted token must resolve to the created row"
-    assert row.target == "https://github.com/owner/repo@develop", (
-        "the row stores the packed repo@branch target"
-    )
-
-
-async def test_request_repo_binding_rejects_a_branch_carrying_a_delimiter(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-) -> None:
-    runtime = _runtime(committing_sessionmaker)
-    auth = _auth_identity()
-    with pytest.raises(ToolError, match="branch must not contain"):
-        await _request_repo_binding_impl(
-            runtime,
-            auth,
-            agent_name="daimon",
-            repo_url="https://github.com/owner/repo",
-            purpose="x",
-            channel_id="222",
-            branch="feat@weird",
-        )
-    assert await _row_count(db_session) == 0, "a branch that would mangle the target creates no row"
 
 
 # ---------------------------------------------------------------------------
@@ -2512,52 +2028,6 @@ async def test_request_agent_key_on_teams_posts_an_env_file_card(
     assert len(posts) == 1, "the card is posted for the pasted-file form"
 
 
-async def test_request_repo_binding_on_teams_posts_a_card(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
-) -> None:
-    runtime, auth, origin_id, requests = await _teams_setup(committing_sessionmaker, db_session)
-    result = await _request_repo_binding_impl(
-        runtime,
-        auth,
-        origin_context_id=origin_id,
-        expected_ma_agent_id="ag_t",
-        agent_name="daimon",
-        repo_url="https://github.com/o/r",
-        purpose="x",
-        channel_id="c",
-    )
-    assert result.kind == "repo"
-    posts = [r for r in requests if r.method == "POST" and "/activities" in str(r.url)]
-    assert len(posts) == 1 and "o/r" in posts[0].content.decode()
-
-
-async def test_request_skill_repo_token_on_teams_posts_a_card(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
-) -> None:
-    """Teams has the skill repo form too, so the request is posted, not refused."""
-    # A member's own agent: a system agent takes no chat skill imports.
-    runtime, auth, origin_id, requests = await _teams_setup(
-        committing_sessionmaker, db_session, owner=uuid.uuid4()
-    )
-    auth = dataclasses.replace(auth, is_admin=True, role=Role.ADMIN)
-    result = await _request_skill_repo_token_impl(
-        runtime,
-        auth,
-        origin_context_id=origin_id,
-        expected_ma_agent_id="ag_t",
-        agent_name="daimon",
-        repo_url="https://github.com/o/skills",
-        branch="main",
-        path="",
-        purpose="x",
-        channel_id="c",
-    )
-    assert result.kind == "skill_repo", "a skill repo request was minted"
-    posts = [r for r in requests if r.method == "POST" and "/activities" in str(r.url)]
-    assert len(posts) == 1, "one card posted to the Teams chat"
-    assert "o/skills" in posts[0].content.decode(), "the card names the repo"
-
-
 @pytest.mark.parametrize("key", ["OPENAI_API_KEY", None], ids=["one-key", "env-file"])
 async def test_request_agent_key_refuses_before_posting_when_no_crypto_keys(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
@@ -2774,55 +2244,6 @@ async def test_request_mcp_token_requires_ownership_even_for_drafts_and_new_name
         assert posted == {} and await _row_count(db_session) == 0
 
 
-async def test_request_agent_key_treats_an_alias_of_a_held_key_as_a_replacement(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """GITHUB_TOKEN beside a held GH_TOKEN retargets `gh`: refused for a member on a shared agent."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_shared", name="daimon", tenant_id=tenant.id)]
-    )
-    runtime = _runtime(
-        committing_sessionmaker,
-        client=client,
-        deployment_default=DeploymentDefault(agent_name="daimon"),
-    )
-    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
-    await make_account(db_session, tenant=tenant, id=auth.account_id)
-    await db_session.commit()
-    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared")
-    async with committing_sessionmaker.begin() as session:
-        await put_agent_file(
-            session,
-            tenant_id=tenant.id,
-            agent_id=agent_uuid,
-            key="GH_TOKEN",
-            content="old-value",
-            set_by_account_id=None,
-        )
-    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
-    posted: dict[str, Any] = {}
-    _patch_successful_post(monkeypatch, message_id="9305", posted=posted)
-
-    with pytest.raises(ToolError, match="admin") as caught:
-        await _request_agent_key_impl(
-            runtime,
-            auth,
-            origin_context_id=str(origin_id),
-            expected_ma_agent_id="ag_shared",
-            agent_name="daimon",
-            key="GITHUB_TOKEN",
-            purpose="a GitHub token",
-            channel_id="222",
-        )
-    assert "adding 'GITHUB_TOKEN' would replace GH_TOKEN" in str(caught.value)
-    assert await _row_count(db_session) == 0
-    assert posted == {}
-
-
 async def test_request_agent_key_treats_adding_to_a_stored_aws_family_as_a_replacement(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
@@ -2871,18 +2292,13 @@ async def test_request_agent_key_treats_adding_to_a_stored_aws_family_as_a_repla
     assert posted == {}
 
 
-_request_skill_repo_token_impl = (
-    _credential_requests_mod._request_skill_repo_token_impl  # pyright: ignore[reportPrivateUsage]
-)
-
-
 _ACME_CHANNEL = "555555555555555555"
 
 
 _CLIENTB_CHANNEL = "666666666666666666"
 
 
-_REQUEST_TOOLS = ["agent_key", "mcp_token", "mcp_oauth", "skill_repo_token", "repo_binding"]
+_REQUEST_TOOLS = ["agent_key", "mcp_token", "mcp_oauth"]
 
 
 @pytest.mark.parametrize("tool", _REQUEST_TOOLS)
@@ -2972,21 +2388,8 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
             return await _request_mcp_oauth_impl(
                 runtime, auth, server_name="linear", url="https://mcp.linear.app/sse", **common
             )
-        if tool == "skill_repo_token":
-            return await _request_skill_repo_token_impl(
-                runtime,
-                auth,
-                repo_url="https://github.com/acme/skills",
-                branch="main",
-                path="skills",
-                purpose="skills",
-                **common,
-            )
-        return await _request_repo_binding_impl(
-            runtime, auth, repo_url="https://github.com/acme/repo", purpose="code", **common
-        )
 
-    if not is_admin and tool in ("mcp_token", "mcp_oauth", "skill_repo_token"):
+    if not is_admin and tool in ("mcp_token", "mcp_oauth"):
         allowed = False
     if allowed:
         await request()

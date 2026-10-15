@@ -82,7 +82,6 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import github_access, github_app_installations
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.github_links import save_verified_link
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
@@ -517,7 +516,6 @@ async def test_start_turn_mints_baseline_app_token_with_or_without_personal_link
             ceiling_access="read",
             granted_by_account_id=_ACCOUNT_ID,
         )
-        await github_access.activate_agent(session, tenant_id=tenant.id, agent_id=_AGENT_UUID)
         if linked:
             await make_platform_principal(
                 session, platform="discord", external_id="person", tenant=tenant, account=account
@@ -597,9 +595,9 @@ async def test_start_turn_mints_baseline_app_token_with_or_without_personal_link
             "repository_ids": [101],
             "permissions": {
                 "metadata": "read",
-                "contents": "write",
-                "issues": "write",
-                "pull_requests": "write",
+                "contents": "read",
+                "issues": "read",
+                "pull_requests": "read",
             },
         }
     ]
@@ -1656,33 +1654,6 @@ def _describe_agent_router() -> MARouter:
         ),
     )
     return router
-
-
-async def test_describe_agent_returns_bound_repo_url_for_bound_agent(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A bound agent's describe_agent().repo_url equals the (normalized) bound URL."""
-    client = build_fake_anthropic(_describe_agent_router().dispatch)
-    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
-    auth = _auth()
-
-    async with db_session_factory() as session, session.begin():
-        await make_tenant(session, platform="discord", workspace_id=str(_TENANT_ID), id=_TENANT_ID)
-        await set_binding(
-            session,
-            tenant_id=_TENANT_ID,
-            agent_id=_AGENT_UUID,
-            repo_url="https://github.com/acme/widgets",
-            default_branch="main",
-            ma_secret_ref="anon:",
-            proof=None,
-        )
-
-    description = await _describe_agent_impl(runtime, auth)
-
-    assert description.repo_url == "acme/widgets", (
-        f"describe_agent should report the bound (normalized) repo URL; got {description.repo_url!r}"
-    )
 
 
 async def test_describe_agent_returns_none_repo_url_for_unbound_agent(

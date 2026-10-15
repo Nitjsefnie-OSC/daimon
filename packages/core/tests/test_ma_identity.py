@@ -54,9 +54,8 @@ def test_derive_handles_prefixed_string_id() -> None:
 def test_derive_against_frozen_vector() -> None:
     """Golden-vector test: pins the namespace UUID + algorithm.
 
-    If this assertion changes, you broke backward compatibility — every
-    agent_repo_binding row keyed under the old namespace is now orphaned.
-    Don't 'fix' this test; if you really need a re-key, write a migration.
+    If this assertion changes, persisted per-agent records keyed under the old
+    namespace become orphaned. A re-key requires a migration.
     """
     tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
     ma_id = "agent_017vXaNG5P7Fu1g4orggSwEY"

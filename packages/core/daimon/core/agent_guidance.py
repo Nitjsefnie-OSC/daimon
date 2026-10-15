@@ -34,8 +34,8 @@ look for keys that don't exist.
 YOUR SETUP IS READ AT THE START OF A TURN, NOT DURING ONE. Keys, connections,
 model, instructions, skills and the working repo can change between turns.
 You have one working repo in your filesystem at /workspace/<owner>/<repo> if
-one is set. GH_TOKEN covers every repo connected to this agent, with read and
-write access. You can also reach those repos by token: clone
+one is set. The session's GH_TOKEN covers this agent's active GitHub App grants,
+at each repo's granted access level. You can also reach those repos by token: clone
 one with `gh repo clone owner/repo` (gh reads GH_TOKEN), or if that fails with
 `git clone https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git`. Plain
 git without the token only reaches the mounted repo and public repos, so never

@@ -124,7 +124,6 @@ from daimon.core.stores.github_issued_tokens import (
     recheck_token_revoke_due,
     record_revoke_attempt,
     select_abandoned_pending_tokens,
-    select_deactivated_tokens,
     select_due_superseded_tokens,
     select_stale_tokens,
     session_token_needs_rotation,
@@ -488,15 +487,11 @@ async def _build_fire(
         crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
         fernet = build_multifernet(crypto_keys) if crypto_keys else None
 
-        github_fallback_pat: str | None = (
-            settings.github.fallback_pat.get_secret_value()
-            if settings.github.fallback_pat is not None
-            else None
-        )
-        github_app_id: str | None = settings.github.app_id
+        github_fallback_pat: str | None = None
+        github_app_id: str | None = settings.github_app.app_id
         github_app_private_key: str | None = (
-            settings.github.app_private_key.get_secret_value()
-            if settings.github.app_private_key is not None
+            settings.github_app.private_key.get_secret_value()
+            if settings.github_app.private_key is not None
             else None
         )
 
@@ -666,7 +661,6 @@ async def _sweep_github_app_tokens(
         return
     async with sm() as session:
         stale = await select_stale_tokens(session)
-        stale.extend(await select_deactivated_tokens(session))
         stale.extend(await select_abandoned_pending_tokens(session))
         due_superseded = await select_due_superseded_tokens(session)
         stale.extend(due_superseded)
@@ -1374,6 +1368,7 @@ async def _drain_github_push_resync(
             fernet=fernet,
             anthropic_client=client,
             github_settings=settings.github,
+            github_app=settings.github_app,
         )
     except Exception:
         log.exception("scheduler.github_push_resync.failed")
@@ -1388,7 +1383,7 @@ async def _drain_github_installation_reconciliations(
             await drain_github_installation_reconciliations(
                 sessionmaker=sm,
                 http_client=http_client,
-                github_settings=settings.github,
+                github_app=settings.github_app,
             )
     except Exception:
         log.exception("scheduler.github_installation_reconciliation.failed")

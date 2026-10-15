@@ -10,6 +10,7 @@ any collaborator the caller supplied.
 
 from __future__ import annotations
 
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
@@ -81,7 +82,6 @@ from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
-from daimon.adapters.mcp.tools.repo_binding import register_repo_binding_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
@@ -475,7 +475,6 @@ def create_mcp_app(
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
-    register_repo_binding_tools(mcp, runtime)  # bind a public repo from chat
     environments.register_environment_tools(mcp, runtime)
     vault.register_vault_tools(mcp, runtime)
     register_credential_request_tools(mcp, runtime)
@@ -763,26 +762,26 @@ def create_mcp_app(
     # required only by skill-sync's push-driven resync and is gated separately
     # on webhook_secret (fail-fast on partial webhook config, never coupled to
     # App-clone itself).
-    github_cfg = effective_settings.github
-    app_configured = github_cfg.app_id is not None and github_cfg.app_private_key is not None
-    if github_cfg.app_id is not None and github_cfg.app_private_key is None:
+    github_cfg = effective_settings.github_app
+    app_configured = github_cfg.app_id is not None and github_cfg.private_key is not None
+    if github_cfg.app_id is not None and github_cfg.private_key is None:
         raise BootstrapError(
-            "GitHub App is partially configured: app_id is set but app_private_key "
-            "is missing. Set DAIMON_GITHUB__APP_PRIVATE_KEY, or leave both unset to "
+            "GitHub App is partially configured: app_id is set but private_key "
+            "is missing. Set DAIMON_GITHUB_APP__PRIVATE_KEY, or leave both unset to "
             "disable the GitHub App."
         )
     if github_cfg.webhook_secret is not None:
         if not app_configured:
             raise BootstrapError(
-                "DAIMON_GITHUB__WEBHOOK_SECRET is set but the GitHub App is not "
-                "configured (app_id + app_private_key required). Set both, or unset "
+                "DAIMON_GITHUB_APP__WEBHOOK_SECRET is set but the GitHub App is not "
+                "configured (app_id + private_key required). Set both, or unset "
                 "WEBHOOK_SECRET to disable the skill-sync webhook."
             )
         if fernet is None:
             raise BootstrapError(
-                "DAIMON_GITHUB__WEBHOOK_SECRET is set but no crypto keys are set: "
-                "push-driven skill sync cannot decrypt the MA/MCP credential without "
-                "them. Set DAIMON_CRYPTO__KEYS, or unset WEBHOOK_SECRET to disable "
+                "DAIMON_GITHUB_APP__WEBHOOK_SECRET is set but no crypto keys are set: "
+                "push-driven skill sync needs Managed Agents access. "
+                "Set DAIMON_CRYPTO__KEYS, or unset WEBHOOK_SECRET to disable "
                 "the webhook."
             )
         app.add_route(

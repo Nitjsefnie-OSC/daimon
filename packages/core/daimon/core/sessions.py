@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
-import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from decimal import Decimal, localcontext
@@ -63,18 +62,16 @@ from daimon.core.github_app_session import (
     add_app_credentials,
     archive_app_vault,
     create_session_vault,
+    declared_app_repositories,
     finish_app_delivery,
     prepare_app_access,
     resolve_bot_identity,
     revoke_app_access,
 )
-from daimon.core.github_credentials import get_pat, get_pat_revision
-from daimon.core.github_repo_auth import resolve_clone_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
-    add_github_copilot_credential,
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
 )
@@ -91,7 +88,6 @@ from daimon.core.mux_compat import (
     sdk_agent,
     source_environment_record,
 )
-from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_ports_compat import (
     archive_session_record,
     create_session_record,
@@ -116,10 +112,8 @@ from daimon.core.stores import (
     agent_memory_stores,
 )
 from daimon.core.stores import agent_mcp_credentials as credential_store
-from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.channel_skills import list_skill_channel_rules
-from daimon.core.stores.domain import AgentRepoBindingRow, BackendAgent
-from daimon.core.stores.github_access import get_agent_mode
+from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from mux.contracts.ids import Scope
@@ -130,7 +124,6 @@ from mux.drivers.anthropic.sessions_lifecycle import (
     SessionReads,
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
-from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -148,14 +141,7 @@ __all__ = ["create_session", "create_isolated_session"]
 async def _session_app_mode(
     session_factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> bool:
-    async with session_factory() as session:
-        return await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app"
-
-
-async def _session_repo_binding(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, app_mode: bool
-) -> AgentRepoBindingRow | None:
-    return None if app_mode else await get_binding(session, tenant_id=tenant_id, agent_id=agent_id)
+    return True
 
 
 def _caller_mcp_vault_required(
@@ -174,38 +160,6 @@ def _caller_mcp_vault_required(
     return configured and (
         not app_mode
         or (account_id is not None and agent_uuid is not None and session_factory is not None)
-    )
-
-
-def _agent_pat_required(
-    *,
-    app_mode: bool,
-    agent_uuid: uuid.UUID | None,
-    session_factory: async_sessionmaker[AsyncSession] | None,
-    fernet: MultiFernet | None,
-) -> bool:
-    return (
-        not app_mode
-        and agent_uuid is not None
-        and session_factory is not None
-        and fernet is not None
-    )
-
-
-def _copilot_mirror_required(
-    *,
-    vault_available: bool,
-    pat_available: bool,
-    account_id: uuid.UUID | None,
-    agent_uuid: uuid.UUID | None,
-    session_factory: async_sessionmaker[AsyncSession] | None,
-) -> bool:
-    return (
-        vault_available
-        and pat_available
-        and account_id is not None
-        and agent_uuid is not None
-        and session_factory is not None
     )
 
 
@@ -340,24 +294,9 @@ async def project_session_resources(
             )
             else ()
         )
-        binding = await _session_repo_binding(
-            session, tenant_id=tenant_id, agent_id=agent_uuid, app_mode=app_mode
-        )
         store_id = await agent_memory_stores.get_memory_store_id(
             session, tenant_id=tenant_id, agent_id=agent_uuid
         )
-    pat_revision = (
-        await get_pat_revision(
-            principal_id=agent_uuid, agent_id=agent_uuid, sessionmaker=session_factory
-        )
-        if _agent_pat_required(
-            app_mode=app_mode,
-            agent_uuid=agent_uuid,
-            session_factory=session_factory,
-            fernet=fernet,
-        )
-        else None
-    )
     hidden = frozenset[str]()
     hiding_for = account_id if account_id is not None else hide_personal_for
     if hiding_for is not None:
@@ -408,12 +347,6 @@ async def project_session_resources(
             ResourceBinding(id=reference, kind="credential", credential_ref=reference)
         )
         generations.append((reference, updated))
-    if pat_revision is not None:
-        reference = f"github-credential:{pat_revision[0]}"
-        requirements.append(
-            ResourceBinding(id=reference, kind="credential", credential_ref=reference)
-        )
-        generations.append((reference, pat_revision[1]))
     if caller_vault:
         reference = f"caller-mcp:{tenant_id}:{account_id}:{agent_uuid}"
         if slack_turn_context_id is not None:
@@ -421,44 +354,20 @@ async def project_session_resources(
         requirements.append(
             ResourceBinding(id=reference, kind="credential", credential_ref=reference)
         )
-    if app_mode:
-        # A fresh vault and remotely authorized App credentials cannot be inferred from local rows.
-        requirements.append(
-            ResourceBinding(id=f"app-session-vault:{tenant_id}:{agent_uuid}", kind="native")
-        )
-    if _copilot_mirror_required(
-        vault_available=caller_vault if not app_mode else True,
-        pat_available=pat_revision is not None,
-        account_id=account_id,
-        agent_uuid=agent_uuid,
-        session_factory=session_factory,
-    ):
-        assert pat_revision is not None
-        reference = f"github-credential:{pat_revision[0]}"
-        requirements.append(
-            ResourceBinding(id="github-copilot-mirror", kind="credential", credential_ref=reference)
-        )
     repos: list[WorkspaceSource] = []
-    if binding is not None:
-        repos.append(
-            WorkspaceSource(
-                kind="repository",
-                target_path=".",
-                repository_url=f"https://github.com/{binding.repo_url}",
-                ref=binding.default_branch,
-                credential_ref=binding.ma_secret_ref,
-            )
-        )
-        generations.append((f"repository:{tenant_id}:{agent_uuid}", binding.updated_at))
     if app_mode and not is_external:
         # This owner's requester-access calculation may use network and tokens.
         # Capture its locally declared intent; remote effective access remains unproven.
-        from daimon.core.github_app_session import declared_app_repositories
-
         repos.extend(
             await declared_app_repositories(
                 session_factory, tenant_id=tenant_id, agent_id=agent_uuid
             )
+        )
+    if app_mode and repos:
+        # Without a repository grant, the App vault carries no GitHub source
+        # obligation. Caller MCP credentials are captured separately above.
+        requirements.append(
+            ResourceBinding(id=f"app-session-vault:{tenant_id}:{agent_uuid}", kind="native")
         )
     if (
         extra_resources
@@ -467,7 +376,7 @@ async def project_session_resources(
         or app_session_unmapped
         or (requester_is_headless and app_mode)
         or origin_seal_ids
-        or (app_mode and agent_github_app is not None)
+        or (app_mode and agent_github_app is not None and repos)
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id="caller-resources", kind="native"))
@@ -816,23 +725,26 @@ async def create_session(
     caller_vault_id: str | None = None
     try:
         if app_mode:
-            assert tenant_id is not None and agent_uuid is not None
-            vault_id = await create_session_vault(
-                anthropic,
-                tenant_id=tenant_id,
-                agent_id=agent_uuid,
-                account_id=account_id,
-                public_url=(
-                    str(mcp_settings.public_url)
-                    if mcp_settings is not None and mcp_settings.public_url is not None
-                    else None
-                ),
-                jwt_secret=(
-                    mcp_settings.jwt_secret.get_secret_value().encode()
-                    if mcp_settings is not None and mcp_settings.jwt_secret is not None
-                    else None
-                ),
-            )
+            assert tenant_id is not None and agent_uuid is not None and session_factory is not None
+            if not is_external and await declared_app_repositories(
+                session_factory, tenant_id=tenant_id, agent_id=agent_uuid
+            ):
+                vault_id = await create_session_vault(
+                    anthropic,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    account_id=account_id,
+                    public_url=(
+                        str(mcp_settings.public_url)
+                        if mcp_settings is not None and mcp_settings.public_url is not None
+                        else None
+                    ),
+                    jwt_secret=(
+                        mcp_settings.jwt_secret.get_secret_value().encode()
+                        if mcp_settings is not None and mcp_settings.jwt_secret is not None
+                        else None
+                    ),
+                )
             if caller_vault:
                 assert account_id is not None and session_factory is not None
                 assert (
@@ -880,55 +792,6 @@ async def create_session(
                 slack_turn_context_id=slack_turn_context_id,
                 scope=scope,
             )
-
-        # Dev-agent port: resolve the per-agent GitHub PAT once. It feeds BOTH the
-        # github_repository clone resource (below) and the Copilot MCP credential
-        # (above the session create). Requires fernet to decrypt it; None when no
-        # fernet, no overlay binding, or no stored PAT — all mean "no GitHub".
-        per_agent_pat: str | None = None
-        if _agent_pat_required(
-            app_mode=app_mode, agent_uuid=agent_uuid, session_factory=session_factory, fernet=fernet
-        ):
-            assert agent_uuid is not None and session_factory is not None and fernet is not None
-            per_agent_pat = await get_pat(
-                principal_id=agent_uuid,
-                agent_id=agent_uuid,
-                sessionmaker=session_factory,
-                fernet=fernet,
-            )
-
-        # Copilot: mirror the resolved PAT into a static_bearer credential at the
-        # GitHub Copilot MCP URL on the agent's vault, so the agent can author PRs
-        # via the github MCP toolset. Rides the same
-        # vault already attached to the session via vault_ids. Bound to the REAL
-        # per-agent identity only — the operator fallback PAT is never mirrored here.
-        if _copilot_mirror_required(
-            vault_available=vault_id is not None,
-            pat_available=per_agent_pat is not None,
-            account_id=account_id,
-            agent_uuid=agent_uuid,
-            session_factory=session_factory,
-        ):
-            assert vault_id is not None and per_agent_pat is not None
-            assert account_id is not None and agent_uuid is not None and session_factory is not None
-            # Degrade-not-block: a transient MA failure on this optional credential
-            # must not kill the turn. Mirrors the memory-store mount pattern below.
-            try:
-                async with hold_agent_vault_lock(
-                    session_factory, account_id=account_id, agent_id=agent_uuid
-                ):
-                    await add_github_copilot_credential(
-                        anthropic, vault_id=vault_id, token=per_agent_pat, scope=scope
-                    )
-            except anthropic_pkg.APIError as exc:
-                if resource_source is not None:
-                    raise
-                _log.warning(
-                    "copilot_credential.mount_failed",
-                    vault_id=vault_id,
-                    agent_uuid=str(agent_uuid),
-                    error=str(exc),
-                )
 
         # External MCP servers are attached to the AGENT, so every caller who
         # mentions it gets the toolset — but MA resolves each server's credential
@@ -986,44 +849,6 @@ async def create_session(
             )
             if mount is not None:
                 resources.append(mount)
-
-            # Fetch the binding unconditionally — the resolver needs it even when
-            # there is no per-agent PAT (App/fallback branches).
-            async with session_factory() as session:
-                binding = await _session_repo_binding(
-                    session, tenant_id=tenant_id, agent_id=agent_uuid, app_mode=app_mode
-                )
-            if binding is not None:
-                app_private_key_secret = (
-                    SecretStr(github_app_private_key)
-                    if github_app_private_key is not None
-                    else None
-                )
-                now = int(time.time())
-                if http_client is not None:
-                    clone_token = await resolve_clone_token(
-                        http_client,
-                        binding=binding,
-                        per_agent_pat=per_agent_pat,
-                        fallback_pat=github_fallback_pat,
-                        app_id=github_app_id,
-                        app_private_key=app_private_key_secret,
-                        now=now,
-                    )
-                else:
-                    async with httpx.AsyncClient() as client:
-                        clone_token = await resolve_clone_token(
-                            client,
-                            binding=binding,
-                            per_agent_pat=per_agent_pat,
-                            fallback_pat=github_fallback_pat,
-                            app_id=github_app_id,
-                            app_private_key=app_private_key_secret,
-                            now=now,
-                        )
-                repo_resource = build_repo_resource(binding, clone_token)
-                if repo_resource is not None:
-                    resources.append(repo_resource)
 
             # Memory stores (agent memory feature): degrade-not-block. A memory
             # outage must never take down chat — the session just runs without
@@ -1190,7 +1015,7 @@ async def create_session(
         owned_created = False
         observed = None
         try:
-            if app_mode:
+            if app_mode and vault_id is not None:
                 assert (
                     tenant_id is not None and agent_uuid is not None and session_factory is not None
                 )
@@ -1224,10 +1049,9 @@ async def create_session(
                             )
                     except anthropic_pkg.APIError as exc:
                         _log.warning("git_identity.mount_failed", error=str(exc))
-                if vault_id is not None:
-                    await add_app_credentials(
-                        anthropic, vault_id=vault_id, access=app_access, scope=scope
-                    )
+                await add_app_credentials(
+                    anthropic, vault_id=vault_id, access=app_access, scope=scope
+                )
             if before_create is not None:
                 # The caller's last access decision, after every await above.
                 await before_create()
@@ -1243,6 +1067,8 @@ async def create_session(
                     if caller_vault_id is not None and vault_id is not None
                     else [vault_id]
                     if vault_id is not None
+                    else [caller_vault_id]
+                    if caller_vault_id is not None
                     else None
                 ),
                 resources=resources if resources else None,

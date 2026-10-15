@@ -209,7 +209,7 @@ def snapshot_from_created_session(
     repo_token_issued_at: int | None,
     vault_id: str | None,
     sent_skills: Sequence[MaSkill],
-    github_mode: Literal["legacy", "app"] = "legacy",
+    github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
@@ -272,7 +272,7 @@ def _snapshot_from_session(
     env_file_id: str | None,
     repo_token_issued_at: int | None,
     vault_id: str | None,
-    github_mode: Literal["legacy", "app"] = "legacy",
+    github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
 ) -> SessionSnapshot:
     env_resource_id: str | None = None
@@ -409,7 +409,7 @@ def desired_snapshot(
     environment_id: str,
     env_sha256: str | None,
     repo_url: str | None,
-    github_mode: Literal["legacy", "app"] = "legacy",
+    github_mode: Literal["legacy", "app"] = "app",
     repo_urls: tuple[str, ...] = (),
     token_repo_urls: tuple[str, ...] = (),
     repo_branch: str | None,

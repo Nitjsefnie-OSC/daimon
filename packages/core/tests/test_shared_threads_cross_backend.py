@@ -33,7 +33,6 @@ from typing import Any
 import httpx
 import pytest
 from daimon.core import shared_threads
-from daimon.core._models import AgentGitHubMode
 from daimon.core.channel_backend import (
     BackendUnsupported,
     channel_ref,
@@ -41,7 +40,6 @@ from daimon.core.channel_backend import (
     set_channel_backend,
 )
 from daimon.core.config import McpSettings
-from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.shared_threads import shared_owner, shared_slot
@@ -206,8 +204,6 @@ async def _world(session: AsyncSession) -> _World:
     tenant = await make_tenant(session)
     alice = await make_account(session, tenant=tenant)
     bob = await make_account(session, tenant=tenant)
-    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_host")
-    session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
     await session.commit()
     return _World(
         tenant, alice.id, bob.id, ma_agent(id="ag_host", tenant_id=tenant.id), ma_environment()

@@ -110,7 +110,7 @@ from daimon.core.session_ports_compat import archive_session_record
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores import session_settle_state
-from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.github_access import list_live_grant_repositories
 from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.turn.outcomes import current_outcome
@@ -485,8 +485,12 @@ async def _describe_agent_impl(
     if auth.agent_id is None:
         raise ToolError("agent not found")
     async with runtime.session_factory() as session:
-        binding = await get_binding(session, tenant_id=auth.tenant_id, agent_id=auth.agent_id)
-    repo_url = binding.repo_url if binding is not None else None
+        grants = await list_live_grant_repositories(
+            session, tenant_id=auth.tenant_id, agent_id=auth.agent_id
+        )
+    repo_url = next(
+        (repo.repo_full_name for grant, repo in grants if grant.is_working_repo), None
+    )
     skill_names = [sk.skill_id for sk in ma_agent.skills]
     role_summary = (ma_agent.system or "")[:200]
     return AgentDescription(
@@ -625,16 +629,11 @@ async def _start_turn_impl(
             origin_seal_ids=seal,
         )
     else:
-        github_fallback_pat: str | None = (
-            runtime.settings.github.fallback_pat.get_secret_value()
-            if runtime.settings.github.fallback_pat is not None
-            else None
-        )
-        github_app_id: str | None = runtime.settings.github.app_id
+        github_fallback_pat: str | None = None
+        github_app_id: str | None = runtime.settings.github_app.app_id
         github_app_private_key: str | None = (
-            runtime.settings.github.app_private_key.get_secret_value()
-            if runtime.settings.github.app_private_key is not None
-            else None
+            runtime.settings.github_app.private_key.get_secret_value()
+            if runtime.settings.github_app.private_key is not None else None
         )
 
         if recheck is not None:

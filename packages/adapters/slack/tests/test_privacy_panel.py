@@ -330,11 +330,8 @@ def _make_preview(**overrides: Any) -> PurgePreview:
         "user_configs": PurgePreviewRow(count=0, example=None),
         "account": PurgePreviewRow(count=1, example=None),
         "user_skills": PurgePreviewRow(count=0, example=None),
-        "github_credentials": PurgePreviewRow(count=0, example=None),
         "github_user_links": PurgePreviewRow(count=0, example=None),
-        "github_oauth_states": PurgePreviewRow(count=0, example=None),
         "mcp_tokens": PurgePreviewRow(count=0, example=None),
-        "agent_github_binding": PurgePreviewRow(count=0, example=None),
         "slack_user_tokens": PurgePreviewRow(count=0, example=None),
         "slack_turn_contexts": PurgePreviewRow(count=0, example=None),
         "credential_requests": PurgePreviewRow(count=0, example=None),
@@ -346,17 +343,15 @@ def _make_preview(**overrides: Any) -> PurgePreview:
     return PurgePreview(**base)
 
 
-def test_summary_line_includes_mcp_tokens_agent_github_binding_slack_categories() -> None:
-    """summary_line reflects all 4 newly-added categories when non-zero."""
+def test_summary_line_includes_mcp_tokens_and_slack_categories() -> None:
+    """summary_line reflects active token categories when non-zero."""
     preview = _make_preview(
         mcp_tokens=PurgePreviewRow(count=2, example=None),
-        agent_github_binding=PurgePreviewRow(count=1, example=None),
         slack_user_tokens=PurgePreviewRow(count=1, example=None),
         slack_turn_contexts=PurgePreviewRow(count=4, example=None),
     )
     text = summary_line(preview)
     assert "Daimon access token" in text, "summary must mention mcp_tokens"
-    assert "link from an agent" in text, "summary must mention agent_github_binding"
     assert "saved Slack access token" in text, "summary must mention slack_user_tokens"
     assert "temporary Slack request record" in text, "summary must mention slack_turn_contexts"
 
@@ -365,14 +360,14 @@ def test_cascade_plain_rows_are_a_spaced_list_without_routine_id() -> None:
     preview = _make_preview(
         routines=PurgePreviewRow(count=2, example="routine-uuid"),
         user_configs=PurgePreviewRow(count=1, example=None),
-        github_credentials=PurgePreviewRow(count=1, example="octocat"),
+        mcp_tokens=PurgePreviewRow(count=1, example=None),
     )
     text = _cascade_blocks(preview)[0]["text"]["text"]
     assert text.startswith("⚡ *What will happen*\n\n• ")
     assert "• ⏰ Cancel *2* routines" in text
     assert "routine-uuid" not in text
     assert "• ⚙ Remove your saved settings" in text
-    assert "• 🔑 Delete *1* saved GitHub key, for example the one for `octocat`" in text
+    assert "Daimon access token" in text
 
 
 def test_cascade_blocks_render_mcp_tokens_row_when_nonzero() -> None:
@@ -382,17 +377,6 @@ def test_cascade_blocks_render_mcp_tokens_row_when_nonzero() -> None:
     joined = _extract_text(view)
     assert "3" in joined, "mcp_tokens count must appear in the cascade"
     assert "Daimon access token" in joined, "mcp_tokens row must mention MCP token(s)"
-
-
-def test_cascade_blocks_render_agent_github_binding_row_when_nonzero() -> None:
-    """agent_github_binding row appears in the cascade preview when count > 0."""
-    preview = _make_preview(agent_github_binding=PurgePreviewRow(count=2, example=None))
-    view = build_delete_modal(preview, account_id=uuid.uuid4(), user_name="alice", view_id="V2")
-    joined = _extract_text(view)
-    assert "2" in joined, "agent_github_binding count must appear in the cascade"
-    assert "links from agents to your GitHub keys" in joined, (
-        "agent_github_binding row must mention the per-agent GitHub token link"
-    )
 
 
 def test_cascade_blocks_render_slack_user_tokens_row_when_nonzero() -> None:
@@ -423,9 +407,6 @@ def test_cascade_blocks_zero_count_categories_omit_new_rows() -> None:
     view = build_delete_modal(preview, account_id=uuid.uuid4(), user_name="alice", view_id="V5")
     joined = _extract_text(view).lower()
     assert "mcp token(s)" not in joined, "zero-count mcp_tokens must NOT render a row"
-    assert "per-agent github token link" not in joined, (
-        "zero-count agent_github_binding must NOT render a row"
-    )
     assert "slack user token" not in joined, "zero-count slack_user_tokens must NOT render a row"
     assert "slack turn context" not in joined, (
         "zero-count slack_turn_contexts must NOT render a row"

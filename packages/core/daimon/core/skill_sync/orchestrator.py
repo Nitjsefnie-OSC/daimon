@@ -50,7 +50,6 @@ from anthropic.types.beta import (
 )
 from cryptography.fernet import MultiFernet
 from daimon.core.defaults.ma_index import (
-    MA_METADATA_KEY_TENANT,
     find_agent_by_daimon_tag,
     find_attach_mount_collision,
     find_conflicting_skill_mount,
@@ -58,12 +57,13 @@ from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
 )
 from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_TENANT,
     strip_tenant_prefix,
     tenant_scoped_display_title,
 )
 from daimon.core.errors import DaimonError, DefaultsError
-from daimon.core.github_credentials import get_pat
-from daimon.core.github_repo_auth import InstallationLookup, resolve_skill_sync_token
+from daimon.core.github_rate_limit import GitHubRateLimitError
+from daimon.core.github_repo_auth import mint_granted_skill_token
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
@@ -81,7 +81,6 @@ from daimon.core.skill_sync.bundler import (
 )
 from daimon.core.skill_sync.fetcher import (
     GitHubAuthError,
-    GitHubRateLimitError,
     GitHubTarballFetcher,
     GitHubUnreachable,
     TarballTooLarge,
@@ -89,11 +88,6 @@ from daimon.core.skill_sync.fetcher import (
 from daimon.core.skill_zip import canonical_zip_bytes
 from daimon.core.skills.attachments import delete_skill_unless_attached
 from daimon.core.specs import SkillRepo, merge_default_agent_toolset
-from daimon.core.stores.agent_repo_binding import get_tenant_repo_proof_kind
-from daimon.core.stores.agent_skill_repo_credentials import (
-    get_tenant_skill_repo_proof_kind,
-)
-from daimon.core.stores.domain import RepoProofKind
 from daimon.core.stores.user_skills import (
     delete_user_skill,
     list_user_skills_for_agent,
@@ -506,88 +500,20 @@ async def sync_agent_skills(
     agent_name: str,
     repos: list[SkillRepo],
     sessionmaker: async_sessionmaker[AsyncSession],
-    fernet: MultiFernet,
+    fernet: MultiFernet | None,
     http_client: httpx.AsyncClient,
     anthropic_client: AsyncAnthropic,
-    credential_override: str | None = None,
     target_ma_agent_id: str | None = None,
-    github_fallback_pat: str | None = None,
     app_id: str | None = None,
     app_private_key: SecretStr | None = None,
-    installation_lookup: InstallationLookup | None = None,
     max_tarball_bytes: int = 50 * 1024 * 1024,
     max_tarball_decompressed_bytes: int = DEFAULT_MAX_TARBALL_DECOMPRESSED_BYTES,
     max_tarball_members: int = MAX_TARBALL_MEMBERS,
 ) -> SyncReport:
-    """Sync all skill_repos for one agent. Named error boundary.
+    """Sync an agent's skill repos using its active GitHub App grants.
 
-    ``target_ma_agent_id`` lets a binding-driven resync preserve the MA
-    identity resolved from its binding. That exact resource is retrieved
-    and checked for tenant ownership and non-archived state before use;
-    name-only callers keep the canonical name resolver.
-
-    ``credential_override`` lets a caller (the webhook resync) pass a
-    pre-selected GitHub credential. Whatever the caller supplies is the
-    single authority for every repo in this call, and this function does
-    not re-resolve — that override, not any tier ordering, is what keeps
-    a pre-selected credential (e.g. a minted App installation token) from
-    being shadowed. When provided, the internal resolution below (and the
-    ``app_id`` / ``app_private_key`` / ``installation_lookup`` parameters)
-    is skipped entirely.
-
-    When ``credential_override`` is None (panel / CLI / MCP paths), this
-    function resolves a credential per repo through the shared
-    skill-sync selector — ``daimon.core.github_repo_auth.
-    resolve_skill_sync_token`` and its pure decision table
-    ``select_skill_sync_auth`` — whose ordering is a per-agent token
-    first, then an App installation covering the repo (gated on this
-    tenant having recorded proof of access to it), then the operator
-    fallback, then an unauthenticated fetch. Resolution happens per repo
-    (not once for the whole call) because App installation coverage AND
-    the tenant's recorded proof are both repo-specific: before each
-    ``resolve_skill_sync_token`` call this function reads the proof this
-    tenant recorded for ``tenant_id``/``repo.url``, preferring its
-    skill-repo credential
-    (``agent_skill_repo_credentials.get_tenant_skill_repo_proof_kind``)
-    and falling back to the legacy binding
-    (``agent_repo_binding.get_tenant_repo_proof_kind``) so tenants
-    enrolled before the credential table keep their proof. ANY of this
-    tenant's own rows recording proof for that exact repo is
-    sufficient; a repo this tenant has never enrolled or bound (with
-    proof) is never eligible for the App tier, even when the
-    deployment's App happens to cover it because some unrelated tenant
-    installed it for their own use.
-
-    ``app_id``, ``app_private_key``, and ``installation_lookup`` feed the
-    App tier of that per-repo resolution. ``installation_lookup`` is
-    injected so the caller decides between a live GitHub installation
-    lookup (e.g. the interactive agent-creation path) and a cheap cached
-    read; when it is absent (or the tenant has no recorded proof for the
-    repo) the App tier is skipped entirely, so all pre-existing callers
-    stay source-compatible without threading it.
-
-    ``github_fallback_pat`` is the operator-wide service default, threaded
-    by callers that already have ``settings.github.fallback_pat`` in scope
-    (panel / CLI / MCP). It is only consulted by the per-repo selector
-    described above — when ``credential_override`` is supplied, the
-    caller's pre-selected credential remains the single authority and the
-    fallback is not consulted. Defaults to None so all pre-existing
-    callers stay source-compatible without threading it.
-
-    ``max_tarball_bytes`` bounds the per-repo tarball download.
-    Defaults to the safe 50 MiB constant so all pre-existing callers
-    stay guarded without threading settings explicitly; the webhook resync edge
-    passes ``github_settings.max_tarball_bytes`` so operator overrides take effect.
-
-    ``max_tarball_decompressed_bytes`` and ``max_tarball_members`` bound a
-    tarball's expansion (decompressed byte total and member count,
-    respectively) BEFORE extraction — closing the gap where a small
-    compressed tarball decompresses to tens of gigabytes. Both default to
-    the same safe constants the sibling ``daimon.core.skills.fetch``
-    pipeline already guards with, so all pre-existing callers stay
-    guarded without threading settings explicitly; callers that already
-    thread ``max_tarball_bytes`` from ``github_settings`` thread
-    ``max_tarball_decompressed_bytes`` the same way.
+    A repo without a grant is fetched anonymously, allowing public skills.
+    Private repos need a grant on this agent before their tarball can be read.
     """
     report = SyncReport()
     report_lock = asyncio.Lock()
@@ -612,27 +538,6 @@ async def sync_agent_skills(
         # Agent not found on MA — use agent_id=None (principal-default) only as
         # a safe fallback for public repos. Private repos will 404 as skipped_repos.
         resolved_agent_id = None
-    # When the caller pre-selected a credential, it is the single authority —
-    # do NOT re-resolve a per-agent PAT (that double-resolution is what silently
-    # shadowed the App installation token).
-    per_agent_credential: str | None = None
-    if credential_override is None:
-        # allow_service_default=False: the operator-fallback tier is no longer
-        # decided here. It is now the shared skill-sync selector's decision,
-        # made per repo inside the fetch loop below (resolve_skill_sync_token).
-        # Leaving the service default enabled at this call would resolve a
-        # fallback credential before the App tier is ever consulted — the same
-        # shadowing bug the credential_override contract above exists to
-        # prevent, just reached a different way.
-        per_agent_credential = await get_pat(
-            principal_id=principal_id,
-            agent_id=resolved_agent_id,
-            sessionmaker=sessionmaker,
-            fernet=fernet,
-            allow_service_default=False,
-            fallback_pat=None,
-        )
-
     # user_skills is a per-AGENT ledger, not a per-user one. Both the panel
     # sync (Discord-user account principal) and the webhook resync (synthetic webhook
     # principal) target the SAME (tenant, agent). Keying the ledger on the agent's
@@ -651,41 +556,21 @@ async def sync_agent_skills(
     with tempfile.TemporaryDirectory(prefix="daimon-skill-sync-") as tmp_root:
         tmp_root_path = Path(tmp_root)
         for repo in repos:
-            if credential_override is not None:
-                credential = credential_override
-            else:
-                # A per-agent credential already resolved wins regardless of
-                # proof (select_skill_sync_auth's "pat" tier), so the proof
-                # lookup below is only needed when it did not — this both
-                # saves a DB round-trip and keeps the pat-short-circuit zero-
-                # extra-I/O on the resolution path, not just the App tier.
-                proof_kind: RepoProofKind | None = None
-                if per_agent_credential is None:
-                    # The skill-repo credential is where enrolling a skill
-                    # repo records its proof today; the binding is the
-                    # legacy home, still authoritative for tenants that
-                    # enrolled before the credential table existed.
-                    async with sessionmaker() as session:
-                        proof_kind = await get_tenant_skill_repo_proof_kind(
-                            session, tenant_id=tenant_id, repo_url=repo.url
-                        ) or await get_tenant_repo_proof_kind(
-                            session, tenant_id=tenant_id, repo_url=repo.url
-                        )
-                try:
-                    credential = await resolve_skill_sync_token(
+            try:
+                async with sessionmaker() as session:
+                    credential = await mint_granted_skill_token(
+                        session,
                         http_client,
+                        tenant_id=tenant_id,
+                        agent_id=resolved_agent_id,
                         repo_url=repo.url,
-                        per_agent_pat=per_agent_credential,
-                        proof_kind=proof_kind,
-                        fallback_pat=github_fallback_pat,
                         app_id=app_id,
                         app_private_key=app_private_key,
-                        installation_lookup=installation_lookup,
                         now=int(time.time()),
                     )
-                except DaimonError as err:
-                    report.skipped_repos.append((repo.url, type(err).__name__))
-                    continue
+            except DaimonError as err:
+                report.skipped_repos.append((repo.url, type(err).__name__))
+                continue
 
             try:
                 tarball = await fetcher.fetch_tarball(

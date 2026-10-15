@@ -204,14 +204,11 @@ tokens. Run it alongside the MCP service.
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
 A server admin, or a channel admin of the channels an agent is limited to,
 gets a private link bound to that agent; the selected repos are for that agent
-only and activate for it when confirmed. If the agent has a saved GitHub key,
-the key is retired once its working repo and private skill repos are among
-its repos; until then the repos wait in the agent's GitHub panel. An
+only and activate for it when confirmed. The migration retires any saved
+GitHub key. An
 operator can issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
 --requester <platform-user-id> --agent <agent-uuid> --agent-name <agent-name>`.
-That link stages an update. After the recipient confirms repos on the web, run
-`daimon github finish-update --tenant <workspace-uuid> --agent <agent-uuid>`
-as the operator to switch the agent and restart its open chats.
+The selected grants become live when the recipient confirms them on the web.
 Members can request setup; their request is recorded for an admin. For an
 operator fallback, print a seven-day, single-use invitation with
 `daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
@@ -231,15 +228,27 @@ GitHub link, and waiting requests. An admin can also open GitHub from
 keeps Save changes visible until confirmation. Admins can review requests and
 disconnect the server connection.
 
-Operator-issued links without an agent target only connect repos to the
-workspace. In that fallback, agents remain in legacy GitHub mode until an
-admin stages grants with
-`daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id>` (add `--working` to make it the working repo)
-and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
-Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.
-While app mode is active, `grants stage` updates access immediately. Existing
+Operator-issued links without an agent target connect repos to the workspace.
+An admin grants one to an agent with
+`daimon github grants add --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`.
+Use `grants list` and `remove` with the same tenant and agent options. Existing
 sessions rotate tokens in place when the repository set is unchanged; a changed
 repository set closes the sessions so the next turn mounts the new checkouts.
+
+Before upgrading, run `daimon github retirement-preview`. It lists staged grants
+the migration will delete, and every agent losing a saved key or binding with
+its working repo and whether a live App grant covers it. An uncovered agent
+loses GitHub access until an App grant is connected. The preview also reports
+App token evidence for live sessions and stops if an unapproved agent lacks
+working or private skill repo coverage. Set
+`DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS` to a comma-separated list of agent UUIDs
+whose loss is explicitly accepted by the operator. Set the same value for the
+preview and the Alembic migration. With no value, the migration stops before
+deleting rows if any agent would lose access. After upgrading, run
+`daimon github cleanup-legacy-vault` to preview retired
+Managed Agents vault credentials. Run it with `--apply` to delete them. Repeated
+runs skip credentials already deleted. This command leaves GitHub Copilot MCP
+credentials configured for `https://api.githubcopilot.com/mcp` alone.
 
 ## Microsoft Teams (optional)
 

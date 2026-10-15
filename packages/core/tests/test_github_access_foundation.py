@@ -24,7 +24,7 @@ from daimon.core._models import (
     Tenant,
     TenantGitHubRepo,
 )
-from daimon.core.config import GithubAppSettings, GithubSettings, load_settings
+from daimon.core.config import GithubAppSettings, load_settings
 from daimon.core.github_app_auth import group_repository_access, mint_installation_token
 from daimon.core.github_app_session import add_app_credentials, prepare_app_access
 from daimon.core.github_credentials import build_multifernet
@@ -47,26 +47,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
-def test_new_app_settings_are_separate_from_legacy() -> None:
+def test_app_settings_decode_key_and_validate_slug() -> None:
     pem = "-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----"
     new = GithubAppSettings(
         private_key=SecretStr(base64.b64encode(pem.encode()).decode()), app_slug="new-app"
     )
-    legacy = GithubSettings(app_id="old-app")
     assert new.private_key is not None and new.private_key.get_secret_value() == pem
-    assert legacy.app_id == "old-app" and legacy.app_private_key is None
     with pytest.raises(ValueError):
         GithubAppSettings(app_slug="bad/path")
 
 
-def test_new_app_env_does_not_change_legacy_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_app_env_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
-    monkeypatch.setenv("DAIMON_GITHUB__APP_ID", "legacy")
     monkeypatch.setenv("DAIMON_GITHUB_APP__APP_ID", "new")
     monkeypatch.setenv("DAIMON_GITHUB_APP__CLIENT_ID", "client")
     settings = load_settings(_env_file=None)
-    assert settings.github.app_id == "legacy"
     assert settings.github_app.app_id == "new"
     assert settings.github_app.client_id == "client"
 
@@ -95,7 +91,7 @@ def test_group_access_uses_write_for_duplicate_repo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_staged_grants_activate_atomically_with_app_write(
+async def test_grants_are_live_immediately(
     db_session: AsyncSession,
 ) -> None:
     tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
@@ -131,20 +127,11 @@ async def test_staged_grants_activate_atomically_with_app_write(
         granted_by_account_id=None,
         is_working_repo=True,
     )
-    assert staged.staged
-    assert (
-        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
-        == "legacy"
-    )
-    await github_access.activate_agent(db_session, tenant_id=tenant_id, agent_id=agent_id)
-    assert (
-        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
-        == "app"
-    )
+    assert staged.is_working_repo
     grants = await github_access.list_agent_grants(
         db_session, tenant_id=tenant_id, agent_id=agent_id
     )
-    assert len(grants) == 1 and not grants[0].staged and grants[0].version == 2
+    assert len(grants) == 1 and grants[0].is_working_repo and grants[0].version == 1
     updated = await github_access.stage_grant(
         db_session,
         tenant_id=tenant_id,
@@ -155,12 +142,7 @@ async def test_staged_grants_activate_atomically_with_app_write(
         granted_by_account_id=None,
         is_working_repo=True,
     )
-    assert not updated.staged and updated.version == 2 and updated.baseline_access == "write"
-    await github_access.deactivate_agent(db_session, tenant_id=tenant_id, agent_id=agent_id)
-    assert (
-        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
-        == "legacy"
-    )
+    assert updated.version == 2 and updated.baseline_access == "read"
 
 
 @pytest.mark.asyncio
@@ -200,11 +182,6 @@ async def test_copied_agent_identity_starts_without_source_grants(
         baseline_access="read",
         ceiling_access="read",
         granted_by_account_id=None,
-    )
-    await github_access.activate_agent(db_session, tenant_id=tenant_id, agent_id=source_id)
-    assert (
-        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=copied_id)
-        == "legacy"
     )
     assert (
         await github_access.list_agent_grants(db_session, tenant_id=tenant_id, agent_id=copied_id)
@@ -411,7 +388,6 @@ async def test_sweep_rechecks_restored_token_but_revokes_removed_grant(
         ceiling_access="write",
         granted_by_account_id=None,
     )
-    await github_access.activate_agent(db_session, tenant_id=tenant_id, agent_id=agent_id)
     [grant] = await github_access.list_agent_grants(
         db_session, tenant_id=tenant_id, agent_id=agent_id
     )
@@ -664,7 +640,6 @@ async def test_mint_revocation_race_revokes_late_github_token(
             ceiling_access="read",
             granted_by_account_id=None,
         )
-        await github_access.activate_agent(session, tenant_id=tenant_id, agent_id=agent_id)
 
     async def mint_after_revocation(*args: object, **kwargs: object) -> str:
         async with db_session_factory.begin() as session:
@@ -679,7 +654,10 @@ async def test_mint_revocation_race_revokes_late_github_token(
             await github_issued_tokens.mark_revoked(session, token_id=pending.token_id)
         return "late-token"
 
-    monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *a, **k: "jwt")
+    monkeypatch.setattr(
+        "daimon.core.github_app_session.build_app_jwt",
+        lambda *a, **k: "jwt",  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
     monkeypatch.setattr(
         "daimon.core.github_app_session.mint_installation_token", mint_after_revocation
     )
@@ -803,16 +781,11 @@ async def test_inventory_sweeper_keeps_write_token_for_read_authorizer_until_ver
             repo_id=101,
             baseline_access="write",
             ceiling_access="write",
-            staged=False,
             is_working_repo=True,
             version=1,
         )
     )
     await db_session.flush()
-    assert (
-        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
-        == "legacy"
-    )
     with pytest.raises(ValueError):
         await github_issued_tokens.create_pending(
             db_session,

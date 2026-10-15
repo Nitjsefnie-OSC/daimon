@@ -46,27 +46,14 @@ def build_cascade_preview_container(
         ex = preview.user_skills.example or "—"
         n = amount(preview.user_skills.count, "skill")
         will_happen_rows.append(f"-# 🧰 Forget {n} you synced, for example `{ex}`")
-    if preview.github_credentials.count > 0:
-        ex = preview.github_credentials.example or "—"
-        n = preview.github_credentials.count
-        will_happen_rows.append(
-            f"-# 🔑 Delete {amount(n, 'saved GitHub key')}, for example the one for `{ex}`"
-        )
     if preview.github_user_links.count > 0:
         will_happen_rows.append(
             f"-# 🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}"
-        )
-    if preview.github_oauth_states.count > 0:
-        will_happen_rows.append(
-            f"-# 🤝 Delete {amount(preview.github_oauth_states.count, 'GitHub sign-in record')}"
         )
     if preview.mcp_tokens.count > 0:
         will_happen_rows.append(
             f"-# 🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}"
         )
-    if preview.agent_github_binding.count > 0:
-        n = preview.agent_github_binding.count
-        will_happen_rows.append(f"-# 🤖 Remove {amount(n, 'link')} from agents to your GitHub keys")
     if preview.slack_user_tokens.count > 0:
         will_happen_rows.append(
             f"-# 🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"

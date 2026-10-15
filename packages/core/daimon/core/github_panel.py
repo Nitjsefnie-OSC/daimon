@@ -22,7 +22,7 @@ from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import SERVER_WIDE_GRANT_MESSAGE
 from daimon.core.stores.github_connect import (
-    CLIENT_AGENT_MESSAGE,
+    PINNED_AGENT_MESSAGE,
     admin_account_for_platform_user,
     expire_pending_invitation,
     latest_pending_invitation,
@@ -189,7 +189,7 @@ _PUBLIC_ERRORS = frozenset(
         "Select at least one repo.",
         "Only a server or workspace admin can manage connected repos.",
         "Only a workspace admin can connect GitHub.",
-        CLIENT_AGENT_MESSAGE,
+        PINNED_AGENT_MESSAGE,
         SERVER_WIDE_GRANT_MESSAGE,
     }
 )
@@ -303,7 +303,6 @@ async def connect_link(
             tenant_id=tenant_id,
             agent_id=agent_id,
             agent_name=agent_name,
-            switch_saved_key=True,
         )
     if start_over:
         await expire_pending_invitation(

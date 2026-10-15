@@ -28,16 +28,10 @@ def build_post_delete_container(
         rows.append(f"-# ✓ {result.db.user_configs} user config row(s) removed")
     if result.db.user_skills > 0:
         rows.append(f"-# ✓ {result.db.user_skills} synced skill ledger row(s) removed")
-    if result.db.github_credentials > 0:
-        rows.append(f"-# ✓ {result.db.github_credentials} stored GitHub token(s) deleted")
     if result.db.github_user_links > 0:
         rows.append(f"-# ✓ {result.db.github_user_links} GitHub user link(s) removed")
-    if result.db.github_oauth_states > 0:
-        rows.append(f"-# ✓ {result.db.github_oauth_states} OAuth handshake record(s) removed")
     if result.db.mcp_tokens > 0:
         rows.append(f"-# ✓ {result.db.mcp_tokens} per-agent MCP token(s) revoked")
-    if result.db.agent_github_binding > 0:
-        rows.append(f"-# ✓ {result.db.agent_github_binding} per-agent GitHub token link(s) removed")
     if result.db.accounts > 0:
         rows.append("-# ✓ Account row removed")
     if result.sessions.deleted > 0:

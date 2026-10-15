@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -20,9 +19,7 @@ from daimon.adapters.discord.credential_modals import (
     EnvCredentialModal,
     EnvFileModal,
     McpCredentialModal,
-    RepoBindModal,
 )
-from daimon.adapters.discord.credential_repo_bind import _SHARED_AGENT_MESSAGE
 from daimon.core.credential_requests import (
     ENV_FILE_TARGET,
     build_button_label,
@@ -39,7 +36,6 @@ from daimon.core.posted_controls import (
     expired_message,
 )
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.credential_requests import (
     create_credential_request,
     peek_credential_request,
@@ -490,137 +486,6 @@ async def test_callback_dispatches_mcp_modal_for_mcp_kind() -> None:
 
 
 # --- callback (repo kind) ----------------------------------------------------
-
-
-async def test_callback_repo_kind_admin_opens_repo_bind_modal_with_zero_ma_requests() -> None:
-    row = _row(token="repoadmin1234567890123", kind="repo", target="github.com/o/r")
-    item = CredentialRequestButton(token=row.token, label="Bind repo: o/r", request_row=row)
-    calls: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        return list_response([])
-
-    bot = _fake_bot(MagicMock(), anthropic=build_fake_anthropic(handler))
-    interaction = _repo_admin_interaction(client=bot)
-
-    await item.callback(interaction)
-
-    interaction.response.send_modal.assert_awaited_once()
-    sent_modal = interaction.response.send_modal.call_args.args[0]
-    assert isinstance(sent_modal, RepoBindModal), "repo-kind rows must open RepoBindModal"
-    assert len(calls) == 0, "the admin pre-filter must precede every MA request, costing zero I/O"
-
-
-async def test_callback_repo_kind_member_against_defaults_managed_target_refuses_without_opening_modal(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    ma_agent_id = "agent_button_managed"
-    row = await _seed_repo_row(db_session_factory, ma_agent_id=ma_agent_id)
-    agent = _make_agent(
-        ma_agent_id=ma_agent_id, tenant_id=row.tenant_id, name="daimon", managed=True
-    )
-    bot = _fake_bot(
-        db_session_factory, anthropic=build_fake_anthropic(_list_agents_handler([agent]))
-    )
-    item = CredentialRequestButton(token=row.token, label="Bind repo: o/r", request_row=row)
-    interaction = _repo_member_interaction(client=bot)
-
-    await item.callback(interaction)
-
-    (
-        interaction.response.send_modal.assert_not_awaited(),
-        "a refused member must never see the token form",
-    )
-    assert interaction.response.send_message.call_args.args[0] == _SHARED_AGENT_MESSAGE, (
-        "the pre-filter's refusal must name the shared-agent message specifically"
-    )
-
-
-async def test_callback_repo_kind_member_unbound_target_refuses_modal(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    ma_agent_id = "agent_button_private"
-    row = await _seed_repo_row(db_session_factory, ma_agent_id=ma_agent_id)
-    agent = _make_agent(
-        ma_agent_id=ma_agent_id, tenant_id=row.tenant_id, name="mine", managed=False
-    )
-    bot = _fake_bot(
-        db_session_factory, anthropic=build_fake_anthropic(_list_agents_handler([agent]))
-    )
-    item = CredentialRequestButton(token=row.token, label="Bind repo: o/r", request_row=row)
-    interaction = _repo_member_interaction(client=bot)
-
-    await item.callback(interaction)
-
-    interaction.response.send_modal.assert_not_awaited()
-    interaction.response.send_message.assert_awaited_once()
-
-
-async def test_callback_repo_kind_pre_filter_timeout_opens_modal_and_submit_time_gate_still_refuses(
-    monkeypatch: Any,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """The pair this test proves: a timed-out pre-filter trades UX (the
-    refused member briefly sees the token field) for availability (the
-    button still opens), and never trades away authorization -- the
-    submit-time gate, driven by the real (unmocked) gate function, still
-    refuses and writes nothing."""
-    ma_agent_id = "agent_button_timeout"
-    row = await _seed_repo_row(db_session_factory, ma_agent_id=ma_agent_id)
-    agent = _make_agent(
-        ma_agent_id=ma_agent_id, tenant_id=row.tenant_id, name="daimon", managed=True
-    )
-    runtime_anthropic = build_fake_anthropic(_list_agents_handler([agent]))
-    bot = _fake_bot(db_session_factory, anthropic=runtime_anthropic)
-
-    monkeypatch.setattr(credential_button_mod, "_PRE_FILTER_TIMEOUT_SECONDS", 0.01)
-
-    async def _slow_gate(*_args: Any, **_kwargs: Any) -> bool:
-        await asyncio.sleep(1)
-        return False
-
-    monkeypatch.setattr(
-        credential_button_mod, "refuse_if_shared_and_not_admin_for_request", _slow_gate
-    )
-
-    item = CredentialRequestButton(token=row.token, label="Bind repo: o/r", request_row=row)
-    interaction = _repo_member_interaction(client=bot)
-
-    cap = structlog.testing.LogCapture()
-    structlog.configure(processors=[cap])
-    try:
-        await item.callback(interaction)
-    finally:
-        structlog.reset_defaults()
-
-    interaction.response.send_modal.assert_awaited_once()
-    sent_modal = interaction.response.send_modal.call_args.args[0]
-    assert isinstance(sent_modal, RepoBindModal), "a timed-out pre-filter must still open the modal"
-    assert any(
-        entry.get("event") == "credential_button.repo_pre_filter_timed_out" for entry in cap.entries
-    ), "the timeout must be logged so an operator can see the pre-filter eroding"
-
-    submit_interaction = MagicMock()
-    submit_interaction.response.defer = AsyncMock()
-    submit_interaction.response.is_done.return_value = True
-    submit_interaction.response.send_message = AsyncMock()
-    submit_interaction.followup.send = AsyncMock()
-    submit_interaction.guild_id = _GUILD_ID
-    submit_interaction.user = MagicMock(spec=discord.Member)
-    submit_interaction.user.id = int(_REQUESTER_ID)
-    submit_interaction.user.guild_permissions.administrator = False
-    submit_interaction.user.guild_permissions.manage_guild = False
-    submit_interaction.guild.owner_id = 999
-
-    await sent_modal.on_submit(submit_interaction)
-
-    async with db_session_factory() as session:
-        binding = await get_binding(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
-        consumed = await peek_credential_request(session, token=row.token)
-    assert binding is None, "the submit-time gate must still refuse -- the write must never happen"
-    assert consumed is not None and consumed.used_at is None, "a refused submit must burn no token"
-    assert submit_interaction.followup.send.call_args.args[0] == _SHARED_AGENT_MESSAGE
 
 
 # --- dispatch matching (no DB) -----------------------------------------------

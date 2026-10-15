@@ -179,7 +179,6 @@ from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
 )
-from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.domain import CredentialRequestRow
 from mux.errors import ScopeViolation
 
@@ -1486,7 +1485,7 @@ class RepoBindModal(discord.ui.Modal):
                         row=consumed_row,
                         ma_secret_ref=ma_secret_ref,
                         proof=proof,
-                        write=set_binding,
+
                     )
             except DaimonError:
                 # Only fixed copy: domain errors can carry upstream details.

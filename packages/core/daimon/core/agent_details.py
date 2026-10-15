@@ -29,7 +29,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.errors import UserFacingError
-from daimon.core.github_repo_auth import RepoAccess, derive_repo_access
+from daimon.core.github_repo_auth import RepoAccess
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.rule_views import load_rule_viewer
@@ -43,8 +43,9 @@ from daimon.core.scope import (
     answering_places,
 )
 from daimon.core.setup_conversations import get_setup_agent
-from daimon.core.stores import agent_files, agent_repo_binding, scoped_config_read
-from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow, Platform
+from daimon.core.stores import agent_files, scoped_config_read
+from daimon.core.stores.domain import AgentFileRow, Platform
+from daimon.core.stores.github_access import list_live_grant_repositories
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,7 +60,6 @@ class GitHubDeploymentFacts(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    has_fallback_pat: bool
     app_configured: bool
 
 
@@ -147,7 +147,7 @@ def build_agent_details(
     channels: Sequence[ChannelConfigRow],
     default: DeploymentDefault,
     resolved_here: ResolvedConfig | None,
-    binding: AgentRepoBindingRow | None,
+    repo: RepoBinding | None,
     files: Sequence[AgentFileRow],
     skill_titles: Mapping[str, str],
     skills_truncated: bool,
@@ -167,19 +167,6 @@ def build_agent_details(
     """
     places = answering_places(agent.name, tenant=tenant, channels=channels, default=default)
     created_by_account_id = account_id_from_metadata(agent.metadata.get(MA_METADATA_KEY_ACCOUNT))
-    repo = (
-        RepoBinding(
-            repo_url=binding.repo_url,
-            default_branch=binding.default_branch,
-            access=derive_repo_access(
-                binding,
-                has_fallback_pat=github.has_fallback_pat,
-                app_configured=github.app_configured,
-            ),
-        )
-        if binding is not None
-        else None
-    )
     return AgentDetails(
         ma_agent_id=agent.id,
         name=agent.name,
@@ -291,8 +278,17 @@ async def load_agent_details(
             default=deployment_default,
         )
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
-    binding = await agent_repo_binding.get_binding(
+    grants = await list_live_grant_repositories(
         session, tenant_id=tenant_id, agent_id=agent_uuid
+    )
+    working = next((repo for grant, repo in grants if grant.is_working_repo), None)
+    repo = (
+        RepoBinding(
+            repo_url=working.repo_full_name,
+            default_branch="default",
+            access=RepoAccess(kind="connected", credential="github_app"),
+        )
+        if working is not None else None
     )
     files = await agent_files.list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     skill_titles, skills_truncated = await resolve_custom_skill_titles(
@@ -305,7 +301,7 @@ async def load_agent_details(
         channels=channel_rows,
         default=deployment_default,
         resolved_here=resolved_here,
-        binding=binding,
+        repo=repo,
         files=files,
         skill_titles=skill_titles,
         skills_truncated=skills_truncated,

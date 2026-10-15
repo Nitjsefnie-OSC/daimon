@@ -91,10 +91,7 @@ class DeleteConfirmModal(discord.ui.Modal, title="Confirm delete"):
             routines=result.db.routines,
             links=result.db.principal_links,
             user_skills=result.db.user_skills,
-            github_credentials=result.db.github_credentials,
-            oauth_states=result.db.github_oauth_states,
             mcp_tokens=result.db.mcp_tokens,
-            agent_github_binding=result.db.agent_github_binding,
             sessions_deleted=result.sessions.deleted,
             sessions_failed=result.sessions.failed,
         )

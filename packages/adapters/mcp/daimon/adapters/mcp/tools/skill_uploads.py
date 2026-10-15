@@ -24,6 +24,7 @@ attach.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Literal
@@ -49,6 +50,9 @@ from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.adapters.mcp.tools.agents import (
     _system_agent_rejection,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.github_connect import (
+    _github_connect_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
@@ -63,6 +67,7 @@ from daimon.adapters.mcp.tools.slack._leak_policy import get_destination, is_dm_
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.add import (
@@ -300,6 +305,9 @@ async def _load_bundle(
     branch: str,
     path: str,
     origin_context_id: str | None,
+    agent_id: uuid.UUID | None,
+    agent_name: str,
+    expected_ma_agent_id: str | None,
 ) -> tuple[SkillBundle, str]:
     """The checked skill and a short origin for the ledger."""
     if skill_md is not None:
@@ -312,9 +320,7 @@ async def _load_bundle(
         return bundle, f"attachment {filename}"
     if repo_url is None:
         raise ToolError("Pass exactly one of skill_md, attachment_url or repo_url.")
-    # The workspace's stored GitHub access fetches only for an admin, so a
-    # member cannot lift files out of a private repo the workspace enrolled.
-    token = await _resolve_sync_token(runtime, auth, repo_url, http) if auth.is_admin else None
+    token = await _resolve_sync_token(runtime, auth, repo_url, http, agent_id=agent_id)
     try:
         bundle = await fetch_repo_skill(
             http,
@@ -326,8 +332,26 @@ async def _load_bundle(
             max_tarball_decompressed_bytes=runtime.settings.github.max_tarball_decompressed_bytes,
         )
     except GitHubFetchError as exc:
-        hint = " A private repo needs an admin, or paste the SKILL.md." if token is None else ""
-        raise ToolError(f"{exc}{hint}") from exc
+        if exc.status_code == 404 and token is None:
+            if agent_id is not None and origin_context_id is not None:
+                await _github_connect_impl(
+                    runtime,
+                    auth,
+                    origin_context_id=origin_context_id,
+                    agent_name=agent_name,
+                    expected_ma_agent_id=expected_ma_agent_id,
+                    repo_name=repo_url.removeprefix("https://github.com/").removesuffix(".git"),
+                    required_ability="read",
+                )
+                raise ToolError(
+                    f"No active GitHub App grant for {repo_url!r}. "
+                    "The Connect GitHub button was posted."
+                ) from exc
+            raise ToolError(
+                f"No active GitHub App grant for {repo_url!r}. "
+                "Ask an admin to use Connect GitHub for this agent and repo."
+            ) from exc
+        raise ToolError(str(exc)) from exc
     return bundle, repo_origin(repo_url, path=path, branch=branch)
 
 
@@ -479,6 +503,7 @@ async def _add_skill_impl(
 
         await recheck(agent)
         target_id = agent.id
+        github_agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
 
         async def add(bundle: SkillBundle, source: str) -> SkillAddResult:
             return await add_agent_skill(
@@ -515,6 +540,7 @@ async def _add_skill_impl(
 
         await neutral_recheck(view.revision.agent)
         target_id = view.id
+        github_agent_id = None
         catalog_id = view.revision.catalog_id
 
         async def add(bundle: SkillBundle, source: str) -> SkillAddResult:
@@ -547,6 +573,9 @@ async def _add_skill_impl(
                 branch=branch,
                 path=path,
                 origin_context_id=origin_context_id,
+                agent_id=github_agent_id,
+                agent_name=agent_name,
+                expected_ma_agent_id=target_id if hosted is None else None,
             )
         bound = confirmation_hash(bundle.preview, agent_id=target_id)
         preview = bundle.preview.model_copy(update={"content_hash": bound})

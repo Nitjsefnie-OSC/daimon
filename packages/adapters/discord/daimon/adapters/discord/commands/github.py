@@ -20,10 +20,8 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
-    CLIENT_AGENT_MESSAGE,
-    ClientAgentConnectionError,
+    PinnedAgentConnectionError,
     mint_invitation,
-    pending_update_for_agent,
     require_app_eligible_agent,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -140,19 +138,11 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 target_name, target_ma_id = matches[0].name, str(matches[0].id)
             agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target_ma_id)
             async with runtime.sessionmaker() as session:
-                pending = await pending_update_for_agent(
-                    session, tenant_id=tenant_id, agent_id=agent_id
-                )
-            if pending is not None:
-                await interaction.followup.send(CLIENT_AGENT_MESSAGE, ephemeral=True)
-                return
-            async with runtime.sessionmaker() as session:
                 await require_app_eligible_agent(
                     session,
                     tenant_id=tenant_id,
                     agent_id=agent_id,
                     agent_name=target_name,
-                    switch_saved_key=True,
                 )
             async with runtime.sessionmaker.begin() as session:
                 principal = await get_or_create_platform_principal(
@@ -208,7 +198,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except ClientAgentConnectionError as exc:
+        except PinnedAgentConnectionError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
         except (anthropic.APIError, discord.HTTPException, ValueError):
             await interaction.followup.send(

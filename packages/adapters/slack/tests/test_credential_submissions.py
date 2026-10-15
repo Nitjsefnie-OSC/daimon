@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
@@ -32,19 +31,16 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from daimon.adapters.slack import credential_submissions as credential_submissions_mod
-from daimon.adapters.slack.agent_policy import SHARED_AGENT_SKILLS_MESSAGE
 from daimon.adapters.slack.credential_requests import (
     run_env_credential_submission,
     run_env_file_credential_submission,
     run_mcp_credential_submission,
-    run_repo_bind_credential_submission,
     run_skill_repo_credential_submission,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core import credential_submit
 from daimon.core.credential_requests import (
     ENV_FILE_TARGET,
-    build_skill_repo_target,
     mint_request_token,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -52,23 +48,17 @@ from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.env_file import MAX_ENV_FILE_BYTES
 from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import build_multifernet, get_pat
-from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.github_credentials import build_multifernet
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.posted_controls import RECEIVED_FOOTER
-from daimon.core.scope import TenantScopeRef
-from daimon.core.stores import scoped_config_write
 from daimon.core.stores.agent_files import get_agent_file, put_agent_file
-from daimon.core.stores.agent_repo_binding import get_binding
-from daimon.core.stores.agent_skill_repo_credentials import get_skill_repo_credential
 from daimon.core.stores.credential_requests import (
     create_credential_request,
     peek_credential_request,
 )
-from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.testing import list_response, ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import skill_response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -541,200 +531,9 @@ async def test_mcp_submission_with_unconfigured_mcp_refuses_before_the_consume(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_repo_submission_refuses_non_admin_before_the_consume(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    tenant_id, fernet_key = await _seed_team(db_session)
-    token = await _seed_request(
-        db_session, tenant_id=tenant_id, kind="repo", target="https://github.com/o/r"
-    )
-    await db_session.commit()
-    runtime = _build_runtime(fernet_key, db_session_factory)
-
-    await run_repo_bind_credential_submission(
-        runtime,
-        team_id=_TEAM_ID,
-        user_id=_USER_ID,
-        channel_id=_CHANNEL_ID,
-        message_ts=_MESSAGE_TS,
-        token=token,
-        value="",
-        dispatch_continuations=_noop_dispatch,
-    )
-
-    async with db_session_factory() as s:
-        row = await peek_credential_request(s, token=token)
-    assert row is not None and row.used_at is None, (
-        "the admin gate is the authorization boundary and must precede the consume"
-    )
-    assert ("POST", _EPHEMERAL_URL) in fake_slack_web_client.mock.requests
-    assert ("POST", _CHAT_UPDATE_URL) not in fake_slack_web_client.mock.requests
-
-
-@pytest.mark.asyncio
-async def test_repo_submission_by_admin_binds_a_public_repo(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """A workspace admin (per users.info) passes the gate and binds the repo."""
-    monkeypatch.setattr(credential_submissions_mod, "is_public_repo", AsyncMock(return_value=True))
-    _override_users_info_admin(fake_slack_web_client.mock)
-    tenant_id, fernet_key = await _seed_team(db_session)
-    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
-
-    def ma_handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/v1/agents":
-            return list_response([live_agent.model_dump(mode="json")])
-        raise AssertionError(f"Unexpected MA request: {request.method} {request.url.path}")
-
-    token = await _seed_request(
-        db_session,
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
-        tenant_id=tenant_id,
-        kind="repo",
-        target=build_skill_repo_target("https://github.com/o/r", "release", ""),
-    )
-    await db_session.commit()
-    runtime = _build_runtime(fernet_key, db_session_factory, anthropic_handler=ma_handler)
-
-    await run_repo_bind_credential_submission(
-        runtime,
-        team_id=_TEAM_ID,
-        user_id=_USER_ID,
-        channel_id=_CHANNEL_ID,
-        message_ts=_MESSAGE_TS,
-        token=token,
-        value="",
-        dispatch_continuations=_noop_dispatch,
-    )
-
-    async with db_session_factory() as s:
-        row = await peek_credential_request(s, token=token)
-        assert row is not None and row.used_at is not None
-        binding = await get_binding(s, tenant_id=row.tenant_id, agent_id=row.agent_id)
-    assert binding is not None and binding.ma_secret_ref == "anon:"
-    assert binding.proof_kind == "public"
-    assert binding.repo_url == "o/r", (
-        "the repo URL is unpacked from the target before it is stored — a packed "
-        "target would store the branch as part of the repo name"
-    )
-    assert binding.default_branch == "release", (
-        "the branch comes from the target the card was posted for, not from the form"
-    )
-    assert ("POST", _CHAT_UPDATE_URL) in fake_slack_web_client.mock.requests
-
-
 # ---------------------------------------------------------------------------
 # run_skill_repo_credential_submission
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_skill_repo_submission_writes_the_skill_credential_not_the_working_repo_binding(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """Importing puts skills in the tenant library; the request names an agent,
-    so the submission must also attach them — import-without-attach leaves the
-    user with an agent that has no skills and a success message saying
-    otherwise. The pasted token lands in the skill-repo credential store and
-    NOWHERE else: somebody offering a token so an agent can read skills out of
-    a repo has not asked for that repo to become the agent's checkout, and the
-    card they clicked said the working repo does not change."""
-    _override_users_info_admin(fake_slack_web_client.mock)
-    monkeypatch.setattr(
-        credential_submissions_mod, "pat_can_access_repo", AsyncMock(return_value=True)
-    )
-    monkeypatch.setattr(
-        credential_submissions_mod,
-        "run_skill_sync",
-        AsyncMock(
-            return_value=[
-                ResourceOutcome(
-                    kind="skill",
-                    name="imported-skill",
-                    action=Action.CREATED,
-                    anthropic_id="skill_01imported",
-                )
-            ]
-        ),
-    )
-    tenant_id, fernet_key = await _seed_team(db_session)
-    ma_agent_id = "agent_slack_skill_attach"
-    assert tenant_id == derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
-    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
-    token = await _seed_request(
-        db_session,
-        tenant_id=tenant_id,
-        kind="skill_repo",
-        target=build_skill_repo_target("https://github.com/o/attach-repo", "main", ""),
-        agent_id=agent_id,
-    )
-    await db_session.commit()
-
-    agent = ma_agent(id=ma_agent_id, name="daimon", tenant_id=tenant_id)
-    updates: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith(agent.id):
-            # Both the version-retry re-fetch and the update itself address the
-            # agent directly and must parse as ONE agent; only the list route
-            # gets the list envelope.
-            if request.method in ("POST", "PATCH"):
-                updates.append(json.loads(request.content))
-            return httpx.Response(200, json=agent.model_dump(mode="json"))
-        skill = re.fullmatch(r"/v1/skills/([^/]+)", request.url.path)
-        if skill is not None:  # the attach's existence check
-            return httpx.Response(200, json=skill_response(skill.group(1)))
-        return list_response([agent.model_dump(mode="json")])
-
-    runtime = _build_runtime(fernet_key, db_session_factory, anthropic_handler=handler)
-
-    await run_skill_repo_credential_submission(
-        runtime,
-        team_id=_TEAM_ID,
-        user_id=_USER_ID,
-        channel_id=_CHANNEL_ID,
-        message_ts=_MESSAGE_TS,
-        token=token,
-        value="ghp_slack_attach_token",
-        dispatch_continuations=_noop_dispatch,
-    )
-
-    async with db_session_factory() as s:
-        binding = await get_binding(s, tenant_id=tenant_id, agent_id=agent_id)
-        credential = await get_skill_repo_credential(
-            s,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            repo_url="https://github.com/o/attach-repo",
-        )
-    assert binding is None, "a skill-repo token must not become the agent's working repo binding"
-    assert credential is not None, (
-        "the skill-repo credential store is where a later sync looks for this token"
-    )
-    assert credential.proof_kind == "pat"
-    assert (credential.default_branch, credential.path) == ("main", ""), (
-        "branch and path come from the target the card was posted for"
-    )
-    assert updates, "the submission must call agents.update to attach the imported skills"
-    attached_ids = {entry["skill_id"] for entry in updates[-1]["skills"]}
-    assert "skill_01imported" in attached_ids, (
-        "the newly imported skill must be attached to the agent the request named"
-    )
-    assert ("POST", _EPHEMERAL_URL) not in fake_slack_web_client.mock.requests, (
-        "the card is the receipt on a success path"
-    )
-    assert _chat_updates(fake_slack_web_client)[-1]["text"] == (
-        "✅ 1 skill added to tester from o/attach-repo."
-    ), "the applied card must report the import through the shared change-confirmation copy"
 
 
 def _imported_skill_sync() -> AsyncMock:
@@ -750,112 +549,6 @@ def _imported_skill_sync() -> AsyncMock:
     )
 
 
-@pytest.mark.asyncio
-async def test_skill_repo_submission_refuses_a_member_on_a_managed_agent_before_the_consume(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """Importing attaches skills, so a member may not do it on a shared agent."""
-    sync = _imported_skill_sync()
-    monkeypatch.setattr(credential_submissions_mod, "run_skill_sync", sync)
-    tenant_id, fernet_key = await _seed_team(db_session)
-    live_agent = ma_agent(
-        id="agent_seeded",
-        name="daimon",
-        tenant_id=tenant_id,
-        metadata={MA_METADATA_KEY_MANAGED: "true"},
-    )
-    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
-    token = await _seed_request(
-        db_session,
-        tenant_id=tenant_id,
-        kind="skill_repo",
-        agent_id=agent_id,
-        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
-    )
-    await db_session.commit()
-    runtime = _build_runtime(
-        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-    )
-
-    await run_skill_repo_credential_submission(
-        runtime,
-        team_id=_TEAM_ID,
-        user_id=_USER_ID,
-        channel_id=_CHANNEL_ID,
-        message_ts=_MESSAGE_TS,
-        token=token,
-        value="ghp_member_token",
-        dispatch_continuations=_noop_dispatch,
-    )
-
-    async with db_session_factory() as s:
-        row = await peek_credential_request(s, token=token)
-        credential = await get_skill_repo_credential(
-            s, tenant_id=tenant_id, agent_id=agent_id, repo_url="https://github.com/o/skills"
-        )
-    assert row is not None and row.used_at is None, "the gate must precede the consume"
-    assert credential is None, "a refused submission stores nothing"
-    sync.assert_not_called()
-    assert _ephemeral_texts(fake_slack_web_client) == [SHARED_AGENT_SKILLS_MESSAGE]
-
-
-@pytest.mark.asyncio
-async def test_skill_repo_submission_never_attaches_to_a_managed_agent_even_for_an_admin(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """An attach would drift the seeded spec for good, so the skills stay in the library."""
-    monkeypatch.setattr(
-        credential_submissions_mod, "pat_can_access_repo", AsyncMock(return_value=True)
-    )
-    monkeypatch.setattr(credential_submissions_mod, "run_skill_sync", _imported_skill_sync())
-    _override_users_info_admin(fake_slack_web_client.mock)
-    tenant_id, fernet_key = await _seed_team(db_session)
-    live_agent = ma_agent(
-        id="agent_seeded",
-        name="daimon",
-        tenant_id=tenant_id,
-        metadata={MA_METADATA_KEY_MANAGED: "true"},
-    )
-    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
-    token = await _seed_request(
-        db_session,
-        tenant_id=tenant_id,
-        kind="skill_repo",
-        agent_id=agent_id,
-        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
-    )
-    await db_session.commit()
-    runtime = _build_runtime(
-        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-    )
-
-    await run_skill_repo_credential_submission(
-        runtime,
-        team_id=_TEAM_ID,
-        user_id=_USER_ID,
-        channel_id=_CHANNEL_ID,
-        message_ts=_MESSAGE_TS,
-        token=token,
-        value="ghp_admin_token",
-        dispatch_continuations=_noop_dispatch,
-    )
-
-    async with db_session_factory() as s:
-        row = await peek_credential_request(s, token=token)
-    assert row is not None and row.used_at is None and row.outcome == "write_failed"
-    # `_agents_handler` fails the test on any agent update, so reaching here
-    # means the managed agent was left untouched.
-    card = json.dumps(_chat_updates(fake_slack_web_client)[-1])
-    assert "but not added to tester" in card, "the card must not claim the agent has them"
-    assert "is a built-in agent" in card, "the card says why"
-
-
 async def _submit_skill_repo(
     runtime: SlackRuntime, token: str, value: str = "ghp_skill_token"
 ) -> None:
@@ -869,206 +562,6 @@ async def _submit_skill_repo(
         value=value,
         dispatch_continuations=_noop_dispatch,
     )
-
-
-@pytest.mark.asyncio
-async def test_skill_repo_submission_refuses_a_member_on_a_reachable_unmanaged_agent(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """Not built-in, but it answers for the workspace, so a member still needs an admin."""
-    sync = _imported_skill_sync()
-    monkeypatch.setattr(credential_submissions_mod, "run_skill_sync", sync)
-    tenant_id, fernet_key = await _seed_team(db_session)
-    live_agent = ma_agent(id="agent_shared", name="shared", tenant_id=tenant_id)
-    await scoped_config_write.set_fields(
-        db_session,
-        scope=TenantScopeRef(tenant_id=tenant_id),
-        tenant_id=tenant_id,
-        agent_name="shared",
-    )
-    token = await _seed_request(
-        db_session,
-        tenant_id=tenant_id,
-        kind="skill_repo",
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
-        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
-    )
-    await db_session.commit()
-    runtime = _build_runtime(
-        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-    )
-
-    await _submit_skill_repo(runtime, token)
-
-    async with db_session_factory() as s:
-        row = await peek_credential_request(s, token=token)
-    assert row is not None and row.used_at is None, "the gate must precede the consume"
-    sync.assert_not_called()
-    assert _ephemeral_texts(fake_slack_web_client) == [SHARED_AGENT_SKILLS_MESSAGE]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("is_admin", [False, True])
-async def test_skill_repo_submission_passes_seeded_names_and_admin_status_to_the_sync(
-    is_admin: bool,
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """The sync can only refuse seeded names and member replacements it is told about."""
-    monkeypatch.setattr(
-        credential_submissions_mod, "pat_can_access_repo", AsyncMock(return_value=True)
-    )
-    sync = AsyncMock(return_value=[])
-    monkeypatch.setattr(credential_submissions_mod, "run_skill_sync", sync)
-    if is_admin:
-        _override_users_info_admin(fake_slack_web_client.mock)
-    tenant_id, fernet_key = await _seed_team(db_session)
-    await record_seeded_skill(
-        db_session, tenant_id=tenant_id, name="eda", content_hash="h", anthropic_id="sk_eda"
-    )
-    live_agent = ma_agent(id="agent_private", name="private", tenant_id=tenant_id)
-    token = await _seed_request(
-        db_session,
-        tenant_id=tenant_id,
-        kind="skill_repo",
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
-        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
-    )
-    await db_session.commit()
-    runtime = _build_runtime(
-        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-    )
-
-    await _submit_skill_repo(runtime, token)
-
-    if not is_admin:
-        sync.assert_not_awaited()
-        return
-    assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
-    assert sync.call_args.kwargs["is_admin"] is is_admin
-
-
-@pytest.mark.asyncio
-async def test_skill_repo_submission_puts_a_refused_import_on_the_card(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """A refusal is not a success: nothing attaches, and the card says why."""
-    _override_users_info_admin(fake_slack_web_client.mock)
-    monkeypatch.setattr(
-        credential_submissions_mod, "pat_can_access_repo", AsyncMock(return_value=True)
-    )
-    reason = "skill name 'eda' belongs to a default skill. Rename the skill and re-sync."
-    monkeypatch.setattr(
-        credential_submissions_mod,
-        "run_skill_sync",
-        AsyncMock(
-            return_value=[
-                ResourceOutcome(
-                    kind="skill", name="eda", action=Action.FAILED, error="raw", refusal=reason
-                )
-            ]
-        ),
-    )
-    tenant_id, fernet_key = await _seed_team(db_session)
-    live_agent = ma_agent(id="agent_private", name="private", tenant_id=tenant_id)
-    token = await _seed_request(
-        db_session,
-        tenant_id=tenant_id,
-        kind="skill_repo",
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
-        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
-    )
-    await db_session.commit()
-    # `_agents_handler` fails the test on any agent update.
-    runtime = _build_runtime(
-        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-    )
-
-    await _submit_skill_repo(runtime, token)
-
-    card = json.dumps(_chat_updates(fake_slack_web_client)[-1])
-    assert "The skills did not import." in card and reason in card
-    assert "added to" not in card and "again to retry" not in card
-    assert ("POST", _EPHEMERAL_URL) not in fake_slack_web_client.mock.requests, (
-        "the card is the receipt"
-    )
-
-
-@pytest.mark.parametrize("fails_after_storage", [False, True])
-async def test_skill_repo_failure_receipt_reflects_confirmed_token_storage(
-    fails_after_storage: bool,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    _override_users_info_admin(fake_slack_web_client.mock)
-    tenant_id, fernet_key = await _seed_team(db_session)
-    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
-
-    def ma_handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/v1/agents":
-            return list_response([live_agent.model_dump(mode="json")])
-        raise AssertionError(f"Unexpected MA request: {request.method} {request.url.path}")
-
-    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
-    token = await _seed_request(
-        db_session,
-        tenant_id=tenant_id,
-        kind="skill_repo",
-        agent_id=agent_id,
-        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
-    )
-    await db_session.commit()
-    checks = 0
-
-    def github_response(request: httpx.Request) -> httpx.Response:
-        nonlocal checks
-        checks += 1
-        if checks == 1 or (checks == 2 and fails_after_storage):
-            return httpx.Response(200, json={})
-        return httpx.Response(403, text="sensitive-upstream-detail")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(github_response)) as http_client:
-        runtime = replace(
-            _build_runtime(fernet_key, db_session_factory, anthropic_handler=ma_handler),
-            http_client=http_client,
-        )
-        await run_skill_repo_credential_submission(
-            runtime,
-            team_id=_TEAM_ID,
-            user_id=_USER_ID,
-            channel_id=_CHANNEL_ID,
-            message_ts=_MESSAGE_TS,
-            token=token,
-            value="ghp_test_private_value",
-            dispatch_continuations=_noop_dispatch,
-        )
-    stored = await get_pat(
-        principal_id=derive_guild_account_uuid(tenant_id=tenant_id),
-        agent_id=agent_id,
-        sessionmaker=db_session_factory,
-        fernet=build_multifernet((fernet_key,)),
-    )
-    receipt = " ".join(_ephemeral_texts(fake_slack_web_client))
-    assert (stored is not None) == fails_after_storage, (
-        "fixture must fail at the intended write stage"
-    )
-    assert ("Token stored" in receipt) == fails_after_storage, (
-        "receipt must report only confirmed storage"
-    )
-    assert "Try again using the same form" in receipt, "a reachable retry"
-    assert "sensitive-upstream-detail" not in receipt, (
-        "upstream details must stay out of the receipt"
-    )
-    assert "ghp_test_private_value" not in receipt, "the private token must stay out of the receipt"
 
 
 @pytest.mark.parametrize("wrong_dimension", ["requester", "tenant", "platform", "deleted_target"])
@@ -2278,99 +1771,6 @@ async def test_env_submission_alias_of_a_held_key_needs_the_replacement_gate(
     assert "Adding ANTHROPIC_AUTH_TOKEN would replace ANTHROPIC_API_KEY" in json.dumps(edit), (
         "the card names both keys"
     )
-
-
-@pytest.mark.asyncio
-async def test_env_file_submission_refuses_an_alias_of_a_held_key_and_names_both(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    tenant_id, fernet_key = await _seed_team(db_session)
-    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
-    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
-        key="GH_TOKEN",
-        content="the-value-in-use",
-        set_by_account_id=None,
-    )
-    await db_session.commit()
-    _patch_file_download(monkeypatch, b"OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n")
-    runtime = _build_runtime(
-        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-    )
-
-    await _run_env_file_submission(runtime, token)
-
-    async with db_session_factory() as s:
-        rows = await _agent_file_rows(s)
-    assert [r["key"] for r in rows] == ["GH_TOKEN"], (
-        "an import that shadows a held key writes nothing"
-    )
-    edit = json.dumps(_chat_updates(fake_slack_web_client)[-1])
-    assert "GITHUB_TOKEN would replace GH_TOKEN" in edit, "the refusal names both keys"
-    assert "secret-b" not in edit, "no value on the card"
-
-
-async def test_env_submission_alias_that_appears_after_the_gate_is_caught_under_the_write(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The alias read before the gate is repeated inside the write transaction."""
-
-    tenant_id, fernet_key = await _seed_team(db_session)
-    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
-    token = await _seed_request(
-        db_session,
-        tenant_id=tenant_id,
-        kind="env",
-        target="GITHUB_TOKEN",
-        agent_id=agent_uuid,
-        origin_thread_id=_ORIGIN_THREAD,
-        target_ma_agent_id=live_agent.id,
-    )
-    await db_session.commit()
-
-    real = credential_submit.list_turn_key_names
-    calls = 0
-
-    async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return ()
-        await put_agent_file(
-            session,
-            tenant_id=tenant_id,
-            agent_id=agent_uuid,
-            key="GH_TOKEN",
-            content="the-value-in-use",
-            set_by_account_id=None,
-        )
-        return await real(session, **kw)
-
-    monkeypatch.setattr(credential_submit, "list_turn_key_names", first_read_misses_the_alias)
-
-    await _run_env(
-        _build_runtime(
-            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-        ),
-        token,
-    )
-
-    assert calls == 2, "the alias must be re-read under the write"
-    async with db_session_factory() as s:
-        rows = await _agent_file_rows(s)
-        request_row = await peek_credential_request(s, token=token)
-    assert [r["key"] for r in rows] == ["GH_TOKEN"], "the late alias blocks the write"
-    assert request_row is not None and request_row.outcome == "stale_replacement"
 
 
 async def _aws_pair_and_secret_token(

@@ -17,7 +17,6 @@ import structlog
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
 from daimon.core.broker.providers import TokenProvider
 from daimon.core.broker.providers.gcloud import GcloudTokenProvider
-from daimon.core.broker.providers.github import GitHubTokenProvider
 from daimon.core.config import Settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,7 +25,6 @@ logger = structlog.get_logger()
 # Stateless protocol implementers — module-level dict is acceptable
 # (no I/O, no settings cached); provider configuration is injected per call.
 _REGISTRY: dict[str, TokenProvider] = {
-    GitHubTokenProvider.service: GitHubTokenProvider(),
     GcloudTokenProvider.service: GcloudTokenProvider(),
 }
 

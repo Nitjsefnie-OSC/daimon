@@ -793,10 +793,8 @@ channel. Invalid input names the field and value and writes nothing.
 
 A private DM conversation (`dm:` scope) is outside every agent rule wherever
 it is checked: admission, `hand_off_task`, and continuations owed to a DM,
-which are admitted as DM turns. Adding a key, connector token, skill-repo
-token or repo binding to an agent with a rule (`request_agent_key`,
-`request_mcp_token`, `request_mcp_oauth`, `request_skill_repo_token`,
-`request_repo_binding`) or pointing it at a public repo (`bind_public_repo`)
+which are admitted as DM turns. Adding a key or connector token to an agent with a rule (`request_agent_key`,
+`request_mcp_token`, `request_mcp_oauth`) or pointing it at a public repo (`bind_public_repo`)
 needs an admin, a channel admin of every channel its rule names, or a request
 made inside one of those channels. The form's submit (Discord, Slack and
 Teams) re-checks the rule against the agent as it is now, resolved by its
@@ -1203,12 +1201,7 @@ run plain `git push` or `git fetch` against origin, which hang. Slack renders
 `author_name` (the requester's profile display name, else real name, else
 username, from the turn's one `users.info` call) on the `<user_query>` as Discord
 already does; Teams does not.
-A stored per-agent token is not read in App mode. Legacy sessions continue to
-use their existing binding and credential path. Switching a legacy agent to
-App mode keeps its working repo: when the agent has a repo binding and no
-grant is marked as the working repo (a working repo chosen in the same flow
-wins), the one grant for the binding's repo becomes the working repo, because
-App mode ignores the binding and mounts only a marked grant.
+An agent’s working repo is the App grant marked `is_working_repo`. Existing repo bindings are carried over during the App-only migration when a matching grant exists.
 
 **Stage three, `run_prepared_turn()` —
 `packages/core/daimon/core/turn/run.py`.** Calls the driver, and on a
@@ -1762,8 +1755,7 @@ admission before any of this runs.
   may grant it. Otherwise it posts the Connect GitHub browser link for that repo.
   Chat changes need no separate confirmation turn; the agent says what changed
   and how to undo it. Browser edits apply only after **Save changes**.
-  An operator-issued agent link may stage an update for an operator to finish
-  with `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
+  When the `DAIMON_GITHUB_APP__*`
   credentials and
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
@@ -1796,8 +1788,7 @@ admission before any of this runs.
   line in the origin thread or channel. Failed notices back off and expire
   after eight attempts or 24 hours.
   For one agent, the connection page is titled "<Agent>'s repos". It lists
-  every recorded repo grant with its working-repo marker and staged
-  or unavailable status, including repos the signed-in GitHub account cannot
+  every recorded repo grant with its working-repo marker and unavailable status, including repos the signed-in GitHub account cannot
   edit. The person may add repos, remove repos, and select or clear the one
   working repo, then confirm with **Save changes**. **Add repos** opens a
   centered dialog on desktop and a bottom sheet on mobile. Tick repos one by one,
@@ -2003,8 +1994,7 @@ as the executing agent identity for `get_cli_token(service="gcloud")`, while
 preserving the ordinary chat tool surface and live account-role checks. The
 separate `agent_id` claim still selects the restricted external agent-chat surface.
 Neither claim is supplied through tool arguments. Chat identity is stored separately
-from `AuthIdentity.agent_id` and is consumed only by the Google broker path. GitHub
-chat calls still resolve the account principal-default PAT; other identity gates
+from `AuthIdentity.agent_id` and is consumed only by the Google broker path. GitHub chat calls use the agent’s App grants; other identity gates
 and the two-tool search interface remain unchanged.
 
 The operator must configure `credentials.google_sa_json`, authorize domain-wide

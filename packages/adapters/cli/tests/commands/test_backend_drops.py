@@ -650,51 +650,6 @@ async def test_flag_off_refuses_before_source_or_dependency_construction(operato
     assert not operator[-1]
 
 
-@pytest.mark.parametrize(
-    "backend,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
-)
-async def test_real_default_settings_have_no_inactive_app_obligation_but_active_app_stays_hard(
-    operator, backend, model
-):
-    from daimon.core.channel_backend import AgentBackendRefused
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores.github_access import activate_agent, get_agent_mode
-    from daimon.core.turn.runtime_manifest import preview_source_drops
-    from mux.contracts.ids import ModelRef
-    from mux.errors import UnsupportedCapability
-
-    rt, tenant, native, *_ = operator
-    assert rt.settings.github_app is not None
-    assert rt.settings.github_app.app_id is None and rt.settings.github_app.private_key is None
-    identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=native.id)
-    async with rt.sessionmaker() as db:
-        assert await get_agent_mode(db, tenant_id=tenant.id, agent_id=identity) == "legacy"
-    before = await capture(operator)
-    assert not any(r.kind == "native" for r in before.resource_requirements)
-    assert preview_source_drops(before, ModelRef(provider=backend, id=model)).declared_drops == (
-        "memory",
-        "sandbox",
-    )
-    async with rt.sessionmaker.begin() as db:
-        await activate_agent(db, tenant_id=tenant.id, agent_id=identity, changed_by_account_id=None)
-        assert await get_agent_mode(db, tenant_id=tenant.id, agent_id=identity) == "app"
-    active = await capture(operator)
-    assert any(
-        resource.id == f"app-session-vault:{tenant.id}:{identity}" and resource.kind == "native"
-        for resource in active.resource_requirements
-    )
-    assert any(
-        resource.id == "caller-resources" and resource.kind == "native"
-        for resource in active.resource_requirements
-    )
-    with pytest.raises(UnsupportedCapability):
-        preview_source_drops(active, ModelRef(provider=backend, id=model))
-    with pytest.raises(AgentBackendRefused, match="source unavailable"):
-        await run(operator, accept_drops="memory,sandbox")
-    assert await revisions(operator) is None
-    assert all(r.method == "GET" for r in operator[-1])
-
-
 async def test_real_encrypted_key_remains_nondroppable_without_any_secret_read(
     operator, monkeypatch
 ):

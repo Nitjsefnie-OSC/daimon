@@ -128,7 +128,6 @@ async def summary(session: AsyncSession, *, tenant_id: uuid.UUID) -> ConnectedRe
     agent_count = await session.scalar(
         select(func.count(distinct(AgentGitHubGrant.agent_id))).where(
             AgentGitHubGrant.tenant_id == tenant_id,
-            AgentGitHubGrant.staged.is_(False),
             AgentGitHubGrant.repo_id.in_([r.repo_id for r in repos]),
         )
     )

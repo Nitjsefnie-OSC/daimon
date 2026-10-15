@@ -97,7 +97,6 @@ class HereCog(commands.Cog):
                     category_visible.append(
                         (str(sibling.id), f"#{sibling.name}: {'yes' if bot_can_view else 'no'}")
                     )
-            github = runtime.settings.github
             caller_perms = channel.permissions_for(member) if member is not None else None
             async with runtime.sessionmaker() as session:
                 principal = await find_platform_principal(
@@ -116,9 +115,8 @@ class HereCog(commands.Cog):
                     category_id=str(channel.category_id) if channel.category_id else None,
                     default=runtime.deployment_default,
                     github=GitHubDeploymentFacts(
-                        has_fallback_pat=github.fallback_pat is not None,
-                        app_configured=github.app_id is not None
-                        and github.app_private_key is not None,
+                            app_configured=runtime.settings.github_app.app_id is not None
+                        and runtime.settings.github_app.private_key is not None,
                     ),
                     public_mcp_url=str(runtime.settings.mcp.public_url)
                     if runtime.settings.mcp.public_url is not None

@@ -373,9 +373,7 @@ def test_details_shows_the_model_display_name_and_every_section_when_populated(
         repo=RepoBinding(
             repo_url="acme/warehouse",
             default_branch="main",
-            access=RepoAccess(
-                kind="connected", credential="per_agent_token", checked_at=_FIXED_CHECK
-            ),
+            access=RepoAccess(kind="connected", credential="github_app", checked_at=_FIXED_CHECK),
         ),
         keys=(KeyEntry(name="SNOWFLAKE_TOKEN", updated_at=_FIXED_CHECK),),
         skills=(SkillEntry(type="custom", skill_id="sk_1", title="Warehouse SQL", version="3"),),
@@ -443,7 +441,7 @@ def test_details_shows_the_unrouted_note_verbatim_in_the_readers_voice(
         channels=[],
         default=DeploymentDefault(),
         resolved_here=None,
-        binding=None,
+        repo=None,
         files=[],
         skill_titles={},
         skills_truncated=False,
@@ -475,25 +473,21 @@ def test_details_shows_the_unrouted_note_verbatim_in_the_readers_voice(
 def _github_facts() -> Any:
     from daimon.core.agent_details import GitHubDeploymentFacts
 
-    return GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False)
+    return GitHubDeploymentFacts(app_configured=False)
 
 
 @pytest.mark.parametrize(
     ("access", "expected"),
     [
         (
-            RepoAccess(kind="connected", credential="per_agent_token", checked_at=_FIXED_CHECK),
-            "via token\n-# Last checked",
-        ),
-        (
-            RepoAccess(kind="connected", credential="deployment_public", checked_at=_FIXED_CHECK),
-            "public repo\n-# Last checked",
+            RepoAccess(kind="connected", credential="github_app", checked_at=_FIXED_CHECK),
+            "via GitHub App\n-# Last checked",
         ),
         (
             RepoAccess(kind="checked", credential="github_app", checked_at=_FIXED_CHECK),
             "via GitHub App\n-# Last checked",
         ),
-        (RepoAccess(kind="not_checked", credential="per_agent_token"), "not checked yet"),
+        (RepoAccess(kind="not_checked", credential="none"), "not checked yet"),
         (
             RepoAccess(
                 kind="needs_attention",
@@ -765,9 +759,7 @@ def test_full_details_stays_within_the_component_budget(account_id: uuid.UUID) -
         repo=RepoBinding(
             repo_url="acme/warehouse",
             default_branch="main",
-            access=RepoAccess(
-                kind="connected", credential="per_agent_token", checked_at=_FIXED_CHECK
-            ),
+            access=RepoAccess(kind="connected", credential="github_app", checked_at=_FIXED_CHECK),
         ),
         keys=tuple(
             KeyEntry(name=f"KEY_{index:02d}_{'x' * 30}", updated_at=_FIXED_CHECK)

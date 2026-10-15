@@ -10,11 +10,9 @@ from daimon.core._models import (
     Account,
     AgentGitHubGrant,
     AgentGitHubGrantDraft,
-    AgentGitHubMode,
     GitHubAppInstallation,
     TenantGitHubRepo,
 )
-from daimon.core.stores import agent_repo_binding
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, or_, select, text
@@ -46,7 +44,6 @@ class AgentGrant(BaseModel):
     repo_id: int
     baseline_access: Literal["none", "read", "write"]
     ceiling_access: Literal["read", "write"]
-    staged: bool
     mount_path: str | None
     is_working_repo: bool
     granted_by_account_id: uuid.UUID | None
@@ -139,8 +136,6 @@ async def list_live_grant_repositories(
     grants = await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     result: list[tuple[AgentGrant, AuthorizedRepo]] = []
     for grant in grants:
-        if grant.staged:
-            continue
         row = await repo_for_agent(
             session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
         )
@@ -157,6 +152,18 @@ async def list_live_grant_repositories(
     return result
 
 
+async def active_grant_for_repo(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, repo_name: str
+) -> AuthorizedRepo | None:
+    """Return an agent's usable App grant for one repository."""
+    for _, repo in await list_live_grant_repositories(
+        session, tenant_id=tenant_id, agent_id=agent_id
+    ):
+        if repo.repo_full_name.casefold() == repo_name.casefold():
+            return repo
+    return None
+
+
 class AgentRepo(BaseModel):
     """One repo an agent has, with the confirmation it rests on."""
 
@@ -168,7 +175,6 @@ class AgentRepo(BaseModel):
     max_access: Literal["read", "write"]
     baseline_access: Literal["none", "read", "write"]
     ceiling_access: Literal["read", "write"]
-    staged: bool
     status: Literal["active", "suspended", "revoked"]
     added_by_account_id: uuid.UUID | None
     added_at: datetime
@@ -198,7 +204,6 @@ async def list_agent_repos(
                 max_access=cast(Literal["read", "write"], row.max_access),
                 baseline_access=grant.baseline_access,
                 ceiling_access=grant.ceiling_access,
-                staged=grant.staged,
                 status=cast(Literal["active", "suspended", "revoked"], row.status),
                 added_by_account_id=row.authorized_by_account_id,
                 added_at=row.authorized_at,
@@ -273,14 +278,6 @@ async def set_working_repo(
         if selected is None:
             raise ValueError("That repo is not on this agent's list. Offer Connect GitHub.")
     changed_ids: list[int] = []
-    cleared_binding = False
-    if selected is None:
-        binding = await agent_repo_binding.get_binding(
-            session, tenant_id=tenant_id, agent_id=agent_id
-        )
-        if binding is not None:
-            await agent_repo_binding.clear_binding(session, tenant_id=tenant_id, agent_id=agent_id)
-            cleared_binding = True
     for grant in rows:
         wanted = grant is selected
         if grant.is_working_repo != wanted:
@@ -288,7 +285,7 @@ async def set_working_repo(
             grant.version += 1
             changed_ids.append(grant.repo_id)
     await session.flush()
-    if changed_ids or cleared_binding:
+    if changed_ids:
         await append_event(
             session,
             tenant_id=tenant_id,
@@ -320,10 +317,6 @@ async def remove_agent_repo(
     needs a new Connect. A server-wide repo stays connected for other agents.
     """
     await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
-    working = await session.get(
-        AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True
-    )
-    was_working = working is not None and working.is_working_repo
     removed = await remove_grant(
         session,
         tenant_id=tenant_id,
@@ -335,12 +328,6 @@ async def remove_agent_repo(
     if draft is not None:
         await session.delete(draft)
         removed = True
-    if was_working:
-        binding = await agent_repo_binding.get_binding(
-            session, tenant_id=tenant_id, agent_id=agent_id
-        )
-        if binding is not None:
-            await agent_repo_binding.clear_binding(session, tenant_id=tenant_id, agent_id=agent_id)
     own = await session.scalar(
         select(TenantGitHubRepo)
         .where(
@@ -371,13 +358,6 @@ async def remove_agent_repo(
         )
     await session.flush()
     return removed
-
-
-async def get_agent_mode(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
-) -> Literal["legacy", "app"]:
-    row = await session.get(AgentGitHubMode, (tenant_id, agent_id))
-    return "app" if row is not None and row.mode == "app" else "legacy"
 
 
 _ACCESS_RANK = {"none": 0, "read": 1, "write": 2}
@@ -443,9 +423,6 @@ async def stage_grant(
                 "One agent can use one GitHub org. Use another agent for repos from a "
                 "different org."
             )
-    baseline_access = "write"
-    ceiling_access = "write"
-    app_active = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app"
     if is_working_repo:
         working = await session.scalars(
             select(AgentGitHubGrant)
@@ -473,7 +450,6 @@ async def stage_grant(
     elif (
         row.baseline_access == baseline_access
         and row.ceiling_access == ceiling_access
-        and row.staged == (not app_active)
         and row.mount_path == mount_path
         and row.is_working_repo == is_working_repo
     ):
@@ -482,7 +458,6 @@ async def stage_grant(
         row.version += 1
     row.baseline_access = baseline_access
     row.ceiling_access = ceiling_access
-    row.staged = not app_active
     row.mount_path = mount_path
     row.is_working_repo = is_working_repo
     row.granted_by_account_id = granted_by_account_id
@@ -497,7 +472,7 @@ async def stage_grant(
         tool_name="github_grants",
         operation="github_grant",
         outcome="allowed",
-        reason="grant updated" if app_active else "grant staged",
+        reason="grant updated",
         github_repo_ids=[repo_id],
     )
     return AgentGrant.model_validate(row)
@@ -531,142 +506,3 @@ async def remove_grant(
         github_repo_ids=[repo_id],
     )
     return True
-
-
-async def _keep_legacy_working_repo(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_id: uuid.UUID,
-    grants: list[AgentGitHubGrant],
-    changed_by_account_id: uuid.UUID | None,
-) -> None:
-    """Carry a legacy agent's working repo over as the App working-repo grant.
-
-    App mode ignores the legacy repo binding and mounts only the grant marked
-    as the working repo, so an agent switched over without one silently stops
-    mounting its repo. A working repo chosen in the same flow wins: this acts
-    only when no grant is marked, and only when exactly one grant is the
-    binding's repo.
-    """
-    if any(grant.is_working_repo for grant in grants):
-        return
-    binding = await agent_repo_binding.get_binding(session, tenant_id=tenant_id, agent_id=agent_id)
-    if binding is None:
-        return
-    wanted = (
-        binding.repo_url.removeprefix("https://github.com/")
-        .removeprefix("http://github.com/")
-        .removeprefix("github.com/")
-        .rstrip("/")
-        .removesuffix(".git")
-        .rstrip("/")
-        .casefold()
-    )
-    matches: list[AgentGitHubGrant] = []
-    for grant in grants:
-        repo = await repo_for_agent(
-            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
-        )
-        if repo is not None and repo.repo_full_name.casefold() == wanted:
-            matches.append(grant)
-    if len(matches) != 1:
-        return
-    matches[0].is_working_repo = True
-    matches[0].version += 1
-    await session.flush()
-    await append_event(
-        session,
-        tenant_id=tenant_id,
-        account_id=changed_by_account_id,
-        agent_id=agent_id,
-        platform=None,
-        platform_user_id=None,
-        tool_name="github_grants",
-        operation="github_grant",
-        outcome="allowed",
-        reason="working repo kept from legacy binding",
-        github_repo_ids=[matches[0].repo_id],
-    )
-
-
-async def activate_agent(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_id: uuid.UUID,
-    changed_by_account_id: uuid.UUID | None = None,
-) -> None:
-    """Make the staged set live and switch mode in the caller's transaction."""
-    mode = await session.get(AgentGitHubMode, (tenant_id, agent_id), with_for_update=True)
-    if mode is None:
-        mode = AgentGitHubMode(tenant_id=tenant_id, agent_id=agent_id, mode="legacy")
-        session.add(mode)
-        await session.flush()
-    switching = mode.mode != "app"
-    grants = list(
-        await session.scalars(
-            select(AgentGitHubGrant)
-            .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
-            .with_for_update()
-        )
-    )
-    for grant in grants:
-        authorized = await repo_for_agent(
-            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
-        )
-        if authorized is None or authorized.status != "active":
-            raise ValueError("staged grant is no longer authorized")
-        installation = await session.get(GitHubAppInstallation, authorized.installation_id)
-        if installation is None or installation.suspended_at is not None:
-            raise ValueError("staged grant installation is not active")
-        if grant.staged:
-            grant.staged = False
-            grant.version += 1
-    if switching:
-        await _keep_legacy_working_repo(
-            session,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            grants=grants,
-            changed_by_account_id=changed_by_account_id,
-        )
-    mode.mode = "app"
-    await session.flush()
-    await append_event(
-        session,
-        tenant_id=tenant_id,
-        account_id=changed_by_account_id,
-        agent_id=agent_id,
-        platform=None,
-        platform_user_id=None,
-        tool_name="github_grants",
-        operation="github_grant",
-        outcome="allowed",
-        reason="app mode activated",
-    )
-
-
-async def deactivate_agent(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_id: uuid.UUID,
-    changed_by_account_id: uuid.UUID | None = None,
-) -> None:
-    mode = await session.get(AgentGitHubMode, (tenant_id, agent_id), with_for_update=True)
-    if mode is not None:
-        mode.mode = "legacy"
-        await session.flush()
-        await append_event(
-            session,
-            tenant_id=tenant_id,
-            account_id=changed_by_account_id,
-            agent_id=agent_id,
-            platform=None,
-            platform_user_id=None,
-            tool_name="github_grants",
-            operation="github_grant",
-            outcome="allowed",
-            reason="app mode deactivated",
-        )

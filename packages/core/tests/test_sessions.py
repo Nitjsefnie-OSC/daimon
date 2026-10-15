@@ -17,10 +17,8 @@ from anthropic.types.beta import (
     BetaManagedAgentsSession,
     FileMetadata,
 )
-from cryptography.fernet import Fernet, MultiFernet
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from daimon.core._models import AgentGitHubMode, GitHubAppSessionVault
+from cryptography.fernet import Fernet
+from daimon.core._models import GitHubAppSessionVault
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_requests import mint_request_token
@@ -32,7 +30,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.github_app_auth import BotIdentity
 from daimon.core.github_app_session import AppSessionAccess, AppToken
-from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.memory_resource import (
     MEMORY_INSTRUCTIONS,
     PERSONAL_MEMORY_INSTRUCTIONS,
@@ -46,12 +44,9 @@ from daimon.core.sessions import (
     native_session_budget_cents,
 )
 from daimon.core.skills.unresolved import SkillUnavailable
-from daimon.core.stores import agent_github_binding as github_binding_store
-from daimon.core.stores import agent_repo_binding as repo_binding_store
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
-from daimon.core.stores.domain import RepoAccessProof
 from daimon.core.turn.posture import ExemptReason
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
@@ -65,6 +60,16 @@ from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session, ma_session_agent
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@pytest.fixture
+def empty_app_vault(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let resource tests focus on their mounts while App vaults use their own tests."""
+    monkeypatch.setattr(
+        "daimon.core.sessions.create_session_vault",
+        AsyncMock(return_value="vlt_app_test"),
+    )
+    monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
 
 
 @pytest.mark.parametrize("budget", [None, Decimal("0.20"), Decimal("0.70")])
@@ -214,7 +219,6 @@ async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     agent_id = uuid.uuid4()
-    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_id, mode="app"))
     if fault == "registration_conflict":
         db_session.add(
             GitHubAppSessionVault(
@@ -314,6 +318,9 @@ async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
 
     revoke = AsyncMock(wraps=session_module.revoke_app_access)
     monkeypatch.setattr(session_module, "revoke_app_access", revoke)
+    monkeypatch.setattr(
+        session_module, "declared_app_repositories", AsyncMock(return_value=("declared",))
+    )
     async with build_fake_anthropic_http(
         combine_handlers(make_fake_memory_store_handler(), handle)
     ) as client:
@@ -857,6 +864,7 @@ def _files_and_session_handler(
     return _handler
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_mounts_env_resource_when_agent_has_secrets(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -898,6 +906,7 @@ async def test_create_session_mounts_env_resource_when_agent_has_secrets(
     )
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_omits_resources_when_agent_has_no_secrets(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1276,7 +1285,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
 
     assert len(bodies) == 1, "exactly one session-create call"
     assert bodies[0].get("vault_ids") == ["vlt_existing"], (
-        "vault_ids behavior must be preserved alongside resources"
+        "the caller vault must be mounted alongside resources when no App grant exists"
     )
     assert _without_memory_resource(bodies[0].get("resources")) == [
         {"type": "file", "file_id": "file_both", "mount_path": ".env"}
@@ -1320,305 +1329,7 @@ async def test_create_session_raises_when_mcp_active_and_agent_uuid_none() -> No
 # --- Dev-agent port: github_repository clone resource injection (Task 1) -----
 
 
-async def _seed_repo_binding_with_pat(
-    db_session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_uuid: uuid.UUID,
-    fernet: MultiFernet,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    repo_url: str = "https://github.com/example-org/example-repo",
-    default_branch: str = "main",
-    plaintext_token: str = "ghp_dev_agent_token",
-) -> None:
-    """Seed an agent_repo_binding + a resolvable per-agent PAT.
-
-    After this, get_binding(tenant,agent) returns the repo binding and
-    get_pat(agent_id=agent_uuid) decrypts to ``plaintext_token``.
-    """
-    await repo_binding_store.set_binding(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_uuid,
-        repo_url=repo_url,
-        default_branch=default_branch,
-        ma_secret_ref="anon:",
-        proof=RepoAccessProof(kind="pat", at=datetime(2026, 5, 1, tzinfo=UTC), account_id=None),
-    )
-    # Per-agent credential overlay: agent_uuid → principal_id.
-    await github_binding_store.set_agent_github_binding(
-        db_session, agent_id=agent_uuid, principal_id=agent_uuid
-    )
-    await db_session.commit()
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=agent_uuid,
-        github_login="dev-agent",
-        plaintext_token=plaintext_token,
-        scopes=("repo",),
-    )
-
-
-async def test_create_session_mounts_repo_resource_when_bound_and_pat_present(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_repo_binding_with_pat(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        fernet=fernet,
-        db_session_factory=db_session_factory,
-    )
-
-    agent = _make_agent(anthropic_id="ag_repo")
-    env = _make_env(anthropic_id="env_repo")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_repo", session_create_bodies=bodies
-        )
-    )
-
-    await create_session(
-        client,
-        agent=agent,
-        environment=env,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-    )
-
-    assert len(bodies) == 1, "exactly one session-create call"
-    resources = _without_memory_resource(bodies[0].get("resources"))
-    assert resources == [
-        {
-            "type": "github_repository",
-            "url": "https://github.com/example-org/example-repo",
-            "authorization_token": "ghp_dev_agent_token",
-            "checkout": {"type": "branch", "name": "main"},
-        }
-    ], "session-create body must carry the github_repository clone resource"
-
-
-def _generate_rsa_keypair() -> str:
-    """Return a PEM-encoded RSA private key string for GitHub App-JWT tests."""
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    return private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode()
-
-
-async def test_create_session_uses_app_installation_token_when_app_installed_and_no_pat(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """No per-agent PAT, App installed on the (private) repo owner, and the
-    binding recorded a pat-kind proof at bind time -> the minted installation
-    token lands in authorization_token (step 2)."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    await _seed_inline_pat_binding(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        proof=RepoAccessProof(kind="pat", at=datetime.now(UTC), account_id=None),
-    )
-
-    agent = _make_agent(anthropic_id="ag_app")
-    env = _make_env(anthropic_id="env_app")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_app", session_create_bodies=bodies
-        )
-    )
-
-    def github_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/example-org/private-repo/installation":
-            return httpx.Response(status_code=200, json={"id": 999})
-        if request.url.path == "/app/installations/999/access_tokens":
-            return httpx.Response(status_code=201, json={"token": "ghs_installation_token"})
-        raise AssertionError(f"unexpected GitHub request: {request.method} {request.url}")
-
-    github_client = httpx.AsyncClient(transport=httpx.MockTransport(github_handler))
-
-    await create_session(
-        client,
-        agent=agent,
-        environment=env,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        github_app_id="12345",
-        github_app_private_key=_generate_rsa_keypair(),
-        http_client=github_client,
-    )
-    await github_client.aclose()
-
-    assert len(bodies) == 1, "exactly one session-create call"
-    resources = _without_memory_resource(bodies[0].get("resources"))
-    assert resources == [
-        {
-            "type": "github_repository",
-            "url": "https://github.com/example-org/private-repo",
-            "authorization_token": "ghs_installation_token",
-            "checkout": {"type": "branch", "name": "main"},
-        }
-    ], "session-create body must carry the App-mode clone resource"
-
-
-async def test_create_session_pat_wins_with_zero_github_app_calls(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """When both a per-agent PAT and App creds are present, the PAT wins
-    and resolve_clone_token issues ZERO GitHub App HTTP calls."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_repo_binding_with_pat(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        fernet=fernet,
-        db_session_factory=db_session_factory,
-    )
-
-    agent = _make_agent(anthropic_id="ag_pat_wins")
-    env = _make_env(anthropic_id="env_pat_wins")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_pat_wins", session_create_bodies=bodies
-        )
-    )
-
-    def github_handler(request: httpx.Request) -> httpx.Response:
-        pytest.fail(f"GitHub App transport must not be called when a PAT wins; got {request.url}")
-
-    github_client = httpx.AsyncClient(transport=httpx.MockTransport(github_handler))
-
-    await create_session(
-        client,
-        agent=agent,
-        environment=env,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-        github_app_id="12345",
-        github_app_private_key=_generate_rsa_keypair(),
-        http_client=github_client,
-    )
-    await github_client.aclose()
-
-    assert len(bodies) == 1, "exactly one session-create call"
-    resources = _without_memory_resource(bodies[0].get("resources"))
-    assert resources == [
-        {
-            "type": "github_repository",
-            "url": "https://github.com/example-org/example-repo",
-            "authorization_token": "ghp_dev_agent_token",
-            "checkout": {"type": "branch", "name": "main"},
-        }
-    ], "PAT must win over App coverage"
-
-
-async def test_create_session_raises_when_private_binding_app_not_installed_no_fallback(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Private binding, no per-agent PAT, App not installed (404), no fallback
-    PAT -> resolve_clone_token raises (step 4); no session-create call
-    happens with an empty authorization_token."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    await _seed_inline_pat_binding(db_session, tenant_id=tenant.id, agent_uuid=agent_uuid)
-
-    agent = _make_agent(anthropic_id="ag_app_404")
-    env = _make_env(anthropic_id="env_app_404")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_app_404", session_create_bodies=bodies
-        )
-    )
-
-    def github_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/example-org/private-repo/installation":
-            return httpx.Response(status_code=404)
-        raise AssertionError(f"unexpected GitHub request: {request.method} {request.url}")
-
-    github_client = httpx.AsyncClient(transport=httpx.MockTransport(github_handler))
-
-    with pytest.raises(DaimonError):
-        await create_session(
-            client,
-            agent=agent,
-            environment=env,
-            tenant_id=tenant.id,
-            agent_uuid=agent_uuid,
-            session_factory=db_session_factory,
-            github_app_id="12345",
-            github_app_private_key=_generate_rsa_keypair(),
-            http_client=github_client,
-        )
-    await github_client.aclose()
-
-    assert len(bodies) == 0, "no session-create call when the clone credential fails to resolve"
-
-
-async def test_create_session_raises_when_fernet_absent_and_no_other_credential(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Without the fernet kwarg, create_session cannot decrypt the per-agent PAT.
-
-    Behavior change (step 4 / C-03): the binding is ``anon:`` (public) with
-    no per-agent PAT, no App creds, and no fallback PAT resolvable — this is the
-    fail-loud ``none`` branch, not a silent omit. resolve_clone_token raises."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_repo_binding_with_pat(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        fernet=fernet,
-        db_session_factory=db_session_factory,
-    )
-
-    agent = _make_agent(anthropic_id="ag_norepo")
-    env = _make_env(anthropic_id="env_norepo")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_norepo", session_create_bodies=bodies
-        )
-    )
-
-    with pytest.raises(DaimonError):
-        await create_session(
-            client,
-            agent=agent,
-            environment=env,
-            tenant_id=tenant.id,
-            agent_uuid=agent_uuid,
-            session_factory=db_session_factory,
-            # fernet omitted
-        )
-
-    assert len(bodies) == 0, "no session-create call when the clone credential fails to resolve"
-
-
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_omits_repo_resource_when_unbound(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1744,112 +1455,6 @@ def _warm_vault_copilot_handler(
     return _handler
 
 
-async def test_create_session_provisions_copilot_credential_from_pat(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """When the vault is ensured and the agent has a resolvable PAT, a Copilot
-    static_bearer credential is provisioned on the same vault from that PAT."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    account_id = uuid.UUID("00000000-0000-0000-0000-0000000000c0")
-    public_url = "https://mcp.example.com/mcp"
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_repo_binding_with_pat(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        fernet=fernet,
-        db_session_factory=db_session_factory,
-        plaintext_token="ghp_copilot_pat",
-    )
-
-    agent = _make_agent(anthropic_id="ag_copilot")
-    env = _make_env(anthropic_id="env_copilot")
-    cred_bodies: list[dict[str, Any]] = []
-    session_bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _warm_vault_copilot_handler(
-            account_id=account_id,
-            agent_uuid=agent_uuid,
-            public_url=public_url,
-            credential_post_bodies=cred_bodies,
-            session_create_bodies=session_bodies,
-            session_id="sess_copilot",
-        )
-    )
-
-    await create_session(
-        client,
-        agent=agent,
-        environment=env,
-        account_id=account_id,
-        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-    )
-
-    assert len(cred_bodies) == 1, "exactly one credential POST (the Copilot cred)"
-    auth = cred_bodies[0]["auth"]
-    assert auth["type"] == "static_bearer"
-    assert auth["mcp_server_url"] == "https://api.githubcopilot.com/mcp"
-    assert auth["token"] == "ghp_copilot_pat", "Copilot cred must carry the resolved per-agent PAT"
-    assert len(session_bodies) == 1
-    assert session_bodies[0].get("vault_ids") == ["vlt_existing"], (
-        "the Copilot cred rides the same vault attached to the session"
-    )
-
-
-async def test_create_session_skips_copilot_when_no_pat(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A configured new App never enters the legacy session's mint path."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    account_id = uuid.UUID("00000000-0000-0000-0000-0000000000c1")
-    public_url = "https://mcp.example.com/mcp"
-    await db_session.commit()  # no binding / no credential seeded
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-
-    agent = _make_agent(anthropic_id="ag_nocopilot")
-    env = _make_env(anthropic_id="env_nocopilot")
-    cred_bodies: list[dict[str, Any]] = []
-    session_bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _warm_vault_copilot_handler(
-            account_id=account_id,
-            agent_uuid=agent_uuid,
-            public_url=public_url,
-            credential_post_bodies=cred_bodies,
-            session_create_bodies=session_bodies,
-            session_id="sess_nocopilot",
-        )
-    )
-    app_mint = AsyncMock()
-    monkeypatch.setattr("daimon.core.sessions.prepare_app_access", app_mint)
-
-    await create_session(
-        client,
-        agent=agent,
-        environment=env,
-        account_id=account_id,
-        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-        agent_github_app=GithubAppSettings(app_id="new", private_key=SecretStr("unused")),
-    )
-
-    app_mint.assert_not_awaited()
-    assert len(cred_bodies) == 0, "no Copilot credential POST when there is no PAT"
-    assert len(session_bodies) == 1
-
-
 @pytest.mark.parametrize("app_session_unmapped", [False, True])
 async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
     db_session: AsyncSession,
@@ -1860,7 +1465,6 @@ async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant) if app_session_unmapped else None
     agent_uuid = uuid.uuid4()
-    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
     await db_session.commit()
     vault = AsyncMock(return_value="vlt_session")
     credentials = AsyncMock()
@@ -1893,14 +1497,11 @@ async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
     )
     async with db_session_factory() as session:
         registered = await session.get(GitHubAppSessionVault, "sess_zero_grants")
-    assert registered is not None
-    assert registered.is_unmapped is app_session_unmapped
-    assert registered.is_mcp is app_session_unmapped
-    assert registered.agent_id == (agent_uuid if app_session_unmapped else None)
-    assert bodies[0]["vault_ids"] == ["vlt_session"]
+    assert registered is None
+    assert bodies[0].get("vault_ids") is None
     assert not any(r["type"] == "github_repository" for r in bodies[0].get("resources", []))
-    assert credentials.await_args.kwargs["access"].tokens == ()
-    assert credentials.await_args.kwargs["access"].working_token is None
+    vault.assert_not_awaited()
+    credentials.assert_not_awaited()
 
 
 @pytest.mark.parametrize("identity_resolves", [True, False])
@@ -1912,11 +1513,14 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
     await db_session.commit()
     identity = BotIdentity(name="daimon[bot]", email="7+daimon[bot]@users.noreply.github.com")
     token = AppToken(uuid.uuid4(), "ghs_x", 1, (1,), "write", "GH_TOKEN_ACME_WRITE")
     monkeypatch.setattr("daimon.core.sessions.create_session_vault", AsyncMock(return_value="v"))
+    monkeypatch.setattr(
+        "daimon.core.sessions.declared_app_repositories",
+        AsyncMock(return_value=("declared",)),
+    )
     monkeypatch.setattr(
         "daimon.core.sessions.prepare_app_access",
         AsyncMock(return_value=AppSessionAccess((), (token,), "ghs_x")),
@@ -1973,10 +1577,13 @@ async def test_app_session_attaches_caller_and_session_vaults(
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_uuid, account_id = uuid.uuid4(), uuid.uuid4()
-    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
     await db_session.commit()
     monkeypatch.setattr(
         "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_session")
+    )
+    monkeypatch.setattr(
+        "daimon.core.sessions.declared_app_repositories",
+        AsyncMock(return_value=("declared",)),
     )
     monkeypatch.setattr(
         "daimon.core.sessions.ensure_agent_mcp_vault", AsyncMock(return_value="vlt_caller")
@@ -2016,141 +1623,6 @@ async def test_app_session_attaches_caller_and_session_vaults(
     assert bodies[0]["vault_ids"] == ["vlt_caller", "vlt_session"]
     assert mirror.await_args.kwargs["vault_id"] == "vlt_caller"
     assert add_app.await_args.kwargs["vault_id"] == "vlt_session"
-
-
-async def test_create_session_never_mirrors_fallback_pat_into_copilot_vault(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An agent with no per-agent PAT but a configured operator fallback still
-    gets NO Copilot vault credential -- the fallback must never be mirrored
-    into a per-agent MA vault. This is a regression guard: the signature
-    change that added allow_service_default/fallback_pat to get_pat makes it
-    newly *possible* for this call site to opt in; sessions.py's single
-    get_pat call (feeding both the Copilot mirror and the clone resolver)
-    must stay at the default so this never happens."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    account_id = uuid.UUID("00000000-0000-0000-0000-0000000000c2")
-    public_url = "https://mcp.example.com/mcp"
-    await _seed_anon_binding(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        proof=RepoAccessProof(kind="public", at=datetime.now(UTC), account_id=None),
-    )
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-
-    agent = _make_agent(anthropic_id="ag_fallback_novault")
-    env = _make_env(anthropic_id="env_fallback_novault")
-    cred_bodies: list[dict[str, Any]] = []
-    session_bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _warm_vault_copilot_handler(
-            account_id=account_id,
-            agent_uuid=agent_uuid,
-            public_url=public_url,
-            credential_post_bodies=cred_bodies,
-            session_create_bodies=session_bodies,
-            session_id="sess_fallback_novault",
-        )
-    )
-
-    await create_session(
-        client,
-        agent=agent,
-        environment=env,
-        account_id=account_id,
-        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-        github_fallback_pat="ghp_operator_fallback",
-    )
-
-    assert len(cred_bodies) == 0, (
-        "the operator fallback PAT must never be mirrored into a per-agent Copilot vault "
-        "credential, even when a repo binding resolves it for the clone resource"
-    )
-    assert len(session_bodies) == 1, "the session is still created"
-    resources = _without_memory_resource(session_bodies[0].get("resources"))
-    assert resources == [
-        {
-            "type": "github_repository",
-            "url": "https://github.com/example-org/example-repo",
-            "authorization_token": "ghp_operator_fallback",
-            "checkout": {"type": "branch", "name": "main"},
-        }
-    ], "the clone resource still resolves via the fallback -- only the Copilot mirror is guarded"
-
-
-async def test_create_session_app_installation_token_wins_over_fallback_for_anon_binding(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An anon: (verified-public) binding with a configured GitHub App
-    installation AND a configured operator fallback must clone via the
-    installation token, not the fallback -- the App keeps winning. Regression
-    guard for the resolve_clone_token ordering (per_agent_pat -> App ->
-    fallback) now that get_pat can itself resolve a fallback: sessions.py
-    must keep passing per_agent_pat=None to resolve_clone_token so the App
-    branch is reached first, exactly as before this phase's changes. The
-    binding recorded a verified-public proof, which is what the fallback
-    tier requires (and the App tier accepts any recorded proof kind)."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    await _seed_anon_binding(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        proof=RepoAccessProof(kind="public", at=datetime.now(UTC), account_id=None),
-    )
-
-    agent = _make_agent(anthropic_id="ag_app_over_fallback")
-    env = _make_env(anthropic_id="env_app_over_fallback")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused",
-            session_id="sess_app_over_fallback",
-            session_create_bodies=bodies,
-        )
-    )
-
-    def github_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/example-org/example-repo/installation":
-            return httpx.Response(status_code=200, json={"id": 4242})
-        if request.url.path == "/app/installations/4242/access_tokens":
-            return httpx.Response(status_code=201, json={"token": "ghs_installation_wins"})
-        raise AssertionError(f"unexpected GitHub request: {request.method} {request.url}")
-
-    github_client = httpx.AsyncClient(transport=httpx.MockTransport(github_handler))
-
-    await create_session(
-        client,
-        agent=agent,
-        environment=env,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        github_fallback_pat="ghp_operator_fallback",
-        github_app_id="12345",
-        github_app_private_key=_generate_rsa_keypair(),
-        http_client=github_client,
-    )
-    await github_client.aclose()
-
-    assert len(bodies) == 1, "exactly one session-create call"
-    resources = _without_memory_resource(bodies[0].get("resources"))
-    assert resources == [
-        {
-            "type": "github_repository",
-            "url": "https://github.com/example-org/example-repo",
-            "authorization_token": "ghs_installation_wins",
-            "checkout": {"type": "branch", "name": "main"},
-        }
-    ], "the App installation token must win over a configured operator fallback"
 
 
 def _warm_vault_copilot_500_handler(
@@ -2225,291 +1697,13 @@ def _warm_vault_copilot_500_handler(
     return _handler
 
 
-async def test_create_session_degrades_when_copilot_credential_mount_fails(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """SYNC-04: a transient anthropic.APIError on the Copilot credential POST
-    must not raise out of create_session — the session is still created, and
-    a stable-keyed structured warning fires (the alerting pipeline keys off these)."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    account_id = uuid.UUID("00000000-0000-0000-0000-0000000000c2")
-    public_url = "https://mcp.example.com/mcp"
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_repo_binding_with_pat(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        fernet=fernet,
-        db_session_factory=db_session_factory,
-        plaintext_token="ghp_copilot_pat",
-    )
-
-    agent = _make_agent(anthropic_id="ag_copilot_fail")
-    env = _make_env(anthropic_id="env_copilot_fail")
-    session_bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _warm_vault_copilot_500_handler(
-            account_id=account_id,
-            agent_uuid=agent_uuid,
-            public_url=public_url,
-            session_create_bodies=session_bodies,
-            session_id="sess_copilot_fail",
-        )
-    )
-
-    import structlog.testing
-
-    with structlog.testing.capture_logs() as logs:
-        session = await create_session(
-            client,
-            agent=agent,
-            environment=env,
-            account_id=account_id,
-            mcp_settings=McpSettings(
-                jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)
-            ),
-            tenant_id=tenant.id,
-            agent_uuid=agent_uuid,
-            session_factory=db_session_factory,
-            fernet=fernet,
-        )
-
-    assert session is not None, "a transient Copilot-credential APIError must degrade, not raise"
-    assert len(session_bodies) == 1, "session-create must still happen after the degrade"
-    assert any(e.get("event") == "copilot_credential.mount_failed" for e in logs), (
-        "must emit the stable copilot_credential.mount_failed warning key"
-    )
-
-
 # --- Operator fallback PAT for public-repo clones (quick task 260616-45k) -----
-
-
-async def _seed_anon_binding(
-    db_session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_uuid: uuid.UUID,
-    repo_url: str = "https://github.com/example-org/example-repo",
-    default_branch: str = "main",
-    proof: RepoAccessProof | None = None,
-) -> None:
-    """Seed an ``anon:`` (public, no-PAT) repo binding with NO per-agent PAT.
-
-    ``proof`` defaults to None (a proof-NULL row) — callers whose scenario
-    relies on the App or fallback tier firing must pass the proof that tier
-    now requires.
-    """
-    await repo_binding_store.set_binding(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_uuid,
-        repo_url=repo_url,
-        default_branch=default_branch,
-        ma_secret_ref="anon:",
-        proof=proof,
-    )
-    await db_session.commit()
-
-
-async def _seed_inline_pat_binding(
-    db_session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_uuid: uuid.UUID,
-    repo_url: str = "https://github.com/example-org/private-repo",
-    default_branch: str = "main",
-    proof: RepoAccessProof | None = None,
-) -> None:
-    """Seed an ``inline-pat:`` (private) binding with NO resolvable per-agent PAT.
-
-    Models the guardrail case: a private binding whose per-agent credential is
-    absent. The fallback PAT must NEVER apply here. ``proof`` defaults to
-    None — callers whose scenario relies on the App tier firing must pass a
-    proof.
-    """
-    await repo_binding_store.set_binding(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_uuid,
-        repo_url=repo_url,
-        default_branch=default_branch,
-        ma_secret_ref=f"inline-pat:{agent_uuid}",
-        proof=proof,
-    )
-    await db_session.commit()
-
-
-async def test_create_session_uses_fallback_pat_for_anon_binding_without_per_agent_pat(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_anon_binding(
-        db_session,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        proof=RepoAccessProof(kind="public", at=datetime.now(UTC), account_id=None),
-    )
-
-    agent = _make_agent(anthropic_id="ag_fallback")
-    env = _make_env(anthropic_id="env_fallback")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_fallback", session_create_bodies=bodies
-        )
-    )
-
-    await create_session(
-        client,
-        agent=agent,
-        environment=env,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-        github_fallback_pat="ghp_operator_fallback",
-    )
-
-    assert len(bodies) == 1, "exactly one session-create call"
-    assert _without_memory_resource(bodies[0].get("resources")) == [
-        {
-            "type": "github_repository",
-            "url": "https://github.com/example-org/example-repo",
-            "authorization_token": "ghp_operator_fallback",
-            "checkout": {"type": "branch", "name": "main"},
-        }
-    ], "anon binding with no per-agent PAT must clone via the operator fallback PAT"
-
-
-async def test_create_session_fallback_not_used_for_inline_pat_binding(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """The guardrail (fallback PAT never clones a private binding) now surfaces
-    as a raise, not a silent omit (step 4 / C-03): a private (inline-pat:)
-    binding with no per-agent PAT, no App coverage, and no App creds configured
-    hits the fail-loud ``none`` branch even though an operator fallback PAT was
-    passed — the fallback only ever applies to ``anon:`` (public) bindings."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_inline_pat_binding(db_session, tenant_id=tenant.id, agent_uuid=agent_uuid)
-
-    agent = _make_agent(anthropic_id="ag_private")
-    env = _make_env(anthropic_id="env_private")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_private", session_create_bodies=bodies
-        )
-    )
-
-    with pytest.raises(DaimonError):
-        await create_session(
-            client,
-            agent=agent,
-            environment=env,
-            tenant_id=tenant.id,
-            agent_uuid=agent_uuid,
-            session_factory=db_session_factory,
-            fernet=fernet,
-            github_fallback_pat="ghp_operator_fallback",
-        )
-
-    assert len(bodies) == 0, (
-        "fallback PAT must never clone a private (inline-pat) binding — guardrail holds "
-        "via a raise, no session-create call happens"
-    )
-
-
-async def test_create_session_raises_when_binding_present_but_no_token(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Behavior change (step 4 / C-03): a binding exists but nothing
-    resolves a clone token (no per-agent PAT, no App creds, no fallback) —
-    resolve_clone_token raises instead of the old ``repo_clone.no_token``
-    warn-and-omit. No session-create call happens with an empty token."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_anon_binding(db_session, tenant_id=tenant.id, agent_uuid=agent_uuid)
-
-    agent = _make_agent(anthropic_id="ag_notoken")
-    env = _make_env(anthropic_id="env_notoken")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_notoken", session_create_bodies=bodies
-        )
-    )
-
-    with pytest.raises(DaimonError):
-        await create_session(
-            client,
-            agent=agent,
-            environment=env,
-            tenant_id=tenant.id,
-            agent_uuid=agent_uuid,
-            session_factory=db_session_factory,
-            fernet=fernet,
-            github_fallback_pat=None,  # no fallback configured
-        )
-
-    assert len(bodies) == 0, "no session-create call when the clone credential fails to resolve"
-
-
-async def test_create_session_raises_on_empty_fallback_pat_per_d02_behavior_change(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A blank DAIMON_GITHUB__FALLBACK_PAT ("" not None) must behave like "no
-    token" — without the guard it builds authorization_token="" and MA 400s.
-
-    Deliberate C-03 behavior change from earlier semantics: this
-    test used to assert the clone resource was silently omitted. The
-    step-4 "fail loudly" resolution order now makes resolve_clone_token raise
-    on this exact case (anon: binding, no per-agent PAT, no App coverage, and
-    an empty/falsy fallback PAT) instead of omitting the resource — a bound
-    repo with no resolvable credential is a hard failure, never a silent
-    no-clone."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await _seed_anon_binding(db_session, tenant_id=tenant.id, agent_uuid=agent_uuid)
-
-    agent = _make_agent(anthropic_id="ag_emptytok")
-    env = _make_env(anthropic_id="env_emptytok")
-    bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _files_and_session_handler(
-            file_id="file_unused", session_id="sess_emptytok", session_create_bodies=bodies
-        )
-    )
-
-    with pytest.raises(DaimonError):
-        await create_session(
-            client,
-            agent=agent,
-            environment=env,
-            tenant_id=tenant.id,
-            agent_uuid=agent_uuid,
-            session_factory=db_session_factory,
-            fernet=fernet,
-            github_fallback_pat="",  # blank fallback PAT must resolve to "no token" -> raise
-        )
-
-    assert len(bodies) == 0, "no session-create call when the clone credential fails to resolve"
 
 
 # --- Agent memory: per-agent memory store attach -----------------------------
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_attaches_memory_store(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -2559,6 +1753,7 @@ async def test_create_session_attaches_memory_store(
     assert memory_resources[0]["memory_store_id"] in mem_state.stores
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_degrades_when_memory_provisioning_fails(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -2649,6 +1844,7 @@ def _memory_mounts(body: dict[str, Any]) -> list[dict[str, Any]]:
     return [r for r in body.get("resources", []) if r.get("type") == "memory_store"]
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 @pytest.mark.parametrize("read_only", [False, True])
 async def test_personal_memory_mounts_the_callers_own_store_beside_the_shared_one(
     read_only: bool,
@@ -2700,6 +1896,7 @@ async def test_personal_memory_mounts_the_callers_own_store_beside_the_shared_on
     )
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_without_personal_memory_only_the_shared_store_is_mounted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -2727,6 +1924,7 @@ async def test_without_personal_memory_only_the_shared_store_is_mounted(
     assert len(mem_state.stores) == 1, "no personal store is provisioned"
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_a_personal_store_outage_degrades_to_shared_only(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -2913,10 +2111,11 @@ async def test_create_session_mirrors_agent_mcp_credential_for_a_caller_who_did_
         "mirroring must not disturb the caller's own daimon-mcp credential"
     )
     assert session_bodies[0].get("vault_ids") == ["vlt_caller"], (
-        "the mirrored cred rides the caller's own vault"
+        "the mirrored credential rides the caller's vault without an App grant"
     )
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_mirrors_nothing_when_agent_has_no_stored_mcp_credentials(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -3023,6 +2222,7 @@ def _agent_with_personal_server() -> BetaManagedAgentsAgent:
     )
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_leaves_off_a_server_only_another_member_signed_in_to(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -3083,6 +2283,7 @@ async def test_create_session_leaves_off_a_server_only_another_member_signed_in_
     )
 
 
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -3195,6 +2396,81 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
     assert not transport.requests and not transport.violations
 
 
+async def test_source_projection_requires_app_vault_only_for_a_live_grant(
+    db_preflight, db_nullpool_engine
+):
+    from daimon.core._models import TenantGitHubRepo
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import github_access, github_app_installations
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    agent = ma_agent(id="agent-source", tenant_id=str(tenant.id), name="source")
+    identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    scope = resource_scope(tenant_id=str(tenant.id), account_id=str(account.id))
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+
+    async def project():
+        return await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=identity,
+            account_id=account.id,
+            memory_read_only=False,
+            resource_scope=scope,
+        )
+
+    empty = await project()
+    assert not any(r.id.startswith("app-session-vault:") for r in empty.resource_requirements)
+    async with sessions.begin() as db:
+        await github_app_installations.upsert(
+            db, installation_id=77, account_login="example", repo_full_names=["example/widgets"]
+        )
+        db.add(
+            TenantGitHubRepo(
+                tenant_id=tenant.id,
+                repo_id=101,
+                owner_id=1,
+                installation_id=77,
+                repo_full_name="example/widgets",
+                max_access="read",
+                authorized_by_github_user_id=2,
+                status="active",
+                version=1,
+            )
+        )
+        await db.flush()
+        await github_access.stage_grant(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            repo_id=101,
+            baseline_access="read",
+            ceiling_access="read",
+            granted_by_account_id=None,
+        )
+    granted = await project()
+    assert any(r.id.startswith("app-session-vault:") for r in granted.resource_requirements)
+    assert [repo.repository_url for repo in granted.repository_sources] == [
+        "https://github.com/example/widgets"
+    ]
+
+
 @pytest.mark.parametrize(
     "changed", ["tenant", "identity", "version", "instructions", "archived_environment"]
 )
@@ -3278,22 +2554,11 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
             mcp_server_url="https://source.example.test",
             encrypted_token=b"private-ciphertext",
         )
-        await repo_binding_store.set_binding(
-            db,
-            tenant_id=tenant.id,
-            agent_id=identity,
-            repo_url="owner/source",
-            default_branch="work",
-            ma_secret_ref="owned-repo-credential",
-            proof=None,
-        )
 
     def no_secret_resolution(*args, **kwargs):
         raise AssertionError("projection tried to resolve or export a secret")
 
     monkeypatch.setattr("daimon.core.stores.agent_files.decode_value", no_secret_resolution)
-    monkeypatch.setattr("daimon.core.sessions.get_pat", no_secret_resolution)
-    monkeypatch.setattr("daimon.core.sessions.resolve_clone_token", no_secret_resolution)
     transport = ScriptedTransport()
     async with transport.client() as client:
         source = await load_backend_agent(
@@ -3314,166 +2579,21 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
                 public_url=HttpUrl("https://mcp.example.test/mcp"), jwt_secret=SecretStr("test-jwt")
             ),
         )
-    assert {resource.credential_ref for resource in projected.resource_requirements} == {
+    assert {
+        resource.credential_ref
+        for resource in projected.resource_requirements
+        if resource.credential_ref is not None
+    } == {
         f"agent-env:{tenant.id}:{identity}:SOURCE_KEY",
         f"agent-mcp:{credential.id}",
         f"caller-mcp:{tenant.id}:{account.id}:{identity}",
     }
-    assert projected.repository_sources[0].repository_url == "https://github.com/owner/source"
-    assert projected.repository_sources[0].ref == "work"
-    assert len(projected.resource_generations) == 3
+    assert projected.repository_sources == ()
+    assert len(projected.resource_generations) == 2
     for output in (repr(projected), projected.model_dump_json()):
         assert "private-env-value" not in output and "private-ciphertext" not in output
         assert "owned-repo-credential" not in output and "SOURCE_KEY" not in output
     assert not transport.requests and not transport.violations
-
-
-@pytest.mark.parametrize("app_mode", [False, True])
-@pytest.mark.parametrize("configured", [False, True])
-@pytest.mark.parametrize("crypto_available", [False, True])
-async def test_projection_uses_composer_vault_copilot_and_app_filters(
-    db_preflight, db_nullpool_engine, app_mode, configured, crypto_available, monkeypatch
-):
-    from daimon.core.channel_backend import load_backend_agent
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
-    from daimon.core.mux_backend import resource_scope
-    from daimon.core.sessions import project_session_resources
-    from daimon.core.stores import agent_mcp_credentials as credentials
-    from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
-
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
-    require_owned_sessionmaker(sessions)
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    async with sessions.begin() as db:
-        tenant = await make_tenant(db)
-        account = await make_account(db, tenant=tenant)
-        foreign = await make_tenant(db)
-        foreign_account = await make_account(db, tenant=foreign)
-        agent = ma_agent(id="agent-composer", tenant_id=str(tenant.id), name="source")
-        identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
-        db.add(
-            AgentGitHubMode(
-                tenant_id=tenant.id, agent_id=identity, mode="app" if app_mode else "legacy"
-            )
-        )
-        await github_binding_store.set_agent_github_binding(
-            db, agent_id=identity, principal_id=account.id
-        )
-        for key in ("GH_TOKEN", "GITHUB_TOKEN", "SOURCE_KEY"):
-            await put_agent_file(
-                db,
-                tenant_id=tenant.id,
-                agent_id=identity,
-                key=key,
-                content="private-env-value",
-                set_by_account_id=None,
-            )
-        copilot = await credentials.upsert_credential(
-            db,
-            tenant_id=tenant.id,
-            agent_id=identity,
-            mcp_server_url=GITHUB_COPILOT_MCP_URL,
-            encrypted_token=b"private-copilot",
-        )
-        external = await credentials.upsert_credential(
-            db,
-            tenant_id=tenant.id,
-            agent_id=identity,
-            mcp_server_url="https://external.example.test/mcp",
-            encrypted_token=b"private-external",
-        )
-        other = await credentials.upsert_credential(
-            db,
-            tenant_id=foreign.id,
-            agent_id=identity,
-            mcp_server_url="https://foreign.example.test/mcp",
-            encrypted_token=b"private-foreign",
-        )
-        await repo_binding_store.set_binding(
-            db,
-            tenant_id=tenant.id,
-            agent_id=identity,
-            repo_url="owner/legacy",
-            default_branch="work",
-            ma_secret_ref="owned-repo-credential",
-            proof=None,
-        )
-    await upsert_credential_encrypted(
-        sessionmaker=sessions,
-        fernet=fernet,
-        principal_id=account.id,
-        github_login="owned",
-        plaintext_token="private-owned-pat",
-        scopes=("repo",),
-    )
-    await upsert_credential_encrypted(
-        sessionmaker=sessions,
-        fernet=fernet,
-        principal_id=foreign_account.id,
-        github_login="foreign",
-        plaintext_token="private-foreign-pat",
-        scopes=("repo",),
-    )
-
-    def no_secret_or_materialization(*args, **kwargs):
-        raise AssertionError("projection resolved a secret or materialized a resource")
-
-    for path in (
-        "daimon.core.github_credentials.decrypt_token",
-        "daimon.core.stores.agent_files.decode_value",
-        "daimon.core.stores.github_credentials.get_credential_by_principal",
-        "daimon.core.stores.agent_mcp_credentials.list_credentials",
-        "daimon.core.sessions.create_session_vault",
-        "daimon.core.sessions.ensure_agent_mcp_vault",
-        "daimon.core.sessions.add_github_copilot_credential",
-        "daimon.core.sessions.prepare_app_access",
-        "daimon.core.sessions.resolve_clone_token",
-    ):
-        monkeypatch.setattr(path, no_secret_or_materialization)
-    mcp = McpSettings(
-        public_url=HttpUrl("https://mcp.example.test/mcp"),
-        jwt_secret=SecretStr("private-jwt") if configured else None,
-    )
-    transport = ScriptedTransport()
-    async with transport.client() as client:
-        source = await load_backend_agent(
-            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
-        )
-        projected = await project_session_resources(
-            source,
-            agent=agent,
-            environment=ma_environment(tenant_id=str(tenant.id)),
-            session_factory=sessions,
-            tenant_id=tenant.id,
-            agent_uuid=identity,
-            account_id=account.id,
-            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
-            memory_read_only=True,
-            mcp_settings=mcp,
-            fernet=fernet if crypto_available else None,
-        )
-    refs = {r.id for r in projected.resource_requirements}
-    assert (f"caller-mcp:{tenant.id}:{account.id}:{identity}" in refs) is configured
-    assert (f"app-session-vault:{tenant.id}:{identity}" in refs) is app_mode
-    assert ("github-copilot-mirror" in refs) is (configured and crypto_available and not app_mode)
-    assert (f"github-credential:{account.id}" in refs) is (crypto_available and not app_mode)
-    assert (f"agent-mcp:{copilot.id}" in refs) is (configured and crypto_available and not app_mode)
-    assert (f"agent-mcp:{external.id}" in refs) is (configured and crypto_available)
-    assert f"agent-mcp:{other.id}" not in refs
-    assert not any(str(foreign_account.id) in ref for ref in refs)
-    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
-        assert (f"agent-env:{tenant.id}:{identity}:{key}" in refs) is (not app_mode)
-    assert f"agent-env:{tenant.id}:{identity}:SOURCE_KEY" in refs
-    assert bool(projected.repository_sources) is (not app_mode)
-    if not app_mode:
-        assert projected.repository_sources[0].repository_url == "https://github.com/owner/legacy"
-    assert projected.memory_required is True
-    assert projected.memory_store_id is None
-    assert not transport.requests and not transport.violations
-    for output in (repr(projected), projected.model_dump_json()):
-        assert "private-" not in output and "owned-repo-credential" not in output
 
 
 async def worker_source_context(
@@ -3619,285 +2739,6 @@ async def worker_source_context(
         )
     assert captured.agent_id == derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=original.id)
     return sessions, tenant.id, account.id, original, environment, worker, projected
-
-
-@pytest.mark.parametrize(
-    "fault",
-    [
-        None,
-        "session",
-        "agent",
-        "environment",
-        "tenant",
-        "account",
-        "memory",
-        "access",
-        "instructions",
-        "missing_mount",
-        "duplicate_mount",
-        "environment_snapshot",
-        "row",
-        "memory_cleared_before_read",
-        "memory_rebound_before_read",
-        *(
-            f"{stage}_{field}"
-            for stage in ("ack", "get")
-            for field in (
-                "model",
-                "options",
-                "system",
-                "version",
-                "tools",
-                "mcp",
-                "skills",
-                "missing",
-            )
-        ),
-    ],
-)
-@pytest.mark.parametrize("native_budget", [None, Decimal("0.01")])
-async def test_worker_executes_new_agent_with_original_source_memory_and_resource_identity(
-    db_preflight, db_nullpool_engine, fault, native_budget
-):
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.mux_compat import create_agent
-    from daimon.core.stores.agent_memory_stores import get_memory_store_id
-    from daimon.testing.ma_transport import ScriptedTransport
-
-    (
-        sessions,
-        tenant_id,
-        account_id,
-        original,
-        environment,
-        worker,
-        source,
-    ) = await worker_source_context(db_nullpool_engine, warm=True, native_budget=native_budget)
-    executing = ma_agent(
-        id="actual-worker",
-        tenant_id=str(tenant_id),
-        name="worker",
-        model=worker.spec.model.id,
-        system=worker.spec.system,
-    )
-    transport = ScriptedTransport(router=None)
-    # Provisioning already ran through the real SDK/store; readback must preserve its mount.
-    from daimon.testing.ma import MARouter
-
-    router = MARouter()
-    snapshots = {}
-
-    def drift(raw, stage):
-        if fault == f"{stage}_budget":
-            raw["budget"]["max_list_cost"]["amount"] = "2"
-        if fault == f"{stage}_budget_missing":
-            raw.pop("budget")
-        if fault == f"{stage}_model":
-            raw["agent"]["model"]["id"] = "claude-opus-4-6"
-        elif fault == f"{stage}_options":
-            raw["agent"]["model"]["speed"] = "fast"
-        elif fault == f"{stage}_system":
-            raw["agent"]["system"] = "unapproved protected instructions"
-        elif fault == f"{stage}_version":
-            raw["agent"]["version"] = 99
-        elif fault == f"{stage}_tools":
-            raw["agent"]["tools"] = [{"type": "bash", "name": "bash"}]
-        elif fault == f"{stage}_mcp":
-            raw["agent"]["mcp_servers"] = [
-                {"type": "url", "name": "unapproved", "url": "https://unapproved.invalid/mcp"}
-            ]
-        elif fault == f"{stage}_skills":
-            raw["agent"]["skills"] = [{"type": "custom", "skill_id": "unapproved", "version": "1"}]
-        elif fault == f"{stage}_missing":
-            raw["agent"].pop("model")
-        return raw
-
-    def native(request, match):
-        if request.method == "POST":
-            body = json.loads(request.content)
-            if request.url.path == "/v1/agents":
-                return httpx.Response(
-                    200, json=executing.model_dump(mode="json", exclude_unset=True)
-                )
-            result = _session_create_handler()(request).json()
-            result.update(
-                agent=executing.model_dump(mode="json"),
-                metadata=body["metadata"],
-                resources=body["resources"],
-            )
-            if "budget" in body:
-                result["budget"] = body["budget"]
-            snapshots[result["id"]] = result
-            return httpx.Response(200, json=drift(json.loads(json.dumps(result)), "ack"))
-        if "/environments/" in request.url.path:
-            raw = environment.model_dump(mode="json", exclude_unset=True)
-            if fault == "environment_snapshot":
-                raw["description"] = "changed policy"
-            return httpx.Response(200, json=raw)
-        raw = json.loads(json.dumps(snapshots[request.url.path.rsplit("/", 1)[-1]]))
-        if fault == "session":
-            raw["id"] = "foreign-session"
-        elif fault == "agent":
-            raw["agent"]["id"] = "foreign-agent"
-        elif fault == "environment":
-            raw["environment_id"] = "foreign-environment"
-        elif fault == "tenant":
-            raw["metadata"]["daimon_tenant"] = str(uuid.uuid4())
-        elif fault == "account":
-            raw["metadata"]["daimon_account"] = str(uuid.uuid4())
-        elif fault == "memory":
-            raw["resources"][0]["memory_store_id"] = "foreign-memory"
-        elif fault == "access":
-            raw["resources"][0]["access"] = "read_write"
-        elif fault == "instructions":
-            raw["resources"][0]["instructions"] = "altered instructions"
-        elif fault == "missing_mount":
-            raw["resources"] = []
-        elif fault == "duplicate_mount":
-            raw["resources"] *= 2
-        return httpx.Response(200, json=drift(raw, "get"))
-
-    router.add("POST", r"/v1/agents", native)
-    router.add(
-        "POST",
-        r"/v1/sessions/[^/]+/archive",
-        lambda request, match: httpx.Response(
-            200,
-            json={
-                **snapshots[request.url.path.split("/")[-2]],
-                "archived_at": datetime.now(UTC).isoformat(),
-            },
-        ),
-    )
-    router.add("POST", r"/v1/sessions", native)
-    router.add("GET", r"/v1/sessions/.*", native)
-    router.add("GET", r"/v1/environments/.*", native)
-    transport.router = router
-    guards = []
-
-    async def fence():
-        guards.append("fresh")
-        if (
-            fault in ("memory_cleared_before_read", "memory_rebound_before_read")
-            and len(guards) == 1
-        ):
-            from daimon.core.stores.agent_memory_stores import (
-                clear_memory_store,
-                insert_memory_store,
-            )
-
-            async with sessions.begin() as db:
-                await clear_memory_store(db, tenant_id=tenant_id, agent_id=source.agent_id)
-                if fault == "memory_rebound_before_read":
-                    await insert_memory_store(
-                        db,
-                        tenant_id=tenant_id,
-                        agent_id=source.agent_id,
-                        memory_store_id="rebound-memory",
-                    )
-        if fault == "row" and len(guards) == 2:
-            from daimon.core.stores.agent_memory_stores import clear_memory_store
-
-            async with sessions.begin() as db:
-                await clear_memory_store(db, tenant_id=tenant_id, agent_id=source.agent_id)
-
-    async with transport.client() as client:
-        executing = await create_agent(
-            client, worker.spec, scope=worker.permissions.fleet.scope, key="warm-worker-agent"
-        )
-        if fault is not None:
-            from mux.errors import ScopeViolation
-
-            with pytest.raises(ScopeViolation):
-                await create_session(
-                    client,
-                    agent=executing,
-                    environment=environment,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    agent_uuid=source.agent_id,
-                    session_factory=sessions,
-                    resource_source=source,
-                    worker=worker,
-                    before_create=fence,
-                    memory_read_only=True,
-                )
-            expected_posts = (
-                0 if fault in ("memory_cleared_before_read", "memory_rebound_before_read") else 1
-            )
-            assert (
-                sum(request.path == "/v1/sessions" for request in transport.requests)
-                == expected_posts
-            )
-            assert not any("/memory_stores" in request.path for request in transport.requests)
-            assert sum(request.path.endswith("/archive") for request in transport.requests) == (
-                0
-                if fault
-                in {
-                    "session",
-                    "agent",
-                    "environment",
-                    "tenant",
-                    "account",
-                    "memory_cleared_before_read",
-                    "memory_rebound_before_read",
-                }
-                else 1
-            )
-            if expected_posts == 0:
-                async with sessions() as db:
-                    assert await get_memory_store_id(
-                        db, tenant_id=tenant_id, agent_id=source.agent_id
-                    ) == (None if fault == "memory_cleared_before_read" else "rebound-memory")
-            assert not any("/events" in request.path for request in transport.requests)
-            transport.assert_consumed()
-            return
-        created = await create_session(
-            client,
-            agent=executing,
-            environment=environment,
-            tenant_id=tenant_id,
-            account_id=account_id,
-            agent_uuid=source.agent_id,
-            session_factory=sessions,
-            resource_source=source,
-            worker=worker,
-            before_create=fence,
-            memory_read_only=True,
-        )
-    transport.assert_consumed()
-    assert created.agent.id == executing.id
-    session_request = next(
-        request.json() for request in transport.requests if request.path == "/v1/sessions"
-    )
-    assert session_request["agent"] == executing.id
-    if native_budget is not None:
-        assert worker.limits.max_turns == 1
-        assert (
-            worker.limits.deadline - datetime(2026, 10, 12, 18, tzinfo=UTC)
-        ).total_seconds() == 120
-        assert session_request["budget"] == {
-            "type": "limit",
-            "max_list_cost": {"amount": "1", "currency": "USD"},
-        }
-    else:
-        assert "budget" not in session_request
-    assert guards == ["fresh", "fresh", "fresh"]
-    async with sessions() as db:
-        source_memory = await get_memory_store_id(db, tenant_id=tenant_id, agent_id=source.agent_id)
-        assert source_memory is not None
-        assert (
-            await get_memory_store_id(
-                db,
-                tenant_id=tenant_id,
-                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=executing.id),
-            )
-            is None
-        )
-    mount = next(
-        resource for resource in session_request["resources"] if resource["type"] == "memory_store"
-    )
-    assert mount["memory_store_id"] == source_memory and mount["access"] == "read_only"
 
 
 @pytest.mark.parametrize(
@@ -4085,106 +2926,6 @@ async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
     assert trace.requests == []
 
 
-async def test_worker_never_silently_loses_retained_memory_on_materialization_failure(
-    db_preflight, db_nullpool_engine, monkeypatch
-):
-    from daimon.core.errors import StoreError
-    from daimon.testing.ma_transport import ScriptedTransport
-
-    (
-        sessions,
-        tenant_id,
-        account_id,
-        original,
-        environment,
-        worker,
-        source,
-    ) = await worker_source_context(db_nullpool_engine, warm=True)
-    executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
-
-    async def missing(*args, **kwargs):
-        raise StoreError("retained memory unavailable")
-
-    async def fence():
-        pass
-
-    monkeypatch.setattr("daimon.core.sessions.ensure_memory_store_and_mount", missing)
-    trace = ScriptedTransport()
-    async with trace.client() as client:
-        with pytest.raises(StoreError):
-            await create_session(
-                client,
-                agent=executing,
-                environment=environment,
-                tenant_id=tenant_id,
-                account_id=account_id,
-                agent_uuid=source.agent_id,
-                session_factory=sessions,
-                resource_source=source,
-                worker=worker,
-                before_create=fence,
-                memory_read_only=True,
-            )
-    assert trace.requests == []
-
-
-@pytest.mark.parametrize("custom", [False, True])
-async def test_actual_sdk_projected_worker_source_normalizes_represented_native_intent(
-    db_preflight, db_nullpool_engine, custom
-):
-    from dataclasses import replace
-
-    from daimon.core.neutral_resources import resolve_worker_spec
-    from daimon.core.turn.runtime_manifest import classify_source_obligations
-    from mux.contracts.resources import ToolSpec
-    from mux.drivers.anthropic.resources.agents import tool_payload
-
-    from .test_fleet_permissions import NOW, POLICY
-
-    tool = ToolSpec(
-        name="owned-helper",
-        kind="custom",
-        description="Owned helper",
-        input_schema={"type": "object"},
-    )
-    _, _, _, original, _, worker, captured = await worker_source_context(
-        db_nullpool_engine,
-        original_tools=(tool_payload(tool),) if custom else (),
-        granted_tools=(tool,) if custom else (),
-    )
-    root = replace(
-        worker.permissions,
-        fleet=replace(worker.permissions.fleet, depth=0),
-        agent_id=captured.agent_id,
-    )
-    namespaces = {item.namespace for item in captured.effective_spec.extensions}
-    assert namespaces == {
-        "anthropic.agent_tools",
-        "anthropic.model_config",
-        "anthropic.multiagent",
-        "anthropic.agent_create_nulls",
-    }
-    assert captured.source.native == original.model_dump(mode="json", exclude_unset=True)
-    requested = worker.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
-    result = resolve_worker_spec(root, requested, policy=POLICY, now=NOW, captured_source=captured)
-    assert result.spec.tools == ((tool,) if custom else ())
-    assert result.spec.system.count("Protected root instruction") == 1
-    assert not result.spec.extensions
-    assert result.environment is None
-    assert (
-        classify_source_obligations(
-            captured, result.spec, environment=result.environment, resources=result.resources
-        )
-        == frozenset()
-    )
-    assert (
-        result.digest
-        == resolve_worker_spec(
-            root, requested, policy=POLICY, now=NOW, captured_source=captured
-        ).digest
-    )
-
-
 @pytest.mark.parametrize(
     "failure", ["namespace", "model_option", "version", "tools", "memory", "sandbox"]
 )
@@ -4249,60 +2990,6 @@ async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
         resolve_worker_spec(root, requested, policy=POLICY, now=NOW, captured_source=captured)
 
 
-@pytest.mark.parametrize("network", ["unrestricted", "limited"])
-async def test_actual_sdk_source_explicit_cloud_policy_is_preserved_by_normalization(
-    db_preflight, db_nullpool_engine, network
-):
-    from dataclasses import replace
-
-    from daimon.core.neutral_resources import resolve_worker_spec
-    from daimon.core.turn.runtime_manifest import classify_source_obligations
-
-    from .test_fleet_permissions import NOW, POLICY
-
-    networking = {"type": network}
-    if network == "limited":
-        networking.update(
-            allowed_hosts=["pypi.org"], allow_mcp_servers=False, allow_package_managers=False
-        )
-    config = {
-        "type": "cloud",
-        "networking": networking,
-        "packages": {
-            "apt": ["git"],
-            "pip": ["pandas"],
-            "npm": [],
-            "cargo": [],
-            "gem": [],
-            "go": [],
-        },
-    }
-    _, _, _, _, environment, worker, captured = await worker_source_context(
-        db_nullpool_engine, environment_config=config
-    )
-    assert captured.environment.native == environment.model_dump(mode="json", exclude_unset=True)
-    projected = captured.environment.spec
-    assert projected.native_config is None
-    assert projected.network.mode == network
-    assert projected.packages == {"system": ("git",), "python": ("pandas",), "npm": ()}
-    assert projected.sources == ()
-    assert projected.metadata == environment.metadata
-    root = replace(
-        worker.permissions,
-        fleet=replace(worker.permissions.fleet, depth=0),
-        agent_id=captured.agent_id,
-        environment=projected,
-    )
-    requested = worker.spec.model_copy(update={"declared_drops": ("memory",)})
-    resolved = resolve_worker_spec(
-        root, requested, policy=POLICY, now=NOW, captured_source=captured
-    )
-    assert resolved.environment == projected
-    assert not classify_source_obligations(
-        captured, resolved.spec, environment=resolved.environment
-    )
-
-
 @pytest.mark.parametrize(
     "failure",
     [
@@ -4364,94 +3051,3 @@ async def test_source_environment_projection_retains_unrepresented_native_policy
     assert projected.native == environment.model_dump(mode="json", exclude_unset=True)
     transport.assert_consumed()
     assert [request.method for request in transport.requests] == ["GET"]
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [
-        None,
-        "missing_capture",
-        "missing_grant",
-        "foreign_account",
-        "unbound_account",
-        "foreign_tenant",
-        "capture_scope",
-        "stale_revision",
-    ],
-)
-async def test_actual_tenant_scoped_source_clone_requires_the_root_account_capture_and_pin(
-    db_preflight, db_nullpool_engine, failure
-):
-    from dataclasses import replace
-
-    from daimon.core.mux_backend import resource_scope
-    from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
-    from mux.contracts.resources import AgentPatch
-
-    from .test_fleet_permissions import NOW, POLICY
-
-    _, _, _, original, _, worker, captured = await worker_source_context(db_nullpool_engine)
-    actual = captured.source
-    assert actual.ref.account_id == resource_scope(tenant_id=actual.ref.tenant_id).account_id
-    assert actual.native == original.model_dump(mode="json", exclude_unset=True)
-    root = replace(
-        worker.permissions,
-        fleet=replace(worker.permissions.fleet, depth=0),
-        agent_id=captured.agent_id,
-        spec=worker.spec.model_copy(update={"metadata": actual.spec.metadata}),
-        source_agents=(actual.ref,),
-        source_revisions=((actual.ref, actual.revision),),
-    )
-    desired = root.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
-    if failure == "missing_capture":
-        captured = None
-    elif failure == "missing_grant":
-        root = replace(root, source_agents=())
-    elif failure in {"foreign_account", "unbound_account", "foreign_tenant"}:
-        ref = actual.ref.model_copy(
-            update={
-                "tenant_id" if failure == "foreign_tenant" else "account_id": None
-                if failure == "unbound_account"
-                else str(uuid.uuid4())
-            }
-        )
-        actual = actual.model_copy(update={"ref": ref})
-        captured = captured.model_copy(update={"source": actual})
-        root = replace(root, source_agents=(ref,), source_revisions=((ref, actual.revision),))
-    elif failure == "capture_scope":
-        captured = captured.model_copy(
-            update={
-                "resource_scope": captured.resource_scope.model_copy(
-                    update={"account_id": str(uuid.uuid4())}
-                )
-            }
-        )
-    elif failure == "stale_revision":
-        root = replace(root, source_revisions=())
-    kwargs = {
-        "policy": POLICY,
-        "now": NOW,
-        "captured_source": captured,
-        "overrides": AgentPatch.model_validate(desired.model_dump(mode="json")),
-    }
-    if failure is not None:
-        with pytest.raises(WorkerSpecRefused):
-            resolve_worker_spec(root, actual, **kwargs)
-        return
-    result = resolve_worker_spec(root, actual, **kwargs)
-    assert result.source_agent == (actual.ref, actual.revision)
-    assert result.source_agent[0] == actual.ref
-    assert result.permissions.fleet.scope.account_id == root.fleet.scope.account_id
-    assert result.spec.metadata == root.spec.metadata
-    assert result.digest == resolve_worker_spec(root, actual, **kwargs).digest
-
-
-@pytest.mark.parametrize(
-    "fault", ["ack_budget", "get_budget", "ack_budget_missing", "get_budget_missing"]
-)
-async def test_worker_budget_echo_mismatch_refuses_owned_session(
-    db_preflight, db_nullpool_engine, fault
-):
-    await test_worker_executes_new_agent_with_original_source_memory_and_resource_identity(
-        db_preflight, db_nullpool_engine, fault, Decimal("0.01")
-    )

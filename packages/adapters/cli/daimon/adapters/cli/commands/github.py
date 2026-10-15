@@ -5,7 +5,7 @@ from __future__ import annotations
 import getpass
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import httpx
 import typer
@@ -21,23 +21,20 @@ from daimon.core.github_app_session import (
     rotate_live_app_tokens,
 )
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.github_retirement import accepted_loss_agent_ids
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import archive_session
+from daimon.core.mux_compat import archive_session, delete_credential, list_credentials, list_vaults
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
-    activate_agent,
-    deactivate_agent,
-    get_agent_mode,
     list_agent_grants,
     remove_grant,
     stage_grant,
 )
 from daimon.core.stores.github_connect import (
-    activate_pending_agent,
     admin_account_for_platform_user,
     cli_account_id,
     mint_invitation,
@@ -50,19 +47,218 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
     record_app_token_refresh,
 )
+from mux.contracts.ids import Scope
 from rich.console import Console
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 github_app = typer.Typer(help="GitHub App connection commands.")
-grants_app = typer.Typer(help="Stage and activate agent GitHub grants.")
+grants_app = typer.Typer(help="Manage live agent GitHub grants.")
 github_app.add_typer(grants_app, name="grants")
 
 
-@github_app.command("finish-update")
-def finish_update(
-    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
-    agent: Annotated[uuid.UUID, typer.Option("--agent")],
-) -> None:
-    """Finish an operator-issued saved-key update after repo confirmation."""
+def _repo_name(url: str) -> str:
+    return (
+        url.removeprefix("https://github.com/")
+        .removeprefix("http://github.com/")
+        .removeprefix("github.com/")
+        .removesuffix(".git")
+        .rstrip("/")
+        .lower()
+    )
+
+
+async def preview_legacy_retirement(session: AsyncSession, console: Console) -> None:
+    """Show access and saved keys that the next migration will retire."""
+    accepted_loss_ids = accepted_loss_agent_ids()
+    if await session.scalar(text("SELECT to_regclass('agent_repo_binding')")) is None:
+        console.print("GitHub legacy tables have already been retired.")
+        return
+    staged = (
+        await session.execute(
+            text("""
+            SELECT tenant_id, agent_id, repo_id FROM agent_github_grants
+            WHERE staged ORDER BY tenant_id, agent_id, repo_id
+        """)
+        )
+    ).all()
+    counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    for tenant_id, agent_id, repo_id in staged:
+        key = (tenant_id, agent_id)
+        counts[key] = counts.get(key, 0) + 1
+        console.print(f"DELETE staged grant tenant={tenant_id} agent={agent_id} repo_id={repo_id}")
+    for (tenant_id, agent_id), count in sorted(counts.items()):
+        console.print(f"staged grants tenant={tenant_id} agent={agent_id}: {count}")
+    console.print(f"staged grants total: {len(staged)}")
+
+    rows = (
+        await session.execute(
+            text(r"""
+            WITH affected AS (
+                SELECT tenant_id, agent_id FROM agent_files
+                 WHERE key IN ('GH_TOKEN', 'GITHUB_TOKEN')
+                UNION SELECT tenant_id, agent_id FROM agent_repo_binding
+                UNION SELECT tenant_id, agent_id FROM agent_skill_repo_credentials
+                UNION SELECT m.tenant_id, b.agent_id FROM agent_github_binding b
+                  LEFT JOIN agent_github_mode m ON m.agent_id = b.agent_id
+            )
+            SELECT a.tenant_id, a.agent_id, b.repo_url,
+                EXISTS (SELECT 1 FROM agent_files f WHERE f.tenant_id=a.tenant_id
+                    AND f.agent_id=a.agent_id
+                    AND f.key IN ('GH_TOKEN','GITHUB_TOKEN')) AS saved_key,
+                EXISTS (SELECT 1 FROM agent_github_binding gb
+                    WHERE gb.agent_id=a.agent_id) AS github_binding,
+                EXISTS (SELECT 1 FROM agent_skill_repo_credentials sc
+                    WHERE sc.tenant_id=a.tenant_id AND sc.agent_id=a.agent_id) AS skill_binding,
+                COALESCE((SELECT r.repo_full_name FROM agent_github_grants g
+                    JOIN tenant_github_repos r USING (tenant_id, repo_id)
+                    WHERE g.tenant_id=a.tenant_id AND g.agent_id=a.agent_id
+                      AND g.is_working_repo AND NOT g.staged
+                      AND r.status='active'
+                      AND (r.scope_agent_id IS NULL OR r.scope_agent_id=a.agent_id)
+                    LIMIT 1), '') AS app_working_repo,
+                EXISTS (SELECT 1 FROM agent_github_grants g
+                    JOIN tenant_github_repos r USING (tenant_id, repo_id)
+                    WHERE g.tenant_id=a.tenant_id AND g.agent_id=a.agent_id
+                      AND NOT g.staged AND r.status='active'
+                      AND (r.scope_agent_id IS NULL OR r.scope_agent_id=a.agent_id)
+                      AND b.repo_url IS NOT NULL
+                      AND lower(r.repo_full_name)=lower(regexp_replace(
+                          regexp_replace(b.repo_url,
+                              '^(https://github\.com/|http://github\.com/|github\.com/)', ''),
+                          '(\.git)?/*$', ''))) AS binding_covered
+            FROM affected a LEFT JOIN agent_repo_binding b
+              ON b.tenant_id=a.tenant_id AND b.agent_id=a.agent_id
+            ORDER BY a.tenant_id, a.agent_id
+        """)
+        )
+    ).all()
+    failures: list[str] = []
+    for row in rows:
+        working = row.app_working_repo or row.repo_url or "none"
+        covered = bool(row.app_working_repo) or row.binding_covered
+        live_repo_rows = (
+            await session.execute(
+                text("""
+                    SELECT r.repo_full_name, g.repo_id FROM agent_github_grants g
+                    JOIN tenant_github_repos r USING (tenant_id, repo_id)
+                    WHERE g.tenant_id=:tenant AND g.agent_id=:agent
+                      AND NOT g.staged AND r.status='active'
+                      AND (r.scope_agent_id IS NULL OR r.scope_agent_id=:agent)
+                """),
+                {"tenant": row.tenant_id, "agent": row.agent_id},
+            )
+        ).all()
+        live_repo_names = {_repo_name(name) for name, _ in live_repo_rows}
+        working_repo_ids = {
+            repo_id for name, repo_id in live_repo_rows if _repo_name(name) == _repo_name(working)
+        }
+        skill_repos = list(
+            await session.scalars(
+                text("""
+                    SELECT repo_url FROM agent_skill_repo_credentials
+                    WHERE tenant_id=:tenant AND agent_id=:agent ORDER BY repo_url
+                """),
+                {"tenant": row.tenant_id, "agent": row.agent_id},
+            )
+        )
+        uncovered_skills = [repo for repo in skill_repos if _repo_name(repo) not in live_repo_names]
+        accepted_agent = row.agent_id in accepted_loss_ids
+        mode = await session.scalar(
+            text("""
+                SELECT mode FROM agent_github_mode
+                WHERE tenant_id=:tenant AND agent_id=:agent
+            """),
+            {"tenant": row.tenant_id, "agent": row.agent_id},
+        )
+        # A live session's snapshot says which credential path it uses. Match
+        # its MA agent ID through the same stable derivation as the runtime.
+        live_sessions = cast(
+            list[tuple[str | None, str, dict[str, object] | None]],
+            (
+                await session.execute(
+                    text("""
+                    SELECT ma_agent_id, ma_session_id, effective_config
+                    FROM thread_sessions WHERE tenant_id=:tenant AND status='live'
+                """),
+                    {"tenant": row.tenant_id},
+                )
+            ).all(),
+        )
+        own_sessions: list[tuple[str | None, str, dict[str, object] | None]] = []
+        if row.tenant_id is not None:
+            for ma_agent_id, ma_session_id, snapshot in live_sessions:
+                source_agent_id = ma_agent_id or (snapshot or {}).get("ma_agent_id")
+                if (
+                    isinstance(source_agent_id, str)
+                    and derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id=source_agent_id)
+                    == row.agent_id
+                ):
+                    own_sessions.append((ma_agent_id, ma_session_id, snapshot))
+        token_rows = (
+            await session.execute(
+                text("""
+                    SELECT session_id, repo_ids FROM github_issued_tokens
+                    WHERE tenant_id=:tenant AND agent_id=:agent
+                      AND status='delivered' AND expires_at > now()
+                """),
+                {"tenant": row.tenant_id, "agent": row.agent_id},
+            )
+        ).all()
+        token_sessions = {
+            token.session_id
+            for token in token_rows
+            if working_repo_ids.intersection(token.repo_ids)
+        }
+        app_token_sessions = sum(
+            1
+            for _, ma_session_id, snapshot in own_sessions
+            if snapshot is not None
+            and snapshot.get("github_mode") == "app"
+            and ma_session_id in token_sessions
+        )
+        session_source = (
+            "app"
+            if own_sessions and app_token_sessions == len(own_sessions)
+            else "no_live_sessions"
+            if not own_sessions
+            else "unverified"
+        )
+        loss = (
+            not covered or bool(uncovered_skills) or mode != "app" or session_source == "unverified"
+        )
+        if loss and not accepted_agent:
+            failures.append(
+                f"agent {row.agent_id}: working repo, skill repo, or App session access unverified"
+            )
+        note = (
+            f" accepted_loss=True expected_loss={_repo_name(row.repo_url or working)} "
+            "until reconnected"
+            if loss and accepted_agent
+            else ""
+        )
+        console.print(
+            f"RETIRE tenant={row.tenant_id} agent={row.agent_id} "
+            f"saved_key={row.saved_key} repo_binding={row.repo_url is not None} "
+            f"github_binding={row.github_binding} skill_binding={row.skill_binding} "
+            f"legacy_binding_repo={row.repo_url or 'none'} "
+            f"working_repo={working} live_app_grant_covers_working_repo={covered} "
+            f"skill_repo_coverage={len(skill_repos) - len(uncovered_skills)}/{len(skill_repos)} "
+            f"uncovered_skill_repos={uncovered_skills} "
+            f"app_mode={mode == 'app'} app_token_sessions={app_token_sessions}/{len(own_sessions)} "
+            f"session_gh_token_source={session_source} "
+            f"next_session_gh_token_source={'app' if covered else 'none'}{note}"
+        )
+    console.print(f"agents losing saved keys or bindings: {len(rows)}")
+    if failures:
+        for failure in failures:
+            console.print(f"STOP: {failure}")
+        raise RuntimeError("GitHub retirement would remove or cannot verify another agent's access")
+
+
+@github_app.command("retirement-preview")
+def retirement_preview() -> None:
+    """Dry-run the App-only migration against the current database."""
     settings = load_settings()
     console = Console(highlight=False)
 
@@ -70,18 +266,87 @@ def finish_update(
         engine = build_engine(str(settings.database.url))
         try:
             sessionmaker = build_session_factory(engine)
-            async with sessionmaker.begin() as session:
-                account_id = await cli_account_id(
-                    session, tenant_id=tenant, os_user=getpass.getuser()
-                )
-                if account_id is None:
-                    raise ValueError("current CLI user is not a workspace admin")
-                finished = await activate_pending_agent(
-                    session, tenant_id=tenant, agent_id=agent, account_id=account_id
-                )
-                if not finished:
-                    raise ValueError("No operator-issued GitHub update is waiting for this agent")
-            console.print("GitHub update finished. Open chats restart on the next turn.")
+            async with sessionmaker() as session:
+                await preview_legacy_retirement(session, console)
+        finally:
+            await engine.dispose()
+
+    run_cli(_run(), console=console)
+
+
+@github_app.command("cleanup-legacy-vault")
+def cleanup_legacy_vault(
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--apply", help="Preview or delete retired GitHub vault credentials."
+        ),
+    ] = True,
+) -> None:
+    """Delete only recorded legacy github.com repo credentials from MA vaults."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        engine = build_engine(str(settings.database.url))
+        try:
+            sessionmaker = build_session_factory(engine)
+            async with sessionmaker() as session:
+                pending = (
+                    await session.execute(
+                        text(
+                            "SELECT tenant_id, agent_id, credential_id "
+                            "FROM github_legacy_vault_cleanup "
+                            "WHERE deleted_at IS NULL ORDER BY tenant_id, agent_id, credential_id"
+                        )
+                    )
+                ).all()
+            console.print(f"{len(pending)} legacy credential reference(s) pending")
+            if not pending:
+                return
+            scope = Scope.legacy_host_authorized(call_site="cli.github.cleanup_legacy_vault")
+            async with AsyncAnthropic(
+                api_key=settings.anthropic.api_key.get_secret_value(),
+                base_url=str(settings.anthropic.base_url),
+            ) as anthropic:
+                vaults = [vault async for vault in list_vaults(anthropic, scope=scope)]
+                for tenant_id, agent_id, credential_id in pending:
+                    # MA vaults are account scoped; the derived agent UUID is
+                    # tenant scoped. Never search a different agent's vault.
+                    matches: list[str] = []
+                    for vault in vaults:
+                        if not vault.display_name.startswith(
+                            "daimon-mcp:"
+                        ) or not vault.display_name.endswith(f":{agent_id}"):
+                            continue
+                        async for credential in list_credentials(anthropic, vault.id, scope=scope):
+                            if credential.id != credential_id:
+                                continue
+                            url = getattr(credential.auth, "mcp_server_url", None)
+                            if url != "https://github.com":
+                                raise ValueError(
+                                    f"{credential_id} is not a legacy repo credential; "
+                                    "cleanup stopped"
+                                )
+                            matches.append(vault.id)
+                    console.print(
+                        f"{tenant_id} {agent_id} {credential_id}: "
+                        + (f"{len(matches)} vault(s)" if matches else "already absent")
+                    )
+                    if dry_run:
+                        continue
+                    for vault_id in matches:
+                        await delete_credential(anthropic, vault_id, credential_id, scope=scope)
+                    async with sessionmaker.begin() as session:
+                        await session.execute(
+                            text(
+                                "UPDATE github_legacy_vault_cleanup SET deleted_at = now() "
+                                "WHERE tenant_id = :tenant AND agent_id = :agent "
+                                "AND credential_id = :credential AND deleted_at IS NULL"
+                            ),
+                            {"tenant": tenant_id, "agent": agent_id, "credential": credential_id},
+                        )
+            console.print("Dry run complete." if dry_run else "Legacy vault cleanup complete.")
         finally:
             await engine.dispose()
 
@@ -105,7 +370,7 @@ def _grant_session_action(
     action: str, snapshot: SessionSnapshot | None, desired_urls: tuple[str, ...]
 ) -> Literal["rotate", "close"]:
     if (
-        action in ("stage", "remove")
+        action in ("add", "remove")
         and snapshot is not None
         and snapshot.github_mode == "app"
         and desired_urls == snapshot.repo_urls
@@ -145,7 +410,7 @@ def _run_grant_command(
                     or account.is_external
                 ):
                     raise ValueError("current CLI user is not a workspace admin")
-                if action == "stage":
+                if action == "add":
                     if repo is None:
                         raise ValueError("provide a repository ID")
                     result = await stage_grant(
@@ -158,7 +423,7 @@ def _run_grant_command(
                         granted_by_account_id=account_id,
                         is_working_repo=working,
                     )
-                    console.print(f"{'staged' if result.staged else 'updated'} {result.repo_id}")
+                    console.print(f"updated {result.repo_id}")
                 elif action == "remove":
                     if repo is None:
                         raise ValueError("provide a repository ID")
@@ -170,29 +435,11 @@ def _run_grant_command(
                         changed_by_account_id=account_id,
                     )
                     console.print("removed" if removed else "no grant found")
-                elif action == "activate":
-                    await activate_agent(
-                        session,
-                        tenant_id=tenant,
-                        agent_id=agent,
-                        changed_by_account_id=account_id,
-                    )
-                    console.print("app mode active")
-                elif action == "deactivate":
-                    await deactivate_agent(
-                        session,
-                        tenant_id=tenant,
-                        agent_id=agent,
-                        changed_by_account_id=account_id,
-                    )
-                    console.print("legacy mode active")
                 else:
                     rows = await list_agent_grants(session, tenant_id=tenant, agent_id=agent)
                     for row in rows:
-                        console.print(f"{row.repo_id} {'staged' if row.staged else 'live'}")
-            async with sessionmaker() as session:
-                app_mode = await get_agent_mode(session, tenant_id=tenant, agent_id=agent) == "app"
-            if action in ("activate", "deactivate") or (app_mode and action in ("stage", "remove")):
+                        console.print(f"{row.repo_id} live")
+            if action in ("add", "remove"):
                 async with sessionmaker() as session:
                     live = await list_live_sessions_for_agent(
                         session, tenant_id=tenant, agent_id=agent
@@ -214,7 +461,7 @@ def _run_grant_command(
                             if mapped.ma_session_id in rotated_ids:
                                 continue
                             if (
-                                action in ("stage", "remove")
+                                action in ("add", "remove")
                                 and snapshot is not None
                                 and snapshot.github_mode == "app"
                                 and snapshot.vault_id is not None
@@ -296,14 +543,14 @@ def _run_grant_command(
     run_cli(_run(), console=console)
 
 
-@grants_app.command("stage")
-def grants_stage(
+@grants_app.command("add")
+def grants_add(
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
     agent: Annotated[uuid.UUID, typer.Option("--agent")],
     repo: Annotated[int, typer.Option("--repo")],
     working: Annotated[bool, typer.Option("--working")] = False,
 ) -> None:
-    _run_grant_command(tenant, "stage", agent, repo=repo, working=working)
+    _run_grant_command(tenant, "add", agent, repo=repo, working=working)
 
 
 @grants_app.command("list")
@@ -321,22 +568,6 @@ def grants_remove(
     repo: Annotated[int, typer.Option("--repo")],
 ) -> None:
     _run_grant_command(tenant, "remove", agent, repo=repo)
-
-
-@grants_app.command("activate")
-def grants_activate(
-    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
-    agent: Annotated[uuid.UUID, typer.Option("--agent")],
-) -> None:
-    _run_grant_command(tenant, "activate", agent)
-
-
-@grants_app.command("deactivate")
-def grants_deactivate(
-    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
-    agent: Annotated[uuid.UUID, typer.Option("--agent")],
-) -> None:
-    _run_grant_command(tenant, "deactivate", agent)
 
 
 @github_app.command("connect-link")
