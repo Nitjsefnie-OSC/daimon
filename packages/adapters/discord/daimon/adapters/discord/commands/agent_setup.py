@@ -72,7 +72,7 @@ class AgentSetupCog(commands.Cog):
 
     @app_commands.command(
         name="agent-setup",
-        description="See your agents, who answers where, and make changes",
+        description="Your agents and where they answer",
     )
     @require_registered_guild
     async def agent_setup(

@@ -58,7 +58,7 @@ class DirectMessageCog(commands.Cog):
     def __init__(self, bot: DaimonBot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="dm", description="Continue this conversation privately")
+    @app_commands.command(name="dm", description="Continue privately (an admin turns it on)")
     @app_commands.guild_only()
     @require_registered_guild
     async def dm(

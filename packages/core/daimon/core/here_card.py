@@ -59,6 +59,7 @@ class CredentialStatus(BaseModel):
 
 class HereCard(BaseModel):
     model_config = ConfigDict(frozen=True)
+    platform: Platform = "discord"
     agent_name: str | None
     tier: str | None
     set_at: datetime | None = None
@@ -103,24 +104,39 @@ class HereCardPresentation(BaseModel):
 def render_here_card(card: HereCard) -> HereCardPresentation:
     """Choose the approved card copy from existing facts, in priority order."""
     name = " ".join((card.agent_name or "").split())[:100]
+    setup = "setup" if card.platform == "teams" else "/agent-setup"
     if card.bot_can_view is False:
         state, title, colour, subline = (
             "no_view",
-            "No channel access",
+            "Daimon isn't in this channel"
+            if card.platform == "slack"
+            else "Daimon can't see this channel",
             "#ED4245",
-            "Ask an admin to check Daimon's access.",
+            "Invite it with /invite."
+            if card.platform == "slack"
+            else "A server admin can let Daimon's role see it.",
         )
     elif card.effective_writers == "none":
-        state, title, colour, subline = "no_replies", "Replies disabled here", "#ED4245", None
+        state, title, colour, subline = (
+            "no_replies",
+            "Replies are off here",
+            "#ED4245",
+            f"An admin can turn them on in {setup}.",
+        )
     elif card.agent_name is None:
         state, title, colour, subline = (
             "no_agent",
-            "No agent selected",
+            "No agent answers here",
             "#95A5A6",
-            "Ask an admin: /agent-setup",
+            f"An admin can pick one in {setup}.",
         )
     elif card.agent_can_answer_here is False:
-        state, title, colour, subline = ("blocked", f"{name} can't answer here", "#F0B429", None)
+        state, title, colour, subline = (
+            "blocked",
+            f"{name} can't answer here",
+            "#F0B429",
+            f"An admin can change where it answers in {setup}.",
+        )
     elif card.tier == "thread":
         state, title, colour, subline = (
             "thread",
@@ -346,6 +362,7 @@ def assemble_here_card(
                         )
                     )
     card = HereCard(
+        platform=platform,
         agent_name=agent_name,
         tier=tier,
         set_at=set_at,

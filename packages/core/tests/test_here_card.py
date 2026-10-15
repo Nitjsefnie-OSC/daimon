@@ -34,20 +34,21 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
     [
         (
             "no_view",
-            ["No channel access", "Ask an admin to check Daimon's access."],
+            ["Daimon can't see this channel", "A server admin can let Daimon's role see it."],
         ),
         (
             "no_replies",
-            ["Replies disabled here"],
+            ["Replies are off here", "An admin can turn them on in /agent-setup."],
         ),
         (
             "no_agent",
-            ["No agent selected", "Ask an admin: /agent-setup"],
+            ["No agent answers here", "An admin can pick one in /agent-setup."],
         ),
         (
             "blocked",
             [
                 "ResearchBot can't answer here",
+                "An admin can change where it answers in /agent-setup.",
                 "Reading: Any conversation",
                 "Publishing: No approval",
             ],
@@ -91,6 +92,33 @@ def test_mcp_plain_text_states(state: str, expected_lines: list[str]) -> None:
     assert "ghp_fake_value" not in text
     assert "Channel setting. Threads can differ." not in text
     assert " · " not in text
+
+
+@pytest.mark.parametrize(
+    ("state", "subline"),
+    [
+        ("no_replies", "An admin can turn them on in setup."),
+        ("no_agent", "An admin can pick one in setup."),
+        ("blocked", "An admin can change where it answers in setup."),
+    ],
+)
+def test_teams_sublines_name_its_setup_command(state: str, subline: str) -> None:
+    card = HereCard(
+        channel_rule=ChannelRule(),
+        who_may_answer="",
+        reads_kept_inside=False,
+        agent_name=None if state == "no_agent" else "ResearchBot",
+        tier="channel",
+        bot_can_view=True,
+        effective_writers="none" if state == "no_replies" else "any",
+        agent_can_answer_here=state != "blocked",
+        effective_readers="any",
+        publishing_needs_approval=False,
+        bot_can_read_history=True,
+        platform="teams",
+        text="",
+    )
+    assert render_here_card_text(card).splitlines()[1] == subline
 
 
 def test_unknown_reading_publishing_and_history_drop_their_lines() -> None:
@@ -146,10 +174,10 @@ def test_status_uses_first_applicable_blocker() -> None:
         bot_can_read_history=False,
         text="",
     )
-    assert here_card_module.render_here_card(card).title == "No channel access"
+    assert here_card_module.render_here_card(card).title == "Daimon can't see this channel"
     assert (
         here_card_module.render_here_card(card.model_copy(update={"bot_can_view": True})).title
-        == "Replies disabled here"
+        == "Replies are off here"
     )
 
 
@@ -319,7 +347,7 @@ def test_stricter_thread_and_category_rules_are_shown() -> None:
     assert not card.agent_can_answer_here
     assert card.who_may_answer == "nobody"
     assert not card.memory_writable_here
-    assert card.text.startswith("Replies disabled here")
+    assert card.text.startswith("Replies are off here")
     assert "rule:" not in card.text
 
 

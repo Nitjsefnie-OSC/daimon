@@ -51,11 +51,15 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
         if not await handle_dm_notice(interaction, runtime):
             await handle_request_card(interaction, runtime)
 
-    @app_commands.command(name="home", description="GitHub repos and account status")
+    @app_commands.command(
+        name="home", description="Your repos, GitHub account and waiting requests"
+    )
     @require_registered_guild
     async def home(self, interaction: BotInteraction) -> None:
         if interaction.guild_id is None:
-            await interaction.response.send_message("GitHub is unavailable here.", ephemeral=True)
+            await interaction.response.send_message(
+                "GitHub only works in a server channel.", ephemeral=True
+            )
             return
         runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -87,13 +91,15 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
             await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
 
-    @app_commands.command(name="connect", description="Connect repos to one agent")
+    @app_commands.command(name="connect", description="Connect GitHub repos")
     @app_commands.describe(agent="Agent to connect")
     @require_registered_guild
     async def connect(self, interaction: BotInteraction, agent: str | None = None) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         if not is_guild_admin(interaction):
-            await interaction.followup.send("Ask an admin", ephemeral=True)
+            await interaction.followup.send(
+                "Only an admin can connect repos. Ask one to run /github.", ephemeral=True
+            )
             return
         runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
         root = runtime.settings.mcp.app_root_url
@@ -202,8 +208,8 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except ClientAgentConnectionError:
-            await interaction.followup.send(CLIENT_AGENT_MESSAGE, ephemeral=True)
+        except ClientAgentConnectionError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
         except (anthropic.APIError, discord.HTTPException, ValueError):
             await interaction.followup.send(
                 "GitHub setup is unavailable. Try again.", ephemeral=True

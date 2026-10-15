@@ -4635,9 +4635,10 @@
     }),
     'request_mcp_token': dict({
       'description': '''
-        Connect an agent such as research-bot to Linear or GitHub through an MCP
-        endpoint with a bearer token, not browser OAuth. For a server that only
-        signs people in through a browser (Notion, Slack, Atlassian) use
+        Connect an agent such as research-bot to Linear through an MCP endpoint
+        with a bearer token, not browser OAuth. GitHub repos use github_connect.
+        For a server that only signs people in through a browser (Notion, Slack,
+        Atlassian) use
         ``request_mcp_oauth`` instead; such servers reject a pasted key.
         Match supported authentication; an API key is not automatically an MCP token.
         <blank line>

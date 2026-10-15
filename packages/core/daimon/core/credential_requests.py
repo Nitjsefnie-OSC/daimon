@@ -184,8 +184,4 @@ def availability_for_request(row: CredentialRequestRow) -> ChangeAvailability:
 
 def mcp_permission_message(agent_name: str) -> str:
     """Shared permission wording for a refused MCP mint or new connection."""
-    return (
-        f"Changing '{agent_name}'s MCP connections needs a server or workspace admin, "
-        "or an admin of every channel named by its rule, with every use staying inside "
-        "those channels. The caller does not have that permission."
-    )
+    return f"Only an admin can add or change connections on '{agent_name}'."

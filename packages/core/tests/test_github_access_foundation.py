@@ -250,7 +250,7 @@ async def test_agent_cannot_grant_second_installation(db_session: AsyncSession) 
     )
     with pytest.raises(
         github_access.SecondInstallationError,
-        match="ResearchBot already uses repos from first. Connect repos from one GitHub org per agent.",
+        match="ResearchBot already uses repos from first. One agent can use one GitHub org. Use another agent for repos from a different org.",
     ):
         await github_access.stage_grant(
             db_session,

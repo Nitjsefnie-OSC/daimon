@@ -81,16 +81,16 @@ class TestBuildHelpView:
             "view must include the conversational group '💬 Or just ask'"
         )
 
-    def test_approved_command_list_has_no_blank_lines_or_dm(self) -> None:
+    def test_approved_command_list_includes_dm(self) -> None:
         content = _joined_content(build_help_view("Daimon"))
         commands = next(
             text
             for text in _collect_text_display_content(build_help_view())
-            if text.startswith("/agent-setup")
+            if text.startswith("/here")
         )
-        assert len(commands.splitlines()) == 9
+        assert len(commands.splitlines()) == 10
         assert all(line.startswith("/") for line in commands.splitlines())
-        assert "/dm" not in content
+        assert "/dm" in content
         assert "## 📖 Commands\n\n-# Only you can see this." in content
         assert "@Daimon help me set up" in content
 

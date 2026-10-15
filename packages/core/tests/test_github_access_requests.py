@@ -211,7 +211,7 @@ async def test_request_collects_repos_and_is_asker_bound(db_session: AsyncSessio
             ability="read",
             admin_status="unseen",
         ).text
-        == "No admin can see this channel. Ask an admin to open /github."
+        == "No admin can see this channel. Ask an admin to run /github."
     )
     assert (
         requester_card(
@@ -221,7 +221,7 @@ async def test_request_collects_repos_and_is_asker_bound(db_session: AsyncSessio
             ability="read",
             admin_status="recent",
         ).text
-        == "Admins were notified recently."
+        == "An admin was already asked. You'll see it here when it's done."
     )
     assert await record_delivery(
         db_session,

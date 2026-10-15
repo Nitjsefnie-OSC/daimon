@@ -40,10 +40,25 @@ def _card(state: str) -> HereCard:
 @pytest.mark.parametrize(
     ("state", "title", "colour", "subline"),
     [
-        ("no_view", "No channel access", 0xED4245, "Ask an admin to check Daimon's access."),
-        ("no_replies", "Replies disabled here", 0xED4245, None),
-        ("no_agent", "No agent selected", 0x95A5A6, "Ask an admin: /agent-setup"),
-        ("blocked", "ResearchBot can't answer here", 0xF0B429, None),
+        (
+            "no_view",
+            "Daimon can't see this channel",
+            0xED4245,
+            "A server admin can let Daimon's role see it.",
+        ),
+        (
+            "no_replies",
+            "Replies are off here",
+            0xED4245,
+            "An admin can turn them on in /agent-setup.",
+        ),
+        ("no_agent", "No agent answers here", 0x95A5A6, "An admin can pick one in /agent-setup."),
+        (
+            "blocked",
+            "ResearchBot can't answer here",
+            0xF0B429,
+            "An admin can change where it answers in /agent-setup.",
+        ),
         ("channel", "ResearchBot answers here", 0x2ECC71, None),
         ("thread", "ResearchBot answers in this thread", 0x2ECC71, None),
     ],

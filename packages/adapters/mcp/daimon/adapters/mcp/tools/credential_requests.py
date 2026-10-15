@@ -368,9 +368,9 @@ async def _require_mcp_replacement_allowed(
     )
     if decision.refused:
         raise ToolError(
-            f"{mcp_permission_message(ma_agent.name)} Nothing changed and "
-            f"no card was posted. Tell them an admin can ask Daimon to connect '{server_name}' on "
-            f"'{ma_agent.name}'. Do not retry under another name."
+            f"{mcp_permission_message(ma_agent.name)} Nothing changed and no card was posted. "
+            f"Tell the person in one line that an admin can say: connect {server_name} "
+            f"to {ma_agent.name}. Do not retry under another name."
         )
 
 
@@ -983,9 +983,10 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         expected_ma_agent_id: str,
         pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
     ) -> RequestCredentialResult:
-        """Connect an agent such as research-bot to Linear or GitHub through an MCP
-        endpoint with a bearer token, not browser OAuth. For a server that only
-        signs people in through a browser (Notion, Slack, Atlassian) use
+        """Connect an agent such as research-bot to Linear through an MCP endpoint
+        with a bearer token, not browser OAuth. GitHub repos use github_connect.
+        For a server that only signs people in through a browser (Notion, Slack,
+        Atlassian) use
         ``request_mcp_oauth`` instead; such servers reject a pasted key.
         Match supported authentication; an API key is not automatically an MCP token.
 

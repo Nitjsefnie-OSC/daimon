@@ -37,9 +37,10 @@ or self-host it from this repo.
   same thread. Sessions keep their context across turns.
 - **Runs on a schedule.** Routines run recurring analyses headlessly and post
   the results where you ask.
-- **Connects to your tools.** Ask it to connect Notion, Linear, GitHub or any
-  other MCP server. Token-based servers are shared per agent; OAuth servers
-  are connected per person.
+- **Connects to your tools.** Ask it to connect Notion, Linear or any other
+  MCP server. Token-based servers are shared per agent; OAuth servers are
+  connected per person. GitHub repos connect through the GitHub App: ask it
+  to connect GitHub, or run `/github`.
 - **Reachable from Claude Code.** The bundled [plugin](plugin/README.md)
   logs in through Slack or Discord OAuth and exposes every daimon you belong
   to as an MCP server.
@@ -48,9 +49,9 @@ or self-host it from this repo.
   it, each as an isolated tenant with its own agent, memory and data. On
   Teams, a deployment serves one Microsoft 365 organisation.
 
-Everything is done in conversation. Slash commands (`/agent-setup`,
-`/routines`, `/billing`, `/privacy`, `/help`) exist for people who prefer
-them; on Teams they are plain words (`setup`, `routines`, `help`) sent in a
+Everything is done in conversation. Slash commands (`/here`, `/agent-setup`,
+`/github`, `/routines`, `/billing`, `/privacy`, `/help`) exist for people who
+prefer them; on Teams they are plain words (`setup`, `routines`, `help`) sent in a
 1:1 chat with the bot.
 
 ## Example prompts

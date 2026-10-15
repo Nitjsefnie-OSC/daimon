@@ -20,4 +20,4 @@ def test_help_lists_registered_commands_on_consecutive_lines() -> None:
     assert len(commands.splitlines()) == 9
     assert all(line.startswith("/") for line in commands.splitlines())
     assert "/github connect" not in commands
-    assert "/github       Connect repos and choose which agents use them" in commands
+    assert "/github       Connect GitHub repos" in commands

@@ -164,7 +164,7 @@ class MemoryCog(commands.Cog):
 
     @app_commands.command(
         name="memory",
-        description="Show what this channel's agent remembers, or your own memory with it",
+        description="What the agent remembers",
     )
     @app_commands.describe(
         path=(

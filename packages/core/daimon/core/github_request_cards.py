@@ -36,15 +36,19 @@ def requester_card(
     if not asker_is_admin:
         if admin_status == "unseen":
             return RequestCard(
-                "No admin can see this channel. Ask an admin to open /github.",
+                "No admin can see this channel. Ask an admin to run /github.",
                 None,
                 ("Cancel request",),
             )
         if admin_status == "recent":
-            return RequestCard("Admins were notified recently.", None, ("Cancel request",))
+            return RequestCard(
+                "An admin was already asked. You'll see it here when it's done.",
+                None,
+                ("Cancel request",),
+            )
         if request.admin_notified_at is None:
             return RequestCard(
-                "Admin unavailable. Ask an admin to open `/github`.",
+                "No admin is available. Ask an admin to run /github.",
                 None,
                 ("Cancel request",),
             )

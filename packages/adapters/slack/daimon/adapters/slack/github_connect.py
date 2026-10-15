@@ -59,7 +59,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             await reply("Run /github connect [agent].")
             return
         if not await resolve_is_admin(client, user_id=user_id):
-            await reply("Ask an admin")
+            await reply("Only an admin can connect repos. Ask one to run /github.")
             return
         user_info = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]
         user = cast(dict[str, Any], user_info.get("user") or {})
@@ -180,8 +180,8 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             "Connect GitHub",
             attachments=[connect_attachment(f"{root}/oauth/github/connect/{token}", card=card)],
         )
-    except ClientAgentConnectionError:
-        await reply(CLIENT_AGENT_MESSAGE)
+    except ClientAgentConnectionError as exc:
+        await reply(str(exc))
     except (anthropic.APIError, SlackApiError, SQLAlchemyError, ValueError):
         log.exception("slack.github_connect.failed")
         await reply("GitHub setup is unavailable. Try again.")

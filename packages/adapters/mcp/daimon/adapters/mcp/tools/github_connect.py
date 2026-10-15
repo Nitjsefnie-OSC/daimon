@@ -42,7 +42,6 @@ from daimon.core.stores.github_access import (
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
 from daimon.core.stores.github_connect import (
-    CLIENT_AGENT_MESSAGE,
     ClientAgentConnectionError,
     create_discord_connect_intent,
     has_saved_github_state,
@@ -217,8 +216,8 @@ async def _github_connect_impl(
                 agent_name=agent.name,
                 switch_saved_key=True,
             )
-        except ClientAgentConnectionError:
-            return ConnectResult(status="client_agent", message=CLIENT_AGENT_MESSAGE)
+        except ClientAgentConnectionError as exc:
+            return ConnectResult(status="client_agent", message=str(exc))
         account = await get_account(session, auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
@@ -263,7 +262,14 @@ async def _github_connect_impl(
                 outcome="allowed",
                 reason="admin requested",
             )
-            return ConnectResult(status="ask_admin", message="Ask an admin")
+            repo_label = repo_name.strip() if repo_name else "GitHub"
+            return ConnectResult(
+                status="ask_admin",
+                message=(
+                    f"Only an admin can connect repos to {agent.name}. Tell the person in one "
+                    f"line to ask an admin to say here: connect {repo_label} to {agent.name}."
+                ),
+            )
         if repo_name is not None:
             requested_repo = repo_name.strip()
             if requested_repo.count("/") != 1 or any(c.isspace() for c in requested_repo):
