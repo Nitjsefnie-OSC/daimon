@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.resources import NetworkPolicy, ToolSpec
 
+AGENT_TOOLS_NAMESPACE = "anthropic.agent_tools"
+
 
 class NativeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -178,7 +180,7 @@ class MultiagentConfig(NativeConfig):
 
 
 def agent_tools(extension: ExtensionConfig) -> AgentToolsConfig:
-    if extension.namespace != "anthropic.agent_tools" or extension.version != 1:
+    if extension.namespace != AGENT_TOOLS_NAMESPACE or extension.version != 1:
         raise ValueError("expected anthropic.agent_tools@1")
     return AgentToolsConfig.model_validate(dict(extension.value))
 

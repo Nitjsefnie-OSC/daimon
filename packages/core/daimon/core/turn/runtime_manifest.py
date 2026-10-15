@@ -1276,26 +1276,26 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
 
 
 def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
-    """Normalize native toolsets once for fleet ceilings and native clones."""
-    from mux.drivers.anthropic.schemas import agent_tools
+    """Normalize native toolsets without changing unrelated field presence."""
+    from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
 
-    tools = spec.tools
+    updates: dict[str, object] = {}
     excluded: set[str] = set()
     retained: list[ExtensionConfig] = []
     for extension in spec.extensions or ():
-        if extension.namespace == "anthropic.agent_tools":
+        if extension.namespace == AGENT_TOOLS_NAMESPACE:
             native = agent_tools(extension)
-            tools = native.intent()
+            updates["tools"] = native.intent()
             excluded.update(native.excluded_mcp_servers())
         elif not _represented_source_extension(extension):
             retained.append(extension)
-    return spec.model_copy(
-        update={
-            "tools": tools,
-            "extensions": tuple(retained) or None,
-            "mcp_servers": tuple(s for s in spec.mcp_servers or () if s.name not in excluded),
-        }
-    ), frozenset(excluded)
+    if len(retained) != len(spec.extensions or ()):
+        updates["extensions"] = tuple(retained) or None
+    if any(server.name in excluded for server in spec.mcp_servers or ()):
+        updates["mcp_servers"] = tuple(
+            server for server in spec.mcp_servers or () if server.name not in excluded
+        )
+    return spec.model_copy(update=updates) if updates else spec, frozenset(excluded)
 
 
 def classify_source_obligations(
@@ -1321,12 +1321,12 @@ def classify_source_obligations(
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())
-    from mux.drivers.anthropic.schemas import agent_tools
+    from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
 
     for extension in spec.extensions or ():
         if extension.version != 1:
             missing.add("source_definition")
-        elif extension.namespace == "anthropic.agent_tools":
+        elif extension.namespace == AGENT_TOOLS_NAMESPACE:
             try:
                 native = agent_tools(extension)
             except ValueError:
