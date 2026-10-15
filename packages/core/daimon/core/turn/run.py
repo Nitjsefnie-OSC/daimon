@@ -51,7 +51,11 @@ from daimon.core.stores.thread_sessions import (
 )
 from daimon.core.tool_safety import trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
-from daimon.core.turn.approvals import chat_tool_confirmation
+from daimon.core.turn.approvals import (
+    agent_rule_lookup,
+    channel_for_tool_rules,
+    chat_tool_confirmation,
+)
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -945,6 +949,22 @@ async def run_prepared_turn_impl(
         trusted_servers=trusted_servers_for(deps.public_url),
         asks_before_publishing=prepared.admission.asks_before_publishing,
         confirmed_tools=confirmed_tools,
+        rules_for=(
+            agent_rule_lookup(
+                deps.sessionmaker,
+                tenant_id=tenant_id,
+                agent_id=str(prepared.admission.agent.id),
+                server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                channel_id=channel_for_tool_rules(
+                    platform=platform,
+                    channel_id=prepared.admission.origin_channel_id,
+                    private_dm_id=prepared.admission.private_dm_id,
+                ),
+            )
+            if getattr(deps.tool_safety, "enabled", False)
+            and getattr(deps.tool_safety, "agent_rules", False)
+            else None
+        ),
     )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the
