@@ -26,6 +26,9 @@ def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
     assert "The Connect GitHub page shows all of this agent's repos:" in setup
     assert "then select Save" in CREDENTIAL_GUIDANCE_BLOCK
     assert "In chat, make one change on a clear ask" in CREDENTIAL_GUIDANCE_BLOCK
+    flat = " ".join(CREDENTIAL_GUIDANCE_BLOCK.split())
+    assert "the page shows whether it is on this agent's list" in flat
+    assert "the GitHub account they signed in with can't open it" in flat
     assert "none" in setup
     assert "gh repo clone owner/repo" in cli_auth
     assert "Other repos granted to this agent" in cli_auth
