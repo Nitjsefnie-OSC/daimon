@@ -55,7 +55,12 @@ from .conftest import make_status_idle
 
 @pytest.fixture
 async def root_turn(
-    db_preflight, db_nullpool_engine, *, live_root=False, null_environment_description=False
+    db_preflight,
+    db_nullpool_engine,
+    *,
+    live_root=False,
+    null_environment_description=False,
+    resolved_model=False,
 ):
     sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
@@ -99,6 +104,16 @@ async def root_turn(
                 "version": 10,
             }
         )
+        if resolved_model:
+            native = native.model_copy(
+                update={
+                    "model": {
+                        "id": "claude-haiku-5-5",
+                        "speed": "standard",
+                        "effort": {"type": "medium"},
+                    }
+                }
+            )
         # Validate the actual readback shape before the router serves it.
         native = type(native).model_validate(native.model_dump(mode="json"))
         environment = BetaEnvironment.model_validate(
@@ -484,6 +499,20 @@ async def test_real_run_retains_root_before_native_input(root_turn):
     retained, _ = await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
     assert retained.fleet.root.thread_id == origin.thread_id
     assert any(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
+
+
+async def test_fresh_channel_admission_reaches_root_freeze(root_turn):
+    from daimon.core.authz import build_turn_place
+
+    deps, prepared, *rest = root_turn
+    grant = prepared.admission.grant
+    place = build_turn_place(channel_id=grant.channel_id, thread_id=None)
+    admission = replace(
+        prepared.admission,
+        grant=replace(grant, thread_id=None, turn_place=place, run_place=place),
+    )
+    value = (deps, replace(prepared, admission=admission), *rest)
+    await run_root_input(value)
 
 
 async def test_disabled_root_projection_does_not_read_or_write_a_carrier(root_turn):
@@ -1512,3 +1541,279 @@ async def test_retention_never_extends_existing_database_expiry(root_turn):
             await db.scalar(select(TurnOrigin.expires_at).where(TurnOrigin.id == origin.id))
             == earlier
         )
+
+
+@pytest.fixture
+async def recorded_fresh_root(db_preflight, db_nullpool_engine):
+    async for value in root_turn.__wrapped__(
+        db_preflight,
+        db_nullpool_engine,
+        live_root=True,
+        null_environment_description=True,
+        resolved_model=True,
+    ):
+        yield value
+
+
+@pytest.mark.parametrize("configured_channel", [False, True])
+@pytest.mark.parametrize("funded_root", [False, True])
+async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send(
+    recorded_fresh_root,
+    configured_channel,
+    funded_root,
+):
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.turn.admission import admit
+    from daimon.core.turn.prepare import bind_session_impl
+    from daimon.core.turn.runtime_manifest import read_frozen_preparation
+    from daimon.testing.ma import make_fake_memory_store_handler
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+
+    deps, original, _, _, _, _, old_binding, _ = recorded_fresh_root
+    tenant_id = original.admission.grant.tenant_id
+    native, environment = original.admission.agent, original.admission.environment
+    thread_id = "fresh-" + str(uuid4())
+    session_id = "fresh-native-" + str(uuid4())
+    channel_id = old_binding.thread.channel.channel_id
+    async with deps.sessionmaker.begin() as db:
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant_id,
+            delta_usd=Decimal("10"),
+            reason="test",
+            idempotency_key="fresh-credit:" + str(tenant_id),
+        )
+    if configured_channel:
+        from daimon.core.channel_backend import set_channel_backend
+
+        async with deps.sessionmaker.begin() as db:
+            await set_channel_backend(db, old_binding.thread.channel, BackendConfig())
+    if funded_root:
+        service = AgentBackendService(deps.sessionmaker, enabled=True)
+        source = original._source
+        value = await service.read_fleet_grant(tenant_id, source.agent_id, now=datetime.now(UTC))
+        value = value.model_copy(
+            update={
+                "native_root_budget_usd": Decimal("0.02"),
+                "root_cash_budget_usd": Decimal("0.06"),
+            }
+        )
+        preview = await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
+        await service.set_fleet_grant(
+            source,
+            value,
+            preview.setting_revision,
+            BackendActor(tenant_id, original.admission.account_id, Subject(is_admin=True)),
+            expected_preview_digest=preview.digest,
+            now=datetime.now(UTC),
+        )
+    router = MARouter()
+    router.add_agent(native)
+    router.add_agent_list(native)
+    router.add_environment(environment)
+    router.add_environment_list(environment)
+    memory = make_fake_memory_store_handler()
+    router.add("POST", r"/v1/memory_stores", lambda req, _: memory(req))
+    snapshot = ma_session(id=session_id, agent=native, environment_id=environment.id)
+    session_readback = snapshot.model_dump(mode="json")
+
+    def create_session(request, _match):
+        import json
+
+        submitted = json.loads(request.content)
+        for key in ("budget", "metadata", "resources"):
+            if key in submitted:
+                session_readback[key] = submitted[key]
+        return httpx.Response(200, json=session_readback)
+
+    router.add("POST", r"/v1/sessions", create_session)
+    router.add(
+        "GET", rf"/v1/sessions/{session_id}", lambda *_: httpx.Response(200, json=session_readback)
+    )
+    sent = asyncio.Event()
+
+    def send(_request, _match):
+        sent.set()
+        return send_events_response()
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await sent.wait()
+            yield sse_response(
+                [make_status_idle(event_id="fresh-idle").model_dump(mode="json")]
+            ).content
+
+    router.add("POST", rf"/v1/sessions/{session_id}/events", send)
+    router.add(
+        "GET",
+        rf"/v1/sessions/{session_id}/events",
+        lambda *_: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    router.add(
+        "GET",
+        rf"/v1/sessions/{session_id}/events/stream",
+        lambda *_: httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=Stream()
+        ),
+    )
+    transport = ScriptedTransport(router=router)
+    async with transport.client() as client:
+        deps = replace(
+            deps,
+            anthropic=client,
+            channel_backends=True,
+            agent_backends=True,
+            deployment_default=DeploymentDefault(
+                agent_name="root", environment_name=environment.metadata[MA_METADATA_KEY_NAME]
+            ),
+        )
+        admission = await admit(
+            deps,
+            tenant_id=tenant_id,
+            platform="discord",
+            external_user_id="requester",
+            channel_id=channel_id,
+            thread_id=None,
+            now=datetime.now(UTC),
+        )
+        assert admission.backend_revision_origin == ("channel" if configured_channel else None)
+        assert (admission.backend_revision is not None) == configured_channel
+        assert admission.grant.thread_id is None
+        async with deps.sessionmaker.begin() as db:
+            intent = await turn_card_intents.create_turn_card_intent(
+                db,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=channel_id,
+                thread_id=thread_id,
+                turn_token=uuid4(),
+            )
+        async with turn_origin(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform="discord",
+            parent_channel_id=channel_id,
+            thread_id=thread_id,
+            responder_ma_agent_id=native.id,
+            responder_name="root",
+            role=Role.USER,
+        ) as origin:
+            prepared = await bind_session_impl(
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                platform="discord",
+                external_user_id="requester",
+                thread_id=thread_id,
+                session_account_id=admission.account_id,
+                reuse_existing=False,
+                turn_card_intent_id=intent.id,
+            )
+            assert not prepared.reused and prepared.ma_session_id == session_id
+            lifecycle = RecordingLifecycle()
+
+            async def reseed():
+                return "fresh root input"
+
+            await run_prepared_turn(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform="discord",
+                thread_id=thread_id,
+                external_user_id="requester",
+                user_message="fresh root input",
+                lifecycle=lifecycle,
+                cancel=asyncio.Event(),
+                reseed_user_message=reseed,
+                recovery_lifecycle=lambda _: lifecycle,
+                turn_card_intent_id=intent.id,
+            )
+            assert sent.is_set()
+            scope = prepared._source.resource_scope
+            parent, _ = await read_frozen_root(
+                deps, scope, origin_id=origin.id, now=datetime.now(UTC)
+            )
+            async with deps.sessionmaker() as db:
+                record = await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id)
+            if configured_channel:
+                assert "default_backend_revision" not in record.result
+                assert record.result["preparation"]["admission"][
+                    "backend_revision"
+                ] == admission.backend_revision.model_dump(mode="json")
+            else:
+                assert record.result["default_backend_revision"] == ConfigRevision.create(
+                    parent.fleet.root.channel, 0, resolve_default(None)
+                ).model_dump(mode="json")
+            request = await read_frozen_preparation(
+                deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+            )
+            assert request.admission.agent.model == native.model
+            assert request.admission.backend_revision == admission.backend_revision
+            assert request.admission.backend_revision_origin == admission.backend_revision_origin
+            assert request.admission.grant.thread_id == thread_id
+
+
+@pytest.mark.parametrize("fault", ["missing", "digest", "origin"])
+async def test_default_root_refuses_changed_or_missing_retained_configuration(root_turn, fault):
+    import copy
+
+    from sqlalchemy import update
+
+    await freeze(root_turn)
+    deps, _, _, _, origin, scope, _, transport = root_turn
+    async with deps.sessionmaker.begin() as db:
+        operation = await db.scalar(
+            select(MuxOperation).where(
+                MuxOperation.tenant_id == origin.tenant_id,
+                MuxOperation.key == f"fleet_root:{origin.id}:root:0",
+            )
+        )
+        body = copy.deepcopy(operation.record)
+        if fault == "missing":
+            body["result"].pop("default_backend_revision")
+        elif fault == "digest":
+            body["result"]["default_backend_revision"]["digest"] = "changed"
+        else:
+            body["result"]["preparation"]["admission"]["backend_revision_origin"] = "agent"
+        await db.execute(
+            update(MuxOperation)
+            .where(
+                MuxOperation.tenant_id == operation.tenant_id,
+                MuxOperation.account_id == operation.account_id,
+                MuxOperation.key == operation.key,
+            )
+            .values(record=body)
+        )
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
+    assert len(transport.requests) == before
+
+
+async def test_fresh_root_rechecks_new_thread_policy_before_retaining_or_sending(root_turn):
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.authz import build_turn_place
+    from daimon.core.turn.errors import AdmissionDenied
+
+    deps, prepared, _, _, origin, _, _, transport = root_turn
+    place = build_turn_place(channel_id=prepared.admission.grant.channel_id, thread_id=None)
+    grant = replace(prepared.admission.grant, thread_id=None, turn_place=place, run_place=place)
+    prepared = replace(prepared, admission=replace(prepared.admission, grant=grant))
+    async with deps.sessionmaker.begin() as db:
+        await access_policy.set_access_policy(
+            db,
+            tenant_id=grant.tenant_id,
+            policy=POLICY.model_copy(
+                update={"channel_rules": {origin.thread_id: ChannelRule(writers="none")}}
+            ),
+        )
+    before = len(transport.requests)
+    with pytest.raises(AdmissionDenied):
+        await freeze((deps, prepared, *root_turn[2:]))
+    assert len(transport.requests) == before
+    async with deps.sessionmaker() as db:
+        assert await db.scalar(select(func.count()).select_from(FleetRun)) == 0

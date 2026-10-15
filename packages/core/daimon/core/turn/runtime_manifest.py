@@ -24,7 +24,7 @@ from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
-from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
+from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode, resolve_default
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, Scope
 from mux.contracts.profile import Capability
@@ -92,6 +92,9 @@ class _FrozenRoot(BaseModel):
     permissions: WorkerPermissions
     grant_epoch: int | None = Field(default=None, exclude_if=lambda value: value is None)
     grant_digest: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    default_backend_revision: ConfigRevision | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     root_controls: dict[str, JsonValue] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -227,6 +230,20 @@ async def _root_context(
                 )
             ):
                 raise WorkerSpecRefused("origin", "stale")
+    if root is not None and root.preparation is not None:
+        admission_facts = root.preparation.get("admission")
+        if isinstance(admission_facts, dict) and admission_facts.get("backend_revision") is None:
+            default = ConfigRevision.create(binding.thread.channel, 0, resolve_default(None))
+            if (
+                admission_facts.get("backend_revision_origin") is not None
+                or root.default_backend_revision != default
+                or binding.config_revision != default.local
+                or binding.provider != default.backend
+                or binding.profile != default.profile
+            ):
+                raise WorkerSpecRefused("origin", "stale")
+        elif root.default_backend_revision is not None:
+            raise WorkerSpecRefused("origin", "stale")
     if not (origin and intent and account and deps.state_store):
         raise WorkerSpecRefused("origin", "stale")
     if (
@@ -314,7 +331,7 @@ async def prepare_controlled_root(
     # default-backend literal here -- a second site would grow the provider
     # literal count outside the profile/driver seam (`test_provider_literal_ratchet`).
     profile = _admitted_profile(request.admission)
-    model = revision.model if revision else request.admission.agent.model.id
+    model = (revision.model if revision else None) or request.admission.agent.model.id
     origin_id = current_origin_id.get()
     if (
         (request.deps.turn_path or load_turn_settings().path) != "mux"
@@ -593,6 +610,47 @@ async def freeze_prepared_root(
     request = prepared._preparation  # pyright: ignore[reportPrivateUsage]
     if request is None or prepared.admission.backend_counterpart is not None:
         raise WorkerSpecRefused("origin", "unbound")
+    admission = prepared.admission
+    if grant.thread_id is None:
+        from daimon.core.turn.admission import reauthorize
+
+        # A channel mention is admitted before Discord acknowledges its new thread.
+        # Bind that grant only to this same-channel execution, then ask the existing
+        # policy owner again before retaining any authority for the thread.
+        if (
+            grant.is_dm
+            or request.reuse_existing
+            or grant.channel_id != binding.thread.channel.channel_id
+            or grant.run_place.channel_id != grant.channel_id
+            or grant.turn_place.channel_id != grant.channel_id
+        ):
+            raise WorkerSpecRefused("origin", "unbound")
+        grant = replace(
+            grant,
+            thread_id=binding.thread.thread_id,
+            turn_place=replace(
+                grant.turn_place,
+                channel_id=binding.thread.thread_id,
+                parent_channel_id=grant.channel_id,
+            ),
+            run_place=replace(
+                grant.run_place,
+                channel_id=binding.thread.thread_id,
+                parent_channel_id=grant.channel_id,
+            ),
+        )
+        admission = await reauthorize(deps, replace(admission, grant=grant))
+        if (
+            admission.memory_read_only != prepared.admission.memory_read_only
+            or admission.asks_before_publishing != prepared.admission.asks_before_publishing
+            or admission.origin_seal_ids != prepared.admission.origin_seal_ids
+        ):
+            raise WorkerSpecRefused("origin", "stale")
+    default_revision = None
+    if admission.backend_revision is None:
+        if admission.backend_revision_origin is not None:
+            raise WorkerSpecRefused("origin", "unbound")
+        default_revision = ConfigRevision.create(binding.thread.channel, 0, resolve_default(None))
     async with deps.sessionmaker() as db:
         policy = await load_access_policy(db, tenant_id=grant.tenant_id)
     if deps.fleet_root_grants is not None:
@@ -627,12 +685,13 @@ async def freeze_prepared_root(
         origin_id=origin_id,
         binding=binding,
         permissions=permissions,
+        default_backend_revision=default_revision,
         root_controls=request.root_controls,
         grant_epoch=value.epoch,
         grant_digest=request_digest(value.model_dump(mode="json")),
         preparation={
             "admission": {
-                name: adapter.dump_python(getattr(prepared.admission, name), mode="json")
+                name: adapter.dump_python(getattr(admission, name), mode="json")
                 for name, adapter in _ADMISSION_FACTS.items()
             },
             "source": source.source.model_dump(mode="json", exclude={"native"}),
