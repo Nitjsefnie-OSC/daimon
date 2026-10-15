@@ -127,7 +127,7 @@ class AgentToolsConfig(NativeConfig):
 
     tools: list[AgentTool]
 
-    def intent(self) -> tuple[ToolSpec, ...]:
+    def intent(self, *, exact: bool = False) -> tuple[ToolSpec, ...]:
         """Project every toolset with a complete neutral representation.
 
         A well-formed toolset with no neutral form (see `_toolset_intent`)
@@ -136,7 +136,13 @@ class AgentToolsConfig(NativeConfig):
         """
         result: list[ToolSpec] = []
         for tool in self.tools:
+            if exact and not isinstance(tool, CustomTool) and tool.configs is not None:
+                names = [config.name for config in tool.configs]
+                if len(names) != len(set(names)):
+                    raise ValueError("duplicate native tool configs cannot prove execution")
             projected = _toolset_intent(tool)
+            if exact and projected is None:
+                raise ValueError("native tools have no complete neutral representation")
             if projected is not None:
                 result.extend(projected)
         return tuple(result)

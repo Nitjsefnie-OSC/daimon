@@ -1351,7 +1351,11 @@ async def bind_session_impl(
         async def _native_worker() -> PreparedTurn:
             from daimon.core.turn.persistence import current_persistence
             from daimon.core.turn.runtime_manifest import capture_preparation_source, prepare_source
-            from mux.drivers.anthropic.resources.agents import agent_payload, agent_record
+            from mux.drivers.anthropic.resources.agents import (
+                agent_payload,
+                agent_record,
+                native_tools_match,
+            )
 
             persistence = current_persistence.get()
             if (
@@ -1417,7 +1421,10 @@ async def bind_session_impl(
                 observed.ref != allocated.ref
                 or observed.lifecycle != "active"
                 or observed.revision != allocated.revision
-                or any(actual.get(key) != value for key, value in expected.items())
+                or not native_tools_match(expected["tools"], actual.get("tools"))
+                or any(
+                    actual.get(key) != value for key, value in expected.items() if key != "tools"
+                )
                 or await recapture() != selected.source
             ):
                 raise AdmissionDenied(reason="backend_unsupported")
