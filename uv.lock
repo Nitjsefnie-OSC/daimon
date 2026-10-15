@@ -773,6 +773,7 @@ dependencies = [
     { name = "daimon-adapter-slack" },
     { name = "daimon-adapter-teams" },
     { name = "daimon-core" },
+    { name = "daimon-mux", extra = ["openai"] },
 ]
 
 [package.optional-dependencies]
@@ -811,6 +812,7 @@ requires-dist = [
     { name = "daimon-adapter-slack", editable = "packages/adapters/slack" },
     { name = "daimon-adapter-teams", editable = "packages/adapters/teams" },
     { name = "daimon-core", editable = "packages/core" },
+    { name = "daimon-mux", extras = ["openai"], editable = "packages/mux" },
 ]
 provides-extras = ["billing"]
 
