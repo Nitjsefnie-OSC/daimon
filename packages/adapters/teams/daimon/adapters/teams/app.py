@@ -1640,6 +1640,7 @@ class TeamsApp:
                     runtime=self.runtime,
                     tenant_id=tenant_id,
                     account_id=admission.account_id,
+                    admission=admission,
                     conversation_id=inbound.conversation_id,
                     service_url=inbound.service_url,
                     requester_display_name=inbound.user_name,

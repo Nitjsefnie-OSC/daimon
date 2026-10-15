@@ -1755,3 +1755,80 @@ async def test_wizard_origin_controls_the_actual_memory_mount(
     if sealed_id is not None:
         assert "mounted read-only" in memory["instructions"]
     assert stream_hits == ["ses_wizard_policy"]
+
+
+async def test_a_wizard_turns_backend_switch_card_captures_through_its_own_admission(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wizard-submitted turn's Confirm card reads the switched agent's source
+    as that turn's admitted caller, exactly like a mention turn's card. Built
+    without the admission, every backend-switch card refused `source_unavailable`.
+    """
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+    from daimon.core.errors import TurnError
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800011001")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=5011, parent_id=4011)
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=[])
+    runtime = _make_runtime(db_session_factory, router)
+    # Backend selection is on for the card hook (the turn deps were built before).
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    bot = _make_bot(runtime)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    services: list[Any] = []
+    real_callbacks = confirmation.backend_switch_callbacks
+
+    def spy_callbacks(service: Any, **kwargs: Any) -> Any:
+        services.append(service)
+        return real_callbacks(service, **kwargs)
+
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
+    captured = MagicMock(name="captured_source")
+    capture_backend_source = AsyncMock(return_value=captured)
+    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
+    outcome = RunOutcome(
+        state=TurnState(error=TurnError(kind="ceiling", message="stopped")),
+        ma_session_id="sess_wizard_card",
+        mapping_id=None,
+        recovered=False,
+    )
+    with (
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+        patch(
+            "daimon.adapters.discord.wizard_submit.run_prepared_turn",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ),
+    ):
+        mock_create_session.return_value = ma_session(
+            id="sess_wizard_card", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
+        )
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+    (service,) = services
+    source = MagicMock(name="source")
+    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
+    assert await capture(source) is captured
+    capture_backend_source.assert_awaited_once()
+    args, kwargs = capture_backend_source.await_args
+    assert args[1] is source
+    context = kwargs["context"]
+    async with db_session_factory() as session:
+        account = await get_account(session, account_id=context.account_id)
+    assert account is not None and account.tenant_id == tenant.id
+    assert (context.tenant_id, context.platform) == (tenant.id, "discord")
+    assert (context.channel_id, context.thread_id) == ("4011", "5011")
+    assert kwargs["subject"].platform_user_id == _REQUESTER_ID
+    assert kwargs["is_dm"] is False
