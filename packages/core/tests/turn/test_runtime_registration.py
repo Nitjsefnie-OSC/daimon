@@ -48,6 +48,38 @@ def installed_entry(monkeypatch, install):
     return entry
 
 
+def test_installed_conversation_profile_is_discoverable_in_a_cold_process():
+    code = """
+from importlib.metadata import entry_points
+from daimon.core.turn import runtimes
+from mux.profiles.openai import CONVERSATION_ONLY
+
+profile = CONVERSATION_ONLY.profile_id
+entries = entry_points(group="daimon.turn_runtimes", name=profile)
+assert len(entries) == 1, "Missing installed conversation profile; refresh package metadata with uv sync"
+assert not runtimes._RUNTIME_FACTORIES
+assert runtimes.ensure_channel_runtime(profile)
+registration = runtimes._RUNTIME_FACTORIES[profile]
+assert registration.authorizations is not None
+assert registration.tariffs is None
+"""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "PYTHONPATH"
+        and not key.startswith(("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_"))
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_default_profile_never_discovers_optional_distributions(registry, monkeypatch):
     def forbidden(**kwargs):
         raise AssertionError("default turn discovered provider distributions")
