@@ -573,7 +573,9 @@ async def test_client_pinned_agent_refuses_server_wide_repos(
         )
     )
     await db_session.flush()
-    with pytest.raises(github_connect.ClientAgentConnectionError, match="saved GitHub key"):
+    with pytest.raises(
+        github_connect.ClientAgentConnectionError, match="only works in some channels"
+    ):
         await github_connect.mint_invitation(
             db_session,
             tenant_id=tenant_id,
@@ -581,7 +583,9 @@ async def test_client_pinned_agent_refuses_server_wide_repos(
             agent_id=agent_id,
             agent_name="ClientBot",
         )
-    with pytest.raises(github_connect.ClientAgentConnectionError, match="saved GitHub key"):
+    with pytest.raises(
+        github_connect.ClientAgentConnectionError, match="only works in some channels"
+    ):
         await github_connect.activate_confirmed_agent(
             db_session,
             invitation=invitation,

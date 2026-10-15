@@ -171,7 +171,7 @@ async def test_request_card_stays_at_origin_without_dm(
     [
         ("An admin has been asked to allow GitHub access.", False, "An admin has been asked"),
         ("✓ Linked as @person", False, "✓ Linked as @person"),
-        ("Admin unavailable. Ask an admin to open /github.", False, "Admin unavailable"),
+        ("No admin is available. Ask an admin to run /github.", False, "No admin is available"),
         ("Let Bot use private/repo?", True, "GitHub request"),
         ("Let Bot use private/repo?", False, "Let Bot use private/repo?"),
     ],

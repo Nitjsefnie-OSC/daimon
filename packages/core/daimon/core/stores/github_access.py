@@ -440,7 +440,8 @@ async def stage_grant(
             org = other.repo_full_name.split("/", 1)[0]
             raise SecondInstallationError(
                 f"{agent_name or agent_id} already uses repos from {org}. "
-                "Connect repos from one GitHub org per agent."
+                "One agent can use one GitHub org. Use another agent for repos from a "
+                "different org."
             )
     baseline_access = "write"
     ceiling_access = "write"

@@ -46,7 +46,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-CLIENT_AGENT_MESSAGE = "This agent uses a saved GitHub key. Ask your Daimon operator to switch it."
+CLIENT_AGENT_MESSAGE = (
+    "This agent still uses an older GitHub setup. Ask whoever runs Daimon for this "
+    "server to move it to Connect GitHub."
+)
+CHANNEL_LIMITED_REPO_MESSAGE = (
+    "This agent only works in some channels, so it can't use the server's shared repos. "
+    "Ask whoever runs Daimon for this server to connect repos for it."
+)
 
 
 class ClientAgentConnectionError(ValueError):
@@ -75,7 +82,7 @@ async def require_app_eligible_agent(
         and rule.runs_in is not None
         and await uses_server_wide_repo(session, tenant_id=tenant_id, agent_id=agent_id)
     ):
-        raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
+        raise ClientAgentConnectionError(CHANNEL_LIMITED_REPO_MESSAGE)
     if await github_access.get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app":
         return
     if not switch_saved_key and await has_saved_github_state(

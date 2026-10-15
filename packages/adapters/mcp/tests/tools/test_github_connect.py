@@ -354,7 +354,10 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
     result = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, member, origin_context_id=str(uuid.uuid4())
     )
-    assert result.status == "ask_admin" and result.message == "Ask an admin"
+    assert result.status == "ask_admin" and result.message == (
+        "Only an admin can connect repos to ConnectedBot. Tell the person in one line to ask "
+        "an admin to say here: connect GitHub to ConnectedBot."
+    )
     delivery.assert_not_awaited()
     agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
     async with committing_sessionmaker() as session:
@@ -491,6 +494,10 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
         confirmed=True,
     )
     assert other_channel.status == "ask_admin"
+    assert other_channel.message == (
+        "Only an admin can connect repos to ConnectedBot. Tell the person in one line to ask "
+        "an admin to say here: connect owner/repo to ConnectedBot."
+    )
     async with committing_sessionmaker.begin() as session:
         await set_access_policy(
             session,
@@ -524,6 +531,7 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
         repo_name="owner/repo",
     )
     assert managed.status == "ask_admin"
+    assert managed.message == other_channel.message
     delivery.assert_not_awaited()
 
 

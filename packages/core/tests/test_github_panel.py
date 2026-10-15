@@ -134,7 +134,7 @@ async def test_panel_activation_refuses_saved_key(db_session: AsyncSession) -> N
         account_id=None,
         is_working_repo=True,
     )
-    with pytest.raises(ValueError, match="This agent uses a saved GitHub key"):
+    with pytest.raises(ValueError, match="This agent still uses an older GitHub setup"):
         await activate_grants(
             db_session,
             tenant_id=tenant_id,
@@ -300,7 +300,12 @@ async def test_panel_activation_refuses_each_saved_state(
         account_id=None,
         is_working_repo=False,
     )
-    with pytest.raises(ValueError, match="This agent uses a saved GitHub key"):
+    expected = (
+        "only works in some channels"
+        if saved_kind == "channel_pin"
+        else "still uses an older GitHub setup"
+    )
+    with pytest.raises(ValueError, match=expected):
         await activate_grants(
             db_session,
             tenant_id=tenant_id,
