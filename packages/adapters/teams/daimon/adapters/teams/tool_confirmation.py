@@ -288,8 +288,12 @@ class TeamsConfirmationCards:
                 posted_cards.append(posted)
                 return posted
 
+            async def retire(posted: _PostedCard, state: ConfirmationCardState) -> None:
+                posted.retired.set()
+                await self._edit(posted, state)
+
             result = await self._controls.confirm(
-                prompt, post=post, retire=self._edit, post_errors=TEAMS_SEND_ERRORS
+                prompt, post=post, retire=retire, post_errors=TEAMS_SEND_ERRORS
             )
             if result == "approved" and posted_cards:
                 answered_posted = posted_cards[0]

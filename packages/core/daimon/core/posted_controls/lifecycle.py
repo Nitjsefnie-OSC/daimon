@@ -199,9 +199,10 @@ class PostedConfirmations[Card: PromptCard]:
         try:
             answer = await self.pending.wait(token, future, timeout_s=timeout_s)
         except BaseException:
-            posted = self.cards.pop(token, None)
-            if posted is not None:
-                await retire(posted, "stopped")
+            self.cards.pop(token, None)
+            # A winning click pops the token before its waiter resumes. The
+            # posted card still needs Stopped if the turn is cancelled then.
+            await retire(posted, "stopped")
             raise
         posted = self.cards.pop(token, None)
         if answer == "expired" and posted is not None:

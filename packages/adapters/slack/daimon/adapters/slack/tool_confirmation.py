@@ -240,6 +240,7 @@ class SlackConfirmationCards:
                 return posted
 
             async def retire(posted: _PostedCard, state: ConfirmationCardState) -> None:
+                posted.retired.set()
                 await _edit(posted, state, answered_by=None)
 
             result = await self._controls.confirm(

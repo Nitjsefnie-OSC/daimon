@@ -864,6 +864,53 @@ async def test_blocked_always_save_does_not_block_retirement(
     assert client.chat_update.await_args.kwargs["text"].startswith("Stopped")
 
 
+async def test_turn_cancel_after_always_settle_keeps_stopped_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, approve_id = await _post(cards, client, prompt)
+    token = approve_id.split(":")[1]
+    posted = cards._controls.cards[token]
+    object.__setattr__(posted, "rule_factory", MagicMock())
+    object.__setattr__(
+        posted,
+        "rule_subject",
+        AsyncMock(return_value=Subject(is_admin=True, platform_user_id="U2")),
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_save(*_args: object, **_kwargs: object) -> str:
+        waiting.cancel()
+        entered.set()
+        await release.wait()
+        return "saved"
+
+    monkeypatch.setattr(confirmation_module, "save_always_allow", blocked_save)
+    click = asyncio.create_task(cards.handle_click(_click(f"dcf:{token}:always", "U2")))
+    await entered.wait()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert posted.retired.is_set()
+    release.set()
+    await click
+    assert await drain_card_edits(1) == 0
+    assert client.chat_update.await_args.kwargs["text"].startswith("Stopped")
+
+
 async def test_cancelled_retirement_wait_can_be_retried() -> None:
     cards = SlackConfirmationCards()
     client = _client()

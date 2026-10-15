@@ -419,6 +419,59 @@ async def test_blocked_always_save_does_not_block_retirement(
     assert "Stopped" in _json(sender, -1)
 
 
+async def test_turn_cancel_after_always_settle_keeps_stopped_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting = asyncio.create_task(
+        cards.hook(conversation_id=CONVERSATION_ID, service_url=SERVICE_URL)(prompt)
+    )
+    while not sender.sent:
+        await asyncio.sleep(0)
+    token_match = re.search(r'"token":"([^"]+)"', _json(sender, 0))
+    assert token_match is not None
+    token = token_match.group(1)
+    posted = cards._controls.cards[token]
+    object.__setattr__(posted, "rule_factory", MagicMock())
+    object.__setattr__(
+        posted,
+        "rule_subject",
+        AsyncMock(return_value=Subject(is_admin=True, platform_user_id=OTHER_AAD_OBJECT_ID)),
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_save(*_args: object, **_kwargs: object) -> str:
+        waiting.cancel()
+        entered.set()
+        await release.wait()
+        return "saved"
+
+    monkeypatch.setattr(confirmation_module, "save_always_allow", blocked_save)
+    await cards.on_action(_click(token, "always", OTHER_AAD_OBJECT_ID))
+    await entered.wait()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert posted.retired.is_set()
+    release.set()
+    await asyncio.gather(*cards._always_tasks)
+    assert await drain_card_edits(1) == 0
+    assert "Stopped" in _json(sender, -1)
+
+
 async def test_an_unanswered_card_expires_and_is_retired() -> None:
     sender = FakeSender()
     cards = TeamsConfirmationCards(sender)

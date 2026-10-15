@@ -17,6 +17,7 @@ import re
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
+from time import monotonic
 from typing import TYPE_CHECKING
 
 import structlog
@@ -68,6 +69,7 @@ log = structlog.get_logger(__name__)
 
 #: Most time a card edit may take while retiring it.
 RETIRE_TIMEOUT_S = 2.0
+INTERACTION_TOKEN_LIFETIME_S = 15 * 60
 
 
 def _body(card: ConfirmationCard) -> list[str]:
@@ -170,6 +172,7 @@ class _ConfirmationView(discord.ui.LayoutView):
         await self._settle(interaction, "denied")
 
     async def _on_always(self, interaction: discord.Interaction) -> None:
+        clicked_at = monotonic()
         reference = self._prompt.tool_rule
         clicker = str(interaction.user.id)
         if reference is None or self._rule_factory is None or self._rule_subject is None:
@@ -204,9 +207,15 @@ class _ConfirmationView(discord.ui.LayoutView):
             )
         except Exception:
             result = "failed"
-        if result == "saved" and not self.retired:
+        if (
+            result == "saved"
+            and not self.retired
+            and monotonic() - clicked_at < INTERACTION_TOKEN_LIFETIME_S
+        ):
             how: ConfirmationHow = "always" if scope == "agent" else "channel"
             self._queue_always_answer(interaction, clicker, how)
+        elif result == "saved" and not self.retired:
+            log.info("tool_confirmation.always_edit_token_expired")
         if result != "saved":
             await interaction.followup.send(
                 STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
@@ -391,6 +400,7 @@ def discord_confirmation_hook(
         view.card_key = ("discord", message.id)
 
         async def retire(state: ConfirmationCardState) -> None:
+            view.retired = True
             await _retire(message, prompt, state)
 
         result = await wait_local_confirmation(prompt, answer, stop=view.stop, retire=retire)
