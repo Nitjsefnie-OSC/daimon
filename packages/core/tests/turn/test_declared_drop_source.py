@@ -1,5 +1,8 @@
 """Switch previews use the worker preservation rule, without worker authority."""
 
+import json
+from pathlib import Path
+
 import pytest
 from daimon.core.turn.runtime_manifest import (
     classify_source_obligations,
@@ -403,3 +406,194 @@ def test_public_preview_refuses_unclosed_or_nondroppable_consent(preview, change
 def test_source_provider_identity_retains_its_full_existing_spec(captured):
     target = preview_source_drops(captured, captured.effective_spec.model)
     assert target == captured.effective_spec and target.declared_drops == ()
+
+
+def _daimon_mcp(captured, toolset=None, *, credential_ref=None):
+    """What every chat-enabled agent carries: the daimon-mcp server and its toolset."""
+    toolset = toolset or {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        "configs": [
+            {
+                "name": "request_agent_backend_switch",
+                "enabled": True,
+                "permission_policy": {"type": "always_ask"},
+            }
+        ],
+    }
+    spec = captured.effective_spec.model_copy(
+        update={
+            "mcp_servers": (
+                MCPConnection(
+                    name="daimon-mcp",
+                    url="https://mcp.invalid/mcp",
+                    credential_ref=credential_ref,
+                ),
+            ),
+            "extensions": (
+                *(captured.effective_spec.extensions or ()),
+                ExtensionConfig(
+                    namespace="anthropic.agent_tools", version=1, value={"tools": [toolset]}
+                ),
+            ),
+        }
+    )
+    return captured.model_copy(update={"effective_spec": spec})
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+)
+def test_daimon_mcp_toolset_is_a_declarable_loss(captured, provider, model):
+    source = _daimon_mcp(captured)
+    target = preview_source_drops(source, ModelRef(provider=provider, id=model))
+    assert target.declared_drops == ("mcp", "sandbox", "tools")
+    assert target.tools == target.mcp_servers == ()
+    assert classify_source_obligations(source, target, environment=None) == frozenset()
+    for kept, expected in (
+        ("tools", {"tools"}),
+        (("mcp",), {"mcp"}),  # declaring `tools` alone must never discharge `mcp`
+        (("mcp", "tools"), {"mcp", "tools"}),
+    ):
+        omitted = target.model_copy(
+            update={"declared_drops": tuple(d for d in target.declared_drops if d not in kept)}
+        )
+        assert classify_source_obligations(source, omitted, environment=None) == expected
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    ["toolset_field", "config_field", "policy_value", "toolset_type"],
+)
+def test_unclassified_daimon_mcp_toolset_still_refuses_as_source_definition(captured, unknown):
+    toolset = {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "configs": [{"name": "request_agent_backend_switch", "enabled": True}],
+    }
+    if unknown == "toolset_field":
+        toolset["future_execution_policy"] = {"requires_confirmation": True}
+    elif unknown == "config_field":
+        toolset["configs"][0]["future_execution_policy"] = {}
+    elif unknown == "policy_value":
+        toolset["default_config"] = {"permission_policy": {"type": "future_policy"}}
+    else:
+        toolset["type"] = "future_toolset"
+    source = _daimon_mcp(captured, toolset)
+    for provider, model in (("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")):
+        with pytest.raises(UnsupportedCapability) as refused:
+            preview_source_drops(source, ModelRef(provider=provider, id=model))
+        assert "source_definition" in refused.value.missing
+
+
+def test_daimon_mcp_credential_stays_nondroppable(captured):
+    source = _daimon_mcp(captured, credential_ref="vault:daimon-mcp")
+    with pytest.raises(UnsupportedCapability) as refused:
+        preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
+    assert "credentials" in refused.value.missing
+    assert "source_definition" not in refused.value.missing
+
+
+def _daimon_haiku55(captured):
+    """Recorded resolved builtin controls plus the daimon-mcp toolset."""
+    toolset = [
+        *json.loads(
+            (
+                Path(__file__).resolve().parents[3]
+                / "mux/tests/fixtures/anthropic_retrieved_builtin_tools.json"
+            ).read_text()
+        ),
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "daimon-mcp",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {
+                    "name": "request_agent_backend_switch",
+                    "enabled": True,
+                    "permission_policy": {"type": "always_ask"},
+                }
+            ],
+        },
+    ]
+    spec = captured.effective_spec.model_copy(
+        update={
+            "mcp_servers": (MCPConnection(name="daimon-mcp", url="https://mcp.invalid/mcp"),),
+            "extensions": (
+                *(captured.effective_spec.extensions or ()),
+                ExtensionConfig(
+                    namespace="anthropic.agent_tools", version=1, value={"tools": toolset}
+                ),
+            ),
+        }
+    )
+    return captured.model_copy(update={"effective_spec": spec})
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+)
+def test_daimon_haiku55_shape_declares_its_exact_loss_set_on_switch(captured, provider, model):
+    """The real root shape (agent_toolset_20260401 + daimon-mcp mcp_toolset) on
+    an actual provider switch: the environment/sandbox obligation that every
+    switch carries, the real attached mcp server, and the unrepresented
+    mcp_toolset all land in the declared set — nothing is silently dropped,
+    and nothing extra is required once all three are declared."""
+    source = _daimon_haiku55(captured)
+    target = preview_source_drops(source, ModelRef(provider=provider, id=model))
+    assert target.declared_drops == ("mcp", "sandbox", "tools")
+    assert target.tools == target.mcp_servers == ()
+    assert classify_source_obligations(source, target, environment=None) == frozenset()
+    for retained, expected in (
+        (("mcp", "sandbox"), {"tools"}),
+        (("sandbox", "tools"), {"mcp"}),
+        (("mcp", "tools"), {"environment"}),
+        ((), {"mcp", "environment", "tools"}),
+    ):
+        omitted = target.model_copy(update={"declared_drops": retained})
+        assert classify_source_obligations(source, omitted, environment=None) == expected
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+def test_represented_native_builtin_loss_requires_tools_even_on_the_same_provider(
+    captured, provider
+):
+    extension = ExtensionConfig(
+        namespace="anthropic.agent_tools",
+        version=1,
+        value={
+            "tools": [
+                {
+                    "type": "agent_toolset_20260401",
+                    "default_config": {
+                        "enabled": False,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [
+                        {
+                            "name": "read",
+                            "enabled": True,
+                            "permission_policy": {"type": "always_allow"},
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    source = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(
+                update={"extensions": (extension,)}
+            )
+        }
+    )
+    target = source.effective_spec.model_copy(
+        update={"model": ModelRef(provider=provider, id="target"), "extensions": None, "tools": ()}
+    )
+    assert "tools" in classify_source_obligations(source, target, environment=None)
+    retained = target.model_copy(update={"tools": (ToolSpec(name="read", kind="builtin"),)})
+    assert "tools" not in classify_source_obligations(source, retained, environment=None)
+    if provider == "anthropic":
+        native_retained = target.model_copy(update={"extensions": (extension,)})
+        assert "tools" not in classify_source_obligations(source, native_retained, environment=None)

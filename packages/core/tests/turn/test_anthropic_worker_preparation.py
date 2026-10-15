@@ -379,3 +379,55 @@ async def test_foreign_unproved_session_is_never_archived(native_worker):
             cancel=asyncio.Event(),
         )
     assert not any(call.path.endswith(("/archive", "/events")) for call in trace.requests)
+
+
+@pytest.mark.parametrize(
+    "native_worker", ["resolved_readback", "live_root_readback"], indirect=True
+)
+async def test_recorded_builtin_readback_passes_real_allocation_and_session_checks(native_worker):
+    from daimon.core.headless_runner import run_worker
+
+    request, root, claimed, trace, _ = native_worker
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Read the facts",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    allocated = next(
+        call.json()
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/agents"
+    )
+    tools = allocated["tools"]
+    assert tools[0]["default_config"]["enabled"] is False
+    assert {config["name"] for config in tools[0]["configs"]} == {
+        tool.name for tool in root.spec.tools
+    }
+    assert all(config["enabled"] for config in tools[0]["configs"])
+    assert len(allocated["skills"]) == 11 and not allocated.get("mcp_servers")
+    assert any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+    trace.assert_consumed()
+
+
+@pytest.mark.parametrize("native_worker", ["resolved_readback"], indirect=True)
+async def test_resolved_readback_widening_refuses_before_native_session_allocation(native_worker):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = "builtin_widening"
+    with pytest.raises(AdmissionDenied):
+        await run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Read the facts",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert any(call.method == "POST" and call.path == "/v1/agents" for call in trace.requests)
+    assert not any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
