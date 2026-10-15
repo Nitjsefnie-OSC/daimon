@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -27,6 +28,7 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     snapshot_tool_rule,
 )
 from daimon.core.stores import agent_tool_rules as store
+from daimon.testing.db import build_test_engine
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -273,6 +275,7 @@ async def test_committed_save_waits_for_ack_before_reporting_saved(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    db_schema: str,
 ) -> None:
     tenant = Tenant(platform="discord", external_id=str(uuid.uuid4()))
     db_session.add(tenant)
@@ -298,10 +301,11 @@ async def test_committed_save_waits_for_ack_before_reporting_saved(
             clicker="admin",
         )
     )
+    independent_engine = build_test_engine(os.environ["DAIMON_DATABASE__TEST_URL"], db_schema)
     try:
         await asyncio.wait_for(committed.wait(), 1)
         assert not save.done(), "the commit landed but its acknowledgement is delayed"
-        async with db_session_factory() as session:
+        async with async_sessionmaker(independent_engine)() as session:
             row = await store.get_rule(
                 session, tenant_id=tenant.id, agent_id="ma-1", tool_key="remote/append_note"
             )
@@ -312,5 +316,8 @@ async def test_committed_save_waits_for_ack_before_reporting_saved(
             )
             assert row is not None and row.rule == "allow" and count == 1
     finally:
-        release.set()
+        try:
+            await independent_engine.dispose()
+        finally:
+            release.set()
     assert await asyncio.wait_for(save, 1) == "saved"
