@@ -260,9 +260,6 @@ def snapshot_from_retrieved_session(
         env_file_id=None,
         repo_token_issued_at=repo_token_issued_at,
         vault_id=vault_id,
-        # A session without a persisted snapshot predates this mode marker.
-        # Treat its credential path as legacy so the next turn replaces it.
-        github_mode="legacy",
         personal_memory_store_ids=personal_memory_store_ids,
     )
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Iterable
+
+from daimon.core.ma_identity import derive_agent_uuid
 
 ACCEPTED_LOSS_ENV = "DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS"
 
@@ -38,18 +41,92 @@ RETIREMENT_LIVE_GRANTS_SQL = """
       AND r.repo_full_name = ANY(i.repo_full_names)
 """
 
-# The migration and operator preview must use the same loss predicate.
-# A live session's snapshot and short-lived token inventory
-# are deliberately absent: the new worker replaces legacy sessions and renews
-# App tokens from these live grants at the next turn boundary.
-RETIREMENT_LOSS_SQL = f"""
-    WITH affected AS (
-        SELECT tenant_id, agent_id FROM agent_files
+# Use the same credential inventory for the loss guard and the sessions that
+# must stop carrying retired credentials. A binding has no tenant column; its
+# owner is resolved only from a scoped row or an exact known live session.
+RETIREMENT_AFFECTED_AGENTS_SQL = """
+    SELECT tenant_id, agent_id FROM agent_files
+      WHERE key IN ('GH_TOKEN', 'GITHUB_TOKEN')
+    UNION SELECT tenant_id, agent_id FROM agent_repo_binding
+    UNION SELECT tenant_id, agent_id FROM agent_skill_repo_credentials
+    UNION SELECT m.tenant_id, b.agent_id FROM agent_github_binding b
+      LEFT JOIN agent_github_mode m ON m.agent_id=b.agent_id
+"""
+
+# Each tenant-scoped source contributes independently for an affected agent.
+# In particular, mode and grant rows must be considered even without a legacy
+# binding; a disagreement is unsafe to resolve by choosing either tenant.
+RETIREMENT_TENANT_EVIDENCE_SQL = f"""
+    WITH scoped AS (
+        SELECT tenant_id, agent_id FROM agent_github_mode
+        UNION SELECT tenant_id, agent_id FROM agent_files
           WHERE key IN ('GH_TOKEN', 'GITHUB_TOKEN')
         UNION SELECT tenant_id, agent_id FROM agent_repo_binding
         UNION SELECT tenant_id, agent_id FROM agent_skill_repo_credentials
-        UNION SELECT m.tenant_id, b.agent_id FROM agent_github_binding b
-          LEFT JOIN agent_github_mode m ON m.agent_id=b.agent_id
+        UNION SELECT tenant_id, agent_id FROM agent_github_grants
+    ), affected_agents AS (
+        SELECT DISTINCT agent_id FROM ({RETIREMENT_AFFECTED_AGENTS_SQL}) a
+    )
+    SELECT scoped.tenant_id, scoped.agent_id
+    FROM scoped JOIN affected_agents USING (agent_id)
+"""
+
+RETIREMENT_LIVE_SESSIONS_SQL = """
+    SELECT id, tenant_id, ma_agent_id FROM thread_sessions WHERE status = 'live'
+"""
+
+RETIREMENT_POST_MARK_TURNS_SQL = """
+    SELECT a.thread_session_id, a.ma_session_id, a.marked_at,
+           o.id AS turn_outcome_id, o.started_at, o.reason
+    FROM github_retirement_session_audit AS a
+    JOIN turn_outcomes AS o
+      ON o.session_id = a.ma_session_id AND o.started_at > a.marked_at
+    ORDER BY a.thread_session_id, o.started_at
+"""
+
+RETIREMENT_PENDING_SESSIONS_SQL = """
+    SELECT a.thread_session_id, a.ma_session_id, a.marked_at
+    FROM github_retirement_session_audit AS a
+    JOIN thread_sessions AS s ON s.id = a.thread_session_id
+    WHERE s.status = 'live' AND s.ma_session_id = a.ma_session_id
+    ORDER BY a.thread_session_id
+"""
+
+
+def resolve_retirement_tenants(
+    affected: Iterable[tuple[uuid.UUID | None, uuid.UUID]],
+    scoped_evidence: Iterable[tuple[uuid.UUID, uuid.UUID]],
+    live_sessions: Iterable[tuple[uuid.UUID, str | None]],
+) -> tuple[dict[uuid.UUID, uuid.UUID], set[uuid.UUID]]:
+    """Resolve every retired credential to one tenant, or report its agent UUID."""
+    candidates: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for tenant_id, agent_id in affected:
+        tenants = candidates.setdefault(agent_id, set())
+        if tenant_id is not None:
+            tenants.add(tenant_id)
+    for tenant_id, agent_id in scoped_evidence:
+        if agent_id in candidates:
+            candidates[agent_id].add(tenant_id)
+    for tenant_id, ma_agent_id in live_sessions:
+        if ma_agent_id is None:
+            continue
+        agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+        if agent_id in candidates:
+            candidates[agent_id].add(tenant_id)
+    resolved = {
+        agent: next(iter(tenants)) for agent, tenants in candidates.items() if len(tenants) == 1
+    }
+    unresolved = {agent for agent, tenants in candidates.items() if len(tenants) != 1}
+    return resolved, unresolved
+
+
+# The migration and operator preview must use the same loss predicate.
+# A live session's snapshot and short-lived token inventory are deliberately
+# absent: marked legacy-credential sessions start fresh, while other App
+# sessions renew tokens from live grants at the next turn boundary.
+RETIREMENT_LOSS_SQL = f"""
+    WITH affected AS (
+        {RETIREMENT_AFFECTED_AGENTS_SQL}
     ), live_grants AS (
         {RETIREMENT_LIVE_GRANTS_SQL}
     )

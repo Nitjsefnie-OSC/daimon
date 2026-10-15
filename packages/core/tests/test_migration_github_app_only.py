@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,7 +13,12 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.adapters.cli.commands.github import preview_legacy_retirement
 from daimon.core._models import AgentGitHubGrant
-from daimon.core.github_retirement import RETIREMENT_LOSS_SQL, accepted_loss_agent_ids
+from daimon.core.github_retirement import (
+    RETIREMENT_LOSS_SQL,
+    RETIREMENT_PENDING_SESSIONS_SQL,
+    RETIREMENT_POST_MARK_TURNS_SQL,
+    accepted_loss_agent_ids,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.github_access import (
     list_agent_grants,
@@ -589,7 +594,7 @@ async def test_retire_legacy_rows_and_keep_grants(
             """),
             peer,
         )
-    # A live grant can exist without a legacy mode row. Phase 1 must add one
+    # A live grant can exist without a legacy mode row. The expand migration must add one
     # so an old worker does not re-stage that grant during the rollout.
     await db_session.execute(
         text("""
@@ -674,6 +679,14 @@ async def test_retire_legacy_rows_and_keep_grants(
     with pytest.raises(RuntimeError, match="retire unapproved access"):
         await conn.run_sync(upgrade)
     assert await _legacy_counts(db_session) == before_working_loss
+    assert (
+        await db_session.scalar(
+            text(
+                "SELECT fresh_start_requested_at FROM thread_sessions WHERE ma_session_id='session-app'"
+            )
+        )
+        is None
+    )
     await db_session.execute(
         text("DELETE FROM agent_repo_binding WHERE agent_id=:agent"),
         {"agent": other_agent},
@@ -695,6 +708,14 @@ async def test_retire_legacy_rows_and_keep_grants(
     with pytest.raises(RuntimeError, match="retire unapproved access"):
         await conn.run_sync(upgrade)
     assert await _legacy_counts(db_session) == before_rejected_upgrade
+    assert (
+        await db_session.scalar(
+            text(
+                "SELECT fresh_start_requested_at FROM thread_sessions WHERE ma_session_id='session-app'"
+            )
+        )
+        is None
+    )
     assert (
         await db_session.scalar(
             text("SELECT count(*) FROM agent_github_grants WHERE agent_id=:agent AND staged"),
@@ -733,6 +754,14 @@ async def test_retire_legacy_rows_and_keep_grants(
         text("DELETE FROM agent_skill_repo_credentials WHERE ma_secret_ref='cred_private'")
     )
     await conn.run_sync(upgrade)
+    assert (
+        await db_session.scalar(
+            text(
+                "SELECT fresh_start_requested_at FROM thread_sessions WHERE ma_session_id='session-app'"
+            )
+        )
+        is not None
+    )
     grant = (
         await db_session.execute(
             text(
@@ -987,13 +1016,382 @@ async def test_retire_legacy_rows_and_keep_grants(
         {"tenant": tenant, "agent": accepted_agent},
     )
     # The future contract migration can reuse the same exact-UUID guard for
-    # rows an old worker recreated after phase 1.
+    # rows an old worker recreated after the expand migration.
     assert accepted_agent in set((await db_session.execute(text(RETIREMENT_LOSS_SQL))).scalars())
     assert (
         await db_session.scalar(
             text("SELECT to_regclass(current_schema() || '.agent_github_grant_drafts')")
         )
         is not None
+    )
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize(
+    "owner_case", ["known_session", "unresolved", "cross_tenant_link", "mode_conflict"]
+)
+async def test_retired_credential_owner_resolution(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, owner_case: str
+) -> None:
+    path = Path(__file__).parents[1] / "alembic/versions/0105_github_app_only.py"
+    spec = importlib.util.spec_from_file_location("migration_github_app_only", path)
+    assert spec and spec.loader
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    tenant = uuid.UUID("00000000-0000-4000-8000-000000000051")
+    other_tenant = uuid.UUID("11111111-0000-4000-8000-000000000052")
+    agent = derive_agent_uuid(tenant_id=tenant, ma_agent_id="agent-binding-only")
+    for scope, owner in ((tenant, "affected"), (other_tenant, "other")):
+        await db_session.execute(
+            text(
+                "INSERT INTO tenants (id, platform, external_id) VALUES (:tenant, 'discord', :owner)"
+            ),
+            {"tenant": scope, "owner": owner},
+        )
+        await db_session.execute(
+            text("""
+                INSERT INTO thread_sessions
+                    (tenant_id, platform, thread_id, ma_session_id, ma_agent_id)
+                VALUES (:tenant, 'discord', :thread, :session_id, NULL)
+            """),
+            {"tenant": scope, "thread": f"thread-{owner}", "session_id": f"session-{owner}"},
+        )
+    await db_session.execute(
+        text("""
+            INSERT INTO thread_sessions
+                (tenant_id, platform, thread_id, ma_session_id, ma_agent_id)
+            VALUES (:tenant, 'discord', 'thread-clean', 'session-clean', 'agent-clean')
+        """),
+        {"tenant": tenant},
+    )
+    if owner_case == "known_session":
+        await db_session.execute(
+            text("""
+                INSERT INTO thread_sessions
+                    (tenant_id, platform, thread_id, ma_session_id, ma_agent_id)
+                VALUES (:tenant, 'discord', 'thread-binding', 'session-binding',
+                        'agent-binding-only')
+            """),
+            {"tenant": tenant},
+        )
+        await db_session.execute(
+            text("""
+                UPDATE thread_sessions SET fresh_start_requested_at = :requested
+                WHERE thread_id = 'thread-binding'
+            """),
+            {"requested": datetime(2026, 1, 1, tzinfo=UTC)},
+        )
+    for statement in (
+        "CREATE TABLE agent_github_mode (tenant_id uuid, agent_id uuid, mode text, "
+        "PRIMARY KEY (tenant_id, agent_id))",
+        "CREATE TABLE agent_github_binding (agent_id uuid, principal_id uuid)",
+        "CREATE TABLE agent_repo_binding (tenant_id uuid, agent_id uuid, repo_url text, "
+        "default_branch text, ma_secret_ref text)",
+        "CREATE TABLE agent_skill_repo_credentials (tenant_id uuid, agent_id uuid, "
+        "repo_url text, ma_secret_ref text)",
+        "CREATE TABLE github_credentials (principal_id uuid)",
+        "CREATE TABLE github_oauth_states (state uuid)",
+    ):
+        await db_session.execute(text(statement))
+    await db_session.execute(
+        text("ALTER TABLE agent_github_grants ADD COLUMN staged boolean NOT NULL DEFAULT true")
+    )
+    await db_session.execute(text("ALTER TABLE agent_github_grants DROP COLUMN app_visible"))
+    principal = uuid.uuid4()
+    if owner_case == "cross_tenant_link":
+        account = uuid.uuid4()
+        linked_principal = uuid.uuid4()
+        await db_session.execute(
+            text("INSERT INTO accounts (id, tenant_id) VALUES (:account, :tenant)"),
+            {"account": account, "tenant": tenant},
+        )
+        await db_session.execute(
+            text("""
+                INSERT INTO cli_principals (id, tenant_id, os_user, account_id)
+                VALUES (:principal, :tenant, 'synthetic', :account)
+            """),
+            {"principal": principal, "tenant": tenant, "account": account},
+        )
+        await db_session.execute(
+            text("""
+                INSERT INTO platform_principals
+                    (id, tenant_id, platform, external_id, account_id)
+                VALUES (:principal, :tenant, 'discord', 'synthetic', :account)
+            """),
+            {"principal": linked_principal, "tenant": other_tenant, "account": account},
+        )
+        await db_session.execute(
+            text("""
+                INSERT INTO principal_links (cli_principal_id, platform_principal_id)
+                VALUES (:principal, :linked)
+            """),
+            {"principal": principal, "linked": linked_principal},
+        )
+    if owner_case == "mode_conflict":
+        await db_session.execute(
+            text("""
+                INSERT INTO agent_files (tenant_id, agent_id, key, content)
+                VALUES (:tenant, :agent, 'GH_TOKEN', 'synthetic')
+            """),
+            {"tenant": tenant, "agent": agent},
+        )
+        await db_session.execute(
+            text("INSERT INTO agent_github_mode VALUES (:tenant, :agent, 'app')"),
+            {"tenant": other_tenant, "agent": agent},
+        )
+    else:
+        await db_session.execute(
+            text("INSERT INTO agent_github_binding VALUES (:agent, :principal)"),
+            {"agent": agent, "principal": principal},
+        )
+    if owner_case == "mode_conflict":
+        assert await db_session.scalar(text("SELECT count(*) FROM agent_github_binding")) == 0
+    monkeypatch.setenv("DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS", str(agent))
+    report = io.StringIO()
+    if owner_case == "known_session":
+        await preview_legacy_retirement(
+            db_session, Console(file=report, force_terminal=False, width=1000)
+        )
+        assert "tenant unresolved" not in report.getvalue()
+    else:
+        with pytest.raises(RuntimeError, match="unresolved credential owners"):
+            await preview_legacy_retirement(
+                db_session, Console(file=report, force_terminal=False, width=1000)
+            )
+        assert f"tenant unresolved for agent {agent}" in report.getvalue()
+    before = await _legacy_counts(db_session)
+    conn = await db_session.connection()
+
+    def upgrade(sync_conn: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync_conn)):
+            migration.upgrade()
+
+    if owner_case != "known_session":
+        with pytest.raises(RuntimeError, match=str(agent)):
+            await conn.run_sync(upgrade)
+        assert await _legacy_counts(db_session) == before
+        assert (
+            await db_session.scalar(
+                text(
+                    "SELECT count(*) FROM thread_sessions WHERE fresh_start_requested_at IS NOT NULL"
+                )
+            )
+            == 0
+        )
+        assert (
+            await db_session.scalar(
+                text("""
+                    SELECT count(*) FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'agent_github_grants' AND column_name = 'app_visible'
+                """)
+            )
+            == 0
+        )
+        assert (
+            await db_session.scalar(
+                text("SELECT to_regclass(current_schema() || '.github_retirement_session_audit')")
+            )
+            is None
+        )
+        return
+
+    await conn.run_sync(upgrade)
+    markers = (
+        await db_session.execute(
+            text("SELECT thread_id, fresh_start_requested_at FROM thread_sessions")
+        )
+    ).all()
+    assert {name for name, at in markers if at is not None} == {
+        "thread-affected",
+        "thread-binding",
+    }
+    assert await db_session.scalar(text("SELECT count(*) FROM agent_github_binding")) == 0
+    audit = (
+        await db_session.execute(
+            text("""
+                SELECT s.thread_id, a.ma_session_id, a.marked_at, s.fresh_start_requested_at
+                FROM github_retirement_session_audit AS a
+                JOIN thread_sessions AS s ON s.id = a.thread_session_id
+            """)
+        )
+    ).all()
+    assert {row.thread_id for row in audit} == {"thread-affected", "thread-binding"}
+    assert all(row.marked_at is not None for row in audit)
+    affected = next(row for row in audit if row.thread_id == "thread-affected")
+    assert affected.marked_at == affected.fresh_start_requested_at
+    original = next(row for row in audit if row.thread_id == "thread-binding")
+    assert original.ma_session_id == "session-binding"
+    assert original.fresh_start_requested_at == datetime(2026, 1, 1, tzinfo=UTC)
+    assert original.marked_at > original.fresh_start_requested_at
+
+    async def insert_outcome(*, started_at: datetime, reason: str) -> None:
+        await db_session.execute(
+            text("""
+                INSERT INTO turn_outcomes
+                    (id, tenant_id, platform, session_id, origin, reason,
+                     started_at, ended_at, duration_ms, recovered, release, usage_refs)
+                VALUES (gen_random_uuid(), :tenant, 'discord', :session, 'chat', :reason,
+                        :started, :ended, 1000, false, 'synthetic', '[]'::jsonb)
+            """),
+            {
+                "tenant": tenant,
+                "session": original.ma_session_id,
+                "reason": reason,
+                "started": started_at,
+                "ended": started_at + timedelta(seconds=1),
+            },
+        )
+
+    # A turn started before marking may be inserted after migration completes.
+    await insert_outcome(started_at=original.marked_at - timedelta(seconds=1), reason="completed")
+    assert (await db_session.execute(text(RETIREMENT_POST_MARK_TURNS_SQL))).all() == []
+    await insert_outcome(started_at=original.marked_at + timedelta(seconds=1), reason="interrupted")
+    reused = (await db_session.execute(text(RETIREMENT_POST_MARK_TURNS_SQL))).all()
+    assert len(reused) == 1
+    assert reused[0].ma_session_id == original.ma_session_id
+    assert reused[0].reason == "interrupted"
+    pending = (await db_session.execute(text(RETIREMENT_PENDING_SESSIONS_SQL))).all()
+    assert len(pending) == 2
+    await db_session.execute(
+        text("UPDATE thread_sessions SET status='superseded' WHERE thread_id='thread-binding'")
+    )
+    pending = (await db_session.execute(text(RETIREMENT_PENDING_SESSIONS_SQL))).all()
+    assert len(pending) == 1
+
+
+@pytest.mark.fresh_schema
+async def test_only_sessions_with_retired_credentials_start_fresh(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = Path(__file__).parents[1] / "alembic/versions/0105_github_app_only.py"
+    spec = importlib.util.spec_from_file_location("migration_github_app_only", path)
+    assert spec and spec.loader
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    tenant = uuid.UUID("00000000-0000-4000-8000-000000000041")
+    unrelated_tenant = uuid.UUID("11111111-0000-4000-8000-000000000042")
+    await db_session.execute(
+        text("INSERT INTO tenants (id, platform, external_id) VALUES (:tenant, 'discord', 'test')"),
+        {"tenant": tenant},
+    )
+    await db_session.execute(
+        text(
+            "INSERT INTO tenants (id, platform, external_id) VALUES (:tenant, 'discord', 'other')"
+        ),
+        {"tenant": unrelated_tenant},
+    )
+    for statement in (
+        "CREATE TABLE agent_github_mode (tenant_id uuid, agent_id uuid, mode text, "
+        "PRIMARY KEY (tenant_id, agent_id))",
+        "CREATE TABLE agent_github_binding (agent_id uuid, principal_id uuid)",
+        "CREATE TABLE agent_repo_binding (tenant_id uuid, agent_id uuid, repo_url text, "
+        "default_branch text, ma_secret_ref text)",
+        "CREATE TABLE agent_skill_repo_credentials (tenant_id uuid, agent_id uuid, "
+        "repo_url text, ma_secret_ref text)",
+        "CREATE TABLE github_credentials (principal_id uuid)",
+        "CREATE TABLE github_oauth_states (state uuid)",
+    ):
+        await db_session.execute(text(statement))
+    await db_session.execute(
+        text("ALTER TABLE agent_github_grants ADD COLUMN staged boolean NOT NULL DEFAULT true")
+    )
+    await db_session.execute(text("ALTER TABLE agent_github_grants DROP COLUMN app_visible"))
+
+    owners = {
+        name: derive_agent_uuid(tenant_id=tenant, ma_agent_id=f"agent-{name}")
+        for name in ("file", "file-alias", "binding", "repo", "skill", "clean")
+    }
+    for name in owners:
+        await db_session.execute(
+            text("""
+                INSERT INTO thread_sessions
+                    (tenant_id, platform, thread_id, ma_session_id, ma_agent_id)
+                VALUES (:tenant, 'discord', :thread, :session_id, :ma_agent_id)
+            """),
+            {
+                "tenant": tenant,
+                "thread": f"thread-{name}",
+                "session_id": f"session-{name}",
+                "ma_agent_id": f"agent-{name}",
+            },
+        )
+    for scope, owner in ((tenant, "unknown"), (unrelated_tenant, "unrelated")):
+        await db_session.execute(
+            text("""
+                INSERT INTO thread_sessions
+                    (tenant_id, platform, thread_id, ma_session_id, ma_agent_id)
+                VALUES (:tenant, 'discord', :thread, :session_id, NULL)
+            """),
+            {"tenant": scope, "thread": f"thread-{owner}", "session_id": f"session-{owner}"},
+        )
+    await db_session.execute(
+        text("INSERT INTO agent_github_mode VALUES (:tenant, :agent, 'app')"),
+        {"tenant": tenant, "agent": owners["clean"]},
+    )
+    await db_session.execute(
+        text("""
+            INSERT INTO agent_files (tenant_id, agent_id, key, content)
+            VALUES (:tenant, :agent, 'GH_TOKEN', 'synthetic')
+        """),
+        {"tenant": tenant, "agent": owners["file"]},
+    )
+    await db_session.execute(
+        text("""
+            INSERT INTO agent_files (tenant_id, agent_id, key, content)
+            VALUES (:tenant, :agent, 'GITHUB_TOKEN', 'synthetic')
+        """),
+        {"tenant": tenant, "agent": owners["file-alias"]},
+    )
+    await db_session.execute(
+        text("INSERT INTO agent_github_binding VALUES (:agent, :principal)"),
+        {"agent": owners["binding"], "principal": uuid.uuid4()},
+    )
+    await db_session.execute(
+        text("""
+            INSERT INTO agent_repo_binding VALUES
+                (:tenant, :agent, 'https://github.com/example/repo', 'main', 'synthetic-ref')
+        """),
+        {"tenant": tenant, "agent": owners["repo"]},
+    )
+    await db_session.execute(
+        text("""
+            INSERT INTO agent_skill_repo_credentials VALUES
+                (:tenant, :agent, 'https://github.com/example/skill', 'synthetic-ref')
+        """),
+        {"tenant": tenant, "agent": owners["skill"]},
+    )
+    monkeypatch.setenv(
+        "DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS",
+        ",".join(str(agent) for name, agent in owners.items() if name != "clean"),
+    )
+    conn = await db_session.connection()
+
+    def upgrade(sync_conn: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync_conn)):
+            migration.upgrade()
+
+    await conn.run_sync(upgrade)
+    markers = (
+        await db_session.execute(
+            text("SELECT thread_id, fresh_start_requested_at FROM thread_sessions")
+        )
+    ).all()
+    assert {name for name, at in markers if at is not None} == {
+        "thread-file",
+        "thread-file-alias",
+        "thread-binding",
+        "thread-repo",
+        "thread-skill",
+        "thread-unknown",
+    }
+    assert (
+        await db_session.scalar(
+            text("SELECT count(*) FROM agent_files WHERE key IN ('GH_TOKEN', 'GITHUB_TOKEN')")
+        )
+        == 0
     )
 
 

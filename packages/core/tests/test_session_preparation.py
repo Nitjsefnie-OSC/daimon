@@ -1280,6 +1280,29 @@ async def test_a_fresh_start_retires_the_old_row_and_carries_nothing(
     assert second.continuity.applied == (), "a fresh start is not a configuration change"
 
 
+async def test_a_marked_active_session_is_not_returned_for_reuse(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    admission = _admission(account=account)
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
+    async with db_session_factory.begin() as session:
+        await mark_turn_active(
+            session, id=first.mapping_id, active_turn_message_id="running", now=_NOW
+        )
+        await request_fresh_start(session, id=first.mapping_id, at=_NOW)
+
+    second = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(second, PreparationBusy)
+    row = await get_thread_session_by_id(db_session, id=first.mapping_id)
+    assert row is not None and row.fresh_start_requested_at is not None
+
+
 async def test_the_transfer_hook_is_given_the_old_session_and_its_result_is_mounted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1800,6 +1823,78 @@ async def test_a_legacy_row_without_a_snapshot_is_backfilled_and_reused(
         "what the session was found to be running must be written back to the row"
     )
     assert backfilled.effective_config.model_id == _MODEL
+    assert backfilled.effective_config.github_mode == "app"
+
+
+@pytest.mark.parametrize("unknown_identity", [False, True])
+async def test_retired_github_key_session_starts_fresh_without_its_env_mount(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    unknown_identity: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    client = transport.client()
+    file = await client.beta.files.upload(
+        file=("legacy.env", b"GH_TOKEN=synthetic\n", "text/plain")
+    )
+    created = await client.beta.sessions.create(
+        agent=_AGENT_ID,
+        environment_id=_ENV_ID,
+        resources=[{"type": "file", "file_id": file.id, "mount_path": "/workspace/.env"}],
+    )
+    assert any(resource.type == "file" for resource in transport.state.resources[created.id])
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID)
+    async with db_session_factory() as session, session.begin():
+        mapping = await create_thread_session(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            account_id=account.id,
+            ma_session_id=created.id,
+            ma_agent_id=None if unknown_identity else _AGENT_ID,
+        )
+        await session.execute(
+            text("""
+                INSERT INTO agent_files (tenant_id, agent_id, key, content)
+                VALUES (:tenant, :agent, 'GH_TOKEN', 'synthetic')
+            """),
+            {"tenant": tenant.id, "agent": agent_uuid},
+        )
+        # 0105 sets this marker and retires the DB key in one transaction.
+        await session.execute(
+            text("""
+                UPDATE thread_sessions
+                SET fresh_start_requested_at=now(), budget_channel_id=''
+                WHERE id=:id
+            """),
+            {"id": mapping.id},
+        )
+        await session.execute(
+            text("DELETE FROM agent_files WHERE tenant_id=:tenant AND agent_id=:agent"),
+            {"tenant": tenant.id, "agent": agent_uuid},
+        )
+
+    if not unknown_identity:
+        transport.retrieve_error = 400
+        blocked = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+        assert isinstance(blocked, PreparationBusy), "a failed metadata read must not reuse the key"
+        still_marked = await get_thread_session_by_id(db_session, id=mapping.id)
+        assert still_marked is not None and still_marked.fresh_start_requested_at is not None
+        transport.retrieve_error = None
+
+    prepared = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(prepared, PreparedTurn)
+    assert prepared.ma_session_id != created.id
+    assert not any(
+        resource.type == "file" for resource in transport.state.resources[prepared.ma_session_id]
+    ), "the new session must not mount the retired token file"
+    old = await get_thread_session_by_id(db_session, id=mapping.id)
+    assert old is not None and old.status == "retired"
 
 
 async def test_a_responder_change_without_a_handoff_binding_leaves_the_workspace_alone(

@@ -249,6 +249,86 @@ deleting rows if any agent would lose access. After upgrading, run
 Managed Agents vault credentials. Run it with `--apply` to delete them. Repeated
 runs skip credentials already deleted. This command leaves GitHub Copilot MCP
 credentials configured for `https://api.githubcopilot.com/mcp` alone.
+The migration asks live sessions of agents with retired GitHub credentials to
+start fresh on their next turn; other sessions keep their workspace. Run
+`cleanup-legacy-vault --apply` even after those sessions restart: the migration
+does not revoke vault-side credentials.
+During the rollout window, an old-image process may reuse a marked session if
+it cannot read legacy session metadata, or return a marked active session for
+reuse. Repeated metadata failures can cause repeated reuse until that process
+refreshes. The marker persists, and new code replaces the session on its next
+turn.
+
+**GitHub retirement release gate.** After the migrate job, wait for the MCP
+update and worker refresh. Set `REGION`, `ZONE`, `AR_REPO` and
+`EXPECTED_DAIMON_IMAGE` to that deploy's values on the deploy runner. Check
+every traffic-bearing or tagged MCP revision, then connect to the worker VM:
+
+```bash
+set -e
+mcp_revisions=$(gcloud run services describe "${AR_REPO}-mcp" --region "$REGION" --format=json |
+  jq -r '.status.traffic[] | select((.percent // 0) > 0 or .tag != null) | .revisionName')
+test -n "$mcp_revisions"
+while IFS= read -r revision; do
+  image=$(gcloud run revisions describe "$revision" --region "$REGION" \
+    --format='value(spec.containers[0].image)')
+  printf '%s %s\n' "$revision" "$image"
+  test "$image" = "$EXPECTED_DAIMON_IMAGE" || exit 1
+done <<< "$mcp_revisions"
+gcloud compute ssh "${AR_REPO}-workers" --zone "$ZONE" --tunnel-through-iap
+```
+
+In that SSH shell, set `EXPECTED_DAIMON_IMAGE` to the same image and check
+every running worker container:
+
+```bash
+set -e
+cd /etc/daimon
+expected_id=$(sudo docker image inspect "$EXPECTED_DAIMON_IMAGE" --format '{{.Id}}')
+containers=$(sudo docker compose -f compose.worker.yml ps -q)
+test -n "$containers"
+for container in $containers; do
+  image_id=$(sudo docker inspect "$container" --format '{{.Image}}')
+  name=$(sudo docker inspect "$container" --format '{{.Name}}')
+  printf '%s %s\n' "$name" "$image_id"
+  test "$image_id" = "$expected_id" || exit 1
+done
+```
+
+Every printed MCP revision must show `EXPECTED_DAIMON_IMAGE`; every printed
+worker must show `expected_id`. Migration 0105 records each marked session's
+original `ma_session_id` and marking time in
+`github_retirement_session_audit`. After in-flight turns drain, run both
+read-only queries. The first finds any recorded turn outcome, regardless of
+reason, that started on the original session after the mark:
+
+```sql
+SELECT a.thread_session_id, a.ma_session_id, a.marked_at,
+       o.id AS turn_outcome_id, o.started_at, o.reason
+FROM github_retirement_session_audit AS a
+JOIN turn_outcomes AS o
+  ON o.session_id = a.ma_session_id AND o.started_at > a.marked_at
+ORDER BY a.thread_session_id, o.started_at;
+```
+
+The second lists marked original mappings still live on the same session:
+
+```sql
+SELECT a.thread_session_id, a.ma_session_id, a.marked_at
+FROM github_retirement_session_audit AS a
+JOIN thread_sessions AS s ON s.id = a.thread_session_id
+WHERE s.status = 'live' AND s.ma_session_id = a.ma_session_id
+ORDER BY a.thread_session_id;
+```
+
+Expected result for each query: zero rows. A row in the second query means
+replacement is still pending; it does not itself show reuse. `started_at`
+comes from turn creation (`packages/core/daimon/core/turn/outcomes.py:92-94`),
+is copied into the outcome at finish (`:264-276`), and is stored later
+(`:325-330`); it is not the database insertion time. Consider the old-process
+window closed only after the image checks and both queries pass.
+The outcome writer is best effort (`turn/outcomes.py:47-60,325-330`), so an
+empty first query rules out recorded post-mark turns, not unrecorded ones.
 
 ## Microsoft Teams (optional)
 

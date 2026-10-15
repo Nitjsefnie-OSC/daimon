@@ -6,11 +6,16 @@ downgrade: unsupported
 import sqlalchemy as sa
 from alembic import op
 from daimon.core.github_retirement import (
+    RETIREMENT_AFFECTED_AGENTS_SQL,
     RETIREMENT_LIVE_GRANTS_SQL,
+    RETIREMENT_LIVE_SESSIONS_SQL,
     RETIREMENT_LOSS_SQL,
+    RETIREMENT_TENANT_EVIDENCE_SQL,
     accepted_loss_agent_ids,
+    resolve_retirement_tenants,
     retirement_repo_name_sql,
 )
+from daimon.core.ma_identity import derive_agent_uuid
 
 revision: str = "0105_github_app_only"
 down_revision: str | None = "0104_agent_tool_rules"
@@ -20,24 +25,84 @@ depends_on: str | None = None
 
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
-    # Hold the tables used by the loss query stable until retirement finishes.
-    # Every writer to these tables must wait while this transaction decides
-    # whether its current rows are covered by live App grants.
+    # Hold the loss inputs and session mappings stable until retirement finishes.
+    # Every writer must wait while this transaction decides coverage and marks
+    # sessions whose credentials are about to be retired.
     op.execute(
         "LOCK TABLE agent_files, agent_github_binding, agent_github_grants, "
         "agent_github_mode, agent_repo_binding, agent_skill_repo_credentials, "
         "credential_requests, github_credentials, github_oauth_states, tenant_github_repos, "
-        "github_app_installations "
+        "github_app_installations, thread_sessions "
         "IN SHARE ROW EXCLUSIVE MODE"
     )
+    bind = op.get_bind()
+    affected = bind.execute(
+        sa.text(f"SELECT DISTINCT tenant_id, agent_id FROM ({RETIREMENT_AFFECTED_AGENTS_SQL}) a")
+    ).all()
+    scoped_evidence = bind.execute(sa.text(RETIREMENT_TENANT_EVIDENCE_SQL)).all()
+    live_sessions = bind.execute(sa.text(RETIREMENT_LIVE_SESSIONS_SQL)).all()
+    tenant_by_agent, unresolved = resolve_retirement_tenants(
+        ((row.tenant_id, row.agent_id) for row in affected),
+        ((row.tenant_id, row.agent_id) for row in scoped_evidence),
+        ((row.tenant_id, row.ma_agent_id) for row in live_sessions),
+    )
+    if unresolved:
+        agents = ", ".join(str(agent) for agent in sorted(unresolved))
+        raise RuntimeError(
+            f"GitHub App-only migration cannot resolve tenant for agent(s): {agents}"
+        )
     # Fail closed before deleting any row. Staged grants are excluded from
     # coverage because they never conferred access.
-    loss_rows = op.get_bind().execute(sa.text(RETIREMENT_LOSS_SQL)).scalars().all()
+    loss_rows = bind.execute(sa.text(RETIREMENT_LOSS_SQL)).scalars().all()
     if set(loss_rows) - accepted_loss_agent_ids():
         raise RuntimeError(
             "GitHub App-only migration would retire unapproved access; "
             "run daimon github retirement-preview"
         )
+    # Preserve the exact original session ID and marking time for the release
+    # gate. Old processes can complete reads against this additive schema.
+    op.create_table(
+        "github_retirement_session_audit",
+        sa.Column("thread_session_id", sa.UUID(), primary_key=True),
+        sa.Column("ma_session_id", sa.Text(), nullable=False),
+        sa.Column("marked_at", sa.DateTime(timezone=True), nullable=False),
+    )
+    # The old and new workers both honor this marker on the next turn. Read
+    # the credential owners before deleting their rows, then mark their live
+    # sessions and unknown-identity sessions that might belong to them. A mounted
+    # .env containing only a GitHub key can otherwise survive backfill because
+    # both the old and desired env hashes are None.
+    if tenant_by_agent:
+        credential_tenants = set(tenant_by_agent.values())
+        known_matches: set[object] = set()
+        for row in live_sessions:
+            if row.ma_agent_id is None:
+                continue
+            agent_id = derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id=row.ma_agent_id)
+            if agent_id in tenant_by_agent:
+                known_matches.add(row.id)
+        marked_ids = [
+            row.id
+            for row in live_sessions
+            if row.id in known_matches
+            or (row.ma_agent_id is None and row.tenant_id in credential_tenants)
+        ]
+        if marked_ids:
+            bind.execute(
+                sa.text("""
+                    WITH marked AS (
+                        UPDATE thread_sessions
+                        SET fresh_start_requested_at =
+                            COALESCE(fresh_start_requested_at, statement_timestamp())
+                        WHERE id = ANY(:ids)
+                        RETURNING id, ma_session_id
+                    )
+                    INSERT INTO github_retirement_session_audit
+                        (thread_session_id, ma_session_id, marked_at)
+                    SELECT id, ma_session_id, statement_timestamp() FROM marked
+                """),
+                {"ids": marked_ids},
+            )
     # Old workers can still create staged grants before their containers refresh.
     # New workers use app_visible and never read or write staged. The trigger
     # keeps both fields in sync and records App mode for later visible grants;

@@ -23,9 +23,13 @@ from daimon.core.github_app_session import (
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_retirement import (
+    RETIREMENT_AFFECTED_AGENTS_SQL,
     RETIREMENT_LIVE_GRANTS_SQL,
+    RETIREMENT_LIVE_SESSIONS_SQL,
     RETIREMENT_LOSS_SQL,
+    RETIREMENT_TENANT_EVIDENCE_SQL,
     accepted_loss_agent_ids,
+    resolve_retirement_tenants,
     retirement_repo_name_sql,
 )
 from daimon.core.ma_identity import derive_agent_uuid
@@ -73,6 +77,22 @@ async def preview_legacy_retirement(session: AsyncSession, console: Console) -> 
     if await session.scalar(text("SELECT to_regclass('agent_repo_binding')")) is None:
         console.print("GitHub legacy tables have already been retired.")
         return
+    affected = (
+        await session.execute(
+            text(f"SELECT DISTINCT tenant_id, agent_id FROM ({RETIREMENT_AFFECTED_AGENTS_SQL}) a")
+        )
+    ).all()
+    scoped_evidence = (await session.execute(text(RETIREMENT_TENANT_EVIDENCE_SQL))).all()
+    live_sessions = (await session.execute(text(RETIREMENT_LIVE_SESSIONS_SQL))).all()
+    _, unresolved = resolve_retirement_tenants(
+        ((row.tenant_id, row.agent_id) for row in affected),
+        ((row.tenant_id, row.agent_id) for row in scoped_evidence),
+        ((row.tenant_id, row.ma_agent_id) for row in live_sessions),
+    )
+    if unresolved:
+        for agent in sorted(unresolved):
+            console.print(f"STOP: retired GitHub credential tenant unresolved for agent {agent}")
+        raise RuntimeError("GitHub retirement has unresolved credential owners")
     staged = (
         await session.execute(
             text("""
@@ -96,12 +116,7 @@ async def preview_legacy_retirement(session: AsyncSession, console: Console) -> 
             WITH live_grants AS (
                 {RETIREMENT_LIVE_GRANTS_SQL}
             ), affected AS (
-                SELECT tenant_id, agent_id FROM agent_files
-                 WHERE key IN ('GH_TOKEN', 'GITHUB_TOKEN')
-                UNION SELECT tenant_id, agent_id FROM agent_repo_binding
-                UNION SELECT tenant_id, agent_id FROM agent_skill_repo_credentials
-                UNION SELECT m.tenant_id, b.agent_id FROM agent_github_binding b
-                  LEFT JOIN agent_github_mode m ON m.agent_id = b.agent_id
+                {RETIREMENT_AFFECTED_AGENTS_SQL}
             )
             SELECT a.tenant_id, a.agent_id, b.repo_url,
                 EXISTS (SELECT 1 FROM agent_files f WHERE f.tenant_id=a.tenant_id
