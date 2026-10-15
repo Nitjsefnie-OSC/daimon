@@ -129,6 +129,13 @@ async def test_real_root_model_survives_session_source_projection(
                 environment=None,
             )
 
+    wrong_model = target.model_copy(
+        update={"model": ModelRef(provider="anthropic", id="claude-sonnet-5-5")}
+    )
+    assert "source_definition" in classify_source_obligations(
+        projected, wrong_model, environment=None
+    )
+
     extensions = tuple(
         item for item in target.extensions or () if item.namespace != "anthropic.model_config"
     )
@@ -159,6 +166,13 @@ async def test_real_root_model_survives_session_source_projection(
         malformed_source = projected.model_copy(update={"effective_spec": malformed})
         assert "source_definition" in classify_source_obligations(
             malformed_source, malformed, environment=None
+        )
+        assert "source_definition" in classify_source_obligations(
+            malformed_source,
+            malformed,
+            environment=projected.environment.spec,
+            resources=projected.resource_requirements,
+            retained_agent=projected.source.ref,
         )
 
 

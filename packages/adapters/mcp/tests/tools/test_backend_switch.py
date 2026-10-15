@@ -502,3 +502,40 @@ async def test_a_private_session_context_refuses_the_preview(active_chat):
             origin_context_id=str(origin.id),
         )
     assert not trace.replies and not trace.violations
+
+
+async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat):
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+    gate()
+    agent()
+    quote = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="anthropic",
+        origin_context_id=str(origin.id),
+    )
+    assert quote.status == "preview" and quote.declared_drops == ()
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="anthropic",
+        origin_context_id=str(origin.id),
+        expected_revision=0,
+        preview_digest=quote.preview_digest,
+    )
+    assert changed.status == "changed" and changed.declared_drops == ()
+    agent()
+    from daimon.core.channel_backend import load_backend_agent
+
+    source = await load_backend_agent(
+        runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
+    )
+    revision = await service.current(source)
+    assert revision.drop_consent is not None and revision.declared_drops == ()
+    assert not trace.replies and not trace.violations

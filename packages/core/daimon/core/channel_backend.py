@@ -425,8 +425,6 @@ class AgentBackendService:
             )
         except UnsupportedCapability as error:
             raise AgentBackendRefused("source_unavailable") from error
-        if not proposed.declared_drops:
-            return preview
         consent = {
             "declared_drops": proposed.declared_drops,
             "source_pin": source_preservation_pin(agent),
@@ -544,11 +542,16 @@ class AgentBackendService:
                 raise AgentBackendRefused("re_confirm")
             if not grant_operation and consent is not None:
                 if operation != "revert":
-                    if accepted_drops is None:
+                    if accepted_drops is None and consent.declared_drops:
                         raise AgentBackendRefused("drops_required")
                     try:
                         accepted = type(consent).model_validate(
-                            {**consent.model_dump(), "declared_drops": accepted_drops}
+                            {
+                                **consent.model_dump(),
+                                "declared_drops": accepted_drops
+                                if accepted_drops is not None
+                                else (),
+                            }
                         )
                     except ValueError:
                         raise AgentBackendRefused("drops_mismatch") from None

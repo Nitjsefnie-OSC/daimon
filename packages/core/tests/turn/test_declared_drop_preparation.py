@@ -1297,3 +1297,49 @@ async def test_captured_portable_caller_mcp_loss_reaches_retained_preparation(co
     assert selected.target_spec.declared_drops == accepted.declared_drops
     assert not selected.target_spec.mcp_servers
     assert len(constructions) == 1
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": "anthropic",
+            "caller_mcp": True,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+    ],
+    indirect=True,
+)
+async def test_portable_native_no_drop_consent_survives_store_and_retained_prepare(consent_request):
+    from mux.drivers.anthropic.resources.agents import agent_payload
+
+    request, service, source, actor, accepted, router, reads, _, _, _ = consent_request
+    assert accepted.drop_consent is not None
+    assert accepted.declared_drops == ()
+    assert request.admission.backend_revision.model is None
+    assert (await service.revision(source, accepted.local)).drop_consent == accepted.drop_consent
+    await service.clear_backend(source, accepted.local, actor)
+    prepared = await prepare_source(request)
+    assert prepared.target_spec == source.effective_spec
+    assert prepared.source.resource_requirements == source.resource_requirements
+    assert len(prepared.source.resource_requirements) == 1
+    assert classify_source_obligations(
+        source,
+        source.effective_spec,
+        environment=source.environment.spec,
+        resources=source.resource_requirements,
+        retained_agent=source.source.ref,
+        worker_ceiling=True,
+    )
+    assert agent_payload(prepared.target_spec)["model"] == {
+        "id": "claude-haiku-5-5",
+        "speed": "standard",
+        "effort": {"type": "medium"},
+    }
+    assert all(call.method == "GET" for call in reads)
+    changed = request.admission.agent.model.model_copy(update={"effort": {"type": "high"}})
+    router.routes.clear()
+    router.add_agent(request.admission.agent.model_copy(update={"model": changed}))
+    router.add_environment(request.admission.environment)
+    with pytest.raises(AgentBackendRefused, match="confirm"):
+        await prepare_source(request)
