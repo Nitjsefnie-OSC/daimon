@@ -39,9 +39,10 @@ from daimon.adapters.teams.card_actions import Actor
 from daimon.core import channel_backend as cb
 from daimon.core.agent_details import AgentDetails
 from daimon.core.authz import Subject
-from daimon.core.config import TurnSettings
+from daimon.core.config import Settings, TurnSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
 from daimon.core.stores.domain import Role
@@ -81,6 +82,14 @@ class Preview(BaseModel):
     cost_line: str = "List price: unknown. Worst-case per turn: unknown."
     allowed: bool = True
     digest: str = "d" * 64
+    # Mirrors `_BackendConsentFacts` on the real `CompatibilityPreview`: no
+    # drops are declared in these stubs, so the CLI's drop-consent gate reads
+    # the same "nothing to accept" shape it reads from the real preview.
+    drop_consent: object | None = None
+
+    @property
+    def declared_drops(self) -> tuple[str, ...]:
+        return () if self.drop_consent is None else self.drop_consent.declared_drops
 
 
 @dataclass(frozen=True)
@@ -114,9 +123,13 @@ class Factory:
 def seam(monkeypatch):
     calls = []
     factory = Factory()
-    settings = SimpleNamespace(
-        turn=TurnSettings(path="mux", channel_backends=True),
-        cli=SimpleNamespace(local_user="operator"),
+    settings = Settings.model_validate(
+        {
+            "database": {"url": "postgresql://daimon:daimon@localhost:5432/daimon_test_stub"},
+            "anthropic": {"api_key": "offline-owned"},
+            "cli": {"local_user": "operator"},
+            "turn": {"path": "mux", "channel_backends": True},
+        }
     )
     agent = SimpleNamespace(
         tenant_id=TENANT,
@@ -166,7 +179,7 @@ def seam(monkeypatch):
     monkeypatch.setattr(
         cli,
         "get_or_create_cli_principal",
-        AsyncMock(return_value=SimpleNamespace(account_id=ACCOUNT)),
+        AsyncMock(return_value=SimpleNamespace(account_id=ACCOUNT, os_user="operator")),
     )
     monkeypatch.setattr(
         sa,
@@ -189,6 +202,7 @@ def seam(monkeypatch):
         anthropic=object(),
         client=object(),
         deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
     )
     return SimpleNamespace(
         calls=calls,
@@ -556,9 +570,13 @@ async def persisted(
         await make_platform_principal(
             session, tenant=tenant, account=account, platform="discord", external_id="42"
         )
-    settings = SimpleNamespace(
-        turn=TurnSettings(path="mux", channel_backends=True),
-        cli=SimpleNamespace(local_user="operator"),
+    settings = Settings.model_validate(
+        {
+            "database": {"url": str(db_nullpool_engine.url)},
+            "anthropic": {"api_key": "offline-owned"},
+            "cli": {"local_user": "operator"},
+            "turn": {"path": "mux", "channel_backends": True},
+        }
     )
     service = cb.make_backend_service(sessions, settings.turn)
     actor = cb.BackendActor(tenant.id, account.id, Subject(is_admin=True))
@@ -593,6 +611,7 @@ def runtime(persisted, client):
         anthropic=client,
         client=client,
         deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
     )
 
 
