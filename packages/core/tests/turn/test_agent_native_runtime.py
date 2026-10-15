@@ -450,6 +450,8 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
     detail = refused.value.__cause__
     assert isinstance(detail, UnsupportedCapability)
     expected = {"memory", "environment", obligation}
+    if obligation == "credentials":
+        expected.add("mcp")
     if obligation in ("files", "repository"):
         expected.add("credentials")
     assert set(detail.missing) == expected
@@ -873,7 +875,6 @@ async def test_explicit_drops_do_not_discharge_unproved_obligations(
             "foreign_root": "worker_context",
             "missing_reader": "native_counterpart",
             "source_drift": "source_drift",
-            "model_controls": "source_definition",
             "ask_without_tools": "tools",
         }.get(failure, failure)
         assert expected in refused.value.__cause__.missing

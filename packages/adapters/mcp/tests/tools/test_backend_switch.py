@@ -256,16 +256,23 @@ def _without_own_tools(payload):
     payload["mcp_servers"] = []
 
 
+@pytest.mark.parametrize("model_controls", [False, True])
 @pytest.mark.parametrize("own_tools", [False, True])
 @pytest.mark.parametrize("target", ["openai", "gemini"])
 async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
-    active_chat, target, own_tools
+    active_chat, target, own_tools, model_controls
 ):
     from daimon.core.channel_backend import load_backend_agent
 
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
     if not own_tools:
         _without_own_tools(payload)
+    if model_controls:
+        payload["model"] = {
+            "id": "claude-haiku-5-5",
+            "speed": "standard",
+            "effort": {"type": "medium"},
+        }
     gate()
     agent()
     preview = await _request_agent_backend_switch_impl(
@@ -279,7 +286,10 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     assert "unknown" in preview.cost_line.lower()
     drops = preview.declared_drops
     assert {"memory", "sandbox"} <= set(drops)
-    assert own_tools or drops == ("memory", "sandbox")
+    assert ("model_controls" in drops) == model_controls
+    assert own_tools or drops == (
+        ("memory", "model_controls", "sandbox") if model_controls else ("memory", "sandbox")
+    )
     extra = next(item for item in ("files", "repository", "skills") if item not in drops)
     # The confirmed call must name exactly the previewed losses.
     for accepted in (None, (), drops[:1], (*drops, extra)):
