@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import ChannelBudget
+from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -21,15 +22,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def get_channel_budget(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    persisted: bool = False,
 ) -> ChannelBudgetRow | None:
-    orm = await session.scalar(
-        select(ChannelBudget).where(
-            ChannelBudget.tenant_id == tenant_id,
-            ChannelBudget.platform == platform,
-            ChannelBudget.channel_id == channel_id,
-        )
+    query = select(ChannelBudget).where(
+        ChannelBudget.tenant_id == tenant_id,
+        ChannelBudget.platform == platform,
+        ChannelBudget.channel_id == channel_id,
     )
+    if persisted:
+        row = (await read_persisted_columns(session, query, reject_new=True)).one_or_none()
+        return ChannelBudgetRow.model_validate(row) if row is not None else None
+    orm = await session.scalar(query)
     return ChannelBudgetRow.model_validate(orm) if orm is not None else None
 
 

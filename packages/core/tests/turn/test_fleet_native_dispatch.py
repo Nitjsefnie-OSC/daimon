@@ -127,10 +127,13 @@ async def _settled(ports, root, identifier):
 
 async def test_root_request_derivation_reaches_real_fresh_or_clone_worker(worker_root):
     request, root, row, resolved, prices, calls, _, transport, _ = worker_root
+    request = replace(request, native_budget_usd=Decimal("0.03"), root_controls={"max_inputs": 3})
     derived = await request.for_worker(root, resolved)
     assert derived.admission.grant is request.admission.grant
     assert derived.scope == resolved.permissions.fleet.scope
     assert derived.deadline == min(request.deadline, root.limits.deadline, resolved.limits.deadline)
+    assert derived.root_controls is None and derived.native_budget_usd is None
+    assert derived.counterpart is None and derived.verified_counterpart is None
     result = await run_worker(
         derived,
         parent=root,

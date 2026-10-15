@@ -1254,3 +1254,30 @@ to the fleet pricing context and their native usage recorders. Default fleet
 startup discovers the callbacks without credentials or provider calls. Missing
 model rows do not reserve worker funds, and supplying a token tariff leaves
 unknown infrastructure and incomplete native counters pending.
+
+Root reservations use their original scoped operation and private thread slot.
+The monetary owner takes the tenant and actor financial fence before reading
+that operation. Financial proofs use persisted columns without autoflush;
+staged inserts, edits or deletes refuse before they can become admission evidence.
+Existing persisted readers retain their default pending-insert behavior.
+A replay proves its complete original cash reservation and adds
+no second hold. Missing, undersized, foreign or incomplete reservations refuse.
+Unknown allocation keeps its original hold; a cached native receipt cannot
+replace mutable financial evidence. Worker admission reads the same retained
+root exposure alongside original worker reservations and ledger debits.
+
+Explicitly budgeted private fleet roots select their finite native controls
+before session compilation and reserve cash before allocation. Unsupported
+native controls refuse. Distinct one-event input claims spend the root's
+retained allowance atomically with the existing send claim; a replay does not
+consume another input. The first active turn observer is retained with that
+input, including an explicit missing association when no observer exists.
+Completion wakes use the original root operation and reservation.
+
+Allocation preserves the caller's authorization guard. New claims recheck the
+current grant and original funding; revocation or exhausted cash blocks new
+inputs. Stop, archive and recovery interrupts remain available to drain work.
+A controlled root never silently falls back to an uncontrolled replacement.
+Unknown allocation keeps its original ACK and cash hold; this does not certify
+usage, final spend, or release of unknown holds. Ordinary unbudgeted turns keep
+their existing preparation path.
