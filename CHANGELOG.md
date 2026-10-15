@@ -333,6 +333,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opt-in Gemini native credential target offers with scoped origin and independent agent readback, fresh policy checks and separate native MCP registration; existing credential handlers remain unchanged.
 ### Fixed
 
+- Preserve heterogeneous fleet budget ceilings when freezing a root; inherited workers use their provider cap while explicit excess requests still refuse.
+
 - Keep native-only MCP servers and their credentials out of fleet worker grants,
   preserve exact builtin permissions, and declare incomplete native toolsets on backend switches.
 
