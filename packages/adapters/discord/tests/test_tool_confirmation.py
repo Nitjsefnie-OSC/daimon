@@ -29,6 +29,7 @@ from daimon.core.posted_controls.confirmation import (
     ConfirmationCardState,
     build_confirmation_card,
 )
+from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import ToolCall
 
 
@@ -214,6 +215,7 @@ async def test_always_button_allows_admin_and_names_the_clicker(
     monkeypatch.setattr(confirmation_module, "save_always_allow", save)
     click = _interaction(222)
     await _buttons(view)[2].callback(click)
+    assert await drain_card_edits(1) == 0
     assert answer.result() == "approved"
     assert save.await_args.kwargs["scope"] == "agent"
     edited = click.edit_original_response.await_args.kwargs["view"]
@@ -323,11 +325,57 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
             await view._on_always(click)
     else:
         await view._on_always(click)
+    assert await drain_card_edits(1) == 0
     assert answer.result() == "approved"
     assert view.answered_edit_done.is_set()
     assert "-# Approved once by <@222>" in _texts(
         click.edit_original_response.await_args.kwargs["view"]
     )
+
+
+async def test_blocked_always_save_does_not_block_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    channel = MagicMock()
+    message = MagicMock(id=123, edit=AsyncMock())
+    channel.send = AsyncMock(return_value=message)
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(prompt))
+    while not channel.send.await_count:
+        await asyncio.sleep(0)
+    view = channel.send.await_args.kwargs["view"]
+    view._rule_factory = MagicMock()
+    view._rule_subject = AsyncMock(return_value=Subject(is_admin=True, platform_user_id="222"))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_save(*_args: object, **_kwargs: object) -> str:
+        entered.set()
+        await release.wait()
+        return "saved"
+
+    monkeypatch.setattr(confirmation_module, "save_always_allow", blocked_save)
+    click = asyncio.create_task(view._on_always(_interaction(222)))
+    await entered.wait()
+    result = await asyncio.wait_for(waiting, 1)
+    assert isinstance(result, ApprovedConfirmation)
+    await asyncio.wait_for(result.retire_unsent(), 0.5)
+    assert not click.done()
+    release.set()
+    await click
+    assert await drain_card_edits(1) == 0
+    assert _texts(message.edit.await_args.kwargs["view"])[0] == "**Stopped**"
 
 
 async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:

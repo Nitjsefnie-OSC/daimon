@@ -112,6 +112,7 @@ class _PostedCard:
     ts: str
     thread_ts: str | None
     answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
+    retired: asyncio.Event = field(default_factory=asyncio.Event)
     check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None
     rule_factory: async_sessionmaker[AsyncSession] | None = None
     rule_subject: Callable[[str], Awaitable[Subject]] | None = None
@@ -187,7 +188,7 @@ class SlackConfirmationCards:
                 return Subject()
             admin = await resolve_is_admin(client, user_id=clicker)
             caller = await channel_admin_caller(
-                runtime, client, tenant_id=tenant_id, user_id=clicker, is_admin=admin
+                runtime, client, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
             )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
@@ -251,6 +252,7 @@ class SlackConfirmationCards:
                     # Queued behind the Approved edit on the same card
                     # (`edit_card_within` keeps per-card call order).
                     await answered_posted.answered_edit_done.wait()
+                    answered_posted.retired.set()
                     await _edit(answered_posted, "stopped", answered_by=None)
 
                 return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
@@ -326,35 +328,32 @@ class SlackConfirmationCards:
         if refusal := self._controls.claim_admin(token):
             await _ephemeral(posted, clicker, refusal)
             return
+        queue_card_edit(
+            _card_update(posted, "approved", answered_by=clicker, how="once"),
+            card_key=("slack", posted.channel, posted.ts),
+            failure_errors=(SlackApiError,),
+            failed_event="slack.tool_confirmation.edit_failed",
+        )
+        posted.answered_edit_done.set()
         try:
-            try:
-                result = await save_always_allow(
-                    posted.rule_factory,
-                    reference=reference,
-                    scope=scope,
-                    subject=subject,
-                    clicker=clicker,
-                )
-            except asyncio.CancelledError:
-                queue_card_edit(
-                    _card_update(posted, "approved", answered_by=clicker, how="once"),
-                    card_key=("slack", posted.channel, posted.ts),
-                    failure_errors=(SlackApiError,),
-                    failed_event="slack.tool_confirmation.edit_failed",
-                )
-                raise
-            except Exception:
-                result = "failed"
-            how = ("always" if scope == "agent" else "channel") if result == "saved" else "once"
+            result = await save_always_allow(
+                posted.rule_factory,
+                reference=reference,
+                scope=scope,
+                subject=subject,
+                clicker=clicker,
+            )
+        except Exception:
+            result = "failed"
+        if result == "saved" and not posted.retired.is_set():
+            how: ConfirmationHow = "always" if scope == "agent" else "channel"
             await _edit(posted, "approved", answered_by=clicker, how=how)
-            if result != "saved":
-                await _ephemeral(
-                    posted,
-                    clicker,
-                    STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
-                )
-        finally:
-            posted.answered_edit_done.set()
+        if result != "saved":
+            await _ephemeral(
+                posted,
+                clicker,
+                STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
+            )
 
 
 async def _edit(

@@ -40,6 +40,7 @@ from daimon.core.posted_controls.confirmation import (
 from daimon.core.posted_controls.lifecycle import (
     check_confirmation_admin,
     edit_card_within,
+    queue_card_edit,
     settle_local_admin_confirmation,
     settle_local_confirmation,
     wait_local_confirmation,
@@ -113,6 +114,7 @@ class _ConfirmationView(discord.ui.LayoutView):
         self._rule_factory = rule_factory
         self._rule_subject = rule_subject
         self.answered_edit_done = asyncio.Event()
+        self.retired = False
         #: The posted card's ordering key for `edit_card_within`; set once the
         #: card is sent, before anyone can click it.
         self.card_key: object = ("discord-view", id(self))
@@ -190,35 +192,28 @@ class _ConfirmationView(discord.ui.LayoutView):
             await interaction.followup.send(refusal, ephemeral=True)
             return
         self.stop()
+        self._queue_always_answer(interaction, clicker, "once")
+        self.answered_edit_done.set()
         try:
-            try:
-                result = await save_always_allow(
-                    self._rule_factory,
-                    reference=reference,
-                    scope=scope,
-                    subject=subject,
-                    clicker=clicker,
-                )
-            except asyncio.CancelledError:
-                await self._edit_always_answer(interaction, clicker, "once")
-                raise
-            except Exception:
-                result = "failed"
-            how: ConfirmationHow = (
-                ("always" if scope == "agent" else "channel" if scope == "channel" else "once")
-                if result == "saved"
-                else "once"
+            result = await save_always_allow(
+                self._rule_factory,
+                reference=reference,
+                scope=scope,
+                subject=subject,
+                clicker=clicker,
             )
-            await self._edit_always_answer(interaction, clicker, how)
-            if result != "saved":
-                await interaction.followup.send(
-                    STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
-                    ephemeral=True,
-                )
-        finally:
-            self.answered_edit_done.set()
+        except Exception:
+            result = "failed"
+        if result == "saved" and not self.retired:
+            how: ConfirmationHow = "always" if scope == "agent" else "channel"
+            self._queue_always_answer(interaction, clicker, how)
+        if result != "saved":
+            await interaction.followup.send(
+                STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
+                ephemeral=True,
+            )
 
-    async def _edit_always_answer(
+    def _queue_always_answer(
         self, interaction: discord.Interaction, clicker: str, how: ConfirmationHow
     ) -> None:
         answered = build_confirmation_card(
@@ -227,13 +222,12 @@ class _ConfirmationView(discord.ui.LayoutView):
             answered_by_platform_user_id=clicker,
             how=how,
         )
-        await edit_card_within(
+        queue_card_edit(
             interaction.edit_original_response(
                 view=_ConfirmationView(answered, self._prompt, answer=None),
                 allowed_mentions=discord.AllowedMentions.none(),
             ),
             card_key=self.card_key,
-            budget_s=RETIRE_TIMEOUT_S,
             failure_errors=(discord.HTTPException,),
             failed_event="tool_confirmation.answer_edit_failed",
         )
@@ -405,6 +399,7 @@ def discord_confirmation_hook(
             async def retire_unsent() -> None:
                 # Queued behind the Approved edit on the same card.
                 await view.answered_edit_done.wait()
+                view.retired = True
                 await retire("stopped")
 
             return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)

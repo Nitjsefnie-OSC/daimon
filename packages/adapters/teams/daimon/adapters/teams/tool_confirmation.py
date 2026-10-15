@@ -174,6 +174,7 @@ class _PostedCard:
     service_url: str | None
     message_id: str
     answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
+    retired: asyncio.Event = field(default_factory=asyncio.Event)
     check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None
     rule_factory: async_sessionmaker[AsyncSession] | None = None
     rule_subject: Callable[[str], Awaitable[Subject]] | None = None
@@ -249,7 +250,7 @@ class TeamsConfirmationCards:
             settings = runtime.settings.teams
             admin = settings is not None and clicker in settings.admin_user_ids
             caller = await channel_admin_caller(
-                runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin
+                runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
             )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
@@ -297,6 +298,7 @@ class TeamsConfirmationCards:
                     # Queued behind the Approved edit on the same card
                     # (`edit_card_within` keeps per-card call order).
                     await answered_posted.answered_edit_done.wait()
+                    answered_posted.retired.set()
                     await self._edit(answered_posted, "stopped")
 
                 return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
@@ -381,22 +383,28 @@ class TeamsConfirmationCards:
         if refusal := self._controls.claim_admin(token):
             await self._notify_clicker(ctx, refusal)
             return
-        how = "once"
+        once = build_confirmation_card(
+            posted.prompt, state="approved", answered_by_platform_user_id=clicker, how="once"
+        )
+        queue_card_edit(
+            self._send_card(posted, once, answered_by=ctx.activity.from_.name),
+            card_key=self._card_key(posted),
+            failure_errors=TEAMS_SEND_ERRORS,
+            failed_event="teams.tool_confirmation.edit_failed",
+        )
+        posted.answered_edit_done.set()
         try:
-            try:
-                result = await save_always_allow(
-                    posted.rule_factory,
-                    reference=reference,
-                    scope=scope,
-                    subject=subject,
-                    clicker=clicker,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                result = "failed"
-            how = ("always" if scope == "agent" else "channel") if result == "saved" else "once"
-        finally:
+            result = await save_always_allow(
+                posted.rule_factory,
+                reference=reference,
+                scope=scope,
+                subject=subject,
+                clicker=clicker,
+            )
+        except Exception:
+            result = "failed"
+        if result == "saved" and not posted.retired.is_set():
+            how = "always" if scope == "agent" else "channel"
             card = build_confirmation_card(
                 posted.prompt,
                 state="approved",
@@ -409,7 +417,6 @@ class TeamsConfirmationCards:
                 failure_errors=TEAMS_SEND_ERRORS,
                 failed_event="teams.tool_confirmation.edit_failed",
             )
-            posted.answered_edit_done.set()
         if result != "saved":
             await self._notify_clicker(
                 ctx, STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE
@@ -422,9 +429,15 @@ class TeamsConfirmationCards:
     async def _notify_clicker(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity], message: str
     ) -> None:
-        recipient = ctx.activity.from_.model_copy(update={"is_targeted": True})
+        conversation_type = ctx.activity.conversation.conversation_type
+        if conversation_type not in {"personal", "channel", "groupChat", "meeting"}:
+            log.warning("teams.tool_confirmation.private_notice_unknown_conversation")
+            return
+        notice = MessageActivityInput(text=message)
+        if conversation_type != "personal":
+            notice.recipient = ctx.activity.from_.model_copy(update={"is_targeted": True})
         try:
-            await ctx.send(MessageActivityInput(text=message, recipient=recipient))
+            await ctx.send(notice)
         except Exception as err:
             log.warning("teams.tool_confirmation.private_notice_failed", error=str(err))
 

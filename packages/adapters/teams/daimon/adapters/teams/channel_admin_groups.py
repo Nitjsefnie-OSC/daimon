@@ -30,14 +30,16 @@ async def fetch_team_owner_ids(graph: GraphClient, group_id: str) -> frozenset[s
         raise GroupLookupFailed(exc.reason) from exc
 
 
-def team_owner_lookup(runtime: TeamsRuntime) -> GroupMembers | None:
+def team_owner_lookup(runtime: TeamsRuntime, *, fresh: bool = False) -> GroupMembers | None:
     """A team's live owners, through the runtime's short cache; None without Graph."""
     lookup = runtime.team_owners
     if lookup is None:
         return None
 
     async def members(group_id: str) -> frozenset[str]:
-        return await runtime.group_members.members(("teams", group_id), lambda: lookup(group_id))
+        return await runtime.group_members.members(
+            ("teams", group_id), lambda: lookup(group_id), fresh=fresh
+        )
 
     return members
 
@@ -50,10 +52,10 @@ def stored_team_owners(runtime: TeamsRuntime) -> GroupMembersFor:
 
 
 async def owned_team_ids(
-    runtime: TeamsRuntime, *, tenant_id: uuid.UUID, user_id: str
+    runtime: TeamsRuntime, *, tenant_id: uuid.UUID, user_id: str, fresh: bool = False
 ) -> frozenset[str]:
     """The teams named by this tenant's grants that `user_id` owns."""
-    members = team_owner_lookup(runtime)
+    members = team_owner_lookup(runtime, fresh=fresh)
     if members is None:
         return frozenset()
     return await load_member_group_ids(
@@ -66,12 +68,17 @@ async def owned_team_ids(
 
 
 async def channel_admin_caller(
-    runtime: TeamsRuntime, *, tenant_id: uuid.UUID, user_id: str, is_admin: bool
+    runtime: TeamsRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    is_admin: bool,
+    fresh: bool = False,
 ) -> ChannelAdminCaller:
     """The caller with the grant-named teams they own; a server admin needs none."""
     teams = (
         frozenset[str]()
         if is_admin
-        else await owned_team_ids(runtime, tenant_id=tenant_id, user_id=user_id)
+        else await owned_team_ids(runtime, tenant_id=tenant_id, user_id=user_id, fresh=fresh)
     )
     return ChannelAdminCaller(platform_user_id=user_id, role_ids=teams, is_server_admin=is_admin)

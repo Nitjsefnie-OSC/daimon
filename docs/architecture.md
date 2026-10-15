@@ -1330,8 +1330,12 @@ before posting, checks the clicker's current admin rights, then claims the
 single-use pending card before saving a chat-scoped rule by compare-and-set.
 Discord defers the button response before the live check; Slack acknowledges
 the Socket Mode envelope before dispatch; Teams returns an immediate invoke
-response and performs the check in a tracked task. Teams sends any later
-refusal as a message targeted to the clicker.
+response and performs the check in a tracked task. Slack and Teams bypass the
+short group-membership cache for this check; Discord fetches the member from
+the guild. The answered-once edit is queued before the bounded rule save, so
+retiring an unsent call does not wait for the database. Teams sends later
+refusals as ordinary messages in personal chats and targeted messages to the
+clicker in group conversations.
 A failed compare-and-set leaves the call approved once and tells the clicker
 privately. The decider re-reads the rule after approval so a new explicit
 `deny` refuses the call before it is sent.

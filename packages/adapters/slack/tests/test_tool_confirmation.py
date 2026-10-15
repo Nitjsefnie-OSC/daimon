@@ -11,8 +11,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack import tool_confirmation as confirmation_module
+from daimon.adapters.slack.channel_admin_groups import user_group_members
 from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
 from daimon.core.authz import Subject
+from daimon.core.channel_admins import GroupMembersCache
+from daimon.core.config import TurnSettings
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationPrompt,
@@ -25,8 +28,12 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_blocks,
     build_confirmation_card,
 )
+from daimon.core.posted_controls.lifecycle import drain_card_edits
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.tool_safety import ToolCall
+from daimon.testing.factories import make_tenant
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def _prompt(*, expires_in: timedelta = timedelta(minutes=10)) -> ConfirmationPrompt:
@@ -262,6 +269,7 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
             await asyncio.sleep(0)
     else:
         await click
+    assert await drain_card_edits(1) == 0
     assert future.result() == "approved"
     assert posted.answered_edit_done.is_set()
     blocks = client.chat_update.await_args.kwargs["attachments"][0]["blocks"]
@@ -346,6 +354,7 @@ async def test_stale_always_click_approves_once_and_notifies_clicker(
     )
     monkeypatch.setattr(confirmation_module, "save_always_allow", AsyncMock(return_value="stale"))
     await cards.handle_click(_click(f"dcf:{token}:always", "U2"))
+    assert await drain_card_edits(1) == 0
     assert future.result() == "approved"
     blocks = client.chat_update.await_args.kwargs["attachments"][0]["blocks"]
     assert blocks[-1]["elements"][0]["text"] == "Approved once by <@U2>"
@@ -738,3 +747,146 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
     rendered = _attachment(card, prompt)[0]["blocks"]
     texts = [block["text"]["text"] for block in rendered if block["type"] == "section"]
     assert any(losses in text for text in texts) == (state in {"pending", "approved"})
+
+
+async def test_always_click_rechecks_revoked_group_after_cache_fill(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T0RULES")
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="slack",
+        channel_id="C1",
+        role_ids=["S1"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    client = _client()
+    client.users_info = AsyncMock(return_value={"ok": True, "user": {"is_admin": False}})
+    client.usergroups_users_list = AsyncMock(return_value={"users": ["U2"]})
+    runtime = MagicMock(sessionmaker=db_session_factory, group_members=GroupMembersCache())
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=False)
+    assert "U2" in await user_group_members(
+        runtime, cast(AsyncWebClient, client), tenant_id=tenant.id
+    )("S1")
+    client.usergroups_users_list.return_value = {"users": []}
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=tenant.id,
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+                channel_id="C1",
+            ),
+        }
+    )
+    cards = SlackConfirmationCards()
+    waiting = asyncio.create_task(
+        cards.hook(
+            cast(AsyncWebClient, client),
+            channel="C1",
+            thread_ts="1699.9",
+            runtime=runtime,
+            tenant_id=tenant.id,
+        )(prompt)
+    )
+    try:
+        while not client.chat_postMessage.await_count:
+            await asyncio.sleep(0)
+        actions = next(
+            b
+            for b in client.chat_postMessage.await_args.kwargs["attachments"][0]["blocks"]
+            if b["type"] == "actions"
+        )
+        always_id = actions["elements"][2]["action_id"]
+        await cards.handle_click(_click(always_id, "U2"))
+        assert not waiting.done()
+        assert client.usergroups_users_list.await_count == 2
+        assert (
+            client.chat_postEphemeral.await_args.kwargs["text"]
+            == "Only an admin can allow this for everyone."
+        )
+        assert client.chat_update.await_count == 0
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_blocked_always_save_does_not_block_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, approve_id = await _post(cards, client, prompt)
+    token = approve_id.split(":")[1]
+    posted = cards._controls.cards[token]
+    object.__setattr__(posted, "rule_factory", MagicMock())
+    object.__setattr__(
+        posted,
+        "rule_subject",
+        AsyncMock(return_value=Subject(is_admin=True, platform_user_id="U2")),
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_save(*_args: object, **_kwargs: object) -> str:
+        entered.set()
+        await release.wait()
+        return "saved"
+
+    monkeypatch.setattr(confirmation_module, "save_always_allow", blocked_save)
+    click = asyncio.create_task(cards.handle_click(_click(f"dcf:{token}:always", "U2")))
+    await entered.wait()
+    result = await asyncio.wait_for(waiting, 1)
+    assert isinstance(result, ApprovedConfirmation)
+    await asyncio.wait_for(result.retire_unsent(), 0.5)
+    assert not click.done()
+    release.set()
+    await click
+    assert await drain_card_edits(1) == 0
+    assert client.chat_update.await_args.kwargs["text"].startswith("Stopped")
+
+
+async def test_cancelled_retirement_wait_can_be_retried() -> None:
+    cards = SlackConfirmationCards()
+    client = _client()
+    editing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_update(**_kwargs: object) -> None:
+        editing.set()
+        await release.wait()
+
+    client.chat_update = AsyncMock(side_effect=slow_update)
+    waiting, approve_id = await _post(cards, client)
+    click = asyncio.create_task(cards.handle_click(_click(approve_id, "U1")))
+    result = await asyncio.wait_for(waiting, 1)
+    assert isinstance(result, ApprovedConfirmation)
+    await editing.wait()
+    retire = asyncio.create_task(result.retire_unsent())
+    await asyncio.sleep(0)
+    assert not retire.done()
+    retire.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await retire
+    release.set()
+    await click
+    await asyncio.wait_for(result.retire_unsent(), 1)
+    assert client.chat_update.await_args.kwargs["text"].startswith("Stopped")

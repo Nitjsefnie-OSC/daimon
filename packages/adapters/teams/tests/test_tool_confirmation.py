@@ -13,12 +13,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.teams import tool_confirmation as confirmation_module
+from daimon.adapters.teams.channel_admin_groups import team_owner_lookup
 from daimon.adapters.teams.tool_confirmation import (
     VERB,
     TeamsConfirmationCards,
     confirmation_adaptive_card,
 )
 from daimon.core.authz import Subject
+from daimon.core.channel_admins import GroupMembersCache
+from daimon.core.config import TurnSettings
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
@@ -33,8 +36,20 @@ from daimon.core.posted_controls.confirmation import (
     ConfirmationCardState,
     build_confirmation_card,
 )
+from daimon.core.posted_controls.lifecycle import drain_card_edits
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.tool_safety import ToolCall
-from microsoft_teams.api import AdaptiveCardInvokeActivity
+from daimon.testing.factories import make_tenant
+from microsoft_teams.api import (
+    Account,
+    AdaptiveCardInvokeActivity,
+    ApiClient,
+    ConversationAccount,
+    ConversationReference,
+)
+from microsoft_teams.apps import ActivityContext
+from microsoft_teams.common import Client, ClientOptions
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -43,6 +58,7 @@ from .conftest import (
     SERVICE_URL,
     USER_NAME,
     FakeSender,
+    TeamsApiFake,
     make_card_action,
 )
 
@@ -292,16 +308,14 @@ async def test_always_action_refuses_nonadmin_privately(
     other_click = _click(token, "always", OTHER_AAD_OBJECT_ID)
     requester = await cards.on_action(requester_click)
     other = await cards.on_action(other_click)
-    assert (
-        requester.value == other.value == "Checking you're an admin..."
-    )
+    assert requester.value == other.value == "Checking you're an admin..."
     await asyncio.gather(*cards._always_tasks)
     assert requester_click.send.await_args.args[0].text == (
         "Only an admin can allow this for everyone.\n"
         "Ask an admin, or use Approve for just this time."
     )
     assert other_click.send.await_args.args[0].text == "Only an admin can allow this for everyone."
-    assert requester_click.send.await_args.args[0].recipient.is_targeted is True
+    assert requester_click.send.await_args.args[0].recipient is None
     assert not future.done() and not sender.sent
     save.assert_not_awaited()
 
@@ -350,6 +364,59 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
             break
         await asyncio.sleep(0)
     assert "Approved once by" in _json(sender, -1)
+
+
+async def test_blocked_always_save_does_not_block_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting = asyncio.create_task(
+        cards.hook(conversation_id=CONVERSATION_ID, service_url=SERVICE_URL)(prompt)
+    )
+    while not sender.sent:
+        await asyncio.sleep(0)
+    token_match = re.search(r'"token":"([^"]+)"', _json(sender, 0))
+    assert token_match is not None
+    token = token_match.group(1)
+    posted = cards._controls.cards[token]
+    object.__setattr__(posted, "rule_factory", MagicMock())
+    object.__setattr__(
+        posted,
+        "rule_subject",
+        AsyncMock(return_value=Subject(is_admin=True, platform_user_id=OTHER_AAD_OBJECT_ID)),
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_save(*_args: object, **_kwargs: object) -> str:
+        entered.set()
+        await release.wait()
+        return "saved"
+
+    monkeypatch.setattr(confirmation_module, "save_always_allow", blocked_save)
+    await cards.on_action(_click(token, "always", OTHER_AAD_OBJECT_ID))
+    await entered.wait()
+    result = await asyncio.wait_for(waiting, 1)
+    assert isinstance(result, ApprovedConfirmation)
+    await asyncio.wait_for(result.retire_unsent(), 0.5)
+    assert cards._always_tasks
+    release.set()
+    await asyncio.gather(*cards._always_tasks)
+    assert await drain_card_edits(1) == 0
+    assert "Stopped" in _json(sender, -1)
 
 
 async def test_an_unanswered_card_expires_and_is_retired() -> None:
@@ -631,3 +698,95 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
     )
     rendered = confirmation_adaptive_card(card, prompt).model_dump_json(by_alias=True)
     assert (losses in rendered) == (state in {"pending", "approved"})
+
+
+async def test_always_click_rechecks_revoked_team_owner_after_cache_fill(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    team_id = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
+    tenant = await make_tenant(db_session, platform="teams", workspace_id="tenant-rules")
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        channel_id="19:abc@thread.tacv2",
+        role_ids=[team_id],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    owners = AsyncMock(return_value=frozenset({OTHER_AAD_OBJECT_ID}))
+    runtime = MagicMock(
+        sessionmaker=db_session_factory, team_owners=owners, group_members=GroupMembersCache()
+    )
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=False)
+    runtime.settings.teams.admin_user_ids = ()
+    members = team_owner_lookup(runtime)
+    assert members is not None and OTHER_AAD_OBJECT_ID in await members(team_id)
+    owners.return_value = frozenset()
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=tenant.id,
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+                channel_id="19:abc@thread.tacv2",
+            ),
+        }
+    )
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting = asyncio.create_task(
+        cards.hook(
+            conversation_id=CONVERSATION_ID,
+            service_url=SERVICE_URL,
+            runtime=runtime,
+            tenant_id=tenant.id,
+        )(prompt)
+    )
+    try:
+        while not sender.sent:
+            await asyncio.sleep(0)
+        token = re.search(r'"token":"([^"]+)"', _json(sender, 0))
+        assert token is not None
+        click = _click(token.group(1), "always", OTHER_AAD_OBJECT_ID)
+        await cards.on_action(click)
+        await asyncio.gather(*cards._always_tasks)
+        assert not waiting.done()
+        assert owners.await_count == 2
+        assert click.send.await_args.args[0].text == "Only an admin can allow this for everyone."
+        assert len(sender.sent) == 1
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+@pytest.mark.parametrize("conversation_type", ["personal", "channel", "groupChat", "meeting"])
+async def test_private_notice_uses_sdk_endpoint_for_conversation_type(
+    conversation_type: str,
+) -> None:
+    wire = TeamsApiFake()
+    client = Client(ClientOptions(token="offline-token", headers={}))
+    client.use(wire)
+    api = ApiClient(SERVICE_URL, client)
+    payload = make_card_action(VERB, "always", user=OTHER_AAD_OBJECT_ID, token="tok_abcdefgh")
+    conversation = payload["conversation"]
+    assert isinstance(conversation, dict)
+    conversation["conversationType"] = conversation_type
+    context = ActivityContext.__new__(ActivityContext)
+    context.activity = AdaptiveCardInvokeActivity.model_validate(payload)
+    context.api = api
+    context.conversation_ref = ConversationReference(
+        channel_id="msteams",
+        service_url=SERVICE_URL,
+        bot=Account(id="offline-bot"),
+        conversation=ConversationAccount(id=CONVERSATION_ID),
+    )
+    await TeamsConfirmationCards(FakeSender())._notify_clicker(context, "private refusal")
+    assert len(wire.activity_requests) == 1
+    request = wire.activity_requests[0]
+    assert ("isTargetedActivity=true" in request.url) is (conversation_type != "personal")
+    assert request.body["text"] == "private refusal"

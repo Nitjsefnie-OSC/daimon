@@ -8,9 +8,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import pytest
-from daimon.core._models import Tenant
+from daimon.core._models import AgentToolRuleHistoryRecord, Tenant
 from daimon.core.authz import Subject
 from daimon.core.confirmation import ConfirmationPrompt, ToolRuleCardReference
+from daimon.core.posted_controls import tool_rule_confirmation as rule_module
 from daimon.core.posted_controls.confirmation import (
     ConfirmationHow,
     build_confirmation_blocks,
@@ -21,11 +22,13 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import PostedConfirmations
 from daimon.core.posted_controls.tool_rule_confirmation import (
+    SAVE_FAILED_MESSAGE,
     allowed_rule_scope,
     save_always_allow,
     snapshot_tool_rule,
 )
 from daimon.core.stores import agent_tool_rules as store
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -43,6 +46,12 @@ def _prompt(tenant_id: uuid.UUID, *, channel: str | None = "home") -> Confirmati
             server_url="https://example.test/mcp",
             channel_id=channel,
         ),
+    )
+
+
+def test_save_failure_notice_copy() -> None:
+    assert SAVE_FAILED_MESSAGE == (
+        "Approved this time only.\nAlways allow wasn't saved. Try again on the next card."
     )
 
 
@@ -258,3 +267,50 @@ async def test_blind_upsert_and_scoped_saves(
         )
         assert global_rule is not None and global_rule.rule == "allow"
         assert global_rule.set_by == "admin" and global_rule.revision == 2
+
+
+async def test_timed_out_save_rolls_back_rule_and_history(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = Tenant(platform="discord", external_id=str(uuid.uuid4()))
+    db_session.add(tenant)
+    await db_session.commit()
+    prompt = await snapshot_tool_rule(_prompt(tenant.id), db_session_factory)
+    assert prompt.tool_rule is not None
+    real_set = store.set_rule
+    entered = asyncio.Event()
+
+    async def pause_after_flush(session: AsyncSession, **kwargs: object) -> object:
+        row = await real_set(session, **kwargs)  # type: ignore[arg-type]
+        entered.set()
+        await asyncio.Event().wait()
+        return row
+
+    monkeypatch.setattr(store, "set_rule", pause_after_flush)
+    monkeypatch.setattr(rule_module, "SAVE_TIMEOUT_S", 0.05)
+    assert (
+        await save_always_allow(
+            db_session_factory,
+            reference=prompt.tool_rule,
+            scope="agent",
+            subject=Subject(is_admin=True, platform_user_id="admin"),
+            clicker="admin",
+        )
+        == "failed"
+    )
+    assert entered.is_set(), "the rule and history were flushed before cancellation"
+    async with db_session_factory() as session:
+        assert (
+            await store.get_rule(
+                session, tenant_id=tenant.id, agent_id="ma-1", tool_key="remote/append_note"
+            )
+            is None
+        )
+        history = await session.scalars(
+            select(AgentToolRuleHistoryRecord).where(
+                AgentToolRuleHistoryRecord.tenant_id == tenant.id
+            )
+        )
+        assert history.all() == []
