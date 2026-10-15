@@ -70,7 +70,7 @@ to manage webhooks. Discord's channel overrides can deny a permission granted
 at server level. Without it, agent replies still post through the bot with a
 bold agent name on the first answer chunk.
 
-Setup and routines commands require Discord's `Manage Server` permission.
+`/routines` requires Discord's `Manage Server` permission. The other commands are open to every member; what each person may change is checked inside.
 
 Unclicked private credential forms can update their original Discord card
 after expiry when `DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY=true`. The default
@@ -216,26 +216,25 @@ Members can request setup; their request is recorded for an admin. For an
 operator fallback, print a seven-day, single-use invitation with
 `daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
 The invitation is minted on that workspace admin's behalf. The recipient signs in
-to GitHub and confirms repositories they can read or write. No repository is
-preselected. The page lists the repositories on which GitHub gives the signed-in
-account read, triage, write, maintain or admin permission, and notes how many it
-hides because the account has none. Each selected repository is checked again
-against GitHub at confirmation, and the access granted is capped by the person's
-own permission: read and triage give read access, write, maintain and admin allow
-read and write, and never more than the GitHub App installation holds.
+to GitHub and picks repositories. No repository is preselected. The page lists
+the repositories the GitHub App installation covers that the signed-in account
+can see on GitHub, and notes how many it hides because the account can't.
+Each selected repository is checked again against GitHub at confirmation.
+Every connected repository is read and write for the agent, within the GitHub
+App installation's permissions; the person's own GitHub role does not lower it.
+A repository the App installation doesn't cover needs a GitHub org owner to add
+it to the installation first.
 
 In Discord or Slack, open `/github` to see the server connection, your personal
 GitHub link, and waiting requests. An admin can also open GitHub from
-`/agent-setup` to add or change repos for an agent. The browser page searches
-repos, shows the selected access level, and keeps Connect repos visible until
-confirmation. A second submission shows the connected count. People link their
-GitHub account when a request needs repo access; their GitHub permissions cap
-what the agent can use. Admins can review requests and disconnect the server connection.
+`/agent-setup` to see an agent's repos. The browser page searches repos and
+keeps Save changes visible until confirmation. Admins can review requests and
+disconnect the server connection.
 
 Operator-issued links without an agent target only connect repos to the
 workspace. In that fallback, agents remain in legacy GitHub mode until an
 admin stages grants with
-`daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`
+`daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id>` (add `--working` to make it the working repo)
 and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
 Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.
 While app mode is active, `grants stage` updates access immediately. Existing
@@ -670,8 +669,11 @@ controls.
 ## Connecting Notion, Linear and other MCP servers
 
 Ask the agent to connect a server and it posts a card only you can open.
+Adding a server to an agent other people use needs a server admin; anyone can
+sign in to a server the agent already has. GitHub repos go through
+[Connect GitHub](#github-app-optional), not a token.
 
-- A server that takes a bearer token (Linear, GitHub) gets a private token
+- A server that takes a bearer token (Linear) gets a private token
   form. The token is checked against the server before it is stored and is
   shared by everyone who talks to that agent.
 - A server that signs people in through a browser (Notion, Slack, Atlassian)
