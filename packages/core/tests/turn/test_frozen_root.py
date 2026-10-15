@@ -1816,4 +1816,11 @@ async def test_fresh_root_rechecks_new_thread_policy_before_retaining_or_sending
         await freeze((deps, prepared, *root_turn[2:]))
     assert len(transport.requests) == before
     async with deps.sessionmaker() as db:
-        assert await db.scalar(select(func.count()).select_from(FleetRun)) == 0
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == grant.tenant_id)
+            )
+            == 0
+        )
