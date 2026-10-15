@@ -4,11 +4,19 @@ import json
 
 import pytest
 from daimon.core.channel_backend import AgentBackendRefused, BackendUnsupported, check_backend
+from daimon.core.observability import redact_log_event
 from daimon.core.scope import ResolvedConfig
 from daimon.core.turn.admission import Admission, _log_backend_unsupported, _require_backend_origin
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma_models import ma_agent, ma_environment
-from mux.errors import UnsupportedCapability
+from mux.contracts.config import (
+    BackendConfig,
+    CapabilityRequirement,
+    ConfigRevision,
+    ResolvedBackend,
+    resolve_default,
+)
+from mux.errors import InvalidConfig, UnsupportedCapability
 from mux.profiles import backend_selection
 from structlog.testing import capture_logs
 
@@ -57,6 +65,7 @@ def test_workspace_policy_refusal_has_a_structured_reason():
             "event": "turn.backend_unsupported",
             "stage": "workspace_policy",
             "reason": "backend_not_enabled",
+            "causes": [],
             "channel_id": REVISION.channel.channel_id,
             "profile": REVISION.profile,
             "log_level": "info",
@@ -82,7 +91,7 @@ def test_nested_private_errors_log_only_closed_reason_and_capability_labels():
         {"type": "AgentBackendRefused", "reason": "redacted"},
         {"type": "AdmissionDenied", "reason": "backend_unsupported"},
         {"type": "AgentBackendRefused", "reason": "source_unavailable"},
-        {"type": "UnsupportedCapability", "missing": ["source_definition"]},
+        {"type": "UnsupportedCapability", "missing": ["redacted", "source_definition"]},
         {"type": "RuntimeError"},
     ]
     assert private not in json.dumps(logs)
@@ -94,3 +103,89 @@ def test_cyclic_exception_context_cannot_block_a_denial_log():
     with capture_logs() as logs:
         _log_backend_unsupported("preparation_counterpart", error)
     assert logs[0]["causes"] == [{"type": "RuntimeError"}]
+
+
+@pytest.mark.parametrize("enabled", [None, ("anthropic",)])
+def test_unregistered_profile_is_redacted_before_and_after_production_scrubbing(enabled):
+    private = "PRIVATE_DIAGNOSTIC_VALUE"
+    revision = ConfigRevision.create(
+        REVISION.channel,
+        1,
+        ResolvedBackend(backend="openai", profile="openai." + private, model="gpt-6-luna"),
+    )
+    with capture_logs() as logs, pytest.raises(BackendUnsupported) as refused:
+        check_backend(revision, enabled_backends=enabled)
+    assert len(logs) == 1
+    assert logs[0]["profile"] == "redacted"
+    assert logs[0]["stage"] == ("workspace_policy" if enabled else "backend_configuration")
+    assert private not in json.dumps(logs)
+    assert private not in json.dumps([redact_log_event(None, "info", row) for row in logs])
+    # Diagnostic redaction does not rewrite the original exception or its chain.
+    if enabled:
+        assert refused.value.__cause__ is None
+        assert str(refused.value) == "This backend is not enabled for this workspace."
+    else:
+        assert isinstance(refused.value.__cause__, InvalidConfig)
+        assert private in str(refused.value.__cause__)
+        assert str(refused.value) == str(refused.value.__cause__)
+
+
+def test_private_exception_class_is_redacted_and_the_original_chain_is_preserved():
+    private = "PRIVATE_EXCEPTION_CLASS"
+    error = type(private, (RuntimeError,), {})("private message")
+    parent = AdmissionDenied(reason="backend_unsupported")
+    parent.__context__ = error
+    with capture_logs() as logs:
+        _log_backend_unsupported("preparation_counterpart", parent)
+    assert logs[0]["causes"] == [
+        {"type": "AdmissionDenied", "reason": "backend_unsupported"},
+        {"type": "redacted"},
+    ]
+    assert private not in json.dumps(logs)
+    assert parent.__context__ is error
+
+
+@pytest.mark.parametrize(
+    ("config", "stage", "cause_type"),
+    [
+        (
+            BackendConfig(backend="openai", profile="openai.conversation_only", model="gpt-6-luna"),
+            "backend_runnable",
+            None,
+        ),
+        (
+            BackendConfig(
+                backend="openai",
+                profile="openai.conversation_only",
+                model="gpt-6-luna",
+                requires={"thread_workspace_persistence": CapabilityRequirement(level="required")},
+            ),
+            "backend_capabilities",
+            UnsupportedCapability,
+        ),
+    ],
+)
+def test_nonrunnable_and_missing_capabilities_have_distinct_stages_and_unchanged_causes(
+    config,
+    stage,
+    cause_type,
+):
+    revision = ConfigRevision.create(REVISION.channel, 1, resolve_default(config))
+    with capture_logs() as logs, pytest.raises(BackendUnsupported) as refused:
+        check_backend(revision)
+    assert len(logs) == 1 and logs[0]["stage"] == stage
+    assert "error" not in logs[0]
+    if cause_type is None:
+        assert refused.value.__cause__ is None
+        assert logs[0]["reason"] == "profile_not_runnable"
+    else:
+        assert isinstance(refused.value.__cause__, cause_type)
+        assert logs[0]["causes"] == [
+            {"type": "UnsupportedCapability", "missing": ["thread_workspace_persistence"]},
+        ]
+
+
+def test_private_stage_and_reason_cannot_escape_the_shared_diagnostic_owner():
+    with capture_logs() as logs:
+        _log_backend_unsupported("PRIVATE_STAGE", reason="PRIVATE_REASON")
+    assert logs[0]["stage"] == logs[0]["reason"] == "redacted"

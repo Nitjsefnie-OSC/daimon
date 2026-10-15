@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Literal, get_args
+from typing import Literal
 
 import structlog
 from anthropic import APIStatusError
@@ -56,6 +56,9 @@ from daimon.core.channel_backend import (
     channel_ref,
     check_backend,
     current_backend_and_sharing,
+)
+from daimon.core.channel_backend import (
+    log_backend_unsupported as _log_backend_unsupported,
 )
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
@@ -108,8 +111,7 @@ from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import ThreadRef
-from mux.contracts.profile import Capability
-from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Slot
 
@@ -126,61 +128,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-
-def _log_backend_unsupported(stage: str, error: BaseException | None = None) -> None:
-    """Log closed diagnostic labels, never provider messages or source payloads."""
-    safe_reasons = {
-        "actor_not_found",
-        "admin_required",
-        "agent_identity_required",
-        "agent_not_found",
-        "backend_not_allowed",
-        "drops_mismatch",
-        "drops_required",
-        "feature_disabled",
-        "invalid_fleet_grant",
-        "no_previous_revision",
-        "re_confirm",
-        "revision_busy",
-        "source_unavailable",
-        "stale_preview",
-        "stale_revision",
-        "tenant_mismatch",
-        "worker_identity_required",
-        "backend_unsupported",
-    }
-    safe_missing = set(get_args(Capability)) | {
-        "source_definition",
-        "source_context",
-        "source_drift",
-        "worker_context",
-        "native_counterpart",
-        "worker_materialization",
-        "worker_acknowledgement",
-        "instructions",
-        "tools",
-        "skills",
-        "mcp",
-        "memory",
-        "environment",
-        "sandbox",
-        "credentials",
-        "repository",
-        "files",
-    }
-    causes: list[dict[str, object]] = []
-    seen: set[int] = set()
-    while error is not None and id(error) not in seen and len(causes) < 8:
-        seen.add(id(error))
-        cause: dict[str, object] = {"type": type(error).__name__}
-        if isinstance(error, (channel_backend.AgentBackendRefused, AdmissionDenied)):
-            cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
-        if isinstance(error, UnsupportedCapability):
-            cause["missing"] = sorted(set(error.missing) & safe_missing)
-        causes.append(cause)
-        error = error.__cause__ or error.__context__
-    _log.info("turn.backend_unsupported", stage=stage, causes=causes)
 
 
 @dataclass(frozen=True)
