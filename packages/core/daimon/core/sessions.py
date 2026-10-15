@@ -101,7 +101,6 @@ from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import (
     hash_mcp_servers,
     hash_skills,
-    hash_tools,
     session_mcp_servers,
     session_skills,
     session_tools,
@@ -740,6 +739,8 @@ async def create_session(
     )
     resource_agent = agent
     if resource_source is not None or worker is not None:
+        from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
         if (
             resource_source is None
             or worker is None
@@ -772,7 +773,7 @@ async def create_session(
         await before_create()
         if (
             resource_source.memory_store_id is None
-            or resource_source.resource_requirements
+            or worker_source_ceiling(resource_source).resource_requirements
             or resource_source.repository_sources
             or extra_resources
         ):
@@ -804,7 +805,7 @@ async def create_session(
         app_mode = await _session_app_mode(
             session_factory, tenant_id=tenant_id, agent_id=agent_uuid
         )
-    caller_vault = _caller_mcp_vault_required(
+    caller_vault = worker is None and _caller_mcp_vault_required(
         app_mode=app_mode,
         mcp_settings=mcp_settings,
         account_id=account_id,
@@ -1315,6 +1316,8 @@ async def create_session(
                     assert before_create is not None
                     await before_create()
             if resource_source is not None:
+                from mux.drivers.anthropic.resources.agents import native_tools_match
+
                 assert observed is not None
                 native_agent, native_resources = (
                     observed.get(name) for name in ("agent", "resources")
@@ -1350,7 +1353,16 @@ async def create_session(
                         )
                         if (
                             any(getattr(actual, key) != getattr(wanted, key) for key in scalars)
-                            or hash_tools(actual.tools) != hash_tools(wanted.tools)
+                            or not native_tools_match(
+                                [
+                                    tool.model_dump(mode="json", exclude_none=True)
+                                    for tool in wanted.tools
+                                ],
+                                [
+                                    tool.model_dump(mode="json", exclude_none=True)
+                                    for tool in actual.tools
+                                ],
+                            )
                             or hash_mcp_servers(actual.mcp_servers)
                             != hash_mcp_servers(wanted.mcp_servers)
                             or hash_skills(actual.skills) != hash_skills(wanted.skills)

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep native-only MCP servers and their credentials out of fleet worker grants,
+  preserve exact builtin permissions, and declare incomplete native toolsets on backend switches.
+
+
 ### Added
 
 - Workspace admins can set, list and clear per-agent rules for individual third-party MCP tools from `daimon agents tool-rules` or MCP. Channel admins can manage rules for any agent in their channels. A channel rule also applies to threads under its parent channel; where it overlaps an agent-wide rule, the stricter outcome wins. Rules can allow, ask or deny in chat, with an explicit option to allow unattended routines. They are bound to the agent id and server URL, audited with revisions, and inactive by default behind `DAIMON_TOOL_SAFETY__AGENT_RULES`.
