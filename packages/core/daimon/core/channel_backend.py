@@ -855,6 +855,7 @@ def make_backend_service(
     *,
     cost_line: Callable[[BackendAgent, Provider], str] | None = None,
     prices: Mapping[str, ProviderPrice] | None = None,
+    capture_source: Callable[[BackendAgent], Awaitable[BackendAgent]] | None = None,
 ) -> AgentBackendService:
     def configured_cost(agent: BackendAgent, target: Provider) -> str:
         return _default_cost(agent, target, prices=prices)
@@ -863,6 +864,7 @@ def make_backend_service(
         sessionmaker,
         enabled=backend_selection_enabled(settings),
         cost_line=cost_line or configured_cost,
+        capture_source=capture_source,
     )
 
 

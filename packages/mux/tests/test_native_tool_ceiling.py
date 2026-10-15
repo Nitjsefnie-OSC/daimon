@@ -187,6 +187,7 @@ def test_unresolved_defaults_do_not_grant_unlisted_builtins(defaults):
         ({"type": "aws_role", "role_arn": "arn:aws:iam::000000000000:role/example"}, False),
         ({"type": "service_account", "scope": "all"}, False),
         ({"type": "future"}, False),
+        ({"type": "user"}, False),
         (None, False),
     ],
 )
@@ -232,3 +233,23 @@ def test_environment_readback_metadata_is_excluded_but_unknown_authority_refuses
         assert record.spec.execution == "hosted"
         assert record.spec.network.mode == "unrestricted"
         assert dict(record.spec.packages) == {"system": (), "python": (), "npm": ()}
+
+
+@pytest.mark.parametrize(
+    "state", ["archived", "deleted", "Active", "active ", "", None, True, 1, {}, []]
+)
+def test_non_active_environment_lifecycle_remains_a_source_obligation(state):
+    from daimon.core.mux_compat import source_environment_record
+    from daimon.testing.ma_models import ma_environment
+    from mux.contracts.ids import Scope
+
+    native = ma_environment().model_copy(update={"state": state})
+    record = source_environment_record(
+        native,
+        Scope(
+            tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"
+        ),
+    )
+    assert record.spec.native_config is not None
+    assert record.spec.native_config.value["unclassified_fields"] == ["state"]
+    assert record.native["state"] == state
