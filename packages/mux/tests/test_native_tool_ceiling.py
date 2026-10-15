@@ -98,3 +98,46 @@ def test_read_only_neutral_grant_compiles_to_only_read(permission, policy):
         ).intent()
         == spec.tools
     )
+
+
+@pytest.mark.parametrize(
+    "fault", [None, "enabled", "permission", "unknown", "duplicates", "implicit"]
+)
+def test_native_readback_canonicalization_never_erases_a_widening(fault):
+    from copy import deepcopy
+
+    from mux.drivers.anthropic.resources.agents import native_tools_match
+
+    expected = [
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": False, "permission_policy": {"type": "always_ask"}},
+            "configs": [
+                {"name": "read", "enabled": True, "permission_policy": {"type": "always_ask"}}
+            ],
+        }
+    ]
+    observed = deepcopy(expected)
+    observed[0]["configs"][0]["type"] = "read"
+    observed[0]["configs"].insert(
+        0,
+        {
+            "name": "bash",
+            "type": "bash",
+            "enabled": False,
+            "permission_policy": {"type": "always_allow"},
+        },
+    )
+    if fault == "enabled":
+        observed[0]["configs"][0]["enabled"] = True
+    elif fault == "permission":
+        observed[0]["configs"][1]["permission_policy"]["type"] = "always_allow"
+    elif fault == "unknown":
+        observed[0]["configs"][0]["scope"] = "unrestricted"
+    elif fault == "duplicates":
+        observed[0]["configs"].append(
+            {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
+        )
+    elif fault == "implicit":
+        observed[0]["default_config"]["enabled"] = True
+    assert native_tools_match(expected, observed) is (fault is None)
