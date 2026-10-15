@@ -556,3 +556,46 @@ def test_conversation_registration_preserves_explicit_openai_tariff_owner(regist
     assert registry._RUNTIME_FACTORIES[PROFILE].factory is explicit
     assert "openai.conversation_only" in registry._RUNTIME_FACTORIES
     assert dict(registry.channel_runtime_prices()) == source
+
+
+def test_openai_authorization_reads_only_the_selected_profile(registry, monkeypatch, tmp_path):
+    from daimon.core.turn.openai_deployment import (
+        OpenAIDeployment,
+        authorized_deployments,
+        register_runtime,
+    )
+
+    common = dict(
+        tenant_id="tenant",
+        platform="slack",
+        channel_id="channel",
+        account_id="account",
+        config_digest="digest",
+        project="project",
+        agent_id="agent",
+        api_key_env="OFFLINE_OPENAI_KEY",
+    )
+    persistent = OpenAIDeployment(profile=PROFILE, environment_id="environment", **common)
+    conversation = OpenAIDeployment(profile="openai.conversation_only", **common)
+    path = tmp_path / "runtime.json"
+    path.write_text(
+        json.dumps([persistent.model_dump(mode="json"), conversation.model_dump(mode="json")])
+    )
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
+    register_runtime()
+    assert authorized_deployments("tenant") == (persistent,)
+    assert registry.authorized_channel_deployments(PROFILE, "tenant") == (persistent,)
+    assert registry.authorized_channel_deployments("openai.conversation_only", "tenant") == (
+        conversation,
+    )
+    path.write_text(
+        json.dumps(
+            [
+                persistent.model_dump(mode="json"),
+                {"profile": "openai.conversation_only", "tenant_id": "tenant"},
+            ]
+        )
+    )
+    assert registry.authorized_channel_deployments(PROFILE, "tenant") == (persistent,)
+    assert registry.authorized_channel_deployments("openai.conversation_only", "tenant") == ()

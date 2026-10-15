@@ -274,8 +274,10 @@ def _manifest_deployment(request: ProviderPreparationRequest) -> OpenAIDeploymen
     return select_runtime_manifest(request, OpenAIDeployment)
 
 
-def authorized_deployments(tenant_id: str) -> tuple[OpenAIDeployment, ...]:
-    """Every explicit OpenAI deployment the operator's manifest grants one tenant.
+def authorized_deployments(
+    tenant_id: str, *, profile: str = PROFILE
+) -> tuple[OpenAIDeployment, ...]:
+    """Explicit deployments for one tenant and the selected OpenAI profile.
 
     For callers outside a turn (the CLI, MCP tools) that route a tenant's or
     channel's resources natively only where the operator authorized it. The
@@ -294,7 +296,7 @@ def authorized_deployments(tenant_id: str) -> tuple[OpenAIDeployment, ...]:
         return tuple(
             OpenAIDeployment.model_validate(row)
             for row in _MANIFEST.validate_json(raw)
-            if row.get("profile") in PROFILES and row.get("tenant_id") == tenant_id
+            if row.get("profile") == profile and row.get("tenant_id") == tenant_id
         )
     except (OSError, ValidationError):
         return ()
@@ -500,9 +502,7 @@ def register_runtime() -> None:
         register_channel_runtime(
             profile,
             build_openai_runtime,
-            authorizations=lambda tenant_id, selected=profile: tuple(
-                row for row in authorized_deployments(tenant_id) if row.profile == selected
-            ),
+            authorizations=partial(authorized_deployments, profile=profile),
             tariffs=partial(provider_prices, PROFILE) if profile == PROFILE else None,
             fallback=True,
         )
