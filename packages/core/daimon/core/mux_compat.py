@@ -281,7 +281,13 @@ def sdk_environment(record: Environment) -> BetaEnvironment:
         type="environment",
         **record.model_dump(mode="json", include={"created_at", "updated_at", "archived_at"}),
     )
-    return BetaEnvironment.model_validate(payload)
+    # Native responses can carry a null description despite the SDK's str annotation.
+    # Validate every other field strictly, then restore that exact response metadata.
+    null_description = record.spec.description is None
+    if null_description:
+        payload["description"] = ""
+    environment = BetaEnvironment.model_validate(payload)
+    return environment.model_copy(update={"description": None}) if null_description else environment
 
 
 async def list_agents(

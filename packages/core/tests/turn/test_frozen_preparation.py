@@ -59,7 +59,9 @@ async def test_exact_request_reconstructed_from_retained_facts(root_turn):
     assert all(item.method == "GET" for item in transport.requests[before:])
 
 
-@pytest.mark.parametrize("retained_budget_root_turn", ["recorded_i7"], indirect=True)
+@pytest.mark.parametrize(
+    "retained_budget_root_turn", ["recorded_i7", "recorded_i7_null_description"], indirect=True
+)
 @pytest.mark.parametrize("association_fault", [None, "missing", "foreign", "channel"])
 async def test_recorded_agent_origin_root_retains_preparation_association(
     retained_budget_root_turn, association_fault
@@ -110,6 +112,12 @@ async def test_recorded_agent_origin_root_retains_preparation_association(
     )
     value = (deps, prepared, *value[2:6], binding, value[7])
     await freeze(value)
+    async with deps.sessionmaker() as db:
+        stored = await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id)
+    assert (
+        stored.result["preparation"]["environment"]["spec"]["description"]
+        == prepared.admission.environment.description
+    )
     await service.clear_backend(source, accepted.local, actor)
     parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
     if association_fault:
@@ -144,6 +152,8 @@ async def test_recorded_agent_origin_root_retains_preparation_association(
     assert request.admission.backend_revision == revision
     assert request.admission.backend_revision_origin == "agent"
     assert request.admission.backend_agent_revision == accepted
+    assert request.admission.environment.description == prepared.admission.environment.description
+    assert request.source.environment.spec.description == prepared.admission.environment.description
 
 
 @pytest.mark.parametrize("fault", ["scope", "subject", "run"])
@@ -488,6 +498,43 @@ def test_environment_sdk_facade_preserves_represented_network_packages_and_dates
     assert restored.created_at == native.created_at and restored.updated_at == native.updated_at
 
 
+@pytest.mark.parametrize("fault", [None, "scope", "config"])
+def test_environment_facade_preserves_null_description_and_validates_authority(fault):
+    from daimon.core.mux_compat import sdk_environment, source_environment_record
+    from daimon.testing.ma_models import ma_environment
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.ids import Scope
+    from pydantic import ValidationError
+
+    native = ma_environment(tenant_id="tenant").model_copy(update={"description": None})
+    scope = Scope(
+        tenant_id="tenant", account_id="account", principal_id="host", authorization_id="verified"
+    )
+    record = source_environment_record(native, scope).model_copy(update={"native": None})
+    if fault:
+        updates = (
+            {"scope": "unknown"}
+            if fault == "scope"
+            else {
+                "native_config": ExtensionConfig(
+                    namespace="anthropic.environment_config",
+                    version=1,
+                    value={"unclassified_fields": ["unknown_authority"]},
+                )
+            }
+        )
+        record = record.model_copy(update={"spec": record.spec.model_copy(update=updates)})
+        with pytest.raises(ValidationError):
+            sdk_environment(record)
+        return
+    restored = sdk_environment(record)
+    assert restored.description is None
+    assert restored.config.model_dump(mode="json") == native.config.model_dump(mode="json")
+    assert restored.scope == native.scope
+    assert restored.metadata == native.metadata
+    assert restored.id == native.id
+
+
 @pytest.mark.parametrize("change", ["revoke", "expire"])
 async def test_after_source_await_refuses_before_environment_read(root_turn, change):
     import httpx
@@ -802,7 +849,12 @@ async def test_default_grant_duration_and_turn_count_bound_the_frozen_run(root_t
 @pytest.fixture
 async def retained_budget_root_turn(db_preflight, db_nullpool_engine, request):
     async for value in root_turn.__wrapped__(
-        db_preflight, db_nullpool_engine, live_root=getattr(request, "param", None) == "recorded_i7"
+        db_preflight,
+        db_nullpool_engine,
+        live_root=getattr(request, "param", None)
+        in ("recorded_i7", "recorded_i7_null_description"),
+        null_environment_description=getattr(request, "param", None)
+        == "recorded_i7_null_description",
     ):
         yield value
 
