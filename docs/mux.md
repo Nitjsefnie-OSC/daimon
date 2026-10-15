@@ -3012,6 +3012,26 @@ readback fixtures in `packages/core/tests/turn/native_counterpart_support.py`.
 selects Gemini and reuses the same readback assertions. Provider implementations
 are imported when their factory is selected, so OpenAI coverage also runs without
 the Gemini host installed. Existing cross-provider runtime tests retain both selections.
+### Source-loss consent persistence
+
+Agent backend revisions can retain a closed source-loss consent body containing
+the canonical declared drops, the complete source pin and the target-spec digest.
+Existing revisions have no consent and serialize as before. Consent-bearing
+effective configuration rows retain the original logical agent UUID and local
+revision; identical backend/model selections with different consent do not share
+an effective revision. Retained reads resolve that exact original association,
+and refuse foreign, malformed or missing originals. This storage alone enables
+no ordinary cross-backend execution.
+
+The migration adds two nullable JSONB columns without changing existing data.
+Downgrade removes consent and its associations; subsequent source-loss execution
+requires fresh confirmation rather than recovering consent from another revision.
+
+Retained consent and its original association are read from persisted columns.
+Cached ORM values cannot hide cleared or malformed consent. Effective dirty or
+deleted proof sources refuse without flushing, refreshing or overwriting caller
+state; pending new objects remain unflushed. Ordinary revision reads retain their
+existing ORM behavior unless the authoritative persisted mode is selected.
 
 The backend service may receive a trusted complete source-capture callback. Its
 preview derives losses through the existing worker source-preservation rule and
@@ -3031,3 +3051,18 @@ runtime and trusted capture implementations separately; no-consent execution
 retains its existing refusal and all feature defaults remain unchanged.
 
 Cross-backend source consent refuses unclassified native agent and environment fields, including unknown skill, MCP, tool and environment-config policy fields. Original native definitions are validated before requester filtering, including required discriminator presence, supported discriminator values and environment visibility scope. Hidden MCP attachments cannot erase unknown or invalid control fields. These remain nondroppable source-definition obligations even when all supported attachment losses are explicitly confirmed. Schema-supported omission and null values retain their existing meanings.
+
+
+Ordinary Gemini agent-origin turns can use a plain chat counterpart after the
+existing backend-switch flow records the exact declared losses on the original
+immutable revision. Preparation rederives that target from fresh source facts,
+checks the installed source/catalog/configuration pins and native definition,
+and carries the verified named-agent runtime into execution. Memory must be
+explicitly dropped; tools, skills and MCP are empty, and the target uses an
+explicit remote environment without sources. Credentials, publishing approval,
+unknown source controls, shared ownership, seals and transfer remain refused.
+The source instructions and logical name are retained; operator deployment text
+cannot replace them. No worker is fabricated, and ordinary chat does not inherit
+worker token controls. Missing consent, source drift or incomplete native proof
+refuses preparation. The existing explicit backend-selection flags remain
+required; unconfigured channels and the worker option-A limits are unchanged.

@@ -437,7 +437,7 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     spec = importlib.util.spec_from_file_location("backend_settings_rollback", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    consent_path = path.with_name("0100_agent_backend_drop_consent.py")
+    consent_path = path.with_name("0102_agent_backend_drop_consent.py")
     consent_spec = importlib.util.spec_from_file_location("backend_consent_restore", consent_path)
     assert consent_spec is not None and consent_spec.loader is not None
     consent_module = importlib.util.module_from_spec(consent_spec)

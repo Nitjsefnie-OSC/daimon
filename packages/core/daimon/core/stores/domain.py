@@ -171,6 +171,7 @@ class TenantRow(BaseModel):
     provision_status: str  # "ready" | "pending" | "failed"
     funding_mode: FundingMode = "prepaid"
     turn_cap: int | None = None
+    plain_text_mentions: bool = False
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
     registered_at: datetime
@@ -433,6 +434,22 @@ class TeamsChannelSiteRow(BaseModel):
     site_id: str
     drive_id: str
     folder_id: str
+
+
+class TeamsMessageAdmissionRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    channel_id: str
+    message_id: str
+    conversation_id: str
+    user_id: str | None
+    owner_key: int
+    handled: bool
+    message: dict[str, JsonValue] | None
+    notice_sent: bool
+    sent_at: datetime
+    created_at: datetime
 
 
 class SlackUserTokenRow(BaseModel):

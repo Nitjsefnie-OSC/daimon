@@ -565,6 +565,20 @@ async def _channel_skill_name(
     return next((row.name for row in rows if row.tenant_id == tenant_id), None)
 
 
+def native_session_budget_cents(value: object) -> int | None:
+    """Compile an explicit positive session budget without decimal rounding."""
+    if value is None:
+        return None
+    if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
+        raise ValueError("native session budget requires positive exact USD cents")
+    with localcontext() as context:
+        context.prec = max(80, len(value.as_tuple().digits) + 2)
+        cents = value * Decimal(100)
+        if cents != cents.to_integral_value():
+            raise ValueError("native session budget requires positive exact USD cents")
+        return int(cents)
+
+
 async def create_session(
     anthropic: AsyncAnthropic,
     *,

@@ -459,7 +459,7 @@ async def test_expand_downgrade_keeps_legacy_columns_and_rows_readable(
         await mux_state.put_config_revision(
             session, config(channel), origin="agent", agent_revision=original
         )
-    path = Path(__file__).parents[2] / "alembic/versions/0100_agent_backend_drop_consent.py"
+    path = Path(__file__).parents[2] / "alembic/versions/0102_agent_backend_drop_consent.py"
     spec = importlib.util.spec_from_file_location("backend_consent_migration", path)
     assert spec is not None and spec.loader is not None
     migration = importlib.util.module_from_spec(spec)

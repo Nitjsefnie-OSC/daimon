@@ -16,14 +16,15 @@ and runs after the balance and cap gates.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
 from anthropic.types import TextBlock
+from daimon.core.name_mentions import strip_name_mentions
 
 # Priced in AGENT_MODEL_PRICING; a title must never run on an unmetered model.
-THREAD_NAMING_MODEL = "claude-haiku-4-5"
+THREAD_NAMING_MODEL = "claude-haiku-5-5"
 THREAD_NAME_MAX_CHARS = 50
 _MAX_OUTPUT_TOKENS = 60
 _MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")
@@ -87,14 +88,16 @@ class ThreadNameSuggestion:
     usage: ThreadNamingUsage
 
 
-def strip_mentions(text: str) -> str:
+def strip_mentions(text: str, bot_names: Iterable[str | None] = ()) -> str:
     """Drop ``<@user>``, ``<@&role>`` and ``<#channel>`` tokens and collapse whitespace.
 
     An @-mention of the bot is always present in ``message.content``, so
     without this a bare mention would still look like text and pay
-    for a call with nothing to title.
+    for a call with nothing to title. ``bot_names`` also drops a plain-text
+    "@<bot name>" (``daimon.core.name_mentions``), which starts a turn the
+    same way when the tenant turned that on.
     """
-    return " ".join(_MENTION_RE.sub(" ", text).split())
+    return " ".join(strip_name_mentions(_MENTION_RE.sub(" ", text), bot_names).split())
 
 
 def naming_text(text: str, attachment_names: Sequence[str]) -> str:
@@ -166,19 +169,24 @@ async def suggest_thread_name(
     ``message_text`` must be non-empty; the caller skips a bare mention with
     no text and no file rather than paying for a call with nothing to title.
     SDK errors propagate: the adapter boundary decides what a failed
-    naming means (fall back to the message-derived title).
+    naming means (fall back to the message-derived title). A refusal is
+    treated like a blank answer: no title, usage still reported.
     """
     response = await anthropic.messages.create(
         model=THREAD_NAMING_MODEL,
         max_tokens=_MAX_OUTPUT_TOKENS,
+        # Haiku 5.5 thinks by default and thinking counts toward max_tokens,
+        # which would leave a 60-token cap with no title text.
+        thinking={"type": "disabled"},
         system=_SYSTEM_PROMPT,
         messages=[
             {"role": "user", "content": _USER_TURN.format(text=message_text[:max_input_chars])}
         ],
     )
     raw = "".join(block.text for block in response.content if isinstance(block, TextBlock))
+    refused = response.stop_reason == "refusal"
     return ThreadNameSuggestion(
-        name=parse_thread_name(raw),
+        name=None if refused else parse_thread_name(raw),
         usage=ThreadNamingUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
