@@ -220,6 +220,10 @@ def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Sco
         "mcp_servers",
         "skills",
     }
+    # The resolved platform service account names no customer principal.
+    # Other identity shapes remain source obligations, including unknown fields.
+    if native.get("execution_identity") == {"type": "service_account"}:
+        unclassified.discard("execution_identity")
     for name in ("type", "model", "multiagent", "mcp_servers", "skills"):
         if name == "type" or name in native:
             try:

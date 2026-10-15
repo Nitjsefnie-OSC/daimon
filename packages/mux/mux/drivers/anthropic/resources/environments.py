@@ -109,6 +109,9 @@ def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scop
         "scope",
         "config",
     }
+    # The observed lifecycle marker carries no network/package authority.
+    if native.get("state") == "active":
+        unclassified.discard("state")
     for name in ("type", "scope"):
         if name == "type" or name in native:
             try:
