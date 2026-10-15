@@ -1244,10 +1244,13 @@ def _represented_source_extension(
         from mux.drivers.anthropic.schemas import AgentModelConfig
 
         try:
-            AgentModelConfig.model_validate(dict(extension.value))
+            native = AgentModelConfig.model_validate(dict(extension.value))
         except ValueError:
             return False
         if native_target is not None and extension in (native_target.extensions or ()):
+            model_id = native.model if isinstance(native.model, str) else native.model.id
+            if model_id != native_target.model.id:
+                return False
             profile = get_profile(backend_selection(native_target.model.provider).profile)
             if any(
                 offered.namespace == extension.namespace and offered.version == extension.version
@@ -1325,6 +1328,7 @@ def classify_source_obligations(
     resources: tuple[ResourceBinding, ...] = (),
     asks_before_publishing: bool = False,
     worker_ceiling: bool = False,
+    retained_agent: ResourceRef | None = None,
 ) -> frozenset[str]:
     """One source-preservation rule for pre-allocation normalization and preparation."""
     if worker_ceiling:
@@ -1336,6 +1340,29 @@ def classify_source_obligations(
     if spec is None:
         return frozenset({"source_definition"})
     drops = target.declared_drops if target is not None else ()
+    # Existing native sessions retain their agent and composer inputs;
+    # this proof never authorizes a newly compiled worker or counterpart.
+    native_retained = (
+        not worker_ceiling
+        and retained_agent is not None
+        and source.source is not None
+        and retained_agent == source.source.ref
+        and retained_agent.kind == "agent"
+        and source.source.native is not None
+        and source.resource_scope is not None
+        and source.source.ref.tenant_id == source.resource_scope.tenant_id
+        and str(source.tenant_id) == source.resource_scope.tenant_id
+        and source.source.lifecycle == "active"
+        and source.source.archived_at is None
+        and target == spec
+        and retained_agent.provider == spec.model.provider
+        and not drops
+        and source.environment is not None
+        and source.environment.lifecycle == "active"
+        and source.environment.archived_at is None
+        and environment == source.environment.spec
+        and resources == source.resource_requirements
+    )
     missing: set[str] = set()
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
@@ -1391,14 +1418,25 @@ def classify_source_obligations(
         # silently discharge it — an excluded mcp toolset requires an
         # explicit `mcp` (and/or `tools`) declaration, never implied.
         missing.add("mcp")
-    if source.repository_sources and "repository" not in drops:
+    if source.repository_sources and "repository" not in drops and not native_retained:
         missing.add("repository")
-    if any(
-        server.credential_ref and (target is None or server not in (target.mcp_servers or ()))
-        for server in spec.mcp_servers or ()
-    ) or any(repository.credential_ref for repository in source.repository_sources):
+    if not native_retained and (
+        any(
+            server.credential_ref and (target is None or server not in (target.mcp_servers or ()))
+            for server in spec.mcp_servers or ()
+        )
+        or any(repository.credential_ref for repository in source.repository_sources)
+    ):
         missing.add("credentials")
     for resource in source.resource_requirements:
+        if (
+            native_retained
+            and resource.kind == "credential"
+            and resource.credential_ref is not None
+            and resource.native is None
+            and resource.resource is None
+        ):
+            continue
         if resource.target_path is not None and "files" not in drops:
             missing.add("files")
         if (
@@ -1415,8 +1453,10 @@ def classify_source_obligations(
             continue
         # No installed materializer proves credentials or opaque private resources.
         missing.add("credentials" if resource.kind == "credential" else "source_definition")
-    if (source.memory_required is not False or source.memory_store_id is not None) and (
-        "memory" not in drops
+    if (
+        (source.memory_required is not False or source.memory_store_id is not None)
+        and "memory" not in drops
+        and not native_retained
     ):
         from daimon.core.memory_resource import memory_mount
 
@@ -1457,7 +1497,8 @@ def classify_source_obligations(
     # Removing execution is explicit; retaining a source environment requires
     # its complete canonical policy, which native readback must also verify.
     if target is None or not (
-        ("sandbox" in drops and environment is None and not resources)
+        native_retained
+        or ("sandbox" in drops and environment is None and not resources)
         or (
             source.environment is not None
             and environment is not None
@@ -1487,7 +1528,18 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     ):
         raise UnsupportedCapability(("source_context",), profile)
     if profile == backend_selection(spec.model.provider).profile:
-        return spec.model_copy(update={"model": model})
+        target = spec.model_copy(update={"model": model})
+        missing = classify_source_obligations(
+            source,
+            target,
+            environment=source.environment.spec,
+            resources=source.resource_requirements,
+            retained_agent=source.source.ref,
+            asks_before_publishing=source.asks_before_publishing,
+        )
+        if missing:
+            raise UnsupportedCapability(tuple(sorted(missing)), profile)
+        return target
     target = AgentSpec(
         name=spec.name,
         description=spec.description,
@@ -1667,23 +1719,40 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
     target = worker.spec if worker is not None else None
     if setting is not None:
         consent = setting.drop_consent
-        if consent is None or setting.backend != revision.backend or revision.model is None:
+        if consent is None or setting.backend != revision.backend:
+            raise AgentBackendRefused("re_confirm")
+        if revision.model is None and revision.backend != spec.model.provider:
             raise AgentBackendRefused("re_confirm")
         if source_preservation_pin(source) != consent.source_pin:
             raise AgentBackendRefused("re_confirm")
         target = preview_source_drops(
-            source, ModelRef(provider=revision.backend, id=revision.model)
+            source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
         if (
             target.declared_drops != consent.declared_drops
             or request_digest(target.model_dump(mode="json")) != consent.target_digest
         ):
             raise AgentBackendRefused("re_confirm")
+    retain_native = (
+        worker is None
+        and setting is not None
+        and not setting.declared_drops
+        and revision.profile == backend_selection(spec.model.provider).profile
+    )
     missing = classify_source_obligations(
         source,
         target,
-        environment=worker.environment if worker else None,
-        resources=worker.resources if worker else (),
+        retained_agent=source.source.ref if retain_native else None,
+        environment=source.environment.spec
+        if retain_native and source.environment
+        else worker.environment
+        if worker
+        else None,
+        resources=source.resource_requirements
+        if retain_native
+        else worker.resources
+        if worker
+        else (),
         asks_before_publishing=request.admission.asks_before_publishing,
         worker_ceiling=worker is not None,
     )
