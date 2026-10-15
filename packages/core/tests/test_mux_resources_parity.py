@@ -188,6 +188,31 @@ async def test_agent_create_has_no_extra_or_missing_fields(payload):
     assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
 
 
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("effort", ["low", {"type": "medium"}, "high", "xhigh", "max", None])
+async def test_native_model_effort_matches_direct_sdk_requests(operation, effort):
+    payload = {
+        "name": "example",
+        "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": effort},
+    }
+    old, new = ResourceTransport(), ResourceTransport()
+    async with fake_client(old) as before, fake_client(new) as after:
+        if operation == "create":
+            await before.beta.agents.create(**payload)
+            await create_agent(after, payload, scope=platform_scope("test request fidelity"))
+        else:
+            await before.beta.agents.update("agent1", version=1, **payload)
+            await update_agent(
+                after,
+                "agent1",
+                version=1,
+                payload=payload,
+                scope=platform_scope("test request fidelity"),
+            )
+    assert_transport_equal(old, new)
+    assert new.requests[0][-1]["model"] == payload["model"]
+
+
 @pytest.mark.parametrize(
     "payload",
     [

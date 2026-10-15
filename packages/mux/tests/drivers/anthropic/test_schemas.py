@@ -4,6 +4,50 @@ from mux.drivers.anthropic.schemas import AgentToolsConfig, MultiagentConfig, ag
 from pydantic import ValidationError
 
 
+@pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("object_form", [False, True])
+def test_native_model_effort_round_trips_without_changing_its_form(level, object_form):
+    from mux.drivers.anthropic.schemas import AgentModelConfig
+
+    effort = {"type": level} if object_form else level
+    payload = {"model": {"id": "claude-haiku-5-5", "effort": effort}}
+    assert (
+        AgentModelConfig.model_validate(payload).model_dump(mode="json", exclude_unset=True)
+        == payload
+    )
+
+
+@pytest.mark.parametrize("options", [{}, {"effort": None}, {"speed": None}])
+def test_native_model_preserves_omitted_and_null_options(options):
+    from mux.drivers.anthropic.schemas import AgentModelConfig
+
+    payload = {"model": {"id": "claude-haiku-5-5", **options}}
+    assert (
+        AgentModelConfig.model_validate(payload).model_dump(mode="json", exclude_unset=True)
+        == payload
+    )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"effort": "unrecognized"},
+        {"effort": True},
+        {"effort": 1},
+        {"effort": []},
+        {"effort": {}},
+        {"effort": {"type": "unrecognized"}},
+        {"effort": {"type": "high", "budget": 100}},
+        {"unknown_control": "high"},
+    ],
+)
+def test_native_model_rejects_unknown_or_invalid_controls(options):
+    from mux.drivers.anthropic.schemas import AgentModelConfig
+
+    with pytest.raises(ValidationError):
+        AgentModelConfig.model_validate({"model": {"id": "claude-haiku-5-5", **options}})
+
+
 @pytest.mark.parametrize(
     "tools",
     [

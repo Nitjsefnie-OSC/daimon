@@ -1235,14 +1235,32 @@ def compose_source_instructions(
     return required + ("\n\n" + rest if rest else "")
 
 
-def _represented_source_extension(extension: ExtensionConfig) -> bool:
-    model = extension.value.get("model")
-    return extension.version == 1 and (
-        extension.namespace == "anthropic.model_config"
-        and isinstance(model, dict)
-        and set(model) <= {"id", "speed"}
-        and model.get("speed") is None
-        or extension.namespace == "anthropic.multiagent"
+def _represented_source_extension(
+    extension: ExtensionConfig, *, native_target: AgentSpec | None = None
+) -> bool:
+    if extension.version != 1:
+        return False
+    if extension.namespace == "anthropic.model_config":
+        from mux.drivers.anthropic.schemas import AgentModelConfig
+
+        try:
+            AgentModelConfig.model_validate(dict(extension.value))
+        except ValueError:
+            return False
+        if native_target is not None and extension in (native_target.extensions or ()):
+            profile = get_profile(backend_selection(native_target.model.provider).profile)
+            if any(
+                offered.namespace == extension.namespace and offered.version == extension.version
+                for offered in profile.extensions
+            ):
+                # The owning native compiler emits the complete unchanged model object.
+                return True
+        model = extension.value.get("model")
+        return (
+            isinstance(model, dict) and set(model) <= {"id", "speed"} and model.get("speed") is None
+        )
+    return (
+        extension.namespace == "anthropic.multiagent"
         and extension.value == {"clear": True}
         or extension.namespace == "anthropic.agent_create_nulls"
     )
@@ -1341,7 +1359,12 @@ def classify_source_obligations(
                         source_tools = tuple(target.tools or ())
                     elif native.has_unrepresented_toolset():
                         missing.add("tools")
-        elif not _represented_source_extension(extension):
+        elif not _represented_source_extension(
+            extension,
+            native_target=target
+            if target is not None and target.model.provider == spec.model.provider
+            else None,
+        ):
             missing.add("source_definition")
     profile = get_profile(backend_selection(spec.model.provider).profile)
     tools_required = bool(
