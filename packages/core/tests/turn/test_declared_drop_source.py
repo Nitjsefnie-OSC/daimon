@@ -171,27 +171,11 @@ def test_instruction_changes_are_not_discharged_by_any_drops(captured):
     assert "instructions" in classify_source_obligations(captured, target, environment=None)
 
 
-@pytest.mark.parametrize("attachment", ["mcp", "repository", "foreign_file", "opaque_file"])
+@pytest.mark.parametrize("attachment", ["repository", "foreign_file", "opaque_file"])
 def test_dropping_a_connection_or_attachment_never_drops_credentials_or_unknown_resources(
     captured, attachment
 ):
-    if attachment == "mcp":
-        captured = captured.model_copy(
-            update={
-                "effective_spec": captured.effective_spec.model_copy(
-                    update={
-                        "mcp_servers": (
-                            MCPConnection(
-                                name="protected",
-                                url="https://protected.invalid/mcp",
-                                credential_ref="credential",
-                            ),
-                        ),
-                    }
-                )
-            }
-        )
-    elif attachment == "repository":
+    if attachment == "repository":
         captured = captured.model_copy(
             update={
                 "repository_sources": (
@@ -487,12 +471,13 @@ def test_unclassified_daimon_mcp_toolset_still_refuses_as_source_definition(capt
         assert "source_definition" in refused.value.missing
 
 
-def test_daimon_mcp_credential_stays_nondroppable(captured):
+def test_daimon_mcp_server_credential_is_lost_only_with_its_server(captured):
     source = _daimon_mcp(captured, credential_ref="vault:daimon-mcp")
-    with pytest.raises(UnsupportedCapability) as refused:
-        preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
-    assert "credentials" in refused.value.missing
-    assert "source_definition" not in refused.value.missing
+    target = preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
+    assert target.declared_drops == ("mcp", "sandbox", "tools")
+    assert classify_source_obligations(source, target, environment=None) == frozenset()
+    retained = target.model_copy(update={"mcp_servers": source.effective_spec.mcp_servers})
+    assert "credentials" in classify_source_obligations(source, retained, environment=None)
 
 
 def _daimon_haiku55(captured):
@@ -670,3 +655,112 @@ def test_model_control_consent_never_waives_unknown_or_invalid_source(captured, 
     assert "source_definition" in classify_source_obligations(source, target, environment=None)
     with pytest.raises(UnsupportedCapability):
         preview_source_drops(source, target.model)
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+@pytest.mark.parametrize("pair", ["explicit", "caller", "slack_caller"])
+def test_mcp_loss_drops_only_paired_credentials_with_absent_servers(captured, provider, pair):
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME
+
+    server = MCPConnection(
+        name=DAIMON_SERVER_NAME, url="https://mcp.invalid/mcp", credential_ref="paired"
+    )
+    reference = "paired"
+    if pair != "explicit":
+        reference = f"caller-mcp:{captured.tenant_id}:{captured.resource_scope.account_id}:{captured.agent_id}"
+        if pair == "slack_caller":
+            reference += ":slack-turn:00000000-0000-0000-0000-000000000001"
+    binding = ResourceBinding(id=reference, kind="credential", credential_ref=reference)
+    spec = captured.effective_spec.model_copy(
+        update={"mcp_servers": (server,) if pair == "explicit" else ()}
+    )
+    source = captured.model_copy(
+        update={"effective_spec": spec, "resource_requirements": (binding,)}
+    )
+    target = preview_source_drops(
+        source,
+        ModelRef(
+            provider=provider, id="gpt-6-luna" if provider == "openai" else "gemini-3.8-flash"
+        ),
+    )
+    assert target.declared_drops == ("mcp", "sandbox")
+    assert not target.mcp_servers
+    assert classify_source_obligations(source, target, environment=None) == frozenset()
+    assert "mcp" in classify_source_obligations(
+        source, target.model_copy(update={"declared_drops": ("sandbox",)}), environment=None
+    )
+    retained = target.model_copy(update={"mcp_servers": (server,)})
+    assert "credentials" in classify_source_obligations(source, retained, environment=None)
+    renamed = target.model_copy(
+        update={
+            "mcp_servers": (
+                server.model_copy(update={"name": "renamed", "credential_ref": reference}),
+            )
+        }
+    )
+    assert "credentials" in classify_source_obligations(source, renamed, environment=None)
+    assert "credentials" in classify_source_obligations(
+        source, target, environment=None, resources=(binding,)
+    )
+
+
+@pytest.mark.parametrize("reference", ["unpaired", "caller-mcp:wrong:owner:agent"])
+def test_mcp_loss_never_drops_unpaired_credentials(captured, reference):
+    source = captured.model_copy(
+        update={
+            "resource_requirements": (
+                ResourceBinding(id=reference, kind="credential", credential_ref=reference),
+            )
+        }
+    )
+    target = preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
+    target = target.model_copy(update={"declared_drops": ("mcp", "sandbox")})
+    assert "credentials" in classify_source_obligations(source, target, environment=None)
+    with pytest.raises(UnsupportedCapability):
+        preview_source_drops(source, target.model)
+
+
+def test_shared_mcp_credential_cannot_be_lost_with_one_server_retained(captured):
+    servers = tuple(
+        MCPConnection(name=name, url="https://mcp.invalid/mcp", credential_ref="shared")
+        for name in ("lost", "retained")
+    )
+    source = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(update={"mcp_servers": servers}),
+            "resource_requirements": (
+                ResourceBinding(id="shared", kind="credential", credential_ref="shared"),
+            ),
+        }
+    )
+    target = preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
+    retained = target.model_copy(update={"mcp_servers": (servers[1],)})
+    assert "credentials" in classify_source_obligations(source, retained, environment=None)
+
+
+@pytest.mark.parametrize(
+    "corruption", ["bad_suffix", "different_ref", "opaque_native", "mounted_file"]
+)
+def test_caller_mcp_pairing_requires_the_complete_known_binding(captured, corruption):
+    reference = (
+        f"caller-mcp:{captured.tenant_id}:{captured.resource_scope.account_id}:{captured.agent_id}"
+    )
+    if corruption == "bad_suffix":
+        reference += ":slack-turn:unknown"
+    binding = ResourceBinding(id=reference, kind="credential", credential_ref=reference)
+    if corruption == "different_ref":
+        binding = binding.model_copy(update={"credential_ref": "different"})
+    elif corruption == "opaque_native":
+        binding = binding.model_copy(
+            update={
+                "native": ExtensionConfig(
+                    namespace="anthropic.unknown_credential", version=1, value={}
+                )
+            }
+        )
+    elif corruption == "mounted_file":
+        binding = binding.model_copy(update={"target_path": ".env"})
+    source = captured.model_copy(update={"resource_requirements": (binding,)})
+    target = preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
+    target = target.model_copy(update={"declared_drops": ("mcp", "sandbox", "files")})
+    assert "credentials" in classify_source_obligations(source, target, environment=None)

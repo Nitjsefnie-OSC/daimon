@@ -11,6 +11,7 @@ from daimon.core.channel_backend import (
     AgentBackendService,
     resolve_turn_backend,
 )
+from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.scope import ResolvedConfig
@@ -97,7 +98,19 @@ async def consent_request(owned, request):
             backend_revision_origin="agent",
         )
         request = ProviderPreparationRequest(
-            deps=replace(deps_for(client, sessions), agent_backends=True, channel_backends=True),
+            deps=replace(
+                deps_for(client, sessions),
+                agent_backends=True,
+                channel_backends=True,
+                mcp=McpSettings.model_validate(
+                    {
+                        "public_url": "https://mcp.invalid/mcp",
+                        "jwt_secret": "offline-caller-presence",
+                    }
+                )
+                if params.get("caller_mcp")
+                else McpSettings(),
+            ),
             admission=admitted,
             scope=Scope(
                 tenant_id=str(identity.tenant_id),
@@ -1249,4 +1262,38 @@ async def test_portable_recorded_model_controls_consent_apply_and_prepare(consen
     assert selected.target_spec.declared_drops == accepted.declared_drops
     assert "model_controls" in selected.target_spec.system
     assert not selected.target_spec.extensions
+    assert len(constructions) == 1
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": backend,
+            "caller_mcp": True,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+        for backend in ("openai", "gemini")
+    ],
+    indirect=True,
+)
+async def test_captured_portable_caller_mcp_loss_reaches_retained_preparation(consent_request):
+    request, service, source, actor, accepted, _, _, constructions, _, _ = consent_request
+    assert source.effective_spec.mcp_servers == ()
+    assert len(source.resource_requirements) == 1
+    assert source.resource_requirements[0].id.startswith("caller-mcp:")
+    assert accepted.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    quote = await service.preview(source, request.admission.backend_revision.backend)
+    with pytest.raises(AgentBackendRefused):
+        await service.set_backend(
+            source,
+            quote.target_backend,
+            accepted.local,
+            actor,
+            accepted_drops=("memory", "model_controls", "sandbox"),
+            expected_preview_digest=quote.digest,
+        )
+    selected = await read_preparation_counterpart(request)
+    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert not selected.target_spec.mcp_servers
     assert len(constructions) == 1

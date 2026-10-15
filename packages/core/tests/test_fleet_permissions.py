@@ -1480,12 +1480,11 @@ def test_source_obligations_cannot_be_silently_omitted(field):
     additions = {
         "skills": (SkillRef(id="pinned", version="1"),),
     }
-    if field != "tools":
+    if field == "mcp":
         additions["mcp_servers"] = (
             MCPConnection(
                 name="bound",
                 url="https://bound.invalid",
-                credential_ref="bound-auth" if field != "mcp" else None,
                 tool_policy={"allowed_tools": ["read"]},
             ),
         )

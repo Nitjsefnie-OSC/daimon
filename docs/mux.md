@@ -3031,8 +3031,11 @@ speed controls cannot be represented. Identical same-provider native model
 controls are preserved. Unknown or invalid controls still refuse as
 `source_definition`, even with `model_controls` consent. DD3 cards, CLI previews
 and MCP results show this loss through the same canonical declared-drop tuple.
-Credentials, instructions,
-unknown obligations and publishing approval cannot be discarded. Missing source
+A credential paired to an MCP server is lost with an explicit `mcp` declaration
+only when that server is absent from the target. The session composer's scoped
+caller-MCP credential is paired to its injected MCP server even if the native
+agent's MCP list is empty. Credentials for retained servers, unpaired credentials,
+instructions, unknown obligations and publishing approval cannot be discarded. Missing source
 or publishing context refuses. Clear removes consent; revert rechecks the original
 consent against a fresh capture, and fleet-grant changes carry the current consent.
 

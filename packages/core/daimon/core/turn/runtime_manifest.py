@@ -1013,25 +1013,51 @@ def _source_extension_obligation(
     return "source_definition"
 
 
+def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> frozenset[str]:
+    """Pair only owner-projected credentials with their MCP capability."""
+    if (
+        binding.kind != "credential"
+        or binding.credential_ref is None
+        or binding.native is not None
+        or binding.resource is not None
+        or binding.target_path is not None
+    ):
+        return frozenset()
+    paired: set[str] = (
+        {
+            server.name
+            for server in source.effective_spec.mcp_servers or ()
+            if server.credential_ref == binding.credential_ref
+        }
+        if source.effective_spec is not None
+        else set()
+    )
+    if source.resource_scope is not None and binding.id == binding.credential_ref:
+        caller = (
+            f"caller-mcp:{source.tenant_id}:{source.resource_scope.account_id}:{source.agent_id}"
+        )
+        if binding.id == caller:
+            paired.add(DAIMON_SERVER_NAME)
+        elif binding.id.startswith(caller + ":slack-turn:"):
+            try:
+                UUID(binding.id.removeprefix(caller + ":slack-turn:"))
+            except ValueError:
+                pass
+            else:
+                paired.add(DAIMON_SERVER_NAME)
+    return frozenset(paired)
+
+
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     """Exclude validated native-only capabilities and their paired resources."""
     spec = source.effective_spec
     if spec is None:
         return source
     normalized, excluded = worker_spec_ceiling(spec)
-    credential_refs = {
-        server.credential_ref for server in spec.mcp_servers or () if server.name in excluded
-    } - {None}
     resources = tuple(
         binding
         for binding in source.resource_requirements
-        if not (
-            binding.kind == "credential"
-            and (
-                binding.credential_ref in credential_refs
-                or (DAIMON_SERVER_NAME in excluded and binding.id.startswith("caller-mcp:"))
-            )
-        )
+        if not ((paired := _mcp_credential_servers(source, binding)) and paired <= excluded)
     )
     return source.model_copy(
         update={
@@ -1144,12 +1170,30 @@ def classify_source_obligations(
         missing.add("mcp")
     if source.repository_sources and "repository" not in drops:
         missing.add("repository")
-    if any(
-        server.credential_ref and (target is None or server not in (target.mcp_servers or ()))
-        for server in spec.mcp_servers or ()
-    ) or any(repository.credential_ref for repository in source.repository_sources):
+    retained_servers = (target.mcp_servers or ()) if target is not None else ()
+    retained_mcp = {server.name for server in retained_servers}
+    retained_credentials = {binding.credential_ref for binding in resources} | {
+        server.credential_ref for server in retained_servers
+    }
+    retained_credentials.discard(None)
+    for server in spec.mcp_servers or ():
+        if server.credential_ref:
+            if server.name in retained_mcp or server.credential_ref in retained_credentials:
+                missing.add("credentials")
+            elif "mcp" not in drops:
+                missing.add("mcp")
+    if any(repository.credential_ref for repository in source.repository_sources):
         missing.add("credentials")
     for resource in source.resource_requirements:
+        paired = _mcp_credential_servers(source, resource)
+        if paired:
+            if paired & retained_mcp or resource.credential_ref in retained_credentials:
+                missing.add("credentials")
+            elif "mcp" in drops:
+                continue
+            else:
+                missing.add("mcp")
+                continue
         if resource.target_path is not None and "files" not in drops:
             missing.add("files")
         if (
