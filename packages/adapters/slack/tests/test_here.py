@@ -72,6 +72,7 @@ ANSWERING = {"blocked", "channel", "thread"}
 
 def _card(state: str) -> HereCard:
     card = HereCard(
+        platform="slack",
         channel_rule=ChannelRule(),
         who_may_answer="",
         reads_kept_inside=False,
@@ -92,10 +93,20 @@ def _card(state: str) -> HereCard:
 @pytest.mark.parametrize(
     ("state", "title", "colour", "subline"),
     [
-        ("no_view", "No channel access", "#ED4245", "Ask an admin to check Daimon's access."),
-        ("no_replies", "Replies disabled here", "#ED4245", None),
-        ("no_agent", "No agent selected", "#95A5A6", "Ask an admin: /agent-setup"),
-        ("blocked", "ResearchBot can't answer here", "#F0B429", None),
+        ("no_view", "Daimon isn't in this channel", "#ED4245", "Invite it with /invite."),
+        (
+            "no_replies",
+            "Replies are off here",
+            "#ED4245",
+            "An admin can turn them on in /agent-setup.",
+        ),
+        ("no_agent", "No agent answers here", "#95A5A6", "An admin can pick one in /agent-setup."),
+        (
+            "blocked",
+            "ResearchBot can't answer here",
+            "#F0B429",
+            "An admin can change where it answers in /agent-setup.",
+        ),
         ("channel", "ResearchBot answers here", "#2ECC71", None),
         ("thread", "ResearchBot answers in this thread", "#2ECC71", None),
     ],

@@ -34,20 +34,21 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
     [
         (
             "no_view",
-            ["No channel access", "Ask an admin to check Daimon's access."],
+            ["Daimon can't see this channel", "A server admin can let Daimon's role see it."],
         ),
         (
             "no_replies",
-            ["Replies disabled here"],
+            ["Replies are off here", "An admin can turn them on in /agent-setup."],
         ),
         (
             "no_agent",
-            ["No agent selected", "Ask an admin: /agent-setup"],
+            ["No agent answers here", "An admin can pick one in /agent-setup."],
         ),
         (
             "blocked",
             [
                 "ResearchBot can't answer here",
+                "An admin can change where it answers in /agent-setup.",
                 "Reading: Any conversation",
                 "Publishing: No approval",
             ],
@@ -146,10 +147,10 @@ def test_status_uses_first_applicable_blocker() -> None:
         bot_can_read_history=False,
         text="",
     )
-    assert here_card_module.render_here_card(card).title == "No channel access"
+    assert here_card_module.render_here_card(card).title == "Daimon can't see this channel"
     assert (
         here_card_module.render_here_card(card.model_copy(update={"bot_can_view": True})).title
-        == "Replies disabled here"
+        == "Replies are off here"
     )
 
 
@@ -319,7 +320,7 @@ def test_stricter_thread_and_category_rules_are_shown() -> None:
     assert not card.agent_can_answer_here
     assert card.who_may_answer == "nobody"
     assert not card.memory_writable_here
-    assert card.text.startswith("Replies disabled here")
+    assert card.text.startswith("Replies are off here")
     assert "rule:" not in card.text
 
 
