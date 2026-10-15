@@ -5,7 +5,7 @@ from __future__ import annotations
 import getpass
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 
 import httpx
 import typer
@@ -21,7 +21,13 @@ from daimon.core.github_app_session import (
     rotate_live_app_tokens,
 )
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.github_retirement import accepted_loss_agent_ids
+from daimon.core.github_repo_auth import normalize_owner_repo
+from daimon.core.github_retirement import (
+    RETIREMENT_LIVE_GRANTS_SQL,
+    RETIREMENT_LOSS_SQL,
+    accepted_loss_agent_ids,
+    retirement_repo_name_sql,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, delete_credential, list_credentials, list_vaults
@@ -58,14 +64,7 @@ github_app.add_typer(grants_app, name="grants")
 
 
 def _repo_name(url: str) -> str:
-    return (
-        url.removeprefix("https://github.com/")
-        .removeprefix("http://github.com/")
-        .removeprefix("github.com/")
-        .removesuffix(".git")
-        .rstrip("/")
-        .lower()
-    )
+    return normalize_owner_repo(url).casefold()
 
 
 async def preview_legacy_retirement(session: AsyncSession, console: Console) -> None:
@@ -93,8 +92,10 @@ async def preview_legacy_retirement(session: AsyncSession, console: Console) -> 
 
     rows = (
         await session.execute(
-            text(r"""
-            WITH affected AS (
+            text(f"""
+            WITH live_grants AS (
+                {RETIREMENT_LIVE_GRANTS_SQL}
+            ), affected AS (
                 SELECT tenant_id, agent_id FROM agent_files
                  WHERE key IN ('GH_TOKEN', 'GITHUB_TOKEN')
                 UNION SELECT tenant_id, agent_id FROM agent_repo_binding
@@ -110,49 +111,36 @@ async def preview_legacy_retirement(session: AsyncSession, console: Console) -> 
                     WHERE gb.agent_id=a.agent_id) AS github_binding,
                 EXISTS (SELECT 1 FROM agent_skill_repo_credentials sc
                     WHERE sc.tenant_id=a.tenant_id AND sc.agent_id=a.agent_id) AS skill_binding,
-                COALESCE((SELECT r.repo_full_name FROM agent_github_grants g
-                    JOIN tenant_github_repos r USING (tenant_id, repo_id)
+                COALESCE((SELECT g.repo_full_name FROM live_grants g
                     WHERE g.tenant_id=a.tenant_id AND g.agent_id=a.agent_id
-                      AND g.is_working_repo AND NOT g.staged
-                      AND r.status='active'
-                      AND (r.scope_agent_id IS NULL OR r.scope_agent_id=a.agent_id)
+                      AND g.is_working_repo
                     LIMIT 1), '') AS app_working_repo,
-                EXISTS (SELECT 1 FROM agent_github_grants g
-                    JOIN tenant_github_repos r USING (tenant_id, repo_id)
+                EXISTS (SELECT 1 FROM live_grants g
                     WHERE g.tenant_id=a.tenant_id AND g.agent_id=a.agent_id
-                      AND NOT g.staged AND r.status='active'
-                      AND (r.scope_agent_id IS NULL OR r.scope_agent_id=a.agent_id)
                       AND b.repo_url IS NOT NULL
-                      AND lower(r.repo_full_name)=lower(regexp_replace(
-                          regexp_replace(b.repo_url,
-                              '^(https://github\.com/|http://github\.com/|github\.com/)', ''),
-                          '(\.git)?/*$', ''))) AS binding_covered
+                      AND g.repo_name={retirement_repo_name_sql("b.repo_url")}) AS binding_covered
             FROM affected a LEFT JOIN agent_repo_binding b
               ON b.tenant_id=a.tenant_id AND b.agent_id=a.agent_id
             ORDER BY a.tenant_id, a.agent_id
         """)
         )
     ).all()
+    loss_ids = set((await session.execute(text(RETIREMENT_LOSS_SQL))).scalars().all())
     failures: list[str] = []
     for row in rows:
         working = row.app_working_repo or row.repo_url or "none"
-        covered = bool(row.app_working_repo) or row.binding_covered
+        covered = row.binding_covered if row.repo_url is not None else bool(row.app_working_repo)
         live_repo_rows = (
             await session.execute(
-                text("""
-                    SELECT r.repo_full_name, g.repo_id FROM agent_github_grants g
-                    JOIN tenant_github_repos r USING (tenant_id, repo_id)
+                text(f"""
+                    WITH live_grants AS ({RETIREMENT_LIVE_GRANTS_SQL})
+                    SELECT g.repo_full_name, g.repo_id FROM live_grants g
                     WHERE g.tenant_id=:tenant AND g.agent_id=:agent
-                      AND NOT g.staged AND r.status='active'
-                      AND (r.scope_agent_id IS NULL OR r.scope_agent_id=:agent)
                 """),
                 {"tenant": row.tenant_id, "agent": row.agent_id},
             )
         ).all()
-        live_repo_names = {_repo_name(name) for name, _ in live_repo_rows}
-        working_repo_ids = {
-            repo_id for name, repo_id in live_repo_rows if _repo_name(name) == _repo_name(working)
-        }
+        live_repo_names = {name.casefold() for name, _ in live_repo_rows}
         skill_repos = list(
             await session.scalars(
                 text("""
@@ -171,65 +159,10 @@ async def preview_legacy_retirement(session: AsyncSession, console: Console) -> 
             """),
             {"tenant": row.tenant_id, "agent": row.agent_id},
         )
-        # A live session's snapshot says which credential path it uses. Match
-        # its MA agent ID through the same stable derivation as the runtime.
-        live_sessions = cast(
-            list[tuple[str | None, str, dict[str, object] | None]],
-            (
-                await session.execute(
-                    text("""
-                    SELECT ma_agent_id, ma_session_id, effective_config
-                    FROM thread_sessions WHERE tenant_id=:tenant AND status='live'
-                """),
-                    {"tenant": row.tenant_id},
-                )
-            ).all(),
-        )
-        own_sessions: list[tuple[str | None, str, dict[str, object] | None]] = []
-        if row.tenant_id is not None:
-            for ma_agent_id, ma_session_id, snapshot in live_sessions:
-                source_agent_id = ma_agent_id or (snapshot or {}).get("ma_agent_id")
-                if (
-                    isinstance(source_agent_id, str)
-                    and derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id=source_agent_id)
-                    == row.agent_id
-                ):
-                    own_sessions.append((ma_agent_id, ma_session_id, snapshot))
-        token_rows = (
-            await session.execute(
-                text("""
-                    SELECT session_id, repo_ids FROM github_issued_tokens
-                    WHERE tenant_id=:tenant AND agent_id=:agent
-                      AND status='delivered' AND expires_at > now()
-                """),
-                {"tenant": row.tenant_id, "agent": row.agent_id},
-            )
-        ).all()
-        token_sessions = {
-            token.session_id
-            for token in token_rows
-            if working_repo_ids.intersection(token.repo_ids)
-        }
-        app_token_sessions = sum(
-            1
-            for _, ma_session_id, snapshot in own_sessions
-            if snapshot is not None
-            and snapshot.get("github_mode") == "app"
-            and ma_session_id in token_sessions
-        )
-        session_source = (
-            "app"
-            if own_sessions and app_token_sessions == len(own_sessions)
-            else "no_live_sessions"
-            if not own_sessions
-            else "unverified"
-        )
-        loss = (
-            not covered or bool(uncovered_skills) or mode != "app" or session_source == "unverified"
-        )
+        loss = row.agent_id in loss_ids
         if loss and not accepted_agent:
             failures.append(
-                f"agent {row.agent_id}: working repo, skill repo, or App session access unverified"
+                f"agent {row.agent_id}: working repo, skill repo, or App grant access uncovered"
             )
         note = (
             f" accepted_loss=True expected_loss={_repo_name(row.repo_url or working)} "
@@ -245,8 +178,7 @@ async def preview_legacy_retirement(session: AsyncSession, console: Console) -> 
             f"working_repo={working} live_app_grant_covers_working_repo={covered} "
             f"skill_repo_coverage={len(skill_repos) - len(uncovered_skills)}/{len(skill_repos)} "
             f"uncovered_skill_repos={uncovered_skills} "
-            f"app_mode={mode == 'app'} app_token_sessions={app_token_sessions}/{len(own_sessions)} "
-            f"session_gh_token_source={session_source} "
+            f"app_mode={mode == 'app'} loss={loss} "
             f"next_session_gh_token_source={'app' if covered else 'none'}{note}"
         )
     console.print(f"agents losing saved keys or bindings: {len(rows)}")

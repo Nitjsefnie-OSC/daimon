@@ -82,6 +82,8 @@ async def uses_server_wide_repo(
         )
         if model is AgentGitHubGrantDraft:
             query = query.where(AgentGitHubGrantDraft.operation == "upsert")
+        else:
+            query = query.where(AgentGitHubGrant.app_visible.is_(True))
         if await session.scalar(query.limit(1)) is not None:
             return True
     return False
@@ -382,8 +384,12 @@ async def activate_confirmed_agent(
             baseline_access="write",
             ceiling_access="write",
             granted_by_account_id=invitation.requester_account_id,
-            mount_path=existing.mount_path if existing is not None else None,
-            is_working_repo=existing.is_working_repo if existing is not None else False,
+            mount_path=existing.mount_path
+            if existing is not None and existing.app_visible
+            else None,
+            is_working_repo=(
+                existing.is_working_repo if existing is not None and existing.app_visible else False
+            ),
             agent_name=invitation.agent_name,
         )
         granted = True
@@ -421,7 +427,7 @@ async def queue_connect_followup(
             granted.append({"name": repo.full_name, "access": repo.max_access})
             continue
         grant = await session.get(AgentGitHubGrant, (row.tenant_id, row.agent_id, repo.repo_id))
-        if grant is not None:
+        if grant is not None and grant.app_visible:
             granted.append({"name": repo.full_name, "access": grant.ceiling_access})
     row.connected_repos = granted
     if not row.origin_thread_id:
@@ -456,7 +462,9 @@ async def _drop_stale_grants(
 ) -> None:
     grants = await session.scalars(
         select(AgentGitHubGrant).where(
-            AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id
+            AgentGitHubGrant.tenant_id == tenant_id,
+            AgentGitHubGrant.agent_id == agent_id,
+            AgentGitHubGrant.app_visible.is_(True),
         )
     )
     for grant in grants:
@@ -878,7 +886,11 @@ async def agent_repo_snapshot(
     """
     query = (
         select(AgentGitHubGrant)
-        .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
+        .where(
+            AgentGitHubGrant.tenant_id == tenant_id,
+            AgentGitHubGrant.agent_id == agent_id,
+            AgentGitHubGrant.app_visible.is_(True),
+        )
         .order_by(AgentGitHubGrant.repo_id)
     )
     if lock:

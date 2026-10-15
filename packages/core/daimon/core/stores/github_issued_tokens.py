@@ -227,6 +227,7 @@ async def select_stale_tokens(
                     ON grant_row.tenant_id = token.tenant_id
                    AND grant_row.agent_id = token.agent_id
                    AND grant_row.repo_id = repo.repo_id
+                   AND grant_row.app_visible
                   -- The row the agent may use: its own, else the server-wide one.
                   LEFT JOIN LATERAL (
                     SELECT candidate.*

@@ -225,7 +225,10 @@ async def get_tenant_dependent_counts(
         await session.execute(
             select(func.count())
             .select_from(AgentGitHubGrant)
-            .where(AgentGitHubGrant.tenant_id == tenant_id)
+            .where(
+                AgentGitHubGrant.tenant_id == tenant_id,
+                AgentGitHubGrant.app_visible.is_(True),
+            )
         )
     ).scalar_one()
     tenant_config = (

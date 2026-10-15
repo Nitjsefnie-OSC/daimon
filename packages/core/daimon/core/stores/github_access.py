@@ -123,7 +123,9 @@ async def list_agent_grants(
 ) -> list[AgentGrant]:
     rows = await session.scalars(
         select(AgentGitHubGrant).where(
-            AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id
+            AgentGitHubGrant.tenant_id == tenant_id,
+            AgentGitHubGrant.agent_id == agent_id,
+            AgentGitHubGrant.app_visible.is_(True),
         )
     )
     return [AgentGrant.model_validate(row) for row in rows]
@@ -255,7 +257,11 @@ async def set_working_repo(
     rows = list(
         await session.scalars(
             select(AgentGitHubGrant)
-            .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
+            .where(
+                AgentGitHubGrant.tenant_id == tenant_id,
+                AgentGitHubGrant.agent_id == agent_id,
+                AgentGitHubGrant.app_visible.is_(True),
+            )
             .order_by(AgentGitHubGrant.repo_id)
             .with_for_update()
         )
@@ -429,6 +435,7 @@ async def stage_grant(
             .where(
                 AgentGitHubGrant.tenant_id == tenant_id,
                 AgentGitHubGrant.agent_id == agent_id,
+                AgentGitHubGrant.app_visible.is_(True),
                 AgentGitHubGrant.is_working_repo.is_(True),
                 AgentGitHubGrant.repo_id != repo_id,
             )
@@ -448,7 +455,8 @@ async def stage_grant(
         )
         session.add(row)
     elif (
-        row.baseline_access == baseline_access
+        row.app_visible
+        and row.baseline_access == baseline_access
         and row.ceiling_access == ceiling_access
         and row.mount_path == mount_path
         and row.is_working_repo == is_working_repo
@@ -458,6 +466,7 @@ async def stage_grant(
         row.version += 1
     row.baseline_access = baseline_access
     row.ceiling_access = ceiling_access
+    row.app_visible = True
     row.mount_path = mount_path
     row.is_working_repo = is_working_repo
     row.granted_by_account_id = granted_by_account_id
@@ -488,7 +497,7 @@ async def remove_grant(
 ) -> bool:
     await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     row = await session.get(AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True)
-    if row is None:
+    if row is None or not row.app_visible:
         return False
     await session.delete(row)
     await session.flush()

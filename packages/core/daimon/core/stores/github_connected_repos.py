@@ -100,6 +100,7 @@ async def agent_repo_summary(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
         )
         .where(
             AgentGitHubGrant.tenant_id == tenant_id,
+            AgentGitHubGrant.app_visible.is_(True),
             TenantGitHubRepo.status == "active",
             ~_has_own_row(AgentGitHubGrant),
         )
@@ -128,6 +129,7 @@ async def summary(session: AsyncSession, *, tenant_id: uuid.UUID) -> ConnectedRe
     agent_count = await session.scalar(
         select(func.count(distinct(AgentGitHubGrant.agent_id))).where(
             AgentGitHubGrant.tenant_id == tenant_id,
+            AgentGitHubGrant.app_visible.is_(True),
             AgentGitHubGrant.repo_id.in_([r.repo_id for r in repos]),
         )
     )

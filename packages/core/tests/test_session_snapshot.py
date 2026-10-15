@@ -56,6 +56,7 @@ from daimon.core.session_snapshot import (
     hash_tools,
     session_skills,
     snapshot_from_created_session,
+    snapshot_from_retrieved_session,
 )
 from daimon.core.stores.domain import AgentFileRow
 
@@ -332,6 +333,9 @@ def test_snapshot_from_created_session_captures_every_resource_handle() -> None:
     assert snapshot.environment_id == "env_science", "the environment is frozen at create time"
     assert snapshot.agent_version == 3, "the agent version is kept for diagnostics"
     assert snapshot.agent_name == "research-bot", "the agent name is kept for diagnostics"
+    backfilled = snapshot_from_retrieved_session(session)
+    assert backfilled.github_mode == "legacy"
+    assert "github_mode" in identity_change_reasons(backfilled, snapshot)
 
 
 def test_snapshot_survives_a_json_round_trip() -> None:

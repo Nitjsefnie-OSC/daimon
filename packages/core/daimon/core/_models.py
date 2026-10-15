@@ -1334,9 +1334,6 @@ class AgentFile(Base):
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "agent_id", "key", name="pk_agent_files"),
         CheckConstraint("encoding IN ('plain', 'fernet_v1')", name="ck_agent_files_encoding"),
-        CheckConstraint(
-            "key NOT IN ('GH_TOKEN', 'GITHUB_TOKEN')", name="ck_agent_files_no_github_token"
-        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -2848,6 +2845,9 @@ class AgentGitHubGrant(Base):
     ceiling_access: Mapped[str] = mapped_column(Text)
     mount_path: Mapped[str | None] = mapped_column(Text)
     is_working_repo: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # The expand phase keeps the old `staged` column for old workers. A database
+    # trigger mirrors its inverse here; new code reads only this field.
+    app_visible: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
     )
