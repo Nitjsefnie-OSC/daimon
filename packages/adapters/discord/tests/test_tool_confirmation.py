@@ -448,3 +448,52 @@ async def test_runtime_hook_reuses_live_guild_admin_lookup(monkeypatch: pytest.M
     member.guild_permissions = discord.Permissions.none()
     assert await check("111") is False
     assert channel.guild.fetch_member.await_count == 2
+
+
+async def test_runtime_hook_current_admin_refuses_outside_a_thread_or_text_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backend-switch admin recheck is scoped to threads/text channels: a voice
+    channel with the same guild and an administrator clicker must still refuse,
+    not merely inherit whatever `requester_role` says about the guild member.
+    """
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+
+    tenant, account = uuid4(), uuid4()
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    channel = MagicMock(spec=discord.VoiceChannel)
+    channel.guild.owner_id = 999
+    member = MagicMock(spec=discord.Member)
+    member.id = 111
+    member.roles = []
+    member.guild_permissions = discord.Permissions(administrator=True)
+    channel.guild.fetch_member = AsyncMock(return_value=member)
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
+    check = factory.call_args.kwargs["current_admin"]
+    assert await check("111") is False
+    channel.guild.fetch_member.assert_not_awaited()
+
+
+@pytest.mark.parametrize("state", ["pending", "approved", "denied", "expired", "stopped"])
+async def test_complete_backend_loss_list_survives_native_card_rendering(state):
+    losses = "Won't be available on openai: files, mcp, memory, repository, sandbox, skills, tools"
+    prompt = _prompt().model_copy(
+        update={
+            "admin": True,
+            "action": "Switch Research. " + losses,
+            "denied_action": "Model backend unchanged",
+            "consequence": losses,
+            "detail_lines": ("Optional skill: " + "x" * 1000,),
+        }
+    )
+    card = build_confirmation_card(
+        prompt, state=state, token="abcdefgh" if state == "pending" else None
+    )
+    rendered = "\n".join(_texts(build_confirmation_view(card, prompt)))
+    assert (losses in rendered) == (state in {"pending", "approved"})
