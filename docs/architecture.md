@@ -1300,7 +1300,13 @@ turn, `AutoApprove` allows every blocked call, and `PolicyApproval` asks a
 decider per call and sends each answer on the same stream. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
 model in `packages/core/daimon/core/tool_safety.py`. With
-`DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
+`DAIMON_TOOL_SAFETY__AGENT_RULES` on as well, each third-party paused call
+reads its agent's exact tool rule from the database. The lookup uses the
+session's stable agent id, attached server URL and admitted parent channel.
+Agent-wide and matching channel rules combine by the stricter outcome. The
+operator deny list wins; a matching rule then decides before classification.
+A failed lookup asks in chat or refuses unattended. The flag is off by default.
+With `DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
@@ -2372,8 +2378,8 @@ registered and expire too, while older jti-less ones keep working.
 
 | Scope | Tools |
 | --- | --- |
-| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_channel_skills`, `list_environments` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill` |
+| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_channel_skills`, `list_agent_tool_rules`, `list_environments` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
 | `agents:archive` | `archive_channel_copy` |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
