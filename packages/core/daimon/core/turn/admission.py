@@ -20,6 +20,7 @@ their pre-turn gate.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -28,7 +29,7 @@ from time import perf_counter
 from typing import Literal
 
 import structlog
-from anthropic import APIStatusError
+from anthropic import APIError, APIStatusError
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
@@ -750,9 +751,7 @@ async def admit_impl(
     # them are recorded, so unsealing one later leaves the others holding.
     seal_ids = limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
-    memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
-        is_dm and policy.dm_memory_read_only
-    )
+    memory_read_only = _memory_read_only(policy, grant, source_sealed)
 
     backend_counterpart: AgentRevision | None = None
     backend_agent_revision: AgentBackendRevision | None = None
@@ -769,9 +768,9 @@ async def admit_impl(
         _require_backend_origin(selection, origin, agent_backends=deps.agent_backends)
         if revision is None or selection.profile == MANAGED_AGENTS.profile_id:
             return
+        from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
         from daimon.core.turn.ceiling import turn_deadline
         from daimon.core.turn.prepare import (
-            DEFAULT_MA_CAPABILITIES,
             ProviderPreparationRequest,
             admitted_session_scope,
         )
@@ -1115,10 +1114,8 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     # Memory posture is decided from the policy as it is now, not only from
     # new seals: a DM turn picks up `dm_memory_read_only` switched on since
     # admission. Read-only never relaxes back to writable here.
-    memory_read_only = (
-        admission.memory_read_only
-        or (bool(seal_ids) and not _is_own_agent(policy, grant))
-        or (grant.is_dm and policy.dm_memory_read_only)
+    memory_read_only = admission.memory_read_only or _memory_read_only(
+        policy, grant, bool(seal_ids)
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
     if (
@@ -1183,3 +1180,223 @@ def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awa
             )
 
     return decide
+
+
+def _memory_read_only(policy: TenantAccessPolicy, grant: AdmissionGrant, sealed: bool) -> bool:
+    return (sealed and not _is_own_agent(policy, grant)) or (
+        grant.is_dm and policy.dm_memory_read_only
+    )
+
+
+async def capture_backend_source(
+    deps: TurnDeps,
+    source: BackendAgent,
+    *,
+    context: ScopeContext,
+    subject: Subject,
+    place: Place,
+    is_dm: bool,
+    slack_turn_context_id: uuid.UUID | None,
+    private_dm_id: str | None,
+    external_user_id: str | None = None,
+    explicit_target_name: str | None = None,
+) -> BackendAgent:
+    """Read the actual target's source in a verified host context, without admitting a turn."""
+    from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.mux_compat import retrieve_agent
+    from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    try:
+        async with asyncio.timeout(30):
+            if (
+                context.tenant_id != source.tenant_id
+                or context.account_id is None
+                or source.source is None
+            ):
+                raise channel_backend.AgentBackendRefused("source_unavailable")
+            async with deps.sessionmaker() as db:
+                account = await get_account_with_tenant(db, account_id=context.account_id)
+                policy = await load_access_policy(db, tenant_id=context.tenant_id)
+                config = await resolve_config(db, context=context, default=deps.deployment_default)
+            if account is None or account.tenant_id != context.tenant_id or account.is_external:
+                raise channel_backend.AgentBackendRefused("source_unavailable")
+            if (
+                subject.platform_user_id is not None
+                and subject.platform_user_id != account.platform_user_id
+            ):
+                raise channel_backend.AgentBackendRefused("source_unavailable")
+            if explicit_target_name is not None:
+                if (
+                    context.platform != "cli"
+                    or context.channel_id is not None
+                    or context.thread_id is not None
+                    or is_dm
+                    or source.name != explicit_target_name
+                ):
+                    raise channel_backend.AgentBackendRefused("source_unavailable")
+                config = config.model_copy(
+                    update={
+                        "configuration_target_name": explicit_target_name,
+                        "configuration_target_ma_agent_id": source.source.ref.id,
+                    }
+                )
+            if config.configuration_target_name is not None:
+                target_matches = (
+                    config.configuration_target_name == source.name
+                    and config.configuration_target_ma_agent_id == source.source.ref.id
+                )
+            else:
+                target_matches = (
+                    config.agent_name == source.name
+                    and config.responder_ma_agent_id
+                    in (
+                        None,
+                        source.source.ref.id,
+                    )
+                )
+            if not target_matches or config.environment_name is None:
+                raise channel_backend.AgentBackendRefused("source_unavailable")
+            label = external_user_id or account.platform_user_id
+            if not label:
+                raise channel_backend.AgentBackendRefused("source_unavailable")
+            scope = resource_scope(
+                tenant_id=str(context.tenant_id),
+                account_id=str(context.account_id),
+                authorization_id="backend-preview",
+            )
+            actual = await retrieve_agent(deps.anthropic, source.source.ref.id, scope=scope)
+            if explicit_target_name is not None:
+                await channel_backend.load_backend_agent(
+                    deps.anthropic,
+                    deps.sessionmaker,
+                    tenant_id=context.tenant_id,
+                    agent_name=explicit_target_name,
+                    actual_agent=actual,
+                )
+            environment = await find_environment_by_daimon_tag(
+                deps.anthropic,
+                tenant_id=context.tenant_id,
+                name=config.environment_name,
+            )
+            if environment is None or environment.archived_at is not None:
+                raise channel_backend.AgentBackendRefused("source_unavailable")
+            grant = AdmissionGrant(
+                tenant_id=context.tenant_id,
+                subject=subject,
+                surface=Surface.DM if is_dm else Surface.CHANNEL,
+                turn_place=place,
+                run_place=Place() if is_dm else place,
+                agent=build_agent_ref(actual.name, actual.metadata or {}, source.name),
+                channel_id=context.channel_id or "",
+                thread_id=context.thread_id,
+                is_dm=is_dm,
+            )
+            if (
+                place.category_unresolved
+                or place.parent_unresolved
+                or (
+                    context.channel_id is not None
+                    and (place.channel_id, place.parent_channel_id)
+                    != (context.thread_id or context.channel_id, context.channel_id)
+                )
+            ):
+                raise channel_backend.AgentBackendRefused("source_unavailable")
+            seals = limiting_ids_at(policy, channel_id=grant.channel_id, thread_id=grant.thread_id)
+            skills = (
+                await turn_channel_skills(
+                    deps.sessionmaker,
+                    deps.anthropic,
+                    tenant_id=context.tenant_id,
+                    platform=context.platform or account.platform,
+                    channel_id=grant.channel_id,
+                    agent=actual,
+                    agent_names=grant.agent.names,
+                )
+                if context.channel_id is not None
+                else ()
+            )
+            admission = Admission(
+                context.account_id,
+                actual,
+                environment,
+                config,
+                grant=grant,
+                memory_read_only=_memory_read_only(policy, grant, bool(seals)),
+                asks_before_publishing=_asks_before_publishing(policy, grant),
+                source_sealed=bool(seals),
+                origin_channel_id=context.channel_id,
+                origin_thread_id=context.thread_id,
+                origin_seal_ids=seals,
+                channel_skills=skills,
+                slack_turn_context_id=slack_turn_context_id,
+                private_dm_id=(private_dm_id or context.thread_id or context.channel_id)
+                if is_dm
+                else private_dm_id,
+            )
+            request = ProviderPreparationRequest(
+                deps,
+                admission,
+                scope,
+                context.tenant_id,
+                context.platform or account.platform,
+                label,
+                context.thread_id or "",
+                context.account_id,
+                False,
+                DEFAULT_MA_CAPABILITIES,
+                None,
+                datetime.now(UTC) + timedelta(seconds=30),
+                lambda: datetime.now(UTC),
+            )
+            captured = await capture_preparation_source(request, fresh=True)
+            if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
+                raise channel_backend.AgentBackendRefused("source_unavailable")
+            return captured
+    except (APIError, TimeoutError, ScopeViolation) as error:
+        raise channel_backend.AgentBackendRefused("source_unavailable") from error
+
+
+async def capture_admitted_backend_source(
+    deps: TurnDeps,
+    source: BackendAgent,
+    *,
+    admission: Admission | None,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+) -> BackendAgent:
+    """A chat confirmation card's source capture: only its own turn's public admission."""
+    from daimon.core.session_seal import is_private_conversation
+
+    if admission is None or admission.grant is None or admission.account_id != account_id:
+        raise channel_backend.AgentBackendRefused("source_unavailable")
+    # Like the MCP caller's public-context gate: never a DM or private conversation.
+    if (
+        admission.grant.is_dm
+        or admission.private_dm_id is not None
+        or admission.slack_turn_context_id is not None
+        or admission.origin_channel_id is None
+        or is_private_conversation(admission.origin_channel_id)
+        or is_private_conversation(admission.origin_thread_id or "")
+    ):
+        raise channel_backend.AgentBackendRefused("source_context_unavailable")
+    return await capture_backend_source(
+        deps,
+        source,
+        context=ScopeContext(
+            tenant_id=tenant_id,
+            account_id=account_id,
+            platform=platform,
+            channel_id=admission.origin_channel_id,
+            thread_id=admission.origin_thread_id,
+        ),
+        subject=admission.grant.subject,
+        place=admission.grant.run_place,
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
+    )

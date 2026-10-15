@@ -183,6 +183,10 @@ async def _no_card_reason(
     if not runtime.settings.tool_safety.enabled:
         return "cards_off"
     gap = await session_card_gap(runtime, auth, origin, tool_name=_TOOL_NAME)
+    # This call never opts into `require_public_context`, so the gate never
+    # returns that reason; narrow it away rather than widening this tool's
+    # own, unrelated `NoCardReason` vocabulary.
+    assert gap != "source_context_unavailable"
     if gap != "no_origin":
         return gap
     if auth.agent_id is not None:
