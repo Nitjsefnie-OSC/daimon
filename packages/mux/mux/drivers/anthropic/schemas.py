@@ -264,9 +264,17 @@ class EnvironmentConfig(NativeConfig):
         )
 
 
+EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+class EffortConfig(NativeConfig):
+    type: EffortLevel
+
+
 class ModelConfig(NativeConfig):
     id: str
     speed: Literal["standard", "fast"] | None = None
+    effort: EffortLevel | EffortConfig | None = None
 
 
 class AgentModelConfig(NativeConfig):

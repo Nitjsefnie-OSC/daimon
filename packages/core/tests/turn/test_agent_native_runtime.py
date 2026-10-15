@@ -873,7 +873,6 @@ async def test_explicit_drops_do_not_discharge_unproved_obligations(
             "foreign_root": "worker_context",
             "missing_reader": "native_counterpart",
             "source_drift": "source_drift",
-            "model_controls": "source_definition",
             "ask_without_tools": "tools",
         }.get(failure, failure)
         assert expected in refused.value.__cause__.missing
