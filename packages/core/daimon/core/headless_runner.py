@@ -813,6 +813,7 @@ async def run_worker(
                     tenant_id=request.tenant_id,
                     worker_id=worker.id,
                     expected_version=verdict.worker.version,
+                    expected_status="starting" if prepared is None else "running",
                 )
                 return True
 

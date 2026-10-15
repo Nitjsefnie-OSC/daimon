@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from daimon.core._models import Account
 from daimon.core._models import FleetRun as FleetRunRow
@@ -424,8 +424,12 @@ async def use_turn(
     tenant_id: uuid.UUID,
     worker_id: uuid.UUID,
     expected_version: int,
+    expected_status: Literal["starting", "running"] = "running",
 ) -> FleetWorker:
-    """Count one model input, including a starting worker's input-bearing create.
+    """Count one input under the caller's explicit expected worker state.
+
+    Input-bearing creation explicitly expects starting, before its binding is
+    available. Only its first unbound input can use that state.
 
     Call it in the transaction that wins that input's `claim_send` (the state
     store's one `pending -> sent` compare-and-swap for the input's operation
@@ -440,6 +444,7 @@ async def use_turn(
                     FleetWorkerRow.tenant_id == tenant_id,
                     FleetWorkerRow.id == worker_id,
                     FleetWorkerRow.version == expected_version,
+                    FleetWorkerRow.status == expected_status,
                     or_(
                         FleetWorkerRow.status == "running",
                         (FleetWorkerRow.status == "starting")
