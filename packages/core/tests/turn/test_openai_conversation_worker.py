@@ -314,8 +314,9 @@ async def test_recorded_provider_ceilings_refuse_before_native_allocation(conver
     from daimon.core.fleet_orchestration import FleetRefused
 
     _, parent, policy, resolved, wire, ports, _, _ = conversation_root
-    with pytest.raises(FleetRefused, match="admission_evidence_invalid"):
+    with pytest.raises(FleetRefused, match="admission_evidence_invalid") as refused:
         await FleetOrchestrator(ports).spawn(parent, policy, **terms(parent, resolved))
+    assert str(refused.value.__context__) == "provider limits exceed the retained run budget"
     assert not wire.posts
 
 
