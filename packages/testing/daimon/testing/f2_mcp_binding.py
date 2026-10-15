@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
+from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti, validate_agent_mcp_token
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
-from mux.contracts.ids import ResourceRef
+from mux.contracts.ids import Provider, ResourceRef, Scope
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -24,11 +27,57 @@ if TYPE_CHECKING:
     from daimon.testing.anthropic_live import LiveContext
 
 
+@dataclass(frozen=True)
+class AgentMCPAuthority:
+    """Selected owner authority for one actual provider ACK and canonical source.
+
+    `acknowledged` must verify the actual persisted ACK/readback AND its
+    association with canonical_source, not accept an input flag. Foreign
+    provider IDs never become Daimon agent UUIDs by string substitution.
+    """
+
+    provider: Provider
+    scope: Scope
+    account_scope_id: str
+    output: Path
+    deadline_s: int
+    database_url: str | None = field(repr=False)
+    mcp_signing_secret_file: Path | None = field(repr=False)
+    acknowledged: Callable[[ResourceRef], bool] = field(repr=False)
+    redact: Callable[[tuple[str, ...]], None] = field(repr=False)
+    canonical_source: ResourceRef | None = None
+
+
 class AgentMCPBinding:
     """One minted registered token for this attempt's actual created agent; no retries."""
 
-    def __init__(self, context: LiveContext) -> None:
+    def __init__(
+        self, context: LiveContext | None = None, *, authority: AgentMCPAuthority | None = None
+    ) -> None:
+        if (context is None) == (authority is None):
+            raise ValueError("exactly one acknowledged-agent authority is required")
         self.context = context
+        if context is not None:
+            binding = context.admission.binding
+
+            def redact(values: tuple[str, ...]) -> None:
+                context.redaction_secrets += values
+
+            authority = AgentMCPAuthority(
+                provider="anthropic",
+                scope=binding.scope,
+                account_scope_id=binding.account_scope_id,
+                output=context.admission.output,
+                deadline_s=context.admission.deadline_s,
+                database_url=binding.database_url,
+                mcp_signing_secret_file=binding.mcp_signing_secret_file,
+                acknowledged=lambda agent: (
+                    ("agent", agent.id) in context.transport.authorization.created
+                ),
+                redact=redact,
+            )
+        assert authority is not None
+        self.authority = authority
         self.engine: AsyncEngine | None = None
         self.sessions: async_sessionmaker[AsyncSession] | None = None
         self.agent: UUID | None = None
@@ -37,7 +86,7 @@ class AgentMCPBinding:
         self.started = False
 
     def receipt(self, name: str, value: dict[str, object]) -> None:
-        path = self.context.admission.output / name
+        path = self.authority.output / name
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as stream:
             json.dump(value, stream, indent=2)
@@ -48,7 +97,7 @@ class AgentMCPBinding:
     async def bind(self, agent: ResourceRef) -> str:
         from daimon.testing.anthropic_live import LiveRefused, explicit_secret
 
-        binding = self.context.admission.binding
+        binding = self.authority
         if self.started:
             raise LiveRefused(
                 "F2 credential binding cannot be replayed or switched to another agent"
@@ -61,18 +110,32 @@ class AgentMCPBinding:
             agent.tenant_id,
             agent.account_id,
         ) != (
-            "anthropic",
+            binding.provider,
             "agent",
             binding.account_scope_id,
             binding.scope.tenant_id,
             binding.scope.account_id,
-        ) or ("agent", agent.id) not in self.context.transport.authorization.created:
+        ) or not binding.acknowledged(agent):
             raise LiveRefused("F2 credential requires this attempt's acknowledged agent")
         if binding.database_url is None or binding.mcp_signing_secret_file is None:
             raise LiveRefused("F2 requires explicit staging DB and MCP signing authority")
+        canonical = binding.canonical_source or agent
+        if (
+            canonical.provider != "anthropic"
+            or canonical.kind != "agent"
+            or canonical.tenant_id != binding.scope.tenant_id
+            or canonical.account_id not in (None, binding.scope.account_id)
+            or (binding.provider == "anthropic" and canonical != agent)
+            or (binding.provider != "anthropic" and binding.canonical_source is None)
+        ):
+            raise LiveRefused(
+                "F2 credential requires the acknowledged canonical source association"
+            )
         secret = explicit_secret(binding.mcp_signing_secret_file)
-        self.context.redaction_secrets += (secret, binding.database_url)
-        self.agent = derive_agent_uuid(tenant_id=UUID(agent.tenant_id), ma_agent_id=agent.id)
+        binding.redact((secret, binding.database_url))
+        self.agent = derive_agent_uuid(
+            tenant_id=UUID(canonical.tenant_id), ma_agent_id=canonical.id
+        )
         self.engine = create_async_engine(binding.database_url, hide_parameters=True)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         account, tenant = UUID(agent.account_id), UUID(agent.tenant_id)
@@ -81,7 +144,7 @@ class AgentMCPBinding:
             if identity is None or identity.tenant_id != tenant or identity.role.value != "user":
                 raise LiveRefused("F2 token requires its actual isolated nonadmin account")
         now = datetime.now(UTC)
-        ttl = min(900, self.context.admission.deadline_s)
+        ttl = min(900, binding.deadline_s)
         async with self.sessions.begin() as db:
             token = await mint_agent_mcp_token(
                 db,
@@ -93,7 +156,7 @@ class AgentMCPBinding:
                 now=now,
                 ttl_days=ttl / 86400,  # pyright: ignore[reportArgumentType]
             )
-            self.context.redaction_secrets += (token,)
+            binding.redact((token,))
             self.jti = token_jti(token)
             self.receipt(
                 "f2-mcp-token-intent.json",
@@ -107,20 +170,19 @@ class AgentMCPBinding:
                     "token_exported": False,
                 },
             )
-        async with self.sessions() as db:
-            row = await get_mcp_token(db, jti=self.jti)
-            if (
-                row is None
-                or row.account_id != account
-                or row.tenant_id != tenant
-                or row.agent_id != str(self.agent)
-                or row.kind != "agent"
-                or row.scopes
-                or row.revoked_at is not None
-                or row.expires_at is None
-                or not now < row.expires_at <= now + timedelta(seconds=ttl)
-            ):
-                raise LiveRefused("F2 agent-token registry readback differs from its ACK binding")
+        try:
+            await validate_agent_mcp_token(
+                self.sessions,
+                token=token,
+                secret=secret.encode(),
+                scope=binding.scope,
+                agent_id=self.agent,
+                now=now,
+            )
+        except ValueError:
+            raise LiveRefused(
+                "F2 agent-token registry readback differs from its ACK binding"
+            ) from None
         self.token = token
         return token
 
@@ -130,7 +192,7 @@ class AgentMCPBinding:
         try:
             if self.jti is not None:
                 assert self.sessions is not None
-                scope = self.context.admission.binding.scope
+                scope = self.authority.scope
                 async with self.sessions.begin() as db:
                     row = await get_mcp_token(db, jti=self.jti)
                     if row is not None:
