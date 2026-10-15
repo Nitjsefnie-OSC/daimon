@@ -332,8 +332,7 @@ Routines tools: create / list / get / update / delete.
 
 ## `self_edit`
 
-MCP tools for an agent to edit its own ``agent_files`` and manage its
-``agent_repo_binding`` from inside an MA turn.
+MCP tools for an agent to edit its own ``agent_files`` from inside an MA turn.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
