@@ -2288,8 +2288,11 @@ must carry exactly those categories as `accepted_drops`; missing, partial or
 additional categories refuse, and a card whose drop list, digest or source
 changed after it was drawn is refused on the click. Discord, Slack and Teams
 cards read the source as the turn's own admitted caller and only in a public
-channel or thread: DMs and private conversations refuse
-(`source_context_unavailable`), as the MCP tool's public-context gate does.
+channel or thread: DMs refuse (`source_context_unavailable`), as the MCP
+tool's public-context gate does. "DM" is the canonical DM-shaped classifier
+(Slack `D…` IMs, Teams `a:…` personal chats, Discord DM channels) -- a Slack
+private channel or legacy `G…` group DM, or a Teams meeting thread, is not a
+DM by that classifier and is not refused here.
 Revert with `daimon agents backend revert`. A source carrying native tool
 controls (such as its own `daimon-mcp` toolset) cannot yet be previewed on
 another profile and refuses.

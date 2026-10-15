@@ -262,31 +262,39 @@ def _without_own_tools(payload):
     payload["mcp_servers"] = []
 
 
-#: A Daimon agent carrying its own `daimon-mcp` toolset cannot yet preview a
-#: cross-profile switch: `classify_source_obligations` reports
-#: `source_definition` for native tool controls instead of declaring drops.
-_TOOL_BEARING_SOURCE_REFUSES = pytest.mark.xfail(
-    strict=True,
-    raises=ToolError,
-    reason="tool-bearing sources hard-refuse source_unavailable until the "
-    "runtime_manifest.classify_source_obligations fix declares their drops",
-)
-
-
-@pytest.mark.parametrize(
-    "own_tools", [False, pytest.param(True, marks=_TOOL_BEARING_SOURCE_REFUSES)]
-)
+@pytest.mark.parametrize("own_tools", [False, True])
 @pytest.mark.parametrize("target", ["openai", "gemini"])
 async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     active_chat, target, own_tools
 ):
-    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
 
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
     if not own_tools:
         _without_own_tools(payload)
     gate()
     agent()
+    if own_tools:
+        # A Daimon agent carrying its own `daimon-mcp` toolset cannot yet preview
+        # a cross-profile switch: `classify_source_obligations` reports
+        # `source_definition` for native tool controls instead of declaring
+        # drops, so the shared preview path hard-refuses `source_unavailable`
+        # (runtime_manifest.classify_source_obligations fix pending). Narrowed
+        # to this specific cause so an unrelated ToolError elsewhere in the
+        # preview path (which also surfaces as "Preview again") does not pass
+        # here by coincidence.
+        with pytest.raises(ToolError, match="Preview again") as excinfo:
+            await _request_agent_backend_switch_impl(
+                runtime,
+                auth,
+                agent_name="Researcher",
+                target_backend=target,
+                origin_context_id=str(origin.id),
+            )
+        assert isinstance(excinfo.value.__cause__, AgentBackendRefused)
+        assert str(excinfo.value.__cause__) == "source unavailable"
+        assert not trace.replies and not trace.violations
+        return
     preview = await _request_agent_backend_switch_impl(
         runtime,
         auth,
@@ -298,7 +306,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     assert "unknown" in preview.cost_line.lower()
     drops = preview.declared_drops
     assert {"memory", "sandbox"} <= set(drops)
-    assert own_tools or drops == ("memory", "sandbox")
+    assert drops == ("memory", "sandbox")
     extra = next(item for item in ("files", "repository", "skills") if item not in drops)
     # The confirmed call must name exactly the previewed losses.
     for accepted in (None, (), drops[:1], (*drops, extra)):
@@ -485,3 +493,29 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
             )
     assert not trace.replies and not trace.violations
     assert all(request.method == "GET" for request in trace.requests)
+
+
+async def test_a_private_session_context_refuses_the_preview(active_chat):
+    """`_capture_backend_source`'s `require_public_context=True` gate
+    (daimon/adapters/mcp/tools/agents.py) must refuse a preview whose live session's
+    stamped channel doesn't match the verified chat origin exactly, even though the
+    origin/admin/live-session checks above it all pass. Here the session is missing
+    its channel stamp entirely (as an un-public or pre-DD3 session would be).
+    """
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    # A tool-bearing source refuses on its own terms (xfail'd elsewhere in this
+    # file); strip it so the only possible refusal here is the context gate.
+    _without_own_tools(payload)
+    del frozen["metadata"]["daimon_channel"]
+    del frozen["metadata"]["daimon_thread"]
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="Preview again"):
+        await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            agent_name="Researcher",
+            target_backend="openai",
+            origin_context_id=str(origin.id),
+        )
+    assert not trace.replies and not trace.violations

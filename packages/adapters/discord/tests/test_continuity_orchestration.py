@@ -18,7 +18,7 @@ import types
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic as _anthropic
@@ -960,3 +960,90 @@ async def test_session_busy_for_a_seal_says_to_send_again(
     ]
     assert render_access_changed_try_again() in edited, edited
     await _assert_no_recoverable_cards(db_session_factory)
+
+
+@patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+@patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
+async def test_mention_turn_backend_switch_card_captures_through_its_own_admission(
+    mock_build_context_xml: AsyncMock,
+    mock_resolve_config: AsyncMock,
+    mock_resolve_env: AsyncMock,
+    mock_resolve_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary mention turn's Confirm card reads the switched agent's source as
+    that turn's own admitted caller, exactly like a wizard-submitted turn's card
+    (test_a_wizard_turns_backend_switch_card_captures_through_its_own_admission in
+    tests/integration/test_wizard_submit_turn.py). Built without the admission,
+    every backend-switch card on this call site refuses `source_unavailable`.
+    """
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+
+    mock_build_context_xml.return_value = ("<user_query>hello</user_query>", [])
+    guild_id = "700000012"
+    await _seed_tenant(db_session, guild_id=guild_id)
+    mock_resolve_config.return_value = _stub_resolved_config()
+    mock_resolve_agent.return_value = "ag_test"
+    mock_resolve_env.return_value = "env_test"
+
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    bot = make_bot(runtime)
+    message = _make_thread_message(guild_id=int(guild_id))
+    account_id = uuid.uuid4()
+    mapping_id = uuid.uuid4()
+    prepared = _make_prepared_turn(
+        continuity=ContinuityOutcome(), account_id=account_id, mapping_id=mapping_id
+    )
+    run_outcome = RunOutcome(
+        state=TurnState(),
+        ma_session_id="sess_test",
+        mapping_id=mapping_id,
+        recovered=False,
+        continuity=ContinuityOutcome(),
+    )
+
+    services: list[Any] = []
+    real_callbacks = confirmation.backend_switch_callbacks
+
+    def spy_callbacks(service: Any, **kwargs: Any) -> Any:
+        services.append(service)
+        return real_callbacks(service, **kwargs)
+
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
+    captured = MagicMock(name="captured_source")
+    capture_backend_source = AsyncMock(return_value=captured)
+    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
+
+    with (
+        patch(
+            "daimon.adapters.discord.bot.bind_session",
+            new_callable=AsyncMock,
+            return_value=prepared,
+        ),
+        patch(
+            "daimon.adapters.discord.bot.run_prepared_turn",
+            new_callable=AsyncMock,
+            return_value=run_outcome,
+        ),
+    ):
+        await bot.on_message(message)
+
+    (service,) = services
+    source = MagicMock(name="source")
+    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
+    assert await capture(source) is captured
+    capture_backend_source.assert_awaited_once()
+    args, kwargs = capture_backend_source.await_args
+    assert args[1] is source
+    context = kwargs["context"]
+    assert (context.platform, context.channel_id, context.thread_id) == (
+        "discord",
+        "789",
+        "5555",
+    )
