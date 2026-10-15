@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, cast, get_args
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -63,8 +63,9 @@ from mux.contracts.config import (
 from mux.contracts.ids import PROVIDERS, ChannelRef, ModelRef, Provider
 from mux.contracts.profile import SUPPORTED, Capability, Profile
 from mux.contracts.resources import AgentSpec
-from mux.errors import InvalidConfig, UnsupportedCapability
+from mux.errors import InvalidConfig, ScopeViolation, UnsupportedCapability
 from mux.profiles import (
+    PROFILES,
     RUNNABLE_PROFILES,
     backend_selection,
     get_profile,
@@ -150,24 +151,22 @@ def check_backend(
 ) -> BackendAdmission:
     """Admit `revision`, or raise `BackendUnsupported`."""
     if enabled_backends is not None and not backend_is_enabled(revision.backend, enabled_backends):
+        log_backend_unsupported("workspace_policy", reason="backend_not_enabled", revision=revision)
         raise BackendUnsupported("This backend is not enabled for this workspace.")
     try:
         admission = admit(revision, get_profile(revision.profile))
     except (UnsupportedCapability, InvalidConfig) as err:
-        log.info(
-            "turn.backend_unsupported",
-            channel_id=revision.channel.channel_id,
-            profile=revision.profile,
-            error=str(err),
+        stage = (
+            "backend_capabilities"
+            if isinstance(err, UnsupportedCapability)
+            else "backend_configuration"
         )
+        log_backend_unsupported(stage, err, revision=revision)
         raise BackendUnsupported(str(err)) from err
     runnable = revision.profile in RUNNABLE_PROFILES and runnable_selection(revision)
     if not runnable:
-        log.info(
-            "turn.backend_unsupported",
-            channel_id=revision.channel.channel_id,
-            profile=revision.profile,
-            error="not runnable in this release",
+        log_backend_unsupported(
+            "backend_runnable", reason="profile_not_runnable", revision=revision
         )
         raise BackendUnsupported(f"{revision.profile} is not runnable in this release")
     return admission
@@ -200,6 +199,117 @@ class AgentBackendRefused(DaimonError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(reason.replace("_", " "))
+
+
+type BackendRefusalStage = Literal[
+    "workspace_policy",
+    "backend_capabilities",
+    "backend_configuration",
+    "backend_runnable",
+    "admission_origin",
+    "backend_origin",
+    "retained_revision_lookup",
+    "retained_default_mismatch",
+    "retained_binding_mismatch",
+    "retained_default_policy",
+    "channel_policy",
+    "preparation_counterpart",
+    "source_agent_lookup",
+    "agent_preference",
+    "reauthorize_policy",
+]
+
+
+def log_backend_unsupported(
+    stage: BackendRefusalStage,
+    error: BaseException | None = None,
+    *,
+    reason: Literal["backend_not_enabled", "profile_not_runnable"] | None = None,
+    revision: ConfigRevision | None = None,
+) -> None:
+    """Log closed diagnostic labels, never provider messages or source payloads."""
+    # Delay this import: the turn package itself imports channel_backend.
+    from daimon.core.turn.errors import AdmissionDenied
+
+    safe_types: dict[type[BaseException], str] = {
+        AgentBackendRefused: "AgentBackendRefused",
+        AdmissionDenied: "AdmissionDenied",
+        BackendUnsupported: "BackendUnsupported",
+        InvalidConfig: "InvalidConfig",
+        UnsupportedCapability: "UnsupportedCapability",
+        ScopeViolation: "ScopeViolation",
+        RuntimeError: "RuntimeError",
+        ValueError: "ValueError",
+        LookupError: "LookupError",
+    }
+    safe_reasons = {
+        "actor_not_found",
+        "admin_required",
+        "agent_identity_required",
+        "agent_not_found",
+        "backend_not_allowed",
+        "drops_mismatch",
+        "drops_required",
+        "feature_disabled",
+        "invalid_fleet_grant",
+        "no_previous_revision",
+        "re_confirm",
+        "revision_busy",
+        "source_unavailable",
+        "stale_preview",
+        "stale_revision",
+        "tenant_mismatch",
+        "worker_identity_required",
+        "backend_unsupported",
+    }
+    safe_missing = set(get_args(Capability)) | {
+        "source_definition",
+        "source_context",
+        "source_drift",
+        "worker_context",
+        "native_counterpart",
+        "worker_materialization",
+        "worker_acknowledgement",
+        "instructions",
+        "tools",
+        "skills",
+        "mcp",
+        "memory",
+        "environment",
+        "sandbox",
+        "credentials",
+        "repository",
+        "files",
+    }
+    causes: list[dict[str, object]] = []
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen and len(causes) < 8:
+        seen.add(id(error))
+        cause: dict[str, object] = {"type": safe_types.get(type(error), "redacted")}
+        if isinstance(error, (AgentBackendRefused, AdmissionDenied)):
+            cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
+        if isinstance(error, UnsupportedCapability):
+            cause["missing"] = sorted(
+                {item if item in safe_missing else "redacted" for item in error.missing}
+            )
+        causes.append(cause)
+        error = error.__cause__ or error.__context__
+    fields: dict[str, object] = {}
+    if reason is not None:
+        fields["reason"] = (
+            reason if reason in {"backend_not_enabled", "profile_not_runnable"} else "redacted"
+        )
+    if revision is not None:
+        fields.update(
+            channel_id=revision.channel.channel_id,
+            profile=revision.profile if revision.profile in PROFILES else "redacted",
+        )
+    log.info(
+        "turn.backend_unsupported",
+        stage=stage if stage in get_args(BackendRefusalStage.__value__) else "redacted",
+        causes=causes,
+        **fields,
+    )
 
 
 def _digest(facts: object) -> str:

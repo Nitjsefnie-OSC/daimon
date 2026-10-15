@@ -10,6 +10,7 @@ from daimon.core.turn.admission import admit_impl
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec
+from structlog.testing import capture_logs
 
 from .test_backend_selection import (
     initial_backend as initial_backend,
@@ -85,8 +86,18 @@ async def test_real_admission_refuses_even_a_reader_accepting_the_native_compone
         thread_id="new",
         now=datetime.now(UTC),
     )
-    with pytest.raises(AdmissionDenied, match="backend_unsupported") as refused:
+    with (
+        capture_logs() as logs,
+        pytest.raises(AdmissionDenied, match="backend_unsupported") as refused,
+    ):
         await admit_impl(deps, **kwargs)
+    diagnostics = [row for row in logs if row["event"] == "turn.backend_unsupported"]
+    assert diagnostics[-1]["stage"] == "preparation_counterpart"
+    assert diagnostics[-1]["causes"][0] == {
+        "type": "AdmissionDenied",
+        "reason": "backend_unsupported",
+    }
+    assert any(cause["type"] == "UnsupportedCapability" for cause in diagnostics[-1]["causes"])
     assert "private" not in str(refused.value)
     async with host.sessions() as db:
         assert await mux_state.latest_config_revision(db, REVISION.channel) is None
@@ -147,3 +158,45 @@ async def test_prewrite_source_projection_receives_effective_seal_and_memory_pol
     async with host.sessions() as db:
         assert await mux_state.latest_config_revision(db, REVISION.channel) is None
     assert host.created == [] and host.wire.requests == []
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+@pytest.mark.parametrize("owner", ["load_backend_agent", "resolve_turn_backend"])
+async def test_agent_preference_owner_refusal_logs_its_stage_and_cause(
+    selector_host, monkeypatch, owner
+):
+    from daimon.core import channel_backend
+
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(agent, "openai", 0, actor)
+
+    async def refuse(*args, **kwargs):
+        raise channel_backend.AgentBackendRefused("source_unavailable")
+
+    monkeypatch.setattr(channel_backend, owner, refuse)
+    with capture_logs() as logs, pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await host.admit("new-thread")
+    diagnostic = next(row for row in logs if row["event"] == "turn.backend_unsupported")
+    assert diagnostic["stage"] == (
+        "source_agent_lookup" if owner == "load_backend_agent" else "agent_preference"
+    )
+    assert diagnostic["causes"] == [{"type": "AgentBackendRefused", "reason": "source_unavailable"}]
+    assert host.wire.requests == [] and host.created == []
+
+
+async def test_reauthorization_logs_a_removed_workspace_backend(selector_host):
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.turn.admission import reauthorize
+
+    host = selector_host
+    admission = await host.admit("thread")
+    async with host.sessions.begin() as db:
+        await set_access_policy(db, tenant_id=TENANT, policy=TenantAccessPolicy())
+    before = (len(host.wire.requests), len(host.calls))
+    with capture_logs() as logs, pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await reauthorize(host.deps, admission)
+    assert any(row.get("stage") == "workspace_policy" for row in logs)
+    assert any(row.get("stage") == "reauthorize_policy" for row in logs)
+    assert (len(host.wire.requests), len(host.calls)) == before
