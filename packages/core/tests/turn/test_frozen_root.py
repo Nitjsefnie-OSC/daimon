@@ -1824,3 +1824,306 @@ async def test_fresh_root_rechecks_new_thread_policy_before_retaining_or_sending
             )
             == 0
         )
+
+
+@pytest.mark.parametrize("fault", ["wrong_channel", "reused_request", "new_seal"])
+async def test_fresh_root_rebind_refuses_incompatible_execution_before_retention(root_turn, fault):
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.authz import build_turn_place
+
+    deps, prepared, _, intent, origin, scope, _, transport = root_turn
+    channel_id = "foreign-channel" if fault == "wrong_channel" else origin.parent_channel_id
+    place = build_turn_place(channel_id=channel_id, thread_id=None)
+    grant = replace(
+        prepared.admission.grant,
+        channel_id=channel_id,
+        thread_id=None,
+        turn_place=place,
+        run_place=place,
+    )
+    prepared = replace(prepared, admission=replace(prepared.admission, grant=grant))
+    if fault == "reused_request":
+        prepared = replace(
+            prepared, _preparation=replace(prepared._preparation, reuse_existing=True)
+        )
+    elif fault == "new_seal":
+        assert not prepared.admission.memory_read_only and not prepared.admission.origin_seal_ids
+        async with deps.sessionmaker.begin() as db:
+            await access_policy.set_access_policy(
+                db,
+                tenant_id=grant.tenant_id,
+                policy=POLICY.model_copy(
+                    update={"channel_rules": {origin.thread_id: ChannelRule(readers="inside")}}
+                ),
+            )
+    before = len(transport.requests)
+    reason = "stale" if fault == "new_seal" else "unbound"
+    with pytest.raises(WorkerSpecRefused, match=f"origin: {reason}"):
+        await freeze((deps, prepared, *root_turn[2:]))
+    assert len(transport.requests) == before
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == grant.tenant_id)
+            )
+            == 0
+        )
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesis(
+    recorded_fresh_root, provider, monkeypatch, tmp_path
+):
+    import json
+
+    from daimon.core.channel_backend import set_channel_backend
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.admission import admit
+    from daimon.core.turn.openai_codec import PROFILE as OPENAI_PROFILE
+    from daimon.core.turn.prepare import bind_session_impl
+    from daimon.core.turn.runtimes import build_channel_runtime
+    from daimon.core.turn.state import extract_final_response
+    from mux.contracts.config import BackendConfig
+    from mux.contracts.ids import ThreadRef
+    from mux.drivers.gemini.flash import FLASH_PRIMARY
+    from mux.drivers.openai import deployment
+    from mux.state.lease import Slot
+
+    from .test_gemini_codec import interaction
+    from .test_gemini_runtime_transport import clients_for
+    from .test_openai_deployment import manifest
+    from .test_openai_host import Wire
+
+    deps, original, _, _, _, _, old_binding, _ = recorded_fresh_root
+    tenant_id, account_id = original.admission.grant.tenant_id, original.admission.account_id
+    native, environment = original.admission.agent, original.admission.environment
+    thread_id = "fresh-foreign-" + str(uuid4())
+    channel = old_binding.thread.channel
+    profile = OPENAI_PROFILE if provider == "openai" else "gemini.inline_reuse"
+    model = "gpt-6-luna" if provider == "openai" else FLASH_PRIMARY
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    source = original._source
+    quote = await service.preview_fleet_grant(source, None, now=datetime.now(UTC))
+    await service.revoke_fleet_grant(
+        source,
+        quote.setting_revision,
+        BackendActor(tenant_id, account_id, Subject(is_admin=True)),
+        expected_preview_digest=quote.digest,
+        now=datetime.now(UTC),
+    )
+    async with deps.sessionmaker.begin() as db:
+        revision = await set_channel_backend(
+            db, channel, BackendConfig(backend=provider, profile=profile, model=model)
+        )
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant_id,
+            delta_usd=Decimal("10"),
+            reason="test",
+            idempotency_key="fresh-foreign:" + str(tenant_id),
+        )
+    row = {
+        "profile": profile,
+        "tenant_id": str(tenant_id),
+        "platform": channel.platform,
+        "channel_id": channel.channel_id,
+        "account_id": str(account_id),
+        "config_digest": revision.digest,
+        "project": "offline-project",
+        "api_key_env": "N11_FRESH_CHANNEL_KEY",
+    }
+    if provider == "openai":
+        row.update(agent_id="native-agent", environment_id="native-template")
+    else:
+        row.update(
+            records_path=str(tmp_path / "records.sqlite"),
+            holds_path=str(tmp_path / "holds.sqlite"),
+            hold_usd="0.05",
+            cap_usd="0.25",
+            agent_name="fresh-gemini",
+            tools=[],
+            environment={"name": "no-execution", "execution": "none"},
+            max_output_tokens=4096,
+        )
+    manifest(monkeypatch, tmp_path / "runtime.json", [row])
+    monkeypatch.setenv("N11_FRESH_CHANNEL_KEY", "offline-only")
+    router = MARouter()
+    router.add_agent(native)
+    router.add_agent_list(native)
+    router.add_environment(environment)
+    router.add_environment_list(environment)
+    transport = ScriptedTransport(router=router)
+    calls = []
+    freezes = []
+    real_freeze = runtime_manifest.freeze_prepared_root
+
+    async def observe_freeze(deps, prepared, *, intent_id, now):
+        await real_freeze(deps, prepared, intent_id=intent_id, now=now)
+        freezes.append(
+            (
+                prepared.admission.backend_revision,
+                prepared.admission.backend_revision_origin,
+                intent_id,
+            )
+        )
+
+    monkeypatch.setattr(runtime_manifest, "freeze_prepared_root", observe_freeze)
+
+    class OwnedWire(Wire):
+        def session(self):
+            return {**super().session(), "metadata": {"mux_tenant": str(tenant_id)}}
+
+    wire = OwnedWire()
+    wire.expected_spend_limit = None
+
+    def openai_request(request):
+        calls.append(request)
+        if request.method == "GET" and request.url.path.endswith("/agents/native-agent"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "native-agent",
+                    "metadata": {"mux_tenant": str(tenant_id)},
+                    "multi_agent": {"enabled": False},
+                },
+            )
+        return wire.handle(request)
+
+    def gemini_request(request):
+        calls.append(request)
+        assert request.url.host == "generativelanguage.googleapis.com"
+        assert request.headers["x-goog-api-key"] == "offline-only"
+        if request.method == "POST":
+            body = json.loads(request.content)
+            assert body["model"] == FLASH_PRIMARY and body["tools"] == []
+            assert body["generation_config"] == {"max_output_tokens": 4096}
+        response = interaction("fresh-interaction")
+        response.pop("environment_id")
+        return httpx.Response(200, json=response)
+
+    async with transport.client() as client:
+        if provider == "openai":
+            monkeypatch.setattr(
+                deployment, "_http_transport", lambda: httpx.MockTransport(openai_request)
+            )
+        else:
+            clients_for(monkeypatch, gemini_request)
+        deps = replace(
+            deps,
+            anthropic=client,
+            channel_backends=True,
+            agent_backends=False,
+            turn_runtime_factory=build_channel_runtime,
+            deployment_default=DeploymentDefault(
+                agent_name="root", environment_name=environment.metadata[MA_METADATA_KEY_NAME]
+            ),
+        )
+        admission = await admit(
+            deps,
+            tenant_id=tenant_id,
+            platform=channel.platform,
+            external_user_id="requester",
+            channel_id=channel.channel_id,
+            thread_id=None,
+            now=datetime.now(UTC),
+        )
+        assert admission.grant.thread_id is None
+        assert admission.backend_revision == revision
+        assert admission.backend_revision_origin == "channel"
+        assert admission.backend_agent_revision is None
+        async with deps.sessionmaker.begin() as db:
+            intent = await turn_card_intents.create_turn_card_intent(
+                db,
+                tenant_id=tenant_id,
+                platform=channel.platform,
+                channel_id=channel.channel_id,
+                thread_id=thread_id,
+                turn_token=uuid4(),
+            )
+        async with turn_origin(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            platform=channel.platform,
+            parent_channel_id=channel.channel_id,
+            thread_id=thread_id,
+            responder_ma_agent_id=native.id,
+            responder_name="root",
+            role=Role.USER,
+        ):
+            prepared = await bind_session_impl(
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                platform=channel.platform,
+                external_user_id="requester",
+                thread_id=thread_id,
+                session_account_id=account_id,
+                reuse_existing=False,
+                turn_card_intent_id=intent.id,
+            )
+            assert not prepared.reused and prepared.session_ref.provider == provider
+
+            async def reseed():
+                pytest.fail("fresh foreign turn attempted native root recovery")
+
+            outcome = await run_prepared_turn(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform=channel.platform,
+                thread_id=thread_id,
+                external_user_id="requester",
+                user_message="fresh question",
+                lifecycle=RecordingLifecycle(),
+                cancel=asyncio.Event(),
+                reseed_user_message=reseed,
+                recovery_lifecycle=lambda _: RecordingLifecycle(),
+                turn_card_intent_id=intent.id,
+            )
+            assert outcome.state.error is None and not outcome.recovered
+            assert extract_final_response(outcome.state.content) == (
+                "answer turn-1" if provider == "openai" else "answer"
+            )
+            assert prepared.admission.backend_revision == revision
+            assert prepared.admission.backend_revision_origin == "channel"
+            binding = await deps.state_store.get_binding(
+                Slot(
+                    thread=ThreadRef(channel=channel, thread_id=thread_id),
+                    account_id=str(account_id),
+                )
+            )
+            assert binding is not None and binding.config_revision == revision.local
+            assert (
+                binding.provider == provider
+                and binding.native_refs["session"] == prepared.session_ref.id
+            )
+            async with deps.sessionmaker() as db:
+                assert (
+                    await db.scalar(
+                        select(func.count())
+                        .select_from(MuxOperation)
+                        .where(
+                            MuxOperation.tenant_id == tenant_id,
+                            MuxOperation.key.startswith("fleet_root:"),
+                        )
+                    )
+                    == 0
+                )
+                assert (
+                    await db.scalar(
+                        select(func.count())
+                        .select_from(FleetRun)
+                        .where(FleetRun.tenant_id == tenant_id)
+                    )
+                    == 0
+                )
+    assert freezes == [(revision, "channel", intent.id)]
+    assert any(call.method == "POST" for call in calls)
+    assert not any(call.method == "POST" for call in transport.requests)
