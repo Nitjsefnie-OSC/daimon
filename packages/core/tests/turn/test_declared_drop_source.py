@@ -403,3 +403,86 @@ def test_public_preview_refuses_unclosed_or_nondroppable_consent(preview, change
 def test_source_provider_identity_retains_its_full_existing_spec(captured):
     target = preview_source_drops(captured, captured.effective_spec.model)
     assert target == captured.effective_spec and target.declared_drops == ()
+
+
+def _daimon_mcp(captured, toolset=None, *, credential_ref=None):
+    """What every chat-enabled agent carries: the daimon-mcp server and its toolset."""
+    toolset = toolset or {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        "configs": [
+            {
+                "name": "request_agent_backend_switch",
+                "enabled": True,
+                "permission_policy": {"type": "always_ask"},
+            }
+        ],
+    }
+    spec = captured.effective_spec.model_copy(
+        update={
+            "mcp_servers": (
+                MCPConnection(
+                    name="daimon-mcp",
+                    url="https://mcp.invalid/mcp",
+                    credential_ref=credential_ref,
+                ),
+            ),
+            "extensions": (
+                *(captured.effective_spec.extensions or ()),
+                ExtensionConfig(
+                    namespace="anthropic.agent_tools", version=1, value={"tools": [toolset]}
+                ),
+            ),
+        }
+    )
+    return captured.model_copy(update={"effective_spec": spec})
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+)
+def test_daimon_mcp_toolset_is_a_declarable_loss(captured, provider, model):
+    source = _daimon_mcp(captured)
+    target = preview_source_drops(source, ModelRef(provider=provider, id=model))
+    assert target.declared_drops == ("mcp", "sandbox", "tools")
+    assert target.tools == target.mcp_servers == ()
+    assert classify_source_obligations(source, target, environment=None) == frozenset()
+    for kept, expected in (("tools", {"tools"}), (("mcp", "tools"), {"mcp", "tools"})):
+        omitted = target.model_copy(
+            update={"declared_drops": tuple(d for d in target.declared_drops if d not in kept)}
+        )
+        assert classify_source_obligations(source, omitted, environment=None) == expected
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    ["toolset_field", "config_field", "policy_value", "toolset_type"],
+)
+def test_unclassified_daimon_mcp_toolset_still_refuses_as_source_definition(captured, unknown):
+    toolset = {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "configs": [{"name": "request_agent_backend_switch", "enabled": True}],
+    }
+    if unknown == "toolset_field":
+        toolset["future_execution_policy"] = {"requires_confirmation": True}
+    elif unknown == "config_field":
+        toolset["configs"][0]["future_execution_policy"] = {}
+    elif unknown == "policy_value":
+        toolset["default_config"] = {"permission_policy": {"type": "future_policy"}}
+    else:
+        toolset["type"] = "future_toolset"
+    source = _daimon_mcp(captured, toolset)
+    for provider, model in (("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")):
+        with pytest.raises(UnsupportedCapability) as refused:
+            preview_source_drops(source, ModelRef(provider=provider, id=model))
+        assert "source_definition" in refused.value.missing
+
+
+def test_daimon_mcp_credential_stays_nondroppable(captured):
+    source = _daimon_mcp(captured, credential_ref="vault:daimon-mcp")
+    with pytest.raises(UnsupportedCapability) as refused:
+        preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
+    assert "credentials" in refused.value.missing
+    assert "source_definition" not in refused.value.missing

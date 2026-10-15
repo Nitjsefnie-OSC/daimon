@@ -37,10 +37,17 @@ from ..test_agent_backend import owned as owned
 
 
 @pytest.fixture
-async def consent_request(owned):
+async def consent_request(owned, request):
+    params = getattr(request, "param", {})
+    backend = params.get("backend", "openai")
     _, identity, actor, sessions = owned
     now = datetime(2026, 10, 14, tzinfo=UTC)
-    native = ma_agent(tenant_id=identity.tenant_id, system="Authoritative source instructions")
+    native = ma_agent(
+        tenant_id=identity.tenant_id,
+        system="Authoritative source instructions",
+        tools=params.get("tools", ()),
+        mcp_servers=params.get("mcp_servers", ()),
+    )
     environment = ma_environment(tenant_id=identity.tenant_id)
     router, reads, constructions, counterpart_reads = MARouter(), [], [], []
     router.add_agent(native)
@@ -54,7 +61,7 @@ async def consent_request(owned):
         revision = ConfigRevision.create(
             ChannelRef(tenant_id=str(identity.tenant_id), platform="slack", channel_id="channel"),
             1,
-            backend_selection("openai"),
+            backend_selection(backend),
         )
         admitted = Admission(
             account_id=actor.account_id,
@@ -95,10 +102,10 @@ async def consent_request(owned):
 
         service = AgentBackendService(sessions, enabled=True, capture_source=capture)
         await enable(service, source, actor)
-        quote = await service.preview(source, "openai")
+        quote = await service.preview(source, backend)
         accepted = await service.set_backend(
             source,
-            "openai",
+            backend,
             0,
             actor,
             accepted_drops=quote.declared_drops,
@@ -122,7 +129,7 @@ async def consent_request(owned):
                         ref=ResourceRef(
                             id="native-counterpart",
                             kind="agent",
-                            provider="openai",
+                            provider=backend,
                             account_scope_id="project",
                             tenant_id=request.scope.tenant_id,
                             account_id=request.scope.account_id,
@@ -1015,3 +1022,101 @@ async def test_schema_supported_null_enum_keeps_existing_consent(consent_request
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     assert constructions == targets == []
+
+
+DAIMON_MCP_SERVER = {"type": "url", "name": "daimon-mcp", "url": "https://mcp.invalid/mcp"}
+DAIMON_MCP_TOOLSET = {
+    "type": "mcp_toolset",
+    "mcp_server_name": "daimon-mcp",
+    "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+    "configs": [
+        {
+            "name": "request_agent_backend_switch",
+            "enabled": True,
+            "permission_policy": {"type": "always_ask"},
+        }
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {"backend": backend, "tools": [DAIMON_MCP_TOOLSET], "mcp_servers": [DAIMON_MCP_SERVER]}
+        for backend in ("openai", "gemini")
+    ],
+    indirect=True,
+    ids=["openai", "gemini"],
+)
+async def test_chat_enabled_agent_confirms_daimon_mcp_drops_and_runs_without_them(
+    consent_request,
+):
+    request, service, source, _, accepted, _, reads, constructions, targets, _ = consent_request
+    backend = request.admission.backend_revision.backend
+    assert accepted.backend == backend
+    assert accepted.declared_drops == ("mcp", "memory", "sandbox", "tools")
+    selected = await read_preparation_counterpart(request)
+    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert selected.target_spec.tools == selected.target_spec.mcp_servers == ()
+    assert not selected.target_spec.extensions
+    assert selected.target_spec.system.endswith(
+        "Unavailable capabilities: mcp, memory, sandbox, tools."
+    )
+    assert len(constructions) == len(targets) == 1
+    assert constructions[0].target_spec == selected.target_spec
+    assert reads and all(call.method == "GET" for call in reads)
+
+
+@pytest.mark.parametrize("unknown", ["toolset_field", "config_field", "policy_value", "server"])
+async def test_unclassified_daimon_mcp_entry_refuses_as_source_definition(consent_request, unknown):
+    import httpx
+
+    request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
+        consent_request
+    )
+    agent = request.admission.agent.model_dump(mode="json", exclude_unset=True)
+    toolset = json_copy(DAIMON_MCP_TOOLSET)
+    server = dict(DAIMON_MCP_SERVER)
+    if unknown == "toolset_field":
+        toolset["future_execution_policy"] = {"requires_confirmation": True}
+    elif unknown == "config_field":
+        toolset["configs"][0]["future_execution_policy"] = {}
+    elif unknown == "policy_value":
+        toolset["configs"][0]["permission_policy"] = {"type": "future_policy"}
+    else:
+        server["future_execution_policy"] = {"requires_confirmation": True}
+    agent["tools"], agent["mcp_servers"] = [toolset], [server]
+    router.routes.clear()
+    router.add(
+        "GET",
+        "/v1/agents/" + request.admission.agent.id,
+        lambda *_: httpx.Response(200, json=agent),
+    )
+    router.add_environment(request.admission.environment)
+    captured = await capture_preparation_source(request, fresh=True)
+    assert "source_definition" in classify_source_obligations(captured, None, environment=None)
+    before = await service.audit(source.tenant_id)
+    for backend in ("openai", "gemini"):
+        with pytest.raises(AgentBackendRefused) as preview:
+            await service.preview(source, backend)
+        assert preview.value.reason == "source_unavailable"
+    with pytest.raises(AgentBackendRefused) as commit:
+        await service.set_backend(
+            source,
+            "openai",
+            accepted.local,
+            actor,
+            accepted_drops=("mcp", "memory", "sandbox", "tools"),
+            expected_preview_digest=accepted.preview_digest,
+        )
+    assert commit.value.reason == "source_unavailable"
+    assert await service.current(source) == accepted
+    assert await service.audit(source.tenant_id) == before
+    assert constructions == targets == []
+    assert all(call.method == "GET" for call in reads)
+
+
+def json_copy(value):
+    import json
+
+    return json.loads(json.dumps(value))

@@ -998,10 +998,15 @@ def classify_source_obligations(
         elif extension.namespace == "anthropic.agent_tools":
             try:
                 native = agent_tools(extension)
-                if target is not None and "tools" not in drops:
-                    source_tools = native.intent()
             except ValueError:
                 missing.update(("source_definition", "tools"))
+            else:
+                if target is not None and "tools" not in drops:
+                    try:
+                        source_tools = native.intent()
+                    except ValueError:
+                        # Classified toolsets without a neutral projection are a declarable loss.
+                        missing.add("tools")
         elif not (
             extension.namespace == "anthropic.model_config"
             and isinstance(model, dict)
