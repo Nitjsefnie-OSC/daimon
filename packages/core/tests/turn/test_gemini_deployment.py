@@ -72,7 +72,6 @@ from ..test_native_tariffs import fixed_source_date as fixed_source_date
 from .test_agent_native_runtime import claimed_worker_request as claimed_worker_request
 from .test_agent_native_runtime import clone_source as clone_source
 from .test_agent_native_runtime import explicit_worker_request as explicit_worker_request
-from .test_agent_native_runtime import worker_token_caps as worker_token_caps
 from .test_gemini_codec import TrackedTransport, interaction
 from .test_native_counterpart import Owned
 from .test_native_counterpart import clean_sdk_environment as clean_sdk_environment
@@ -1877,7 +1876,7 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     assert all(client.is_closed() for client in clients)
 
 
-@pytest.mark.parametrize("worker_token_caps", [True], indirect=True)
+@pytest.mark.parametrize("explicit_worker_request", [True], indirect=True)
 async def test_capped_worker_materialization_runs_through_headless_preparation_and_sdk(
     materialization_worker_request,
 ):

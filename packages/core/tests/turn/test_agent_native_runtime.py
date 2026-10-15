@@ -524,12 +524,8 @@ async def test_opaque_caller_resource_is_an_unproved_source_definition(native_re
 
 
 @pytest.fixture
-def worker_token_caps(request):
-    return getattr(request, "param", False)
-
-
-@pytest.fixture
-async def explicit_worker_request(owned, monkeypatch, worker_token_caps):
+async def explicit_worker_request(owned, monkeypatch, request):
+    worker_token_caps = getattr(request, "param", False)
     from datetime import timedelta
 
     from daimon.core.ma_identity import derive_agent_uuid
