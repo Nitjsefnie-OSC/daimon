@@ -415,6 +415,29 @@ async def test_restart_replays_created_input_and_rejects_changed_task(conversati
 
     request = replace(request, before_native=guard)
     runtime = build_channel_runtime(request)
+
+    from daimon.core.turn.openai_host import prepare_openai
+    from mux.contracts.ids import Revision
+    from mux.contracts.resources import SessionSpec
+
+    async def retained_plan(selected):
+        return SessionSpec(
+            agent=native.ref.model_copy(update={"kind": "agent", "id": "native-agent"}),
+            agent_revision=Revision(local=0),
+            config_revision=selected.admission.backend_revision.local,
+        )
+
+    runtime = replace(runtime, session_plan=retained_plan)
+    reused = await prepare_openai(
+        replace(
+            request,
+            thread_id=binding.thread.thread_id,
+            reuse_existing=True,
+            deps=replace(request.deps, turn_runtimes={PROFILE: runtime}),
+        )
+    )
+    assert reused.reused and reused.ma_session_id == SESSION_ID
+    assert reused.backend.capabilities().profile_id == PROFILE
     message = json.loads(wire.posts[-1].content)["input"][0]["content"][0]["text"]
     for text in (message, message, "a different task"):
         active = TurnPersistence(
