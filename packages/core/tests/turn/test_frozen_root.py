@@ -1827,11 +1827,22 @@ async def test_fresh_root_rechecks_new_thread_policy_before_retaining_or_sending
 
 
 @pytest.mark.parametrize("fault", ["wrong_channel", "reused_request", "new_seal"])
-async def test_fresh_root_rebind_refuses_incompatible_execution_before_retention(root_turn, fault):
+async def test_fresh_root_rebind_refuses_incompatible_execution_before_retention(
+    root_turn, fault, monkeypatch
+):
     from daimon.core.access_policy import ChannelRule
     from daimon.core.authz import build_turn_place
+    from daimon.core.turn import admission as admission_owner
 
     deps, prepared, _, intent, origin, scope, _, transport = root_turn
+    reauthorizations = []
+    real_reauthorize = admission_owner.reauthorize
+
+    async def observe_reauthorize(deps, admission):
+        reauthorizations.append(admission)
+        return await real_reauthorize(deps, admission)
+
+    monkeypatch.setattr(admission_owner, "reauthorize", observe_reauthorize)
     channel_id = "foreign-channel" if fault == "wrong_channel" else origin.parent_channel_id
     place = build_turn_place(channel_id=channel_id, thread_id=None)
     grant = replace(
@@ -1860,6 +1871,11 @@ async def test_fresh_root_rebind_refuses_incompatible_execution_before_retention
     reason = "stale" if fault == "new_seal" else "unbound"
     with pytest.raises(WorkerSpecRefused, match=f"origin: {reason}"):
         await freeze((deps, prepared, *root_turn[2:]))
+    if fault == "new_seal":
+        assert len(reauthorizations) == 1
+        assert reauthorizations[0].grant.thread_id == origin.thread_id
+    else:
+        assert reauthorizations == []
     assert len(transport.requests) == before
     async with deps.sessionmaker() as db:
         assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
