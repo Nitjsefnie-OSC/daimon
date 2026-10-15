@@ -26,7 +26,7 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
-from mux.contracts.resources import MCPConnection, ResourceBinding
+from mux.contracts.resources import MCPConnection, ResourceBinding, ToolSpec
 from mux.profiles import backend_selection
 
 from ..test_agent_backend import enable
@@ -52,6 +52,26 @@ async def captured(owned, request):
         model="claude-haiku-5-5",
         system="Protected source instruction",
         tools=[
+            {
+                "type": "agent_toolset_20260401",
+                "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+                "configs": [
+                    {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
+                    for name in ("bash", "read", "edit", "grep", "glob", "write")
+                ],
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+                "configs": [
+                    {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
+                    for name in ("describe_agent", "list_my_sessions")
+                ],
+            },
+        ]
+        if getattr(request, "param", None) == "haiku55"
+        else [
             {
                 "type": "custom",
                 "name": "helper",
@@ -311,11 +331,20 @@ async def test_unsupported_missing_or_foreign_capture_refuses_before_native_io(c
     elif fault in ("unknown_extension", "native_tools"):
         extension = ExtensionConfig(namespace="anthropic.unrepresented_intent", version=1, value={})
         if fault == "native_tools":
+            # A per-tool name that fails the closed builtin-tool schema: still a
+            # schema failure, distinct from a well-formed toolset with no neutral
+            # form (e.g. a bare `agent_toolset_20260401` or an `mcp_toolset`),
+            # which is excluded from the ceiling rather than refused.
             extension = ExtensionConfig(
                 namespace="anthropic.agent_tools",
                 version=1,
                 value={
-                    "tools": [{"type": "agent_toolset_20260401"}],
+                    "tools": [
+                        {
+                            "type": "agent_toolset_20260401",
+                            "configs": [{"name": "nonexistent_tool", "enabled": True}],
+                        }
+                    ],
                 },
             )
         source = source.model_copy(
@@ -369,3 +398,40 @@ async def test_unsupported_missing_or_foreign_capture_refuses_before_native_io(c
             now=NOW.replace(tzinfo=None) if fault == "naive_clock" else NOW,
         )
     assert len(trace.requests) == 1
+
+
+_HAIKU55_BUILTINS = ("bash", "read", "edit", "grep", "glob", "write")
+
+
+@pytest.mark.parametrize("captured", ("haiku55",), indirect=True)
+async def test_fleet_root_ceiling_keeps_builtins_and_excludes_the_daimon_mcp_toolset(captured):
+    """The real daimon-haiku55 shape: agent_toolset_20260401 + a daimon-mcp
+    mcp_toolset. The root must not be refused, the ceiling must carry the
+    neutral built-ins, and the mcp toolset — which has no neutral form — must
+    not appear in it (excluded, never granted to a worker)."""
+    permissions = compose(captured)
+    assert {tool.name for tool in permissions.spec.tools} == set(_HAIKU55_BUILTINS)
+    assert all(tool.kind == "builtin" for tool in permissions.spec.tools)
+    assert not any(tool.kind == "mcp_toolset" for tool in permissions.spec.tools)
+    assert len(captured[5].requests) == 1
+
+
+@pytest.mark.parametrize("captured", ("haiku55",), indirect=True)
+async def test_worker_cannot_inherit_the_excluded_daimon_mcp_toolset(captured):
+    """A worker that asks for the excluded mcp toolset is refused by the
+    existing ceiling-subset attenuation — the exclusion in fleet_root_permissions
+    is enough; no worker can ever request what never entered the ceiling."""
+    permissions = compose(captured)
+    requested = permissions.spec.model_copy(
+        update={"tools": (ToolSpec(name="daimon-mcp", kind="mcp_toolset"),)}
+    )
+    with pytest.raises(WorkerSpecRefused) as refused:
+        resolve_worker_spec(
+            permissions,
+            requested,
+            policy=captured[4],
+            now=NOW,
+            limits=permissions.limits,
+            captured_source=captured[0],
+        )
+    assert refused.value.field == "tools" and refused.value.reason == "not_subset"

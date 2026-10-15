@@ -448,7 +448,11 @@ def test_daimon_mcp_toolset_is_a_declarable_loss(captured, provider, model):
     assert target.declared_drops == ("mcp", "sandbox", "tools")
     assert target.tools == target.mcp_servers == ()
     assert classify_source_obligations(source, target, environment=None) == frozenset()
-    for kept, expected in (("tools", {"tools"}), (("mcp", "tools"), {"mcp", "tools"})):
+    for kept, expected in (
+        ("tools", {"tools"}),
+        (("mcp",), {"mcp"}),  # declaring `tools` alone must never discharge `mcp`
+        (("mcp", "tools"), {"mcp", "tools"}),
+    ):
         omitted = target.model_copy(
             update={"declared_drops": tuple(d for d in target.declared_drops if d not in kept)}
         )
@@ -486,3 +490,66 @@ def test_daimon_mcp_credential_stays_nondroppable(captured):
         preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
     assert "credentials" in refused.value.missing
     assert "source_definition" not in refused.value.missing
+
+
+def _daimon_haiku55(captured):
+    """The real daimon-haiku55 root shape: agent_toolset_20260401 (explicit
+    per-tool configs) plus the universal daimon-mcp mcp_toolset."""
+    toolset = [
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
+                for name in ("bash", "read", "edit", "grep", "glob", "write")
+            ],
+        },
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "daimon-mcp",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {
+                    "name": "request_agent_backend_switch",
+                    "enabled": True,
+                    "permission_policy": {"type": "always_ask"},
+                }
+            ],
+        },
+    ]
+    spec = captured.effective_spec.model_copy(
+        update={
+            "mcp_servers": (MCPConnection(name="daimon-mcp", url="https://mcp.invalid/mcp"),),
+            "extensions": (
+                *(captured.effective_spec.extensions or ()),
+                ExtensionConfig(
+                    namespace="anthropic.agent_tools", version=1, value={"tools": toolset}
+                ),
+            ),
+        }
+    )
+    return captured.model_copy(update={"effective_spec": spec})
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+)
+def test_daimon_haiku55_shape_declares_its_exact_loss_set_on_switch(captured, provider, model):
+    """The real root shape (agent_toolset_20260401 + daimon-mcp mcp_toolset) on
+    an actual provider switch: the environment/sandbox obligation that every
+    switch carries, the real attached mcp server, and the unrepresented
+    mcp_toolset all land in the declared set — nothing is silently dropped,
+    and nothing extra is required once all three are declared."""
+    source = _daimon_haiku55(captured)
+    target = preview_source_drops(source, ModelRef(provider=provider, id=model))
+    assert target.declared_drops == ("mcp", "sandbox", "tools")
+    assert target.tools == target.mcp_servers == ()
+    assert classify_source_obligations(source, target, environment=None) == frozenset()
+    for retained, expected in (
+        (("mcp", "sandbox"), {"tools"}),
+        (("sandbox", "tools"), {"mcp"}),
+        (("mcp", "tools"), {"environment"}),
+        ((), {"mcp", "environment", "tools"}),
+    ):
+        omitted = target.model_copy(update={"declared_drops": retained})
+        assert classify_source_obligations(source, omitted, environment=None) == expected

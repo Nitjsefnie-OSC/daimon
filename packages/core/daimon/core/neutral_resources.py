@@ -1207,6 +1207,11 @@ def fleet_root_permissions(
     try:
         for extension in effective.extensions or ():
             if extension.namespace == f"{MANAGED_AGENTS.provider}.agent_tools":
+                # `.intent()` projects per toolset: a well-formed toolset with no
+                # neutral form (e.g. the root's daimon-mcp mcp_toolset, which
+                # every chat-enabled agent carries) is silently excluded from
+                # the worker ceiling below, never granted — only stricter.
+                # `agent_tools()` still raises on schema-invalid/unknown content.
                 tools = agent_tools(extension).intent()
     except ValueError:
         raise WorkerSpecRefused("tools", "unsupported") from None

@@ -75,26 +75,70 @@ class CustomTool(NativeConfig):
 type AgentTool = Annotated[AgentToolset | MCPToolset | CustomTool, Field(discriminator="type")]
 
 
+def _toolset_intent(tool: AgentTool) -> tuple[ToolSpec, ...] | None:
+    """Project one closed tool shape to its neutral form, per toolset.
+
+    Returns `None` for a well-formed toolset with no neutral projection (an
+    `MCPToolset`, or an `AgentToolset` with no explicit `configs` to read
+    enablement from — its native defaults are not safely representable).
+    `None` is never a schema failure: the caller only sees it for toolsets
+    that already passed `AgentToolsConfig` validation. Treat it as a known,
+    droppable loss — exclude it from a worker ceiling (stricter, never
+    looser) or flag it as a declarable "tools" obligation, but never raise.
+    """
+    if isinstance(tool, CustomTool):
+        return (
+            ToolSpec(
+                name=tool.name,
+                kind="custom",
+                description=tool.description,
+                input_schema=tool.input_schema,
+            ),
+        )
+    if isinstance(tool, MCPToolset):
+        return None
+    if tool.configs is None:
+        return None
+    default_enabled = tool.default_config.enabled if tool.default_config else None
+    default_policy = tool.default_config.permission_policy if tool.default_config else None
+    result: list[ToolSpec] = []
+    for config in tool.configs:
+        enabled = config.enabled if config.enabled is not None else default_enabled
+        if enabled is False:
+            continue
+        policy = config.permission_policy or default_policy
+        result.append(
+            ToolSpec(
+                name=config.name,
+                kind="builtin",
+                permission="ask" if isinstance(policy, AskPolicy) else "auto",
+            )
+        )
+    return tuple(result)
+
+
 class AgentToolsConfig(NativeConfig):
     """Payload for anthropic.agent_tools@1."""
 
     tools: list[AgentTool]
 
     def intent(self) -> tuple[ToolSpec, ...]:
-        """Project the closed tool shapes whose complete neutral intent is represented."""
+        """Project every toolset with a complete neutral representation.
+
+        A well-formed toolset with no neutral form (see `_toolset_intent`)
+        is silently excluded, never raised on — call `has_unrepresented_toolset`
+        to detect the drop for obligation/declared-drop bookkeeping.
+        """
         result: list[ToolSpec] = []
         for tool in self.tools:
-            if not isinstance(tool, CustomTool):
-                raise ValueError("native tool controls have no complete neutral projection")
-            result.append(
-                ToolSpec(
-                    name=tool.name,
-                    kind="custom",
-                    description=tool.description,
-                    input_schema=tool.input_schema,
-                )
-            )
+            projected = _toolset_intent(tool)
+            if projected is not None:
+                result.extend(projected)
         return tuple(result)
+
+    def has_unrepresented_toolset(self) -> bool:
+        """True iff some well-formed toolset here has no neutral projection."""
+        return any(_toolset_intent(tool) is None for tool in self.tools)
 
 
 class RosterAgent(NativeConfig):
